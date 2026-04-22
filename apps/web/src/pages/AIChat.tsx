@@ -1,14 +1,24 @@
 import { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
-import type { AIProviderConfig } from '@smt/shared';
-import { Send, Bot, User } from 'lucide-react';
+import type { AIProviderConfig, AIAgentEvent } from '@smt/shared';
+import { Send, Bot, User, Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+
+interface ToolCallRecord {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  output?: string;
+  isError?: boolean;
+  expanded: boolean;
+}
 
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  toolCalls?: ToolCallRecord[];
 }
 
 export default function AIChatPage() {
@@ -24,20 +34,36 @@ export default function AIChatPage() {
   });
 
   useEffect(() => {
-    if (providers && Array.isArray(providers) && providers.length > 0 && !providerId) setProviderId((providers as any[])[0].id);
+    if (providers && Array.isArray(providers) && providers.length > 0 && !providerId) setProviderId((providers as AIProviderConfig[])[0]!.id);
   }, [providers, providerId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  function toggleToolCall(msgIdx: number, tcId: string) {
+    setMessages((prev) =>
+      prev.map((m, i) =>
+        i !== msgIdx
+          ? m
+          : {
+              ...m,
+              toolCalls: (m.toolCalls ?? []).map((tc) =>
+                tc.id === tcId ? { ...tc, expanded: !tc.expanded } : tc,
+              ),
+            },
+      ),
+    );
+  }
+
   async function handleSend() {
     if (!input.trim() || streaming || !providerId) return;
     const userMsg = input.trim();
     setInput('');
-    setMessages((prev) => [...prev, { role: 'user', content: userMsg }]);
+
+    const assistantMsg: Message = { role: 'assistant', content: '', toolCalls: [] };
+    setMessages((prev) => [...prev, { role: 'user', content: userMsg }, assistantMsg]);
     setStreaming(true);
-    setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
 
     try {
       const res = await fetch('/api/ai/chat', {
@@ -46,6 +72,7 @@ export default function AIChatPage() {
         credentials: 'include',
         body: JSON.stringify({
           providerId,
+          agentMode: true,
           messages: [...messages, { role: 'user', content: userMsg }],
         }),
       });
@@ -58,26 +85,52 @@ export default function AIChatPage() {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value);
-        // parse SSE lines
         for (const line of chunk.split('\n')) {
-          if (line.startsWith('data: ')) {
-            const text = line.slice(6);
-            if (text === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(text);
-              if (parsed.type === 'done') continue;
-              if (parsed.type === 'error') throw new Error(parsed.error);
-              const token = parsed.content ?? parsed.delta ?? '';
-              if (token) {
-                setMessages((prev) => {
-                  const last = prev[prev.length - 1];
-                  if (!last) return prev;
-                  return [...prev.slice(0, -1), { ...last, content: last.content + token, role: last.role || 'assistant' }];
-                });
-              }
-            } catch (parseErr) {
-              if (parseErr instanceof Error && parseErr.message !== 'Unexpected end of JSON input') throw parseErr;
+          if (!line.startsWith('data: ')) continue;
+          const raw = line.slice(6);
+          let event: AIAgentEvent;
+          try {
+            event = JSON.parse(raw) as AIAgentEvent;
+          } catch {
+            continue;
+          }
+
+          if (event.type === 'delta') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last || last.role !== 'assistant') return prev;
+              return [...prev.slice(0, -1), { ...last, content: last.content + event.content }];
+            });
+          } else if (event.type === 'tool_call') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last || last.role !== 'assistant') return prev;
+              const tc: ToolCallRecord = {
+                id: event.id,
+                name: event.name,
+                input: event.input ?? {},
+                expanded: true,
+              };
+              return [...prev.slice(0, -1), { ...last, toolCalls: [...(last.toolCalls ?? []), tc] }];
+            });
+          } else if (event.type === 'tool_result') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last || last.role !== 'assistant') return prev;
+              const toolCalls = (last.toolCalls ?? []).map((tc) =>
+                tc.id === event.id ? { ...tc, output: event.output, isError: event.isError } : tc,
+              );
+              return [...prev.slice(0, -1), { ...last, toolCalls }];
+            });
+          } else if (event.type === 'done' || event.type === 'error') {
+            if (event.type === 'error') {
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (!last) return prev;
+                return [...prev.slice(0, -1), { ...last, content: last.content + `\n\n**Error:** ${event.error}` }];
+              });
             }
+            break;
           }
         }
       }
@@ -85,7 +138,7 @@ export default function AIChatPage() {
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (!last) return prev;
-        return [...prev.slice(0, -1), { ...last, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, role: last.role || 'assistant' }];
+        return [...prev.slice(0, -1), { ...last, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }];
       });
     } finally {
       setStreaming(false);
@@ -122,48 +175,90 @@ export default function AIChatPage() {
         {messages.map((m, i) => (
           <div key={i} className={`flex gap-3 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
             {m.role === 'assistant' && (
-              <div className="size-7 rounded-full bg-primary/20 flex items-center justify-center shrink-0">
+              <div className="size-7 rounded-full bg-primary/20 flex items-center justify-center shrink-0 mt-0.5">
                 <Bot size={14} className="text-primary" />
               </div>
             )}
-            <div className={`max-w-[80%] rounded-lg px-4 py-2.5 text-sm ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>
-              {m.role === 'user' ? (
-                <span className="whitespace-pre-wrap">{m.content}</span>
-              ) : m.content ? (
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  components={{
-                    p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-                    h1: ({ children }) => <h1 className="text-lg font-bold mb-2 mt-3 first:mt-0">{children}</h1>,
-                    h2: ({ children }) => <h2 className="text-base font-bold mb-2 mt-3 first:mt-0">{children}</h2>,
-                    h3: ({ children }) => <h3 className="text-sm font-bold mb-1 mt-2 first:mt-0">{children}</h3>,
-                    ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-0.5">{children}</ul>,
-                    ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-0.5">{children}</ol>,
-                    li: ({ children }) => <li className="ml-2">{children}</li>,
-                    code: ({ inline, children }: { inline?: boolean; children?: React.ReactNode }) =>
-                      inline ? (
-                        <code className="bg-background/60 rounded px-1 py-0.5 font-mono text-xs">{children}</code>
-                      ) : (
-                        <code className="block bg-background/60 rounded p-3 font-mono text-xs overflow-x-auto mb-2 whitespace-pre">{children}</code>
-                      ),
-                    pre: ({ children }) => <>{children}</>,
-                    blockquote: ({ children }) => <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground mb-2">{children}</blockquote>,
-                    a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">{children}</a>,
-                    table: ({ children }) => <div className="overflow-x-auto mb-2"><table className="w-full text-xs border-collapse">{children}</table></div>,
-                    th: ({ children }) => <th className="border border-border/50 px-2 py-1 bg-background/40 font-semibold text-left">{children}</th>,
-                    td: ({ children }) => <td className="border border-border/50 px-2 py-1">{children}</td>,
-                    hr: () => <hr className="border-border/50 my-2" />,
-                    strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-                  }}
+            <div className={`max-w-[80%] space-y-2 ${m.role === 'user' ? 'items-end flex flex-col' : ''}`}>
+              {/* Tool calls */}
+              {m.toolCalls?.map((tc) => (
+                <div
+                  key={tc.id}
+                  className="w-full rounded-lg border border-border bg-muted/40 text-xs overflow-hidden"
                 >
-                  {m.content}
-                </ReactMarkdown>
-              ) : streaming && i === messages.length - 1 ? (
-                <span className="animate-pulse">▌</span>
-              ) : null}
+                  <button
+                    onClick={() => toggleToolCall(i, tc.id)}
+                    className="flex items-center gap-1.5 w-full px-3 py-2 text-left text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    {tc.expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                    <Terminal size={12} className="text-primary" />
+                    <span className="font-mono text-primary">{tc.name}</span>
+                    {tc.output === undefined && (
+                      <Loader2 size={11} className="ml-auto animate-spin text-primary" />
+                    )}
+                    {tc.isError && <span className="ml-auto text-destructive text-[10px]">error</span>}
+                  </button>
+                  {tc.expanded && (
+                    <div className="px-3 pb-2 space-y-1.5 border-t border-border">
+                      <div className="mt-1.5">
+                        <p className="text-[10px] text-muted-foreground mb-0.5">Input</p>
+                        <pre className="text-[10px] whitespace-pre-wrap bg-background/60 rounded p-1.5 overflow-x-auto font-mono">{JSON.stringify(tc.input, null, 2)}</pre>
+                      </div>
+                      {tc.output !== undefined && (
+                        <div>
+                          <p className="text-[10px] text-muted-foreground mb-0.5">Output</p>
+                          <pre className={`text-[10px] whitespace-pre-wrap bg-background/60 rounded p-1.5 overflow-x-auto font-mono ${tc.isError ? 'text-destructive' : 'text-green-400'}`}>
+                            {tc.output.slice(0, 2000)}{tc.output.length > 2000 && '\n…(truncated)'}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {/* Message text */}
+              {(m.content || (streaming && i === messages.length - 1 && m.role === 'assistant')) && (
+                <div className={`rounded-lg px-4 py-2.5 text-sm ${m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>
+                  {m.role === 'user' ? (
+                    <span className="whitespace-pre-wrap">{m.content}</span>
+                  ) : m.content ? (
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                        h1: ({ children }) => <h1 className="text-lg font-bold mb-2 mt-3 first:mt-0">{children}</h1>,
+                        h2: ({ children }) => <h2 className="text-base font-bold mb-2 mt-3 first:mt-0">{children}</h2>,
+                        h3: ({ children }) => <h3 className="text-sm font-bold mb-1 mt-2 first:mt-0">{children}</h3>,
+                        ul: ({ children }) => <ul className="list-disc list-inside mb-2 space-y-0.5">{children}</ul>,
+                        ol: ({ children }) => <ol className="list-decimal list-inside mb-2 space-y-0.5">{children}</ol>,
+                        li: ({ children }) => <li className="ml-2">{children}</li>,
+                        code: ({ inline, children }: { inline?: boolean; children?: React.ReactNode }) =>
+                          inline ? (
+                            <code className="bg-background/60 rounded px-1 py-0.5 font-mono text-xs">{children}</code>
+                          ) : (
+                            <code className="block bg-background/60 rounded p-3 font-mono text-xs overflow-x-auto mb-2 whitespace-pre">{children}</code>
+                          ),
+                        pre: ({ children }) => <>{children}</>,
+                        blockquote: ({ children }) => <blockquote className="border-l-2 border-primary/40 pl-3 italic text-muted-foreground mb-2">{children}</blockquote>,
+                        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="underline hover:opacity-80">{children}</a>,
+                        table: ({ children }) => <div className="overflow-x-auto mb-2"><table className="w-full text-xs border-collapse">{children}</table></div>,
+                        th: ({ children }) => <th className="border border-border/50 px-2 py-1 bg-background/40 font-semibold text-left">{children}</th>,
+                        td: ({ children }) => <td className="border border-border/50 px-2 py-1">{children}</td>,
+                        hr: () => <hr className="border-border/50 my-2" />,
+                        strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+                      }}
+                    >
+                      {m.content}
+                    </ReactMarkdown>
+                  ) : (
+                    <span className="animate-pulse">▌</span>
+                  )}
+                </div>
+              )}
             </div>
             {m.role === 'user' && (
-              <div className="size-7 rounded-full bg-secondary flex items-center justify-center shrink-0">
+              <div className="size-7 rounded-full bg-secondary flex items-center justify-center shrink-0 mt-0.5">
                 <User size={14} />
               </div>
             )}

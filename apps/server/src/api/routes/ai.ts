@@ -2,11 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { aiProviderConfigs } from '../../db/schema.js';
+import { aiProviderConfigs, servers, savedCommands, cronJobs } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { vault } from '../../vault/index.js';
 import { getAIProvider } from '../../ai/registry.js';
+import { AGENT_TOOLS, ToolExecutor, buildSystemPrompt } from '../../ai/tools.js';
 
 const createProviderSchema = z.object({
   name: z.string().min(1).max(100),
@@ -32,6 +33,10 @@ const chatSchema = z.object({
     })
     .optional(),
   providerId: z.string().optional(),
+  /** Active SSH session ID — enables run_command tool via the existing connection */
+  sessionId: z.string().optional(),
+  /** Set false to skip tool-calling and use plain streaming chat */
+  agentMode: z.boolean().default(true),
 });
 
 export async function aiRoutes(app: FastifyInstance) {
@@ -126,7 +131,49 @@ export async function aiRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  // ── Chat (streaming SSE) ──────────────────────────────────────
+  // ── App context snapshot ──────────────────────────────────────
+  app.get('/context', async (req) => {
+    const db = getDb();
+    const allServers = db
+      .select({
+        id: servers.id,
+        name: servers.name,
+        host: servers.host,
+        username: servers.username,
+        port: servers.port,
+        tags: servers.tags,
+      })
+      .from(servers)
+      .where(eq(servers.orgId, req.orgId))
+      .all()
+      .map((s) => ({ ...s, tags: s.tags ? (JSON.parse(s.tags) as string[]) : [] }));
+
+    const allCommands = db
+      .select({
+        id: savedCommands.id,
+        name: savedCommands.name,
+        command: savedCommands.command,
+        serverId: savedCommands.serverId,
+      })
+      .from(savedCommands)
+      .where(eq(savedCommands.orgId, req.orgId))
+      .all();
+
+    const allCrons = db
+      .select({
+        id: cronJobs.id,
+        name: cronJobs.name,
+        schedule: cronJobs.schedule,
+        enabled: cronJobs.enabled,
+      })
+      .from(cronJobs)
+      .where(eq(cronJobs.orgId, req.orgId))
+      .all();
+
+    return { servers: allServers, commands: allCommands, cronJobs: allCrons };
+  });
+
+  // ── Chat / Agent (streaming SSE) ──────────────────────────────
   app.post('/chat', async (req, reply) => {
     const body = chatSchema.parse(req.body);
     const db = getDb();
@@ -148,7 +195,19 @@ export async function aiRoutes(app: FastifyInstance) {
     if (!providerConfig) return reply.status(400).send({ error: 'No AI provider configured' });
 
     const apiKey = await vault.decrypt(providerConfig.encryptedApiKey, providerConfig.id);
-    const provider = getAIProvider(providerConfig as any, apiKey);
+    const provider = getAIProvider(providerConfig as Parameters<typeof getAIProvider>[0], apiKey);
+
+    // Build the rich system prompt with all app context
+    const systemPrompt = buildSystemPrompt({
+      orgId: req.orgId,
+      terminalOutput: body.context?.lastOutput,
+      sessionServerId: body.context?.serverId,
+    });
+
+    const messagesWithSystem = [
+      { role: 'system' as const, content: systemPrompt },
+      ...body.messages,
+    ];
 
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
@@ -156,21 +215,32 @@ export async function aiRoutes(app: FastifyInstance) {
       Connection: 'keep-alive',
     });
 
-    const messages = body.context?.lastOutput
-      ? [
-          { role: 'system' as const, content: `Server context:\n${body.context.lastOutput}` },
-          ...body.messages,
-        ]
-      : body.messages;
+    const send = (event: Record<string, unknown>) =>
+      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
 
     try {
-      for await (const token of provider.chat(messages)) {
-        reply.raw.write(`data: ${JSON.stringify({ type: 'delta', content: token })}\n\n`);
+      // Use agent loop if provider supports it and agent mode is enabled
+      if (provider.agentLoop && body.agentMode) {
+        const executor = new ToolExecutor(req.orgId, body.sessionId, body.context?.serverId);
+
+        for await (const event of provider.agentLoop(
+          messagesWithSystem,
+          AGENT_TOOLS,
+          (name, input) => executor.execute(name, input),
+        )) {
+          send(event);
+          if (event.type === 'done' || event.type === 'error') break;
+        }
+      } else {
+        // Fallback: simple streaming chat without tools
+        for await (const token of provider.chat(messagesWithSystem)) {
+          send({ type: 'delta', content: token });
+        }
+        send({ type: 'done' });
       }
-      reply.raw.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'AI request failed';
-      reply.raw.write(`data: ${JSON.stringify({ type: 'error', error: message })}\n\n`);
+      send({ type: 'error', error: message });
     } finally {
       reply.raw.end();
     }

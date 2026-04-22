@@ -6,6 +6,12 @@ import type { FastifyRequest } from 'fastify';
 import { nanoid } from 'nanoid';
 import logger from '../logger.js';
 
+export interface ExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
 interface SessionMeta {
   server: { host: string; port: number; username: string };
   key?: { id: string; encryptedPrivateKey: string };
@@ -181,4 +187,105 @@ async function close(sessionId: string) {
   }
 }
 
-export const SSHBroker = { createSession, attach, close };
+/**
+ * Execute a command on an existing session's SSH connection (separate channel).
+ * The interactive shell stream is unaffected.
+ */
+async function exec(sessionId: string, command: string, timeoutMs = 30_000): Promise<ExecResult> {
+  const session = sessions.get(sessionId);
+  if (!session) throw new Error('Session not found');
+
+  return new Promise<ExecResult>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Command timed out')), timeoutMs);
+
+    session.client.exec(command, (err, stream) => {
+      if (err) {
+        clearTimeout(timer);
+        reject(err);
+        return;
+      }
+
+      let stdout = '';
+      let stderr = '';
+      let exitCode = 0;
+
+      stream.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      stream.stderr.on('data', (data: Buffer) => {
+        stderr += data.toString();
+      });
+      stream.on('exit', (code: number | null) => {
+        exitCode = code ?? 0;
+      });
+      stream.on('close', () => {
+        clearTimeout(timer);
+        resolve({ stdout: stdout.slice(0, 64_000), stderr: stderr.slice(0, 8_000), exitCode });
+      });
+    });
+  });
+}
+
+/**
+ * Open a one-shot SSH connection to run a command and return its output.
+ * Used by the AI agent when there is no active interactive session.
+ */
+export async function execOnServer(
+  server: { host: string; port: number; username: string },
+  authOptions: { privateKey?: string; password?: string },
+  command: string,
+  timeoutMs = 30_000,
+): Promise<ExecResult> {
+  return new Promise<ExecResult>((resolve, reject) => {
+    const client = new Client();
+    const timer = setTimeout(() => {
+      client.end();
+      reject(new Error('Command timed out'));
+    }, timeoutMs);
+
+    client
+      .on('ready', () => {
+        client.exec(command, (err, stream) => {
+          if (err) {
+            clearTimeout(timer);
+            client.end();
+            reject(err);
+            return;
+          }
+
+          let stdout = '';
+          let stderr = '';
+          let exitCode = 0;
+
+          stream.on('data', (data: Buffer) => {
+            stdout += data.toString();
+          });
+          stream.stderr.on('data', (data: Buffer) => {
+            stderr += data.toString();
+          });
+          stream.on('exit', (code: number | null) => {
+            exitCode = code ?? 0;
+          });
+          stream.on('close', () => {
+            clearTimeout(timer);
+            client.end();
+            resolve({ stdout: stdout.slice(0, 64_000), stderr: stderr.slice(0, 8_000), exitCode });
+          });
+        });
+      })
+      .on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      })
+      .connect({
+        host: server.host,
+        port: server.port,
+        username: server.username,
+        ...(authOptions.privateKey
+          ? { privateKey: authOptions.privateKey }
+          : { password: authOptions.password }),
+      });
+  });
+}
+
+export const SSHBroker = { createSession, attach, close, exec };

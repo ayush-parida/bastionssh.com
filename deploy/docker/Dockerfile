@@ -14,7 +14,8 @@ RUN pnpm install --frozen-lockfile
 COPY packages/ packages/
 COPY apps/web/ apps/web/
 
-RUN pnpm --filter @smt/web build
+RUN pnpm --filter @smt/shared build && \
+    pnpm --filter @smt/web build
 
 # ─── Stage 2: Build server ────────────────────────────────────────────────────
 FROM node:22-alpine AS server-builder
@@ -31,7 +32,9 @@ RUN pnpm install --frozen-lockfile
 COPY packages/ packages/
 COPY apps/server/ apps/server/
 
-RUN pnpm --filter @smt/server build
+RUN pnpm --filter @smt/shared build && \
+    pnpm --filter @smt/cron-parser build && \
+    pnpm --filter @smt/server build
 
 # ─── Stage 3: Runtime ─────────────────────────────────────────────────────────
 FROM node:22-alpine AS runtime
@@ -47,11 +50,13 @@ COPY apps/server/package.json apps/server/
 RUN pnpm install --frozen-lockfile --prod
 
 # Copy built artifacts
+COPY --from=server-builder /app/packages/shared/dist     ./packages/shared/dist
+COPY --from=server-builder /app/packages/cron-parser/dist ./packages/cron-parser/dist
 COPY --from=server-builder /app/apps/server/dist ./apps/server/dist
 COPY --from=web-builder    /app/apps/web/dist    ./apps/web/dist
 
 # Migrations
-COPY apps/server/src/db/migrations ./apps/server/src/db/migrations
+COPY apps/server/src/db/migrations ./apps/server/dist/db/migrations
 
 ENV NODE_ENV=production \
     SMT_PORT=8080 \

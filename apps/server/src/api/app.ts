@@ -4,6 +4,8 @@ import helmet from '@fastify/helmet';
 import websocket from '@fastify/websocket';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
+import path from 'path';
+import fastifyStatic from '@fastify/static';
 import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { authRoutes } from './routes/auth.js';
@@ -41,6 +43,24 @@ export async function buildApp() {
   await app.register(aiRoutes, { prefix: '/api/ai' });
   await app.register(auditRoutes, { prefix: '/api/audit' });
   await app.register(sshSessionRoutes, { prefix: '/api/ssh-sessions' });
+
+  if (config.staticDir) {
+    const staticPath = path.resolve(config.staticDir);
+    logger.info(`Serving static files from ${staticPath}`);
+    await app.register(fastifyStatic, {
+      root: staticPath,
+      wildcard: false,
+    });
+
+    // Fallback all non-API routes to index.html for SPA routing
+    app.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith('/api/')) {
+        reply.code(404).send({ error: 'Not Found' });
+      } else {
+        reply.sendFile('index.html');
+      }
+    });
+  }
 
   return app;
 }

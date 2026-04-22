@@ -24,6 +24,7 @@ const envSchema = z.object({
 
   SMT_ADMIN_EMAIL: z.string().email().default('admin@smt.local'),
   SMT_ADMIN_PASSWORD: z.string().min(8).default('admin1234'),
+  SMT_STATIC_DIR: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -48,6 +49,7 @@ export const config = {
   maxSshSessions: env.SMT_MAX_SSH_SESSIONS,
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
+  staticDir: env.SMT_STATIC_DIR,
   adminEmail: env.SMT_ADMIN_EMAIL,
   adminPassword: env.SMT_ADMIN_PASSWORD,
   oauth: {
