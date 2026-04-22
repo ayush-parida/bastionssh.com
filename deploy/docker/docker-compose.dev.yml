@@ -1,0 +1,39 @@
+services:
+  smt:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: server-builder
+    image: smt-dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "5173:5173"
+    environment:
+      NODE_ENV: development
+      SMT_PORT: 8080
+      SMT_DB_URL: /data/smt-dev.db
+      SMT_REDIS_URL: redis://redis:6379
+      SMT_ENCRYPTION_KEY: dev-only-key-do-not-use-in-production-x
+      SMT_SESSION_SECRET: dev-only-session-secret-32-chars-min!
+    volumes:
+      - ./../../:/app
+      - /app/node_modules
+      - /app/apps/server/node_modules
+      - /app/apps/web/node_modules
+      - dev-data:/data
+    command: ["pnpm", "dev"]
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-dev-data:/data
+
+volumes:
+  dev-data:
+  redis-dev-data:

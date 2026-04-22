@@ -1,0 +1,189 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    // ─── Dev ──────────────────────────────────────────────────────────────────
+    {
+      "label": "Dev: All (full stack)",
+      "type": "shell",
+      "command": "pnpm dev",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "dev" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": { "command": "pnpm dev" },
+      "runOptions": { "instanceLimit": 1 }
+    },
+    {
+      "label": "Dev: Server only",
+      "type": "shell",
+      "command": "pnpm --filter @smt/server dev",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "dev" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": { "command": "pnpm --filter @smt/server dev" }
+    },
+    {
+      "label": "Dev: Web only",
+      "type": "shell",
+      "command": "pnpm --filter @smt/web dev",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "dev" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": { "command": "pnpm --filter @smt/web dev" }
+    },
+
+    // ─── Build ────────────────────────────────────────────────────────────────
+    {
+      "label": "Build: All",
+      "type": "shell",
+      "command": "pnpm build",
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": ["$tsc"],
+      "windows": { "command": "pnpm build" }
+    },
+    {
+      "label": "Build: Server",
+      "type": "shell",
+      "command": "pnpm --filter @smt/server build",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": ["$tsc"],
+      "windows": { "command": "pnpm --filter @smt/server build" }
+    },
+    {
+      "label": "Build: Web",
+      "type": "shell",
+      "command": "pnpm --filter @smt/web build",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": ["$tsc"],
+      "windows": { "command": "pnpm --filter @smt/web build" }
+    },
+
+    // ─── Type-check ───────────────────────────────────────────────────────────
+    {
+      "label": "Typecheck: All",
+      "type": "shell",
+      "command": "pnpm typecheck",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": ["$tsc"],
+      "windows": { "command": "pnpm typecheck" }
+    },
+
+    // ─── Lint ─────────────────────────────────────────────────────────────────
+    {
+      "label": "Lint: All",
+      "type": "shell",
+      "command": "pnpm lint",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": ["$eslint-stylish"],
+      "windows": { "command": "pnpm lint" }
+    },
+
+    // ─── Test ─────────────────────────────────────────────────────────────────
+    {
+      "label": "Test: All",
+      "type": "shell",
+      "command": "pnpm test",
+      "group": { "kind": "test", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "pnpm test" }
+    },
+    {
+      "label": "Test: Watch (Server)",
+      "type": "shell",
+      "command": "pnpm --filter @smt/server test:watch",
+      "group": "test",
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": { "command": "pnpm --filter @smt/server test:watch" }
+    },
+
+    // ─── Database ─────────────────────────────────────────────────────────────
+    {
+      "label": "DB: Generate migrations",
+      "type": "shell",
+      "command": "pnpm db:generate",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "pnpm db:generate" }
+    },
+    {
+      "label": "DB: Run migrations",
+      "type": "shell",
+      "command": "pnpm db:migrate",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "pnpm db:migrate" }
+    },
+    {
+      "label": "DB: Studio (Drizzle)",
+      "type": "shell",
+      "command": "pnpm db:studio",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": { "command": "pnpm db:studio" }
+    },
+
+    // ─── Docker ───────────────────────────────────────────────────────────────
+    {
+      "label": "Docker: Start (production)",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml up -d",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "docker compose -f deploy/docker/docker-compose.yml up -d" }
+    },
+    {
+      "label": "Docker: Stop (production)",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml down",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "docker compose -f deploy/docker/docker-compose.yml down" }
+    },
+    {
+      "label": "Docker: Dev stack",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.dev.yml up",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "dedicated" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": { "command": "docker compose -f deploy/docker/docker-compose.dev.yml up" }
+    },
+
+    // ─── Install / Clean ──────────────────────────────────────────────────────
+    {
+      "label": "Install dependencies",
+      "type": "shell",
+      "command": "pnpm install",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "pnpm install" }
+    },
+    {
+      "label": "Clean: All",
+      "type": "shell",
+      "command": "pnpm -r run clean",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" },
+      "problemMatcher": [],
+      "windows": { "command": "pnpm -r run clean" }
+    }
+  ]
+}

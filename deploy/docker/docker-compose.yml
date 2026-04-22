@@ -1,0 +1,44 @@
+services:
+  smt:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: ghcr.io/your-org/server-management-tool:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: production
+      SMT_PORT: 8080
+      SMT_DB_URL: /data/smt.db
+      SMT_REDIS_URL: redis://redis:6379
+      SMT_ENCRYPTION_KEY: ${SMT_ENCRYPTION_KEY:?required}
+      SMT_SESSION_SECRET: ${SMT_SESSION_SECRET:?required}
+      SMT_CORS_ORIGIN: ${SMT_CORS_ORIGIN:-http://localhost:8080}
+    volumes:
+      - smt-data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  smt-data:
+  redis-data:

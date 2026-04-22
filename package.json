@@ -1,0 +1,32 @@
+{
+  "name": "server-management-tool",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source browser-based SSH server management tool with AI integration",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --parallel -r run dev",
+    "build": "pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "clean": "pnpm -r run clean && rm -rf node_modules",
+    "db:generate": "pnpm --filter @smt/server run db:generate",
+    "db:migrate": "pnpm --filter @smt/server run db:migrate",
+    "db:studio": "pnpm --filter @smt/server run db:studio",
+    "docker:up": "docker compose -f deploy/docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -f deploy/docker/docker-compose.yml down",
+    "docker:dev": "docker compose -f deploy/docker/docker-compose.dev.yml up"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "prettier": "^3.3.0",
+    "@types/node": "^22.0.0",
+    "turbo": "^2.0.0"
+  }
+}
