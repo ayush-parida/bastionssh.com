@@ -75,10 +75,10 @@ export default function Layout() {
         <div className="border-t border-border p-3">
           <div className="flex items-center gap-2 px-1 mb-2">
             <div className="size-7 rounded-full bg-primary/20 flex items-center justify-center text-xs font-bold text-primary">
-              {user?.name?.[0]?.toUpperCase() ?? user?.email?.[0]?.toUpperCase()}
+              {user?.displayName?.[0]?.toUpperCase() ?? user?.email?.[0]?.toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium truncate">{user?.name ?? user?.email}</p>
+              <p className="text-xs font-medium truncate">{user?.displayName ?? user?.email}</p>
               <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
             </div>
           </div>

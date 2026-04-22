@@ -58,9 +58,9 @@ export default function CronJobsPage() {
       serverId: form.serverId,
       schedule: form.schedule,
       timezone: form.timezone,
-      savedCommandId: form.savedCommandId || undefined,
-      inlineCommand: form.inlineCommand || undefined,
     };
+    if (form.savedCommandId) body.savedCommandId = form.savedCommandId;
+    if (form.inlineCommand) body.inlineCommand = form.inlineCommand;
     createMutation.mutate(body);
   }
 
@@ -95,7 +95,7 @@ export default function CronJobsPage() {
               <div>
                 <label className="block text-sm font-medium mb-1">Cron schedule</label>
                 <input type="text" required value={form.schedule} onChange={(e) => setForm(p => ({ ...p, schedule: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary" placeholder="0 * * * *" />
-                {preview && <p className="text-xs text-muted-foreground mt-1">Next: {new Date(preview.nextRuns[0]).toLocaleString()}</p>}
+                {preview?.nextRuns?.[0] && <p className="text-xs text-muted-foreground mt-1">Next: {new Date(preview.nextRuns[0] as string).toLocaleString()}</p>}
               </div>
               <div>
                 <label className="block text-sm font-medium mb-1">Timezone</label>

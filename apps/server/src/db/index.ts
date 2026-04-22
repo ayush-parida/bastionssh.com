@@ -24,7 +24,7 @@ export function getDb() {
   return db;
 }
 
-export function getRawDb() {
+export function getRawDb(): any {
   if (!rawDb) getDb();
   return rawDb!;
 }

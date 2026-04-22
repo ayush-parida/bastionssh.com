@@ -4,7 +4,7 @@ FROM node:22-alpine AS web-builder
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/cron-parser/package.json packages/cron-parser/
 COPY apps/web/package.json apps/web/
@@ -21,7 +21,7 @@ FROM node:22-alpine AS server-builder
 RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/cron-parser/package.json packages/cron-parser/
 COPY apps/server/package.json apps/server/
@@ -51,7 +51,7 @@ COPY --from=server-builder /app/apps/server/dist ./apps/server/dist
 COPY --from=web-builder    /app/apps/web/dist    ./apps/web/dist
 
 # Migrations
-COPY apps/server/drizzle ./apps/server/drizzle
+COPY apps/server/src/db/migrations ./apps/server/src/db/migrations
 
 ENV NODE_ENV=production \
     SMT_PORT=8080 \

@@ -1,10 +1,11 @@
-# Server Management Tool
+# BastionSSH (bastionssh.com)
 
 > An open-source, **browser-based** tool to manage multiple SSH keys, multiple servers, and connect to them right from your browser — supercharged with your own AI model (OpenAI, Claude, or any local LLM).
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker Pulls](https://img.shields.io/badge/docker-ready-blue)](#-installation)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-contributing)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4%EF%B8%8F-pink.svg)](https://github.com/sponsors/ayush-parida)
 
 ---
 
@@ -36,10 +37,10 @@ The easiest way to run it — pick whichever you prefer.
 
 ```bash
 docker run -d \
-  --name smt \
+  --name bastionssh \
   -p 8080:8080 \
-  -v smt_data:/data \
-  ghcr.io/<your-org>/server-management-tool:latest
+  -v bastionssh_data:/data \
+  ghcr.io/ayush-parida/bastionssh:latest
 ```
 
 Open http://localhost:8080 and you're done.
@@ -49,16 +50,16 @@ Open http://localhost:8080 and you're done.
 ```yaml
 # docker-compose.yml
 services:
-  smt:
-    image: ghcr.io/<your-org>/server-management-tool:latest
+  bastionssh:
+    image: ghcr.io/ayush-parida/bastionssh:latest
     ports:
-      - "8080:8080"
+      - '8080:8080'
     volumes:
-      - smt_data:/data
+      - bastionssh_data:/data
     restart: unless-stopped
 
 volumes:
-  smt_data:
+  bastionssh_data:
 ```
 
 ```bash
@@ -166,33 +167,33 @@ A typical self-hosted setup:
 ```yaml
 # docker-compose.yml
 services:
-  smt:
-    image: ghcr.io/<your-org>/server-management-tool:latest
+  bastionssh:
+    image: ghcr.io/ayush-parida/bastionssh:latest
     environment:
-      - SMT_BASE_URL=https://smt.yourcompany.com
+      - SMT_BASE_URL=https://bastionssh.yourcompany.com
       - SMT_ENCRYPTION_KEY=${SMT_ENCRYPTION_KEY} # generate once, keep secret
-      - SMT_DB_URL=postgres://smt:smt@db:5432/smt # optional; SQLite by default
+      - SMT_DB_URL=postgres://bastionssh:bastionssh@db:5432/bastionssh # optional; SQLite by default
       - SMT_OAUTH_PROVIDER=google # optional SSO
     ports:
-      - "8080:8080"
+      - '8080:8080'
     volumes:
-      - smt_data:/data
+      - bastionssh_data:/data
     depends_on: [db]
     restart: unless-stopped
 
   db:
     image: postgres:16
     environment:
-      POSTGRES_USER: smt
-      POSTGRES_PASSWORD: smt
-      POSTGRES_DB: smt
+      POSTGRES_USER: bastionssh
+      POSTGRES_PASSWORD: bastionssh
+      POSTGRES_DB: bastionssh
     volumes:
-      - smt_db:/var/lib/postgresql/data
+      - bastionssh_db:/var/lib/postgresql/data
     restart: unless-stopped
 
 volumes:
-  smt_data:
-  smt_db:
+  bastionssh_data:
+  bastionssh_db:
 ```
 
 Then put it behind your reverse proxy of choice (Caddy / Nginx / Traefik) with TLS, invite your team, and you're live.

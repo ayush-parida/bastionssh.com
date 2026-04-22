@@ -150,7 +150,7 @@ async function attach(sessionId: string, socket: WebSocket, _req: FastifyRequest
   stream.stderr.on('data', onData);
 
   // Wire: WebSocket → SSH stream
-  socket.on('message', (msg) => {
+  socket.on('message', (msg: any) => {
     const data = msg instanceof Buffer ? msg : Buffer.from(msg as string);
     try {
       const parsed = JSON.parse(data.toString()) as { type: string; cols?: number; rows?: number };

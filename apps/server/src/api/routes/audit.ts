@@ -32,11 +32,12 @@ export async function auditRoutes(app: FastifyInstance) {
       .offset(offset)
       .all();
 
-    const [{ value: total }] = db
+    const results = db
       .select({ value: count() })
       .from(auditLog)
       .where(eq(auditLog.orgId, req.orgId))
       .all();
+    const total = results[0]?.value ?? 0;
 
     return { items, total };
   });

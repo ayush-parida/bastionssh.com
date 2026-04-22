@@ -24,7 +24,7 @@ export default function AIChatPage() {
   });
 
   useEffect(() => {
-    if (providers?.length && !providerId) setProviderId(providers[0].id);
+    if (providers && Array.isArray(providers) && providers.length > 0 && !providerId) setProviderId((providers as any[])[0].id);
   }, [providers, providerId]);
 
   useEffect(() => {
@@ -71,7 +71,8 @@ export default function AIChatPage() {
               if (token) {
                 setMessages((prev) => {
                   const last = prev[prev.length - 1];
-                  return [...prev.slice(0, -1), { ...last, content: last.content + token }];
+                  if (!last) return prev;
+                  return [...prev.slice(0, -1), { ...last, content: last.content + token, role: last.role || 'assistant' }];
                 });
               }
             } catch (parseErr) {
@@ -83,7 +84,8 @@ export default function AIChatPage() {
     } catch (err: unknown) {
       setMessages((prev) => {
         const last = prev[prev.length - 1];
-        return [...prev.slice(0, -1), { ...last, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }];
+        if (!last) return prev;
+        return [...prev.slice(0, -1), { ...last, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, role: last.role || 'assistant' }];
       });
     } finally {
       setStreaming(false);

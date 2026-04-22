@@ -37,7 +37,7 @@ export async function runCronJob(data: CronJobData) {
       .from(savedCommands)
       .where(eq(savedCommands.id, job.savedCommandId))
       .get();
-    cmd = saved?.command;
+    cmd = saved?.command || null;
   }
   if (!cmd) return;
 

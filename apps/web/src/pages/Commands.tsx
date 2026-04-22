@@ -114,7 +114,6 @@ export default function CommandsPage() {
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="font-medium text-sm">{cmd.name}</span>
-                    {cmd.description && <span className="text-xs text-muted-foreground">— {cmd.description}</span>}
                   </div>
                   <pre className="text-xs font-mono text-muted-foreground bg-muted rounded px-2 py-1 overflow-x-auto">{cmd.command}</pre>
                 </div>

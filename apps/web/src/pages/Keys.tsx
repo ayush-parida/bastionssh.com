@@ -41,9 +41,9 @@ export default function KeysPage() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (mode === 'generate') {
-      generateMutation.mutate({ name, keyType });
+      generateMutation.mutate({ name, type: keyType as "rsa" | "ed25519" | "ecdsa", generate: true } as any);
     } else {
-      importMutation.mutate({ name, publicKey, privateKey });
+      importMutation.mutate({ name, privateKey } as any);
     }
   }
 
@@ -78,15 +78,15 @@ export default function KeysPage() {
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Public key</p>
                 <div className="flex gap-2">
-                  <pre className="flex-1 rounded bg-muted p-2 text-xs font-mono overflow-x-auto">{generatedKey.publicKey}</pre>
-                  <button onClick={() => { navigator.clipboard.writeText(generatedKey.publicKey); toast.success('Copied'); }} className="shrink-0 rounded border border-border p-2 hover:bg-muted"><Copy size={14} /></button>
+                  <pre className="flex-1 rounded bg-muted p-2 text-xs font-mono overflow-x-auto">{generatedKey.key.publicKey}</pre>
+                  <button onClick={() => { navigator.clipboard.writeText(generatedKey.key.publicKey); toast.success('Copied'); }} className="shrink-0 rounded border border-border p-2 hover:bg-muted"><Copy size={14} /></button>
                 </div>
               </div>
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Private key</p>
                 <div className="flex gap-2">
-                  <pre className="flex-1 rounded bg-muted p-2 text-xs font-mono overflow-x-auto">{generatedKey.privateKey}</pre>
-                  <button onClick={() => { navigator.clipboard.writeText(generatedKey.privateKey); toast.success('Copied'); }} className="shrink-0 rounded border border-border p-2 hover:bg-muted"><Copy size={14} /></button>
+                  <pre className="flex-1 rounded bg-muted p-2 text-xs font-mono overflow-x-auto">{generatedKey.privateKeyPem}</pre>
+                  <button onClick={() => { navigator.clipboard.writeText(generatedKey.privateKeyPem); toast.success('Copied'); }} className="shrink-0 rounded border border-border p-2 hover:bg-muted"><Copy size={14} /></button>
                 </div>
               </div>
               <button onClick={() => { setShowForm(false); setGeneratedKey(null); }} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">Done</button>
@@ -149,7 +149,7 @@ export default function KeysPage() {
                 {keys?.map((k) => (
                   <tr key={k.id} className="hover:bg-muted/30">
                     <td className="px-4 py-3 font-medium">{k.name}</td>
-                    <td className="px-4 py-3 text-muted-foreground">{k.type ?? k.keyType}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{k.type}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{k.fingerprint}</td>
                     <td className="px-4 py-3 text-muted-foreground">{new Date(k.createdAt).toLocaleDateString()}</td>
                     <td className="px-4 py-3 text-right">

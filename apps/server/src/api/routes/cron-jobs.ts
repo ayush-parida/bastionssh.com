@@ -85,7 +85,11 @@ export async function cronJobRoutes(app: FastifyInstance) {
     }
 
     db.update(cronJobs)
-      .set({ ...body, updatedAt: new Date().toISOString() })
+      .set({
+        ...body,
+        notify: body.notify ? JSON.stringify(body.notify) : undefined,
+        updatedAt: new Date().toISOString(),
+      } as any)
       .where(eq(cronJobs.id, id))
       .run();
     await unscheduleCronJob(id);

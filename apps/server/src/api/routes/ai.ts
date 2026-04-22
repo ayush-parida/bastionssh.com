@@ -148,7 +148,7 @@ export async function aiRoutes(app: FastifyInstance) {
     if (!providerConfig) return reply.status(400).send({ error: 'No AI provider configured' });
 
     const apiKey = await vault.decrypt(providerConfig.encryptedApiKey, providerConfig.id);
-    const provider = getAIProvider(providerConfig, apiKey);
+    const provider = getAIProvider(providerConfig as any, apiKey);
 
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',

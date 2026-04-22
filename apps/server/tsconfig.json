@@ -2,12 +2,11 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
     "paths": {
       "@smt/shared": ["../../packages/shared/src/index.ts"],
       "@smt/cron-parser": ["../../packages/cron-parser/src/index.ts"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "../../packages/shared/src", "../../packages/cron-parser/src"],
   "exclude": ["node_modules", "dist"]
 }
