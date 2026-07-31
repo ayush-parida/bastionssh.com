@@ -15,13 +15,15 @@ services:
       SMT_ENCRYPTION_KEY: ${SMT_ENCRYPTION_KEY:?required}
       SMT_SESSION_SECRET: ${SMT_SESSION_SECRET:?required}
       SMT_CORS_ORIGIN: ${SMT_CORS_ORIGIN:-http://localhost:8080}
+      SMT_BASE_URL: ${SMT_BASE_URL:-http://localhost:8080}
+      SMT_SFTP_MAX_UPLOAD_BYTES: ${SMT_SFTP_MAX_UPLOAD_BYTES:-1073741824}
     volumes:
       - smt-data:/data
     depends_on:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3

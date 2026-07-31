@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { savedCommands, commandRuns } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -26,7 +26,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     return db.select().from(savedCommands).where(eq(savedCommands.orgId, req.orgId)).all();
   });
 
-  app.post('/', async (req, reply) => {
+  app.post('/', { preHandler: requireRole('operator') }, async (req, reply) => {
     const body = createCommandSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -46,7 +46,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .send(db.select().from(savedCommands).where(eq(savedCommands.id, id)).get());
   });
 
-  app.post('/:id/run', async (req, reply) => {
+  app.post('/:id/run', { preHandler: requireRole('operator') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { variables = {} } = (req.body ?? {}) as { variables?: Record<string, string> };
     const db = getDb();
@@ -98,7 +98,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     return db.select().from(commandRuns).where(eq(commandRuns.commandId, id)).all();
   });
 
-  app.delete('/:id', async (req, reply) => {
+  app.delete('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 

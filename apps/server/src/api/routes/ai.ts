@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { aiProviderConfigs, servers, savedCommands, cronJobs } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -60,7 +60,7 @@ export async function aiRoutes(app: FastifyInstance) {
       .all();
   });
 
-  app.post('/providers', async (req, reply) => {
+  app.post('/providers', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = createProviderSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -84,7 +84,7 @@ export async function aiRoutes(app: FastifyInstance) {
       .send({ id, name: body.name, provider: body.provider, model: body.model });
   });
 
-  app.patch('/providers/:id', async (req, reply) => {
+  app.patch('/providers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const existing = db
@@ -118,7 +118,7 @@ export async function aiRoutes(app: FastifyInstance) {
     return reply.send({ id, ...updates });
   });
 
-  app.delete('/providers/:id', async (req, reply) => {
+  app.delete('/providers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const config = db
@@ -174,7 +174,7 @@ export async function aiRoutes(app: FastifyInstance) {
   });
 
   // ── Chat / Agent (streaming SSE) ──────────────────────────────
-  app.post('/chat', async (req, reply) => {
+  app.post('/chat', { preHandler: requireRole('operator') }, async (req, reply) => {
     const body = chatSchema.parse(req.body);
     const db = getDb();
 

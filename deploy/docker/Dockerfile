@@ -63,7 +63,8 @@ ENV NODE_ENV=production \
     SMT_STATIC_DIR=/app/apps/web/dist
 
 EXPOSE 8080
+# 127.0.0.1, not localhost: the server binds IPv4 only, and localhost resolves to ::1 first
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD wget -qO- http://localhost:8080/api/healthz || exit 1
+    CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 
 CMD ["node", "apps/server/dist/index.js"]

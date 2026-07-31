@@ -11,6 +11,7 @@ const envSchema = z.object({
   SMT_REDIS_URL: z.string().optional(),
   SMT_LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
   SMT_MAX_SSH_SESSIONS: z.coerce.number().default(5),
+  SMT_SFTP_MAX_UPLOAD_BYTES: z.coerce.number().default(1_073_741_824), // 1 GiB
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
   SMT_WORKER_IN_PROCESS: z
     .string()
@@ -47,6 +48,7 @@ export const config = {
   redisUrl: env.SMT_REDIS_URL,
   logLevel: env.SMT_LOG_LEVEL,
   maxSshSessions: env.SMT_MAX_SSH_SESSIONS,
+  sftpMaxUploadBytes: env.SMT_SFTP_MAX_UPLOAD_BYTES,
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,

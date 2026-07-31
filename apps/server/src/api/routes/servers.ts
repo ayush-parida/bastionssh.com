@@ -1,12 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
+import { evictServer } from '../../ssh/sftp.js';
 
 const createServerSchema = z.object({
   name: z.string().min(1).max(100),
@@ -34,7 +35,7 @@ export async function serverRoutes(app: FastifyInstance) {
     return db.select().from(servers).where(eq(servers.orgId, req.orgId)).all().map(sanitize);
   });
 
-  app.post('/', async (req, reply) => {
+  app.post('/', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = createServerSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -77,7 +78,7 @@ export async function serverRoutes(app: FastifyInstance) {
     return sanitize(server);
   });
 
-  app.patch('/:id', async (req, reply) => {
+  app.patch('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = createServerSchema.partial().parse(req.body);
     const db = getDb();
@@ -108,12 +109,14 @@ export async function serverRoutes(app: FastifyInstance) {
     }
 
     db.update(servers).set(updateData).where(eq(servers.id, id)).run();
+    // Pooled SFTP channels hold the old host/credentials — force a reconnect
+    evictServer(req.orgId, id);
     await audit(req, 'server.update', 'server', id, existing.name);
     const row = db.select().from(servers).where(eq(servers.id, id)).get()!;
     return sanitize(row);
   });
 
-  app.delete('/:id', async (req, reply) => {
+  app.delete('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 
@@ -125,6 +128,7 @@ export async function serverRoutes(app: FastifyInstance) {
     if (!existing) return reply.status(404).send({ error: 'Not found' });
 
     db.delete(servers).where(eq(servers.id, id)).run();
+    evictServer(req.orgId, id);
     await audit(req, 'server.delete', 'server', id, existing.name);
     return reply.status(204).send();
   });

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { cronJobs, cronRuns } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -38,7 +38,7 @@ export async function cronJobRoutes(app: FastifyInstance) {
     return db.select().from(cronJobs).where(eq(cronJobs.orgId, req.orgId)).all();
   });
 
-  app.post('/', async (req, reply) => {
+  app.post('/', { preHandler: requireRole('operator') }, async (req, reply) => {
     const body = createCronSchema.parse(req.body);
     const db = getDb();
 
@@ -66,7 +66,7 @@ export async function cronJobRoutes(app: FastifyInstance) {
     return reply.status(201).send(db.select().from(cronJobs).where(eq(cronJobs.id, id)).get());
   });
 
-  app.patch('/:id', async (req, reply) => {
+  app.patch('/:id', { preHandler: requireRole('operator') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = createCronBaseSchema.partial().parse(req.body);
     const db = getDb();
@@ -98,7 +98,7 @@ export async function cronJobRoutes(app: FastifyInstance) {
     return db.select().from(cronJobs).where(eq(cronJobs.id, id)).get();
   });
 
-  app.delete('/:id', async (req, reply) => {
+  app.delete('/:id', { preHandler: requireRole('operator') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 

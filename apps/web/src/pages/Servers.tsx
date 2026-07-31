@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import type { Server, CreateServerRequest } from '@smt/shared';
 import type { SSHKey } from '@smt/shared';
-import { Plus, Terminal, Trash2, Pencil, Server as ServerIcon } from 'lucide-react';
+import { Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ServerFormState {
@@ -193,6 +193,9 @@ export default function ServersPage() {
               <div className="flex gap-2 mt-auto">
                 <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
                   <Terminal size={12} /> Connect
+                </button>
+                <button onClick={() => navigate(`/servers/${s.id}/files`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
+                  <FolderOpen size={12} /> Files
                 </button>
                 <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Pencil size={12} /> Edit

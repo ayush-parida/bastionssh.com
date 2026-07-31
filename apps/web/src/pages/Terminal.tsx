@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import XTerminal, { type XTerminalHandle } from '@/components/terminal/XTerminal.js';
 import AISidebar from '@/components/ai/AISidebar.js';
-import { ArrowLeft, Bot } from 'lucide-react';
+import { ArrowLeft, Bot, FolderOpen } from 'lucide-react';
 import { api } from '@/lib/api.js';
 
 /** Rolling buffer size for terminal output captured for AI context (bytes) */
@@ -57,6 +57,14 @@ export default function TerminalPage() {
         <span className="text-sm text-[#8b949e] font-mono flex-1">
           SSH Session — {serverName ?? id}
         </span>
+        <button
+          onClick={() => navigate(`/servers/${id}/files`)}
+          title="Browse files over SFTP"
+          className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[#8b949e] transition-colors hover:bg-[#21262d] hover:text-white"
+        >
+          <FolderOpen size={13} />
+          Files
+        </button>
         <button
           onClick={() => setAiOpen((o) => !o)}
           title="Toggle AI Assistant"

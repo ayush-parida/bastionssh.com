@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth.js';
 import { api } from '@/lib/api.js';
-import type { User } from '@smt/shared';
+import type { Role, User } from '@smt/shared';
 import { toast } from 'sonner';
 
 export default function LoginPage() {
@@ -16,8 +16,8 @@ export default function LoginPage() {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await api.post<{ user: User; orgId: string }>('/auth/login', { email, password });
-      setUser(res.user, res.orgId);
+      const res = await api.post<{ user: User; orgId: string; role: Role }>('/auth/login', { email, password });
+      setUser(res.user, res.orgId, res.role);
       navigate('/');
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Login failed');

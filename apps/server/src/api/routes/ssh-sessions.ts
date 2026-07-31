@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { SSHBroker } from '../../ssh/broker.js';
 import { getDb } from '../../db/index.js';
 import { servers, sshKeys } from '../../db/schema.js';
@@ -18,6 +18,8 @@ const createSessionSchema = z.object({
 
 export async function sshSessionRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Every route here opens or drives an interactive shell — viewers are excluded wholesale
+  app.addHook('preHandler', requireRole('operator'));
 
   /** POST /api/sessions → create a session and return its WS URL */
   app.post('/', async (req, reply) => {

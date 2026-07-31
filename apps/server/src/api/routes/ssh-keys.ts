@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth } from '../../auth/middleware.js';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { sshKeys } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -42,7 +42,7 @@ export async function sshKeyRoutes(app: FastifyInstance) {
       .all();
   });
 
-  app.post('/import', async (req, reply) => {
+  app.post('/import', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = importKeySchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -68,7 +68,7 @@ export async function sshKeyRoutes(app: FastifyInstance) {
     return reply.status(201).send({ id, name: body.name, type, publicKey, fingerprint });
   });
 
-  app.post('/generate', async (req, reply) => {
+  app.post('/generate', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = generateKeySchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -97,7 +97,7 @@ export async function sshKeyRoutes(app: FastifyInstance) {
       .send({ id, name: body.name, type: body.type, publicKey, fingerprint, privateKey });
   });
 
-  app.delete('/:id', async (req, reply) => {
+  app.delete('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 

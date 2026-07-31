@@ -16,6 +16,7 @@ import { cronJobRoutes } from './routes/cron-jobs.js';
 import { aiRoutes } from './routes/ai.js';
 import { auditRoutes } from './routes/audit.js';
 import { sshSessionRoutes } from './routes/ssh-sessions.js';
+import { sftpRoutes } from './routes/sftp.js';
 import { healthRoutes } from './routes/health.js';
 
 export async function buildApp() {
@@ -43,6 +44,7 @@ export async function buildApp() {
   await app.register(aiRoutes, { prefix: '/api/ai' });
   await app.register(auditRoutes, { prefix: '/api/audit' });
   await app.register(sshSessionRoutes, { prefix: '/api/ssh-sessions' });
+  await app.register(sftpRoutes, { prefix: '/api/sftp' });
 
   if (config.staticDir) {
     const staticPath = path.resolve(config.staticDir);

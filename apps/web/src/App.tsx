@@ -11,6 +11,7 @@ import AIChatPage from '@/pages/AIChat.js';
 import AuditPage from '@/pages/Audit.js';
 import SettingsPage from '@/pages/Settings.js';
 import TerminalPage from '@/pages/Terminal.js';
+import FilesPage from '@/pages/Files.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -34,6 +35,7 @@ export default function App() {
           <Route index element={<DashboardPage />} />
           <Route path="servers" element={<ServersPage />} />
           <Route path="servers/:id/terminal" element={<TerminalPage />} />
+          <Route path="servers/:id/files" element={<FilesPage />} />
           <Route path="keys" element={<KeysPage />} />
           <Route path="commands" element={<CommandsPage />} />
           <Route path="cron-jobs" element={<CronJobsPage />} />

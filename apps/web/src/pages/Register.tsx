@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth.js';
 import { api } from '@/lib/api.js';
-import type { User } from '@smt/shared';
+import type { Role, User } from '@smt/shared';
 import { toast } from 'sonner';
 
 export default function RegisterPage() {
@@ -17,8 +17,8 @@ export default function RegisterPage() {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await api.post<{ user: User; orgId: string }>('/auth/register', { displayName: name, email, password });
-      setUser(res.user, res.orgId);
+      const res = await api.post<{ user: User; orgId: string; role: Role }>('/auth/register', { displayName: name, email, password });
+      setUser(res.user, res.orgId, res.role);
       navigate('/');
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Registration failed');

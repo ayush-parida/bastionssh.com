@@ -33,6 +33,7 @@ export async function authRoutes(app: FastifyInstance) {
     return {
       user: { id: user.id, email: user.email, displayName: user.displayName },
       orgId: membership?.orgId ?? null,
+      role: membership?.role ?? 'viewer',
     };
   });
 
@@ -44,6 +45,6 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   app.get('/me', { preHandler: requireAuth }, async (req) => {
-    return req.user;
+    return { ...req.user, orgId: req.orgId, role: req.role };
   });
 }

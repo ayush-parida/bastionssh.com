@@ -106,9 +106,35 @@ Everything inside the dashed boundary runs on the operator's infrastructure. The
 
 - Wraps `ssh2`. Responsibilities:
   - Decrypt key material on demand (never persisted in plaintext, never logged).
-  - Open interactive shells, exec channels, and (later) SFTP channels.
+  - Open interactive shells, exec channels, and SFTP channels.
   - Bridge a `pty` to a WebSocket frame stream.
   - Enforce per-connection limits and timeouts.
+
+#### SFTP file transfer (`/server/ssh/sftp.ts`)
+
+- Rides the same `ssh2` connection and the same stored credentials as the terminal —
+  no separate protocol, port, or credential set.
+- Connections are pooled per `orgId:serverId:userId`, so a channel is never shared
+  across users. Idle connections close after 5 minutes; the timer only fires when no
+  operation is in flight, and editing or deleting a server evicts its pooled channels.
+- Uploads and downloads stream end to end (`application/octet-stream` raw body in,
+  `createReadStream` out) — file contents never buffer fully in the API process.
+  Uploads are capped by `SMT_SFTP_MAX_UPLOAD_BYTES`.
+- Client-supplied paths must be absolute and are normalized before use; `..` segments
+  collapse rather than escaping. Recursive directory deletion is opt-in per request.
+- Every operation writes an `sftp.*` audit entry recording the path.
+
+REST surface, all under `/api/sftp/:serverId`:
+
+| Method   | Path                       | Purpose                          |
+| -------- | -------------------------- | -------------------------------- |
+| `GET`    | `/list?path=`              | Directory listing (`.` = `$HOME`) |
+| `GET`    | `/download?path=`          | Stream a file to the client      |
+| `GET`    | `/read?path=`              | Text contents for the inline editor (2 MiB cap) |
+| `PUT`    | `/file?path=`              | Upload a raw body to that path   |
+| `POST`   | `/mkdir`                   | Create a directory               |
+| `POST`   | `/rename`                  | Rename or move                   |
+| `DELETE` | `/file?path=&recursive=`   | Delete a file or directory       |
 
 ### 4.5 Secrets Vault (`/server/vault`)
 
@@ -237,14 +263,36 @@ Browser                API                    SSH Broker        Server
 
 ### Authorization (RBAC)
 
-| Role     | Servers     | Keys        | Commands   | Cron Jobs | Members | Settings |
-| -------- | ----------- | ----------- | ---------- | --------- | ------- | -------- |
-| Owner    | full        | full        | full       | full      | full    | full     |
-| Admin    | full        | full        | full       | full      | invite  | most     |
-| Operator | use + edit  | use         | full       | full      | none    | none     |
-| Viewer   | read + open | read public | read + run | read      | none    | none     |
+Enforced by `requireRole(minimum)` in `/server/auth/middleware.ts`, applied per route.
+Roles are totally ordered — `viewer < operator < admin < owner` — and each implies
+every role before it. An unrecognized role string degrades to `viewer`, never upward.
 
-Per-resource ACLs override role defaults (e.g., make a specific key restricted to owners).
+| Area                        | Read     | Write / run |
+| --------------------------- | -------- | ----------- |
+| Servers                     | viewer   | admin       |
+| SSH keys                    | viewer   | admin       |
+| AI providers                | viewer   | admin       |
+| Audit log                   | admin    | —           |
+| Saved commands              | viewer   | operator (delete: admin) |
+| Cron jobs                   | viewer   | operator    |
+| SSH sessions (terminal)     | —        | operator    |
+| SFTP list / download / read | viewer   | —           |
+| SFTP upload / mkdir / rename / delete | — | operator |
+| AI chat                     | —        | operator    |
+
+Two deliberate departures from a naive reading of "viewer = read-only":
+
+- **Opening an interactive session is `operator`, not `viewer`.** A shell is arbitrary
+  code execution; granting it to viewers would make the role meaningless.
+- **AI chat is `operator`.** The agent exposes a `run_command` tool, so chat access is
+  transitively command execution.
+
+The UI hides controls the caller cannot use (`useHasRole` in `/web/store/auth.ts`), but
+that is cosmetic only — every rule above is enforced server-side and independently.
+
+Not yet implemented: per-resource ACLs overriding role defaults, and member-management
+routes (invite / role change / remove), which is why `owner` currently grants nothing
+beyond `admin`.
 
 ### Network
 
@@ -348,6 +396,7 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_LOG_LEVEL`          | no       | `info` (default), `debug`, `warn`, `error`                    |
 | `SMT_MAX_SSH_SESSIONS`   | no       | Per-user concurrent SSH session cap                           |
 | `SMT_AI_REQUEST_TIMEOUT` | no       | Timeout for outbound AI calls (ms)                            |
+| `SMT_SFTP_MAX_UPLOAD_BYTES` | no    | Max SFTP upload size in bytes (default 1 GiB)                 |
 
 ---
 
