@@ -3,11 +3,16 @@ import ReactDOM from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import App from './App.js';
+import { ApiError } from './lib/api.js';
 import './index.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 30_000, retry: 1 },
+    queries: {
+      staleTime: 30_000,
+      // Retrying an expired session just fires another doomed request.
+      retry: (count, err) => count < 1 && !(err instanceof ApiError && err.status === 401),
+    },
   },
 });
 

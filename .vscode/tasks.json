@@ -137,6 +137,90 @@
     },
 
     // ─── Docker ───────────────────────────────────────────────────────────────
+    // NOTE: the redeploy tasks are scoped with `smt --no-deps` on purpose.
+    // The compose project name defaults to the parent directory ("docker"), which
+    // collides with /Users/ayush/Desktop/jesse/docker/docker-compose.yml — its
+    // `redis` and `postgres` containers carry the same project label. Without
+    // --no-deps, compose recreates that project's redis and then aborts with
+    // "container redis has no healthcheck configured". Never add --remove-orphans
+    // here either: it would delete those containers outright.
+    {
+      "label": "Docker: Redeploy",
+      "detail": "Rebuild the smt image and recreate the running container",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml up -d --build --no-deps smt",
+      "group": "build",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "docker",
+        "clear": true
+      },
+      "problemMatcher": [],
+      "runOptions": { "instanceLimit": 1 },
+      "windows": {
+        "command": "docker compose -f deploy/docker/docker-compose.yml up -d --build --no-deps smt"
+      }
+    },
+    {
+      "label": "Docker: Redeploy + Logs",
+      "detail": "Redeploy, then tail the container logs",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml logs -f --tail=100 smt",
+      "dependsOn": ["Docker: Redeploy"],
+      "dependsOrder": "sequence",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "docker" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": {
+        "command": "docker compose -f deploy/docker/docker-compose.yml logs -f --tail=100 smt"
+      }
+    },
+    {
+      "label": "Docker: Redeploy (no cache)",
+      "detail": "Full rebuild ignoring the layer cache — use when deps or the lockfile changed",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml build --no-cache smt && docker compose -f deploy/docker/docker-compose.yml up -d --no-deps smt",
+      "group": "build",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "docker", "clear": true },
+      "problemMatcher": [],
+      "runOptions": { "instanceLimit": 1 },
+      "windows": {
+        "command": "docker compose -f deploy/docker/docker-compose.yml build --no-cache smt; docker compose -f deploy/docker/docker-compose.yml up -d --no-deps smt"
+      }
+    },
+    {
+      "label": "Docker: Restart (no rebuild)",
+      "detail": "Bounce the container without rebuilding the image",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml restart smt",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared", "group": "docker" },
+      "problemMatcher": [],
+      "windows": { "command": "docker compose -f deploy/docker/docker-compose.yml restart smt" }
+    },
+    {
+      "label": "Docker: Logs (smt)",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml logs -f --tail=100 smt",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "dedicated", "group": "docker" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "windows": {
+        "command": "docker compose -f deploy/docker/docker-compose.yml logs -f --tail=100 smt"
+      }
+    },
+    {
+      "label": "Docker: Status",
+      "type": "shell",
+      "command": "docker compose -f deploy/docker/docker-compose.yml ps",
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared", "group": "docker" },
+      "problemMatcher": [],
+      "windows": { "command": "docker compose -f deploy/docker/docker-compose.yml ps" }
+    },
     {
       "label": "Docker: Start (production)",
       "type": "shell",

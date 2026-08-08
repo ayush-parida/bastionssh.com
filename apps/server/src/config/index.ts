@@ -13,6 +13,22 @@ const envSchema = z.object({
   SMT_MAX_SSH_SESSIONS: z.coerce.number().default(5),
   SMT_SFTP_MAX_UPLOAD_BYTES: z.coerce.number().default(1_073_741_824), // 1 GiB
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
+
+  // ── Health monitoring ──
+  SMT_MONITORING_ENABLED: z
+    .string()
+    .transform((v) => v !== 'false')
+    .default('true'),
+  SMT_MONITORING_INTERVAL: z.coerce.number().min(15).default(60), // seconds between sweeps
+  SMT_MONITORING_CONCURRENCY: z.coerce.number().min(1).default(5),
+  SMT_MONITORING_TIMEOUT: z.coerce.number().default(20_000),
+  SMT_MONITORING_RETENTION_HOURS: z.coerce.number().min(1).default(168), // 7 days
+  SMT_ALERT_CPU_PERCENT: z.coerce.number().min(1).max(100).default(90),
+  SMT_ALERT_MEMORY_PERCENT: z.coerce.number().min(1).max(100).default(90),
+  SMT_ALERT_DISK_PERCENT: z.coerce.number().min(1).max(100).default(90),
+  SMT_ALERT_LOAD_PER_CORE: z.coerce.number().min(0.1).default(2),
+  /** Consecutive failed checks before a server is alerted as down. */
+  SMT_ALERT_OFFLINE_FAILURES: z.coerce.number().min(1).default(2),
   SMT_WORKER_IN_PROCESS: z
     .string()
     .transform((v) => v === 'true')
@@ -50,6 +66,20 @@ export const config = {
   maxSshSessions: env.SMT_MAX_SSH_SESSIONS,
   sftpMaxUploadBytes: env.SMT_SFTP_MAX_UPLOAD_BYTES,
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
+  monitoring: {
+    enabled: env.SMT_MONITORING_ENABLED,
+    intervalSeconds: env.SMT_MONITORING_INTERVAL,
+    concurrency: env.SMT_MONITORING_CONCURRENCY,
+    timeoutMs: env.SMT_MONITORING_TIMEOUT,
+    retentionHours: env.SMT_MONITORING_RETENTION_HOURS,
+    thresholds: {
+      cpuPercent: env.SMT_ALERT_CPU_PERCENT,
+      memoryPercent: env.SMT_ALERT_MEMORY_PERCENT,
+      diskPercent: env.SMT_ALERT_DISK_PERCENT,
+      loadPerCore: env.SMT_ALERT_LOAD_PER_CORE,
+      offlineFailures: env.SMT_ALERT_OFFLINE_FAILURES,
+    },
+  },
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,
   adminEmail: env.SMT_ADMIN_EMAIL,

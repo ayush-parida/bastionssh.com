@@ -102,6 +102,28 @@ Everything inside the dashed boundary runs on the operator's infrastructure. The
 - Streams stdout/stderr to Postgres and (optionally) live to subscribed browsers via Redis pub/sub.
 - Handles retries, backoff, and failure notifications.
 
+### 4.3b Health Monitor (`/server/monitoring`)
+
+Agentless fleet monitoring. Deliberately **not** queue-backed: it runs on a plain
+`setInterval` inside the API process so health checks keep working in the default
+single-node deployment, where there is no Redis. A missed sweep is not worth
+persisting or retrying — the next one is a minute away.
+
+- `probe.ts` — the read-only shell probe (`/proc/uptime`, `/proc/loadavg`,
+  `/proc/stat`, `/proc/meminfo`, `df -Pk`, `ps`, `who`) plus a pure parser. Every
+  field is optional, so a host missing `/proc` still yields a usable sample.
+- `collector.ts` — resolves credentials, runs the probe over a short-lived
+  (unpooled) SSH connection, writes a `server_metrics` row, and updates the
+  server's `server_health` row. Never throws: a failed check is a recorded data
+  point, not an exception.
+- `alerts.ts` — evaluates thresholds into conditions and reconciles them against
+  what is already open, so a flapping metric does not open a new alert per sweep.
+- `scheduler.ts` — the interval loop, bounded concurrency, and retention pruning.
+
+CPU utilisation is a delta of `/proc/stat` jiffies against the previous stored
+sample, so the first check after a restart or reboot reports no CPU figure rather
+than a wrong one.
+
 ### 4.4 SSH Broker (`/server/ssh`)
 
 - Wraps `ssh2`. Responsibilities:
@@ -172,6 +194,9 @@ Server       1───* SavedCommand
 Server       1───* CronJob
 CronJob      1───* CronRun
 Server       1───* SSHSession (live, ephemeral)
+Server       1───* ServerMetric
+Server       1───1 ServerHealth
+Server       1───* ServerAlert
 Organization 1───* AIProviderConfig
 Organization 1───* AuditLogEntry
 User         1───* APIToken
@@ -187,6 +212,9 @@ User         1───* APIToken
 - **saved_commands** — `server_id` (nullable for org-wide), `name`, `command`, `variables jsonb`, `category`.
 - **cron_jobs** — `server_id`, `command_id` or inline `command`, `schedule` (cron), `timezone`, `enabled`, `next_run_at`, `notify jsonb`.
 - **cron_runs** — `cron_job_id`, `started_at`, `finished_at`, `exit_code`, `stdout`, `stderr`, `status`.
+- **server_metrics** — append-only health samples: `status`, `latency_ms`, `uptime_seconds`, load, CPU jiffies + percent, memory, swap, disk, `disks jsonb`, `error`. Pruned on a retention window.
+- **server_health** — one row per server holding its current state, so list views never scan the time series.
+- **server_alerts** — one row per alert occurrence; `resolved_at` is set when the condition clears, `acknowledged_at` when a user silences it.
 - **ai_provider_configs** — `provider`, `base_url`, `model`, `encrypted_api_key`, `default boolean`.
 - **audit_log** — append-only, partitioned by month.
 - **sessions** — browser auth sessions (Lucia).
@@ -235,6 +263,23 @@ Browser                API                    SSH Broker        Server
 3. Worker executes the run identically to a saved command.
 4. On failure, optional notification (webhook / email / Slack).
 5. UI shows run history with timing, exit code, and full output.
+
+### 6.3b Health check sweep
+
+```
+interval tick
+  → select servers where monitoring_enabled
+  → bounded-concurrency pool
+      → resolve + decrypt credentials
+      → short-lived SSH connect, run probe script, disconnect
+      → parse sample, compute CPU delta vs previous sample
+      → insert server_metrics row, upsert server_health row
+      → evaluate thresholds → open / refresh / resolve server_alerts
+  → hourly: prune samples past the retention window
+```
+
+Servers with monitoring switched off move to `paused` instead of being skipped
+silently, so the UI can tell "not checked" apart from "not watched".
 
 ### 6.4 AI chat (BYO model)
 
@@ -357,6 +402,7 @@ server-management-tool/
 │       ├── src/
 │       │   ├── api/      # HTTP + WS routes
 │       │   ├── worker/   # BullMQ processors
+│       │   ├── monitoring/ # Agentless SSH health checks + alerting
 │       │   ├── ssh/      # SSH broker
 │       │   ├── ai/       # AI provider adapters
 │       │   ├── vault/    # Secrets encryption
@@ -397,6 +443,14 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_MAX_SSH_SESSIONS`   | no       | Per-user concurrent SSH session cap                           |
 | `SMT_AI_REQUEST_TIMEOUT` | no       | Timeout for outbound AI calls (ms)                            |
 | `SMT_SFTP_MAX_UPLOAD_BYTES` | no    | Max SFTP upload size in bytes (default 1 GiB)                 |
+| `SMT_MONITORING_ENABLED` | no       | Run agentless health checks (default `true`)                  |
+| `SMT_MONITORING_INTERVAL` | no      | Seconds between health sweeps (default 60, minimum 15)        |
+| `SMT_MONITORING_CONCURRENCY` | no   | Servers probed in parallel (default 5)                        |
+| `SMT_MONITORING_TIMEOUT` | no       | Per-check SSH timeout in ms (default 20000)                   |
+| `SMT_MONITORING_RETENTION_HOURS` | no | How long metric samples are kept (default 168)              |
+| `SMT_ALERT_*_PERCENT`    | no       | CPU / memory / disk alert thresholds (default 90 each)        |
+| `SMT_ALERT_LOAD_PER_CORE` | no      | Load-average alert threshold, per core (default 2)            |
+| `SMT_ALERT_OFFLINE_FAILURES` | no   | Failed checks before a host is alerted as down (default 2)    |
 
 ---
 

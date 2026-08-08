@@ -66,18 +66,12 @@ export default function AIChatPage() {
     setStreaming(true);
 
     try {
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          providerId,
-          agentMode: true,
-          messages: [...messages, { role: 'user', content: userMsg }],
-        }),
+      const res = await api.stream('/ai/chat', {
+        providerId,
+        agentMode: true,
+        messages: [...messages, { role: 'user', content: userMsg }],
       });
 
-      if (!res.ok) throw new Error(await res.text());
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
 

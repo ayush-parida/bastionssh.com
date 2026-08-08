@@ -28,7 +28,10 @@ export type AuditAction =
   | 'member.role_change'
   | 'member.remove'
   | 'api_token.create'
-  | 'api_token.revoke';
+  | 'api_token.revoke'
+  | 'server.health_check'
+  | 'monitoring.update'
+  | 'alert.acknowledge';
 
 export interface AuditLogEntry {
   id: string;

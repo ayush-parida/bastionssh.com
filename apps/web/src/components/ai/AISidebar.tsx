@@ -113,12 +113,9 @@ export default function AISidebar({
       setStreaming(true);
 
       try {
-        const res = await fetch('/api/ai/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          signal: ctrl.signal,
-          body: JSON.stringify({
+        const res = await api.stream(
+          '/ai/chat',
+          {
             providerId,
             sessionId,
             agentMode: true,
@@ -130,10 +127,10 @@ export default function AISidebar({
               ...messages.map((m) => ({ role: m.role, content: m.content })),
               { role: 'user', content: userText.trim() },
             ],
-          }),
-        });
+          },
+          { signal: ctrl.signal },
+        );
 
-        if (!res.ok) throw new Error(await res.text());
         const reader = res.body!.getReader();
         const decoder = new TextDecoder();
 

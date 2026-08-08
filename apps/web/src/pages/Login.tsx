@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 export default function LoginPage() {
   const navigate = useNavigate();
   const setUser = useAuthStore((s) => s.setUser);
+  const sessionExpired = useAuthStore((s) => s.sessionExpired);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,6 +32,14 @@ export default function LoginPage() {
       <div className="w-full max-w-sm bg-card border border-border rounded-lg p-8 shadow-sm">
         <h1 className="text-xl font-bold mb-1">Sign in</h1>
         <p className="text-sm text-muted-foreground mb-6">to Server Management Tool</p>
+        {sessionExpired && (
+          <div
+            role="status"
+            className="mb-6 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400"
+          >
+            Your session expired. Please sign in again.
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium mb-1" htmlFor="email">Email</label>

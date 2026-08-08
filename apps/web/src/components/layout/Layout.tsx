@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils.js';
 import {
   LayoutDashboard,
   Server,
+  Activity,
   Key,
   Terminal,
   Clock,
@@ -21,6 +22,7 @@ import { useTheme } from '@/hooks/useTheme.js';
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/servers', label: 'Servers', icon: Server },
+  { to: '/monitoring', label: 'Monitoring', icon: Activity },
   { to: '/keys', label: 'SSH Keys', icon: Key },
   { to: '/commands', label: 'Saved Commands', icon: Terminal },
   { to: '/cron-jobs', label: 'Cron Jobs', icon: Clock },

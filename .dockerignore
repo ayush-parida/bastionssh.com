@@ -1,0 +1,43 @@
+# Build context is the repo root (see deploy/docker/docker-compose.yml `context: ../..`).
+# Without this file the whole 365 MB tree — mostly node_modules — is uploaded to the
+# daemon on every build. Dependencies are installed inside the image by pnpm, and
+# dist/ is compiled there, so none of it needs to travel.
+
+node_modules
+**/node_modules
+
+# Compiled output — rebuilt in the image
+dist
+**/dist
+*.tsbuildinfo
+**/*.tsbuildinfo
+.turbo
+**/.turbo
+
+# Local databases (dev SQLite lives beside the server sources)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Secrets — the container gets its config from compose `environment:`
+.env
+.env.local
+.env.*.local
+deploy/docker/.env
+
+# VCS / editor / OS
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+
+# Logs, coverage, docs — not needed at build time
+*.log
+npm-debug.log*
+pnpm-debug.log*
+coverage
+docs
+README.md

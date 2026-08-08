@@ -9,20 +9,34 @@ interface AuthState {
   user: User | null;
   orgId: string | null;
   role: Role | null;
+  /** True when the server rejected the session, so the login screen can say why. */
+  sessionExpired: boolean;
   setUser: (user: User, orgId: string, role: Role) => void;
   clearUser: () => void;
+  expireSession: () => void;
 }
+
+const signedOut = { user: null, orgId: null, role: null } as const;
 
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
-      user: null,
-      orgId: null,
-      role: null,
-      setUser: (user, orgId, role) => set({ user, orgId, role }),
-      clearUser: () => set({ user: null, orgId: null, role: null }),
+      ...signedOut,
+      sessionExpired: false,
+      setUser: (user, orgId, role) => set({ user, orgId, role, sessionExpired: false }),
+      clearUser: () => set({ ...signedOut, sessionExpired: false }),
+      /**
+       * Sign out because the server no longer accepts the session. Idempotent, so
+       * a burst of concurrent 401s only raises the notice once.
+       */
+      expireSession: () =>
+        set((state) => (state.user ? { ...signedOut, sessionExpired: true } : state)),
     }),
-    { name: 'smt-auth' },
+    {
+      name: 'smt-auth',
+      // `sessionExpired` describes this page load only — never restore it.
+      partialize: ({ user, orgId, role }) => ({ user, orgId, role }),
+    },
   ),
 );
 

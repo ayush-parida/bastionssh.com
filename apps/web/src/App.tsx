@@ -12,6 +12,8 @@ import AuditPage from '@/pages/Audit.js';
 import SettingsPage from '@/pages/Settings.js';
 import TerminalPage from '@/pages/Terminal.js';
 import FilesPage from '@/pages/Files.js';
+import MonitoringPage from '@/pages/Monitoring.js';
+import ServerHealthPage from '@/pages/ServerHealth.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -36,6 +38,8 @@ export default function App() {
           <Route path="servers" element={<ServersPage />} />
           <Route path="servers/:id/terminal" element={<TerminalPage />} />
           <Route path="servers/:id/files" element={<FilesPage />} />
+          <Route path="servers/:id/health" element={<ServerHealthPage />} />
+          <Route path="monitoring" element={<MonitoringPage />} />
           <Route path="keys" element={<KeysPage />} />
           <Route path="commands" element={<CommandsPage />} />
           <Route path="cron-jobs" element={<CronJobsPage />} />

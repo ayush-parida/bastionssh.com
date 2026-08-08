@@ -2,10 +2,12 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
-import type { Server, CreateServerRequest } from '@smt/shared';
+import type { Server, CreateServerRequest, MonitoringOverview, ServerStatus } from '@smt/shared';
 import type { SSHKey } from '@smt/shared';
-import { Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
+import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
 import { toast } from 'sonner';
+import { StatusDot } from '@/components/monitoring/StatusBadge.js';
+import { formatUptime, statusMeta } from '@/lib/monitoring.js';
 
 interface ServerFormState {
   name: string;
@@ -35,6 +37,15 @@ export default function ServersPage() {
     queryKey: ['ssh-keys'],
     queryFn: () => api.get('/keys'),
   });
+
+  // Live health for the status dot on each card; the Monitoring page owns the detail.
+  const { data: overview } = useQuery<MonitoringOverview>({
+    queryKey: ['monitoring-overview'],
+    queryFn: () => api.get('/monitoring/overview'),
+    refetchInterval: 30_000,
+  });
+
+  const healthById = new Map((overview?.servers ?? []).map((h) => [h.serverId, h]));
 
   const createMutation = useMutation({
     mutationFn: (body: CreateServerRequest) => api.post<Server>('/servers', body),
@@ -183,12 +194,27 @@ export default function ServersPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {servers?.map((s) => (
             <div key={s.id} className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="font-semibold">{s.name}</p>
-                  <p className="text-sm text-muted-foreground font-mono">{s.username}@{s.host}:{s.port}</p>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="font-semibold truncate">{s.name}</p>
+                  <p className="text-sm text-muted-foreground font-mono truncate">{s.username}@{s.host}:{s.port}</p>
                 </div>
-                <div className="size-2.5 rounded-full bg-emerald-500 mt-1" />
+                {(() => {
+                  const health = healthById.get(s.id);
+                  const status: ServerStatus = health?.status ?? 'unknown';
+                  return (
+                    <button
+                      onClick={() => navigate(`/servers/${s.id}/health`)}
+                      title={`${statusMeta(status).label}${health?.uptimeSeconds != null ? ` · up ${formatUptime(health.uptimeSeconds)}` : ''}`}
+                      className="mt-1 flex shrink-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-muted-foreground hover:bg-muted"
+                    >
+                      {health?.status === 'online' && health.cpuPercent != null && (
+                        <span className="font-mono">{Math.round(health.cpuPercent)}%</span>
+                      )}
+                      <StatusDot status={status} />
+                    </button>
+                  );
+                })()}
               </div>
               <div className="flex gap-2 mt-auto">
                 <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
@@ -196,6 +222,9 @@ export default function ServersPage() {
                 </button>
                 <button onClick={() => navigate(`/servers/${s.id}/files`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <FolderOpen size={12} /> Files
+                </button>
+                <button onClick={() => navigate(`/servers/${s.id}/health`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
+                  <Activity size={12} /> Health
                 </button>
                 <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Pencil size={12} /> Edit

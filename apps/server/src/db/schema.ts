@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, index } from 'drizzle-orm/sqlite-core';
 
 // ── Users & Auth ─────────────────────────────────────────────────────────────
 
@@ -134,6 +134,7 @@ export const servers = sqliteTable('servers', {
   encryptedPassword: text('encrypted_password'), // AES-256-GCM encrypted, null = key-based auth
   tags: text('tags').notNull().default('[]'), // JSON array
   notes: text('notes'),
+  monitoringEnabled: integer('monitoring_enabled', { mode: 'boolean' }).notNull().default(true),
   createdBy: text('created_by').notNull(),
   createdAt: text('created_at')
     .notNull()
@@ -222,6 +223,99 @@ export const cronRuns = sqliteTable('cron_runs', {
   stderr: text('stderr').notNull().default(''),
   durationMs: real('duration_ms'),
 });
+
+// ── Monitoring ────────────────────────────────────────────────────────────────
+
+/** Append-only time series of polled vitals. Pruned by the monitor's retention sweep. */
+export const serverMetrics = sqliteTable(
+  'server_metrics',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id').notNull(),
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    collectedAt: text('collected_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    status: text('status').notNull(), // online | offline | error
+    latencyMs: real('latency_ms'),
+    uptimeSeconds: real('uptime_seconds'),
+    load1: real('load_1'),
+    load5: real('load_5'),
+    load15: real('load_15'),
+    cpuCores: integer('cpu_cores'),
+    cpuPercent: real('cpu_percent'),
+    // Raw /proc/stat counters — CPU percent is the delta against the prior sample.
+    cpuTotalJiffies: real('cpu_total_jiffies'),
+    cpuIdleJiffies: real('cpu_idle_jiffies'),
+    memTotalKb: real('mem_total_kb'),
+    memUsedKb: real('mem_used_kb'),
+    swapTotalKb: real('swap_total_kb'),
+    swapUsedKb: real('swap_used_kb'),
+    diskTotalKb: real('disk_total_kb'),
+    diskUsedKb: real('disk_used_kb'),
+    processCount: integer('process_count'),
+    loggedInUsers: integer('logged_in_users'),
+    disks: text('disks'), // JSON array of DiskUsage
+    error: text('error'),
+  },
+  (t) => ({
+    serverTimeIdx: index('server_metrics_server_time_idx').on(t.serverId, t.collectedAt),
+  }),
+);
+
+/** Current state of a server — exactly one row per monitored server, updated in place. */
+export const serverHealth = sqliteTable('server_health', {
+  serverId: text('server_id')
+    .primaryKey()
+    .references(() => servers.id, { onDelete: 'cascade' }),
+  orgId: text('org_id').notNull(),
+  status: text('status').notNull().default('unknown'), // unknown | online | offline | error | paused
+  lastCheckedAt: text('last_checked_at'),
+  lastOnlineAt: text('last_online_at'),
+  lastError: text('last_error'),
+  consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+  latencyMs: real('latency_ms'),
+  uptimeSeconds: real('uptime_seconds'),
+  cpuPercent: real('cpu_percent'),
+  memPercent: real('mem_percent'),
+  diskPercent: real('disk_percent'),
+  load1: real('load_1'),
+  cpuCores: integer('cpu_cores'),
+  osName: text('os_name'),
+  kernel: text('kernel'),
+  hostname: text('hostname'),
+  updatedAt: text('updated_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+/** One row per alert occurrence; `resolvedAt` is set when the condition clears. */
+export const serverAlerts = sqliteTable(
+  'server_alerts',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id').notNull(),
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(), // offline | cpu_high | memory_high | disk_high | load_high
+    severity: text('severity').notNull().default('warning'), // warning | critical
+    message: text('message').notNull(),
+    value: real('value'),
+    threshold: real('threshold'),
+    openedAt: text('opened_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    resolvedAt: text('resolved_at'),
+    acknowledgedAt: text('acknowledged_at'),
+    acknowledgedBy: text('acknowledged_by'),
+  },
+  (t) => ({
+    openIdx: index('server_alerts_open_idx').on(t.serverId, t.type, t.resolvedAt),
+  }),
+);
 
 // ── AI Providers ──────────────────────────────────────────────────────────────
 

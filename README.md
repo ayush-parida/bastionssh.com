@@ -17,6 +17,7 @@
 - 💻 **In-Browser Terminal** — Full interactive SSH sessions in your browser via WebSocket + xterm.js.
 - 📌 **Saved Commands per Server** — Save frequently-used commands against any server and run them with one click.
 - ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view history, logs, and failures.
+- 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up. Nothing to install on the servers themselves.
 - 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
 - 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or binary). Each team/company runs an isolated environment they fully control.
 - 🤖 **Bring Your Own AI** — Plug in OpenAI, Anthropic Claude, or any local model (Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible endpoint) to:
@@ -124,6 +125,50 @@ Each cron job has:
 - A schedule (cron expression or human-readable)
 - Run history with stdout/stderr and exit codes
 - Optional notifications on failure (webhook, email)
+
+---
+
+## 📊 Health Monitoring
+
+Every server is checked on a schedule over SSH — **no agent, no daemon, nothing installed on the host**. A single read-only probe reads `/proc` and `df`, so a check costs one short-lived connection.
+
+Collected per check:
+
+| Metric        | Source                              |
+| ------------- | ----------------------------------- |
+| Reachability  | SSH handshake (with latency in ms)  |
+| Uptime        | `/proc/uptime`                      |
+| Load average  | `/proc/loadavg` (normalized per core) |
+| CPU usage     | `/proc/stat` delta between checks   |
+| Memory / swap | `/proc/meminfo`                     |
+| Disk usage    | `df -Pk`, every real filesystem     |
+| Processes     | `ps -e`                             |
+| Logged-in users | `who`                             |
+| OS / kernel   | `/etc/os-release`, `uname`          |
+
+What you get:
+
+- 🟢 **Live status** on the Dashboard, Servers list, and a dedicated Monitoring page
+- 📈 **History charts** per server — CPU, memory, load, disk and SSH response time over 1h / 6h / 24h / 7d
+- 🚨 **Alerts** that open when a host goes unreachable or crosses a CPU / memory / disk / load threshold, and resolve themselves when it recovers
+- ⏸️ **Per-server pause** for hosts you don't want checked
+- 🧹 **Automatic retention** — samples older than `SMT_MONITORING_RETENTION_HOURS` (default 7 days) are pruned
+
+Hosts without `/proc` (macOS, BSD) still report whatever they can — reachability, disks, process count — instead of failing the check.
+
+Tuning (all optional, shown with defaults):
+
+```bash
+SMT_MONITORING_ENABLED=true          # set false to turn health checks off entirely
+SMT_MONITORING_INTERVAL=60           # seconds between sweeps
+SMT_MONITORING_CONCURRENCY=5         # servers probed in parallel
+SMT_MONITORING_RETENTION_HOURS=168   # how long samples are kept
+SMT_ALERT_CPU_PERCENT=90
+SMT_ALERT_MEMORY_PERCENT=90
+SMT_ALERT_DISK_PERCENT=90
+SMT_ALERT_LOAD_PER_CORE=2
+SMT_ALERT_OFFLINE_FAILURES=2         # failed checks before a host is alerted as down
+```
 
 ---
 
@@ -245,7 +290,7 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 
 - [ ] SFTP / file browser
 - [ ] Multi-server command execution (fan-out)
-- [ ] Server monitoring (CPU, memory, disk)
+- [x] Server monitoring (CPU, memory, disk)
 - [ ] Live shared terminal sessions
 - [ ] End-to-end encrypted secret sharing
 - [ ] Plugin marketplace
