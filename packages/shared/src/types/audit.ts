@@ -2,6 +2,7 @@ export type AuditAction =
   | 'user.login'
   | 'user.logout'
   | 'user.register'
+  | 'user.password_change'
   | 'user.invite'
   | 'server.create'
   | 'server.update'

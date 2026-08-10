@@ -21,6 +21,7 @@ import { sftpRoutes } from './routes/sftp.js';
 import { monitoringRoutes } from './routes/monitoring.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { teamRoutes, publicInviteRoutes } from './routes/team.js';
+import { apiTokenRoutes } from './routes/tokens.js';
 import { healthRoutes } from './routes/health.js';
 
 export async function buildApp() {
@@ -71,6 +72,7 @@ export async function buildApp() {
   await app.register(monitoringRoutes, { prefix: '/api/monitoring' });
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(teamRoutes, { prefix: '/api/team' });
+  await app.register(apiTokenRoutes, { prefix: '/api/tokens' });
   // Unauthenticated: reading and accepting an invite happens before an account exists
   await app.register(publicInviteRoutes, { prefix: '/api/invites' });
 

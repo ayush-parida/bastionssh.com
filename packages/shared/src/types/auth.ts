@@ -30,14 +30,19 @@ export interface Session {
   expiresAt: string;
 }
 
+/** 'read' alone caps a token at viewer, whatever role its owner holds. */
+export type TokenScope = 'read' | 'write';
+
 export interface ApiToken {
   id: string;
   name: string;
+  /** Public half of the token, shown so a row can be identified after creation. */
   prefix: string;
-  scopes: string[];
-  lastUsedAt?: string;
-  expiresAt?: string;
+  scopes: TokenScope[];
+  lastUsedAt?: string | null;
+  expiresAt?: string | null;
   createdAt: string;
+  expired: boolean;
 }
 
 export interface LoginRequest {

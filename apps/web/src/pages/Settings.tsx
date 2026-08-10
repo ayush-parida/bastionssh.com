@@ -6,6 +6,8 @@ import { Plus, Trash2, Bot, Pencil } from 'lucide-react';
 import { toast } from 'sonner';
 import NotificationChannels from '@/components/settings/NotificationChannels.js';
 import TeamMembers from '@/components/settings/TeamMembers.js';
+import AccountSettings from '@/components/settings/AccountSettings.js';
+import ApiTokens from '@/components/settings/ApiTokens.js';
 
 interface ProviderForm {
   name: string;
@@ -169,6 +171,8 @@ export default function SettingsPage() {
 
       <NotificationChannels />
       <TeamMembers />
+      <AccountSettings />
+      <ApiTokens />
     </div>
   );
 }
