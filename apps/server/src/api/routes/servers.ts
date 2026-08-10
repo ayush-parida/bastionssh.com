@@ -22,9 +22,24 @@ const createServerSchema = z.object({
 });
 
 /** Strip encryptedPassword and return safe server object */
+/** Tags are stored as a JSON string; the API contract is an array of strings. */
+export function parseTags(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function sanitize(row: typeof servers.$inferSelect) {
   const { encryptedPassword, ...safe } = row;
-  return { ...safe, authType: encryptedPassword ? 'password' : 'key' } as const;
+  return {
+    ...safe,
+    tags: parseTags(row.tags),
+    authType: encryptedPassword ? 'password' : 'key',
+  } as const;
 }
 
 export async function serverRoutes(app: FastifyInstance) {

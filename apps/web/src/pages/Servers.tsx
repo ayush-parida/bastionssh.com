@@ -17,9 +17,15 @@ interface ServerFormState {
   authType: 'key' | 'password';
   defaultKeyId: string;
   password: string;
+  tags: string;
 }
 
-const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '' };
+const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '' };
+
+/** Tags are entered as a comma-separated list and stored as an array. */
+function splitTags(input: string): string[] {
+  return [...new Set(input.split(',').map((t) => t.trim()).filter(Boolean))];
+}
 
 export default function ServersPage() {
   const qc = useQueryClient();
@@ -27,6 +33,7 @@ export default function ServersPage() {
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<ServerFormState>(empty);
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -46,6 +53,11 @@ export default function ServersPage() {
   });
 
   const healthById = new Map((overview?.servers ?? []).map((h) => [h.serverId, h]));
+
+  const allTags = [...new Set((servers ?? []).flatMap((s) => s.tags ?? []))].sort();
+  const visibleServers = tagFilter
+    ? (servers ?? []).filter((s) => (s.tags ?? []).includes(tagFilter))
+    : servers ?? [];
 
   const createMutation = useMutation({
     mutationFn: (body: CreateServerRequest) => api.post<Server>('/servers', body),
@@ -75,6 +87,7 @@ export default function ServersPage() {
       authType: s.authType ?? 'key',
       defaultKeyId: s.defaultKeyId ?? '',
       password: '',
+      tags: (s.tags ?? []).join(', '),
     });
     setShowForm(true);
   }
@@ -98,6 +111,7 @@ export default function ServersPage() {
       authType: form.authType,
       ...(form.authType === 'key' && form.defaultKeyId ? { defaultKeyId: form.defaultKeyId } : {}),
       ...(form.authType === 'password' && form.password ? { password: form.password } : {}),
+      tags: splitTags(form.tags),
     };
     if (editId) updateMutation.mutate({ id: editId, body });
     else createMutation.mutate(body);
@@ -117,6 +131,31 @@ export default function ServersPage() {
           <Plus size={15} /> Add server
         </button>
       </div>
+
+      {allTags.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted-foreground mr-1">Filter:</span>
+          <button
+            onClick={() => setTagFilter(null)}
+            className={`rounded px-2 py-1 text-xs transition-colors ${
+              tagFilter === null ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/70'
+            }`}
+          >
+            All ({servers?.length ?? 0})
+          </button>
+          {allTags.map((tag) => (
+            <button
+              key={tag}
+              onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+              className={`rounded px-2 py-1 text-xs transition-colors ${
+                tagFilter === tag ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground hover:bg-muted/70'
+              }`}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+      )}
 
       {showForm && (
         <div className="mb-6 rounded-lg border border-border bg-card p-5">
@@ -171,6 +210,18 @@ export default function ServersPage() {
                 />
               )}
             </div>
+            <div className="col-span-2">
+              <label className="block text-sm font-medium mb-1">
+                Tags <span className="text-muted-foreground text-xs">(comma separated — target these with saved commands)</span>
+              </label>
+              <input
+                type="text"
+                placeholder="prod, web, eu-west"
+                value={form.tags}
+                onChange={(e) => setForm((prev) => ({ ...prev, tags: e.target.value }))}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              />
+            </div>
             <div className="col-span-2 flex gap-2">
               <button type="submit" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
                 {editId ? 'Update' : 'Add'}
@@ -185,14 +236,18 @@ export default function ServersPage() {
 
       {isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
-      ) : servers?.length === 0 ? (
+      ) : visibleServers.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
           <ServerIcon size={40} className="mb-3 opacity-30" />
-          <p>No servers added yet. Click "Add server" to get started.</p>
+          <p>
+            {tagFilter
+              ? `No servers tagged "${tagFilter}".`
+              : 'No servers added yet. Click "Add server" to get started.'}
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {servers?.map((s) => (
+          {visibleServers.map((s) => (
             <div key={s.id} className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
@@ -216,6 +271,23 @@ export default function ServersPage() {
                   );
                 })()}
               </div>
+              {s.tags?.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {s.tags.map((tag) => (
+                    <button
+                      key={tag}
+                      onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                      className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+                        tagFilter === tag
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted text-muted-foreground hover:bg-muted/70'
+                      }`}
+                    >
+                      {tag}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex gap-2 mt-auto">
                 <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
                   <Terminal size={12} /> Connect

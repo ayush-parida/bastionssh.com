@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { savedCommands, commandRuns, servers } from '../../db/schema.js';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
+import { parseTags } from './servers.js';
 import { nanoid } from 'nanoid';
 import { commandQueue } from '../../worker/queues.js';
 import { audit } from '../../audit/index.js';
@@ -36,7 +37,30 @@ const runCommandSchema = z.object({
   variables: z.record(z.string()).default({}),
   /** Run against this server instead of the command's default. */
   serverId: z.string().optional(),
+  /** Fan out across an explicit set of servers. */
+  serverIds: z.array(z.string()).max(200).optional(),
+  /** Fan out across every server carrying this tag. */
+  tag: z.string().min(1).optional(),
 });
+
+/** How many SSH sessions a fan-out opens at once when running in-process. */
+const INLINE_FANOUT_CONCURRENCY = 5;
+
+/** Execute a fan-out in-process, a few servers at a time. Never rejects. */
+async function runInlineFanout(jobs: Parameters<typeof executeSavedCommand>[0][]): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.min(INLINE_FANOUT_CONCURRENCY, jobs.length) },
+    async () => {
+      while (cursor < jobs.length) {
+        const job = jobs[cursor++]!;
+        // executeSavedCommand records its own failures on the run row
+        await executeSavedCommand(job);
+      }
+    },
+  );
+  await Promise.all(workers);
+}
 
 export async function savedCommandRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
@@ -105,7 +129,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
 
   app.post('/:id/run', { preHandler: requireRole('operator') }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const { variables, serverId } = runCommandSchema.parse(req.body ?? {});
+    const { variables, serverId, serverIds, tag } = runCommandSchema.parse(req.body ?? {});
     const db = getDb();
 
     const command = db
@@ -115,42 +139,67 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .get();
     if (!command) return reply.status(404).send({ error: 'Not found' });
 
-    // A command may carry a default server, be pointed at one per run, or both.
-    const targetId = serverId ?? command.serverId;
-    if (!targetId) {
-      return reply
-        .status(400)
-        .send({ error: 'This command has no default server — choose one to run it on' });
+    const orgServers = db
+      .select({ id: servers.id, name: servers.name, tags: servers.tags })
+      .from(servers)
+      .where(eq(servers.orgId, req.orgId))
+      .all();
+
+    let targets: { id: string; name: string }[];
+
+    if (tag) {
+      targets = orgServers.filter((s) => parseTags(s.tags).includes(tag));
+      if (targets.length === 0) {
+        return reply.status(404).send({ error: `No servers are tagged "${tag}"` });
+      }
+    } else {
+      // A command may carry a default server, be pointed at others per run, or both.
+      const requested = serverIds?.length ? serverIds : serverId ? [serverId] : [];
+      const ids = requested.length ? requested : command.serverId ? [command.serverId] : [];
+
+      if (ids.length === 0) {
+        return reply
+          .status(400)
+          .send({ error: 'This command has no default server — choose one to run it on' });
+      }
+
+      const byId = new Map(orgServers.map((s) => [s.id, s]));
+      const missing = ids.filter((serverId) => !byId.has(serverId));
+      if (missing.length) {
+        return reply.status(404).send({ error: `Server not found: ${missing.join(', ')}` });
+      }
+      // Deduplicate so the same server is not hit twice in one fan-out
+      targets = [...new Set(ids)].map((serverId) => byId.get(serverId)!);
     }
 
-    const target = db
-      .select({ id: servers.id, name: servers.name })
-      .from(servers)
-      .where(and(eq(servers.id, targetId), eq(servers.orgId, req.orgId)))
-      .get();
-    if (!target) return reply.status(404).send({ error: 'Server not found' });
+    const jobs = targets.map((target) => ({
+      runId: nanoid(),
+      orgId: req.orgId,
+      commandId: id,
+      serverId: target.id,
+      variables,
+    }));
 
-    const runId = nanoid();
-    db.insert(commandRuns)
-      .values({
-        id: runId,
-        commandId: id,
-        serverId: target.id,
-        triggeredBy: req.user.id,
-        status: 'pending',
-        stdout: '',
-        stderr: '',
-      })
-      .run();
+    for (const job of jobs) {
+      db.insert(commandRuns)
+        .values({
+          id: job.runId,
+          commandId: id,
+          serverId: job.serverId,
+          triggeredBy: req.user.id,
+          status: 'pending',
+          stdout: '',
+          stderr: '',
+        })
+        .run();
+    }
 
-    const job = { runId, orgId: req.orgId, commandId: id, serverId: target.id, variables };
     let mode: 'queued' | 'inline' = 'queued';
-
     if (config.redisUrl) {
       try {
-        await commandQueue.add('run-command', job);
+        for (const job of jobs) await commandQueue.add('run-command', job);
       } catch (err) {
-        logger.warn({ err, runId }, 'Queue unavailable — running command in-process');
+        logger.warn({ err, commandId: id }, 'Queue unavailable — running commands in-process');
         mode = 'inline';
       }
     } else {
@@ -158,20 +207,44 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     }
 
     if (mode === 'inline') {
-      // No queue to hand this to. Run it here but do not make the caller wait —
-      // they get the runId and poll for the result exactly as with a queued run.
-      void executeSavedCommand(job).catch((err) => {
-        logger.error({ err, runId }, 'In-process command run failed');
+      // No queue to hand these to. Run them here without making the caller wait,
+      // and bounded, so a fan-out across a large fleet does not open one SSH
+      // session per server at once.
+      void runInlineFanout(jobs).catch((err) => {
+        logger.error({ err, commandId: id }, 'In-process fan-out failed');
       });
     }
 
     await audit(req, 'command.run', 'command', id, command.name, {
-      serverId: target.id,
-      serverName: target.name,
+      servers: targets.map((t) => t.name),
+      ...(tag && { tag }),
       mode,
     });
 
-    return reply.status(202).send({ runId, mode });
+    return reply.status(202).send({
+      mode,
+      runs: jobs.map((job, index) => ({
+        runId: job.runId,
+        serverId: job.serverId,
+        serverName: targets[index]!.name,
+      })),
+    });
+  });
+
+  /** Poll several runs at once so a fan-out costs one request, not one per server. */
+  app.get('/runs', async (req) => {
+    const { ids = '' } = req.query as { ids?: string };
+    const wanted = ids.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 200);
+    if (wanted.length === 0) return [];
+
+    const db = getDb();
+    return db
+      .select({ run: commandRuns })
+      .from(commandRuns)
+      .innerJoin(savedCommands, eq(commandRuns.commandId, savedCommands.id))
+      .where(and(inArray(commandRuns.id, wanted), eq(savedCommands.orgId, req.orgId)))
+      .all()
+      .map((row) => row.run);
   });
 
   /** Poll a single run for status and output. */

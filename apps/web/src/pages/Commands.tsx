@@ -7,6 +7,7 @@ import type {
   CreateSavedCommandRequest,
   UpdateSavedCommandRequest,
   CommandRun,
+  CommandRunTarget,
   RunCommandResponse,
 } from '@smt/shared';
 import { Plus, Play, Trash2, Pencil, Terminal, X, Loader2 } from 'lucide-react';
@@ -36,9 +37,9 @@ export default function CommandsPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(empty);
   const [runTarget, setRunTarget] = useState<SavedCommand | null>(null);
-  const [runServerId, setRunServerId] = useState('');
+  const [runServerIds, setRunServerIds] = useState<string[]>([]);
   const [runVars, setRunVars] = useState<Record<string, string>>({});
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [activeRuns, setActiveRuns] = useState<CommandRunTarget[]>([]);
 
   const { data: commands } = useQuery<SavedCommand[]>({
     queryKey: ['saved-commands'],
@@ -46,16 +47,27 @@ export default function CommandsPage() {
   });
   const { data: servers } = useQuery<Server[]>({ queryKey: ['servers'], queryFn: () => api.get('/servers') });
 
-  // Poll while a run is in flight; stop as soon as it reaches a terminal state.
-  const { data: run } = useQuery<CommandRun>({
-    queryKey: ['command-run', activeRunId],
-    queryFn: () => api.get(`/commands/runs/${activeRunId}`),
-    enabled: activeRunId !== null,
-    refetchInterval: (query) =>
-      query.state.data && TERMINAL_STATUSES.includes(query.state.data.status) ? false : 1000,
+  // One poll covers the whole fan-out; it stops once every run is terminal.
+  const runIds = activeRuns.map((r) => r.runId);
+  const { data: runs } = useQuery<CommandRun[]>({
+    queryKey: ['command-runs', runIds.join(',')],
+    queryFn: () => api.get(`/commands/runs?ids=${runIds.join(',')}`),
+    enabled: runIds.length > 0,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data || data.length < runIds.length) return 1000;
+      return data.every((r) => TERMINAL_STATUSES.includes(r.status)) ? false : 1000;
+    },
   });
 
   const serverName = (id?: string | null) => servers?.find((s) => s.id === id)?.name ?? 'unknown server';
+
+  const allTags = [...new Set((servers ?? []).flatMap((s) => s.tags ?? []))].sort();
+  const runsById = new Map((runs ?? []).map((r) => [r.id, r]));
+  const doneCount = (runs ?? []).filter((r) => TERMINAL_STATUSES.includes(r.status)).length;
+  const failedCount = (runs ?? []).filter((r) => r.status === 'failure').length;
+  // Results render under the command they belong to
+  const runsByCommand = (runs ?? [])[0]?.commandId ?? null;
 
   const createMutation = useMutation({
     mutationFn: (body: CreateSavedCommandRequest) => api.post<SavedCommand>('/commands', body),
@@ -77,9 +89,9 @@ export default function CommandsPage() {
   });
 
   const runMutation = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: { variables: Record<string, string>; serverId?: string } }) =>
+    mutationFn: ({ id, body }: { id: string; body: { variables: Record<string, string>; serverIds: string[] } }) =>
       api.post<RunCommandResponse>(`/commands/${id}/run`, body),
-    onSuccess: (res) => { setActiveRunId(res.runId); setRunTarget(null); },
+    onSuccess: (res) => { setActiveRuns(res.runs); setRunTarget(null); },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -115,16 +127,29 @@ export default function CommandsPage() {
   /** Open the run panel, seeded with the command's default server and variables. */
   function openRun(cmd: SavedCommand) {
     setRunTarget(cmd);
-    setRunServerId(cmd.serverId ?? '');
-    setActiveRunId(null);
+    setRunServerIds(cmd.serverId ? [cmd.serverId] : []);
+    setActiveRuns([]);
     const names = extractVariables(cmd.command);
     setRunVars(Object.fromEntries(names.map((n) => [n, cmd.variables?.[n]?.defaultValue ?? ''])));
   }
 
+  function toggleServer(id: string) {
+    setRunServerIds((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
+  }
+
+  /** Select every server carrying a tag, keeping anything already ticked. */
+  function selectTag(tag: string) {
+    const tagged = (servers ?? []).filter((s) => (s.tags ?? []).includes(tag)).map((s) => s.id);
+    const allSelected = tagged.every((id) => runServerIds.includes(id));
+    setRunServerIds((prev) =>
+      allSelected ? prev.filter((id) => !tagged.includes(id)) : [...new Set([...prev, ...tagged])],
+    );
+  }
+
   function submitRun() {
     if (!runTarget) return;
-    if (!runServerId) { toast.error('Pick a server to run on'); return; }
-    runMutation.mutate({ id: runTarget.id, body: { variables: runVars, serverId: runServerId } });
+    if (runServerIds.length === 0) { toast.error('Pick at least one server to run on'); return; }
+    runMutation.mutate({ id: runTarget.id, body: { variables: runVars, serverIds: runServerIds } });
   }
 
   const runVarNames = useMemo(
@@ -228,11 +253,47 @@ export default function CommandsPage() {
                   </div>
                   <div className="space-y-3">
                     <div>
-                      <label className="block text-xs font-medium mb-1">Server</label>
-                      <select value={runServerId} onChange={(e) => setRunServerId(e.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary">
-                        <option value="">Select server…</option>
-                        {servers?.map(s => <option key={s.id} value={s.id}>{s.name} ({s.host})</option>)}
-                      </select>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-medium">
+                          Servers {runServerIds.length > 0 && `(${runServerIds.length} selected)`}
+                        </label>
+                        {runServerIds.length > 0 && (
+                          <button onClick={() => setRunServerIds([])} className="text-xs text-muted-foreground hover:text-foreground">
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      {allTags.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2">
+                          <span className="text-xs text-muted-foreground mr-1 py-0.5">By tag:</span>
+                          {allTags.map((tag) => (
+                            <button
+                              key={tag}
+                              onClick={() => selectTag(tag)}
+                              className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-muted/70"
+                            >
+                              {tag}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="max-h-40 overflow-y-auto rounded-md border border-input bg-background divide-y divide-border">
+                        {servers?.map((s) => (
+                          <label key={s.id} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-muted/50">
+                            <input
+                              type="checkbox"
+                              checked={runServerIds.includes(s.id)}
+                              onChange={() => toggleServer(s.id)}
+                              className="size-4 rounded border-input"
+                            />
+                            <span className="flex-1 truncate">{s.name}</span>
+                            <span className="font-mono text-xs text-muted-foreground truncate">{s.host}</span>
+                            {(s.tags ?? []).map((tag) => (
+                              <span key={tag} className="rounded bg-muted px-1 py-0.5 text-xs text-muted-foreground">{tag}</span>
+                            ))}
+                          </label>
+                        ))}
+                      </div>
                     </div>
                     {runVarNames.map((name) => (
                       <div key={name}>
@@ -248,38 +309,59 @@ export default function CommandsPage() {
                       </div>
                     ))}
                     <button onClick={submitRun} disabled={runMutation.isPending} className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
-                      <Play size={13} /> {runMutation.isPending ? 'Starting…' : 'Execute'}
+                      <Play size={13} />
+                      {runMutation.isPending
+                        ? 'Starting…'
+                        : runServerIds.length > 1
+                          ? `Execute on ${runServerIds.length} servers`
+                          : 'Execute'}
                     </button>
                   </div>
                 </div>
               )}
 
-              {activeRunId && run?.commandId === cmd.id && (
+              {activeRuns.length > 0 && activeRuns[0] && runsByCommand === cmd.id && (
                 <div className="mt-4 rounded-md border border-border bg-background p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2 text-sm">
-                      {!TERMINAL_STATUSES.includes(run.status) ? (
-                        <><Loader2 size={13} className="animate-spin text-muted-foreground" /> <span className="text-muted-foreground">{run.status === 'pending' ? 'Queued…' : 'Running…'}</span></>
-                      ) : (
-                        <span className={run.status === 'success' ? 'text-emerald-500 font-medium' : 'text-red-500 font-medium'}>
-                          {run.status === 'success' ? 'Success' : 'Failed'}
-                          {run.exitCode != null && ` · exit ${run.exitCode}`}
-                          {run.durationMs != null && ` · ${(run.durationMs / 1000).toFixed(1)}s`}
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground">on {serverName(run.serverId)}</span>
-                    </div>
-                    <button onClick={() => setActiveRunId(null)} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
+                  <div className="flex items-center justify-between mb-3">
+                    <p className="text-sm font-medium">
+                      {activeRuns.length > 1 ? `Results — ${doneCount}/${activeRuns.length} finished` : 'Result'}
+                      {failedCount > 0 && <span className="ml-2 text-xs text-red-500">{failedCount} failed</span>}
+                    </p>
+                    <button onClick={() => setActiveRuns([])} className="text-muted-foreground hover:text-foreground"><X size={14} /></button>
                   </div>
-                  {run.stdout && (
-                    <pre className="max-h-64 overflow-auto rounded bg-muted p-2 text-xs font-mono whitespace-pre-wrap">{run.stdout}</pre>
-                  )}
-                  {run.stderr && (
-                    <pre className="mt-2 max-h-40 overflow-auto rounded bg-red-500/10 p-2 text-xs font-mono text-red-500 whitespace-pre-wrap">{run.stderr}</pre>
-                  )}
-                  {TERMINAL_STATUSES.includes(run.status) && !run.stdout && !run.stderr && (
-                    <p className="text-xs text-muted-foreground">No output.</p>
-                  )}
+                  <div className="space-y-3">
+                    {activeRuns.map((target) => {
+                      const run = runsById.get(target.runId);
+                      const status = run?.status ?? 'pending';
+                      const done = TERMINAL_STATUSES.includes(status);
+                      return (
+                        <div key={target.runId} className="rounded border border-border">
+                          <div className="flex items-center gap-2 px-3 py-2 text-sm">
+                            {!done ? (
+                              <><Loader2 size={13} className="animate-spin text-muted-foreground" />
+                                <span className="text-muted-foreground">{status === 'pending' ? 'Queued…' : 'Running…'}</span></>
+                            ) : (
+                              <span className={status === 'success' ? 'text-emerald-500 font-medium' : 'text-red-500 font-medium'}>
+                                {status === 'success' ? 'Success' : 'Failed'}
+                                {run?.exitCode != null && ` · exit ${run.exitCode}`}
+                                {run?.durationMs != null && ` · ${(run.durationMs / 1000).toFixed(1)}s`}
+                              </span>
+                            )}
+                            <span className="ml-auto text-xs text-muted-foreground">{target.serverName}</span>
+                          </div>
+                          {run?.stdout && (
+                            <pre className="max-h-56 overflow-auto border-t border-border bg-muted p-2 text-xs font-mono whitespace-pre-wrap">{run.stdout}</pre>
+                          )}
+                          {run?.stderr && (
+                            <pre className="max-h-40 overflow-auto border-t border-border bg-red-500/10 p-2 text-xs font-mono text-red-500 whitespace-pre-wrap">{run.stderr}</pre>
+                          )}
+                          {done && !run?.stdout && !run?.stderr && (
+                            <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">No output.</p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>

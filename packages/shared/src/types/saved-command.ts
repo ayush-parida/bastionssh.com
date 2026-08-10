@@ -51,10 +51,21 @@ export interface RunCommandRequest {
   variables?: Record<string, string>;
   /** Target this server instead of the command's default */
   serverId?: string;
+  /** Fan out across an explicit set of servers */
+  serverIds?: string[];
+  /** Fan out across every server carrying this tag */
+  tag?: string;
+}
+
+export interface CommandRunTarget {
+  runId: string;
+  serverId: string;
+  serverName: string;
 }
 
 export interface RunCommandResponse {
-  runId: string;
+  /** One entry per targeted server. */
+  runs: CommandRunTarget[];
   /** 'inline' means it ran in-process because no queue was configured */
   mode: 'queued' | 'inline';
 }
