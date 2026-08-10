@@ -16,7 +16,7 @@ declare module 'fastify' {
   }
 }
 
-function rank(role: string): number {
+export function rank(role: string): number {
   const index = ROLES.indexOf(role as Role);
   // Unknown roles are treated as the least privileged, never the most
   return index === -1 ? 0 : index;

@@ -4,6 +4,8 @@ import { api } from '@/lib/api.js';
 import type { AIProviderConfig } from '@smt/shared';
 import { Plus, Trash2, Bot, Pencil } from 'lucide-react';
 import { toast } from 'sonner';
+import NotificationChannels from '@/components/settings/NotificationChannels.js';
+import TeamMembers from '@/components/settings/TeamMembers.js';
 
 interface ProviderForm {
   name: string;
@@ -81,7 +83,7 @@ export default function SettingsPage() {
   return (
     <div className="p-6 max-w-2xl">
       <h1 className="text-2xl font-bold mb-1">Settings</h1>
-      <p className="text-muted-foreground text-sm mb-8">Manage AI providers and application settings</p>
+      <p className="text-muted-foreground text-sm mb-8">Manage AI providers, alerting, and application settings</p>
 
       {/* AI Providers */}
       <section>
@@ -164,6 +166,9 @@ export default function SettingsPage() {
           )}
         </div>
       </section>
+
+      <NotificationChannels />
+      <TeamMembers />
     </div>
   );
 }

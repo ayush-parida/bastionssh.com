@@ -1,12 +1,12 @@
-import { Client } from 'ssh2';
-import { getDb } from '../../db/index.js';
-import { cronJobs, cronRuns, servers, sshKeys, savedCommands } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
-import { vault } from '../../vault/index.js';
-import { getNextRun } from '@smt/cron-parser';
-import { cronQueue } from '../queues.js';
-import logger from '../../logger.js';
 import { nanoid } from 'nanoid';
+import { getNextRun } from '@smt/cron-parser';
+import { getDb } from '../../db/index.js';
+import { cronJobs, cronRuns, savedCommands } from '../../db/schema.js';
+import { resolveServerAuth } from '../../ssh/credentials.js';
+import { execOnServer } from '../../ssh/broker.js';
+import { COMMAND_TIMEOUT_MS, interpolate } from '../../commands/run.js';
+import logger from '../../logger.js';
 
 interface CronJobData {
   cronJobId: string;
@@ -21,15 +21,6 @@ export async function runCronJob(data: CronJobData) {
   const job = db.select().from(cronJobs).where(eq(cronJobs.id, data.cronJobId)).get();
   if (!job || !job.enabled) return;
 
-  const server = db.select().from(servers).where(eq(servers.id, job.serverId)).get();
-  if (!server?.defaultKeyId) {
-    logger.error({ cronJobId: data.cronJobId }, 'Cron job: server or key missing');
-    return;
-  }
-
-  const key = db.select().from(sshKeys).where(eq(sshKeys.id, server.defaultKeyId)).get();
-  if (!key) return;
-
   let cmd = job.inlineCommand;
   if (!cmd && job.savedCommandId) {
     const saved = db
@@ -37,11 +28,12 @@ export async function runCronJob(data: CronJobData) {
       .from(savedCommands)
       .where(eq(savedCommands.id, job.savedCommandId))
       .get();
-    cmd = saved?.command || null;
+    cmd = saved?.command ?? null;
   }
-  if (!cmd) return;
-
-  const privateKey = await vault.decrypt(key.encryptedPrivateKey, key.id);
+  if (!cmd) {
+    logger.error({ cronJobId: data.cronJobId }, 'Cron job has no command to run');
+    return;
+  }
 
   db.insert(cronRuns)
     .values({
@@ -55,82 +47,44 @@ export async function runCronJob(data: CronJobData) {
     })
     .run();
 
-  await new Promise<void>((resolve) => {
-    const ssh = new Client();
-    let stdout = '';
-    let stderr = '';
-    let exitCode = -1;
-
-    ssh.on('ready', () => {
-      ssh.exec(cmd!, (err, stream) => {
-        if (err) {
-          ssh.end();
-          db.update(cronRuns)
-            .set({ status: 'failure', stderr: err.message, finishedAt: new Date().toISOString() })
-            .where(eq(cronRuns.id, runId))
-            .run();
-          resolve();
-          return;
-        }
-
-        stream.on('data', (d: Buffer) => {
-          stdout += d.toString();
-        });
-        stream.stderr.on('data', (d: Buffer) => {
-          stderr += d.toString();
-        });
-        stream.on('close', (code: number) => {
-          exitCode = code;
-          ssh.end();
-        });
-      });
-    });
-
-    ssh.on('close', () => {
-      const durationMs = Date.now() - start;
-      db.update(cronRuns)
-        .set({
-          status: exitCode === 0 ? 'success' : 'failure',
-          exitCode,
-          stdout,
-          stderr,
-          finishedAt: new Date().toISOString(),
-          durationMs,
-        })
-        .where(eq(cronRuns.id, runId))
-        .run();
-
-      db.update(cronJobs)
-        .set({ lastRunAt: new Date().toISOString() })
-        .where(eq(cronJobs.id, data.cronJobId))
-        .run();
-      resolve();
-    });
-
-    ssh.on('error', (err) => {
-      logger.error({ err, cronJobId: data.cronJobId }, 'Cron SSH error');
-      db.update(cronRuns)
-        .set({ status: 'failure', stderr: err.message, finishedAt: new Date().toISOString() })
-        .where(eq(cronRuns.id, runId))
-        .run();
-      resolve();
-    });
-
-    ssh.connect({ host: server!.host, port: server!.port, username: server!.username, privateKey });
-  });
-
-  // Schedule the next occurrence
-  const next = getNextRun(job.schedule, job.timezone);
-  if (next) {
-    const delay = next.getTime() - Date.now();
-    await cronQueue.add(
-      'run-cron',
-      { cronJobId: data.cronJobId, scheduledAt: next.toISOString() },
-      { delay },
-    );
+  const finish = (patch: Partial<typeof cronRuns.$inferInsert>) => {
+    db.update(cronRuns)
+      .set({ ...patch, finishedAt: new Date().toISOString(), durationMs: Date.now() - start })
+      .where(eq(cronRuns.id, runId))
+      .run();
     db.update(cronJobs)
-      .set({ nextRunAt: next.toISOString() })
+      .set({
+        lastRunAt: new Date().toISOString(),
+        nextRunAt: nextRunFor(job.schedule, job.timezone),
+      })
       .where(eq(cronJobs.id, data.cronJobId))
       .run();
+  };
+
+  try {
+    // Shares the resolver used everywhere else, so a password-authenticated
+    // server runs its schedule instead of silently doing nothing.
+    const { server, auth } = await resolveServerAuth(job.orgId, job.serverId);
+    const result = await execOnServer(
+      { host: server.host, port: server.port, username: server.username },
+      auth,
+      interpolate(cmd),
+      COMMAND_TIMEOUT_MS,
+    );
+    finish({
+      status: result.exitCode === 0 ? 'success' : 'failure',
+      exitCode: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, cronJobId: data.cronJobId }, 'Cron job failed');
+    finish({ status: 'failure', stderr: message });
   }
+}
+
+/** Keep `nextRunAt` moving so the schedule list stays accurate after a run. */
+function nextRunFor(schedule: string, timezone: string): string | null {
+  return getNextRun(schedule, timezone, new Date())?.toISOString() ?? null;
 }

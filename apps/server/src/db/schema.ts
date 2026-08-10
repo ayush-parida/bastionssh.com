@@ -338,6 +338,34 @@ export const aiProviderConfigs = sqliteTable('ai_provider_configs', {
     .$defaultFn(() => new Date().toISOString()),
 });
 
+// ── Notification Channels ─────────────────────────────────────────────────────
+
+export const notificationChannels = sqliteTable('notification_channels', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  type: text('type').notNull(), // webhook | slack
+  // Webhook URLs carry their own auth secret, so they are vaulted like passwords.
+  encryptedUrl: text('encrypted_url').notNull(),
+  // Host + leading path only, safe to show in the UI
+  targetHint: text('target_hint').notNull(),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  minSeverity: text('min_severity').notNull().default('warning'), // warning | critical
+  notifyOnResolve: integer('notify_on_resolve', { mode: 'boolean' }).notNull().default(true),
+  lastStatus: text('last_status'), // ok | failed
+  lastError: text('last_error'),
+  lastSentAt: text('last_sent_at'),
+  createdBy: text('created_by').notNull(),
+  createdAt: text('created_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  updatedAt: text('updated_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
 // ── Audit Log ─────────────────────────────────────────────────────────────────
 
 export const auditLog = sqliteTable('audit_log', {

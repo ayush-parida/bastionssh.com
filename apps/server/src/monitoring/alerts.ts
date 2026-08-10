@@ -5,6 +5,7 @@ import { getDb } from '../db/index.js';
 import { serverAlerts } from '../db/schema.js';
 import { config } from '../config/index.js';
 import logger from '../logger.js';
+import { notifyAlertsChanged, type AlertEvent } from '../notifications/index.js';
 import { round2, type ProbeSample } from './probe.js';
 
 export interface AlertCondition {
@@ -116,15 +117,24 @@ export function evaluateConditions(input: EvaluateInput): AlertCondition[] {
   return conditions;
 }
 
+export interface ReconcileOptions {
+  /** Set false to change alert state without telling anyone (e.g. pausing a server). */
+  notify?: boolean;
+}
+
 /**
  * Open alerts that just started firing, refresh ones still firing, and resolve
  * the rest. One open row per (server, type) so a flapping metric does not
  * generate a new alert on every sweep.
+ *
+ * Notifications go out only on the transitions — open and resolve — so a
+ * condition that stays true for an hour does not re-notify every sweep.
  */
 export function reconcileAlerts(
   orgId: string,
   serverId: string,
   conditions: AlertCondition[],
+  options: ReconcileOptions = {},
 ): { opened: AlertCondition[]; resolved: AlertType[] } {
   const db = getDb();
   const now = new Date().toISOString();
@@ -175,6 +185,7 @@ export function reconcileAlerts(
   }
 
   const firing = new Set(conditions.map((c) => c.type));
+  const resolvedRows: typeof open = [];
   for (const alert of open) {
     if (firing.has(alert.type as AlertType)) continue;
     db.update(serverAlerts)
@@ -182,6 +193,7 @@ export function reconcileAlerts(
       .where(eq(serverAlerts.id, alert.id))
       .run();
     resolved.push(alert.type as AlertType);
+    resolvedRows.push(alert);
   }
 
   if (opened.length || resolved.length) {
@@ -189,6 +201,31 @@ export function reconcileAlerts(
       { serverId, opened: opened.map((c) => c.type), resolved },
       'Server alerts changed',
     );
+  }
+
+  if (options.notify !== false) {
+    const events: AlertEvent[] = [
+      ...opened.map((c) => ({
+        kind: 'opened' as const,
+        orgId,
+        serverId,
+        type: c.type,
+        severity: c.severity,
+        message: c.message,
+        value: c.value,
+        threshold: c.threshold,
+      })),
+      ...resolvedRows.map((a) => ({
+        kind: 'resolved' as const,
+        orgId,
+        serverId,
+        type: a.type as AlertType,
+        severity: a.severity as AlertSeverity,
+        message: a.message,
+        openedAt: a.openedAt,
+      })),
+    ];
+    notifyAlertsChanged(events);
   }
 
   return { opened, resolved };

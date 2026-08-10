@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import { ZodError } from 'zod';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import websocket from '@fastify/websocket';
@@ -18,6 +19,8 @@ import { auditRoutes } from './routes/audit.js';
 import { sshSessionRoutes } from './routes/ssh-sessions.js';
 import { sftpRoutes } from './routes/sftp.js';
 import { monitoringRoutes } from './routes/monitoring.js';
+import { notificationRoutes } from './routes/notifications.js';
+import { teamRoutes, publicInviteRoutes } from './routes/team.js';
 import { healthRoutes } from './routes/health.js';
 
 export async function buildApp() {
@@ -35,6 +38,25 @@ export async function buildApp() {
   await app.register(rateLimit, { max: 100, timeWindow: '1 minute' });
   await app.register(websocket);
 
+  // A rejected schema is the caller's mistake, not a server fault. Without this
+  // every bad field surfaced as a 500 carrying the raw Zod dump — including on
+  // the unauthenticated invite endpoints.
+  app.setErrorHandler((err, req, reply) => {
+    if (err instanceof ZodError) {
+      const issue = err.issues[0];
+      const field = issue?.path.join('.');
+      return reply.status(400).send({
+        error: field ? `${field}: ${issue?.message}` : (issue?.message ?? 'Invalid request'),
+      });
+    }
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    if (statusCode && statusCode < 500) {
+      return reply.status(statusCode).send({ error: (err as Error).message });
+    }
+    req.log.error({ err }, 'Unhandled error');
+    return reply.status(500).send({ error: 'Internal Server Error' });
+  });
+
   // Routes
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: '/api/auth' });
@@ -47,6 +69,10 @@ export async function buildApp() {
   await app.register(sshSessionRoutes, { prefix: '/api/ssh-sessions' });
   await app.register(sftpRoutes, { prefix: '/api/sftp' });
   await app.register(monitoringRoutes, { prefix: '/api/monitoring' });
+  await app.register(notificationRoutes, { prefix: '/api/notifications' });
+  await app.register(teamRoutes, { prefix: '/api/team' });
+  // Unauthenticated: reading and accepting an invite happens before an account exists
+  await app.register(publicInviteRoutes, { prefix: '/api/invites' });
 
   if (config.staticDir) {
     const staticPath = path.resolve(config.staticDir);

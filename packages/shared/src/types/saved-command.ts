@@ -21,6 +21,17 @@ export interface CreateSavedCommandRequest {
   category?: string;
 }
 
+export interface UpdateSavedCommandRequest {
+  /** null clears the default server, making the command runnable anywhere */
+  serverId?: string | null;
+  name?: string;
+  command?: string;
+  variables?: Record<string, { label: string; defaultValue?: string }>;
+  category?: string | null;
+}
+
+export type CommandRunStatus = 'pending' | 'running' | 'success' | 'failure';
+
 export interface CommandRun {
   id: string;
   commandId: string;
@@ -29,12 +40,21 @@ export interface CommandRun {
   startedAt: string;
   finishedAt?: string;
   exitCode?: number;
-  status: 'pending' | 'running' | 'success' | 'failure';
+  status: CommandRunStatus;
   stdout: string;
   stderr: string;
+  durationMs?: number;
 }
 
 export interface RunCommandRequest {
   /** Override variable values at runtime */
   variables?: Record<string, string>;
+  /** Target this server instead of the command's default */
+  serverId?: string;
+}
+
+export interface RunCommandResponse {
+  runId: string;
+  /** 'inline' means it ran in-process because no queue was configured */
+  mode: 'queued' | 'inline';
 }

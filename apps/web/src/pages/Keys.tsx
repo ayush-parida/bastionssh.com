@@ -1,9 +1,13 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import type { SSHKey, CreateSSHKeyRequest, GenerateSSHKeyResponse } from '@smt/shared';
-import { Plus, Copy, Trash2, Key as KeyIcon, RefreshCw } from 'lucide-react';
+import { Plus, Copy, Trash2, Key as KeyIcon, RefreshCw, Upload, FileCheck } from 'lucide-react';
 import { toast } from 'sonner';
+
+/** A private key is a few KB; this only catches an obviously wrong file. */
+const MAX_PEM_BYTES = 64 * 1024;
+const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/;
 
 export default function KeysPage() {
   const qc = useQueryClient();
@@ -14,6 +18,8 @@ export default function KeysPage() {
   const [privateKey, setPrivateKey] = useState('');
   const [keyType, setKeyType] = useState<'ed25519' | 'rsa' | 'ecdsa'>('ed25519');
   const [generatedKey, setGeneratedKey] = useState<GenerateSSHKeyResponse | null>(null);
+  const [pemFileName, setPemFileName] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: keys, isLoading } = useQuery<SSHKey[]>({
     queryKey: ['ssh-keys'],
@@ -28,7 +34,7 @@ export default function KeysPage() {
 
   const importMutation = useMutation({
     mutationFn: (body: CreateSSHKeyRequest) => api.post<SSHKey>('/keys/import', body),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['ssh-keys'] }); setShowForm(false); toast.success('Key imported'); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['ssh-keys'] }); setShowForm(false); resetForm(); toast.success('Key imported'); },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -37,6 +43,38 @@ export default function KeysPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['ssh-keys'] }); toast.success('Key deleted'); },
     onError: (err: Error) => toast.error(err.message),
   });
+
+  function resetForm() {
+    setName('');
+    setPublicKey('');
+    setPrivateKey('');
+    setPemFileName(null);
+  }
+
+  /** Load a .pem straight off disk instead of making the user paste it. */
+  async function handlePemFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Clear it so picking the same file again still fires onChange
+    e.target.value = '';
+    if (!file) return;
+
+    if (file.size > MAX_PEM_BYTES) {
+      toast.error('That file is too large to be a private key.');
+      return;
+    }
+
+    // Trailing newline: some PEM parsers reject a key without one
+    const text = `${(await file.text()).trim()}\n`;
+    if (!PEM_PRIVATE_KEY.test(text)) {
+      toast.error(`${file.name} doesn't look like a private key — expected a PEM block.`);
+      return;
+    }
+
+    setPrivateKey(text);
+    setPemFileName(file.name);
+    // A .pem is usually named after the key it holds, so it's a sensible default
+    if (!name.trim()) setName(file.name.replace(/\.(pem|key|txt)$/i, ''));
+  }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -113,8 +151,37 @@ export default function KeysPage() {
                     <textarea rows={3} value={publicKey} onChange={(e) => setPublicKey(e.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary" />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium mb-1">Private key</label>
-                    <textarea rows={5} value={privateKey} onChange={(e) => setPrivateKey(e.target.value)} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary" />
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-sm font-medium">Private key</label>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs font-medium hover:bg-muted"
+                      >
+                        <Upload size={13} /> Import .pem file
+                      </button>
+                    </div>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".pem,.key,.txt"
+                      onChange={handlePemFile}
+                      className="hidden"
+                    />
+                    <textarea
+                      rows={5}
+                      required
+                      value={privateKey}
+                      placeholder="Paste the key here, or import a .pem file"
+                      onChange={(e) => { setPrivateKey(e.target.value); setPemFileName(null); }}
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                    />
+                    {pemFileName && (
+                      <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <FileCheck size={12} className="text-emerald-500" />
+                        Loaded from <span className="font-mono">{pemFileName}</span>
+                      </p>
+                    )}
                   </div>
                 </>
               )}
@@ -122,7 +189,7 @@ export default function KeysPage() {
                 <button type="submit" className="flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
                   {mode === 'generate' ? <><RefreshCw size={14} /> Generate</> : <><Plus size={14} /> Import</>}
                 </button>
-                <button type="button" onClick={() => setShowForm(false)} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">Cancel</button>
+                <button type="button" onClick={() => { setShowForm(false); resetForm(); }} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">Cancel</button>
               </div>
             </form>
           )}

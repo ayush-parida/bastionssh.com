@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth.js';
 import Layout from '@/components/layout/Layout.js';
 import LoginPage from '@/pages/Login.js';
+import AcceptInvitePage from '@/pages/AcceptInvite.js';
 import DashboardPage from '@/pages/Dashboard.js';
 import ServersPage from '@/pages/Servers.js';
 import KeysPage from '@/pages/Keys.js';
@@ -25,6 +26,7 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/invite/:token" element={<AcceptInvitePage />} />
         <Route path="/register" element={<Navigate to="/login" replace />} />
         <Route
           path="/"

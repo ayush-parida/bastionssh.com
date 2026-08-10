@@ -234,8 +234,9 @@ export function pauseHealth(server: typeof servers.$inferSelect) {
     status: 'paused',
     updatedAt: now,
   });
-  // A paused server should not keep firing alerts nobody is watching.
-  reconcileAlerts(server.orgId, server.id, []);
+  // A paused server should not keep firing alerts nobody is watching. Closing
+  // them is bookkeeping, not an all-clear, so it goes out silently.
+  reconcileAlerts(server.orgId, server.id, [], { notify: false });
 }
 
 /**

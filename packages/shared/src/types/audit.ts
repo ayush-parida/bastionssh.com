@@ -18,6 +18,7 @@ export type AuditAction =
   | 'ssh_key.delete'
   | 'ssh_key.use'
   | 'command.run'
+  | 'command.update'
   | 'cron_job.create'
   | 'cron_job.update'
   | 'cron_job.delete'
@@ -31,7 +32,11 @@ export type AuditAction =
   | 'api_token.revoke'
   | 'server.health_check'
   | 'monitoring.update'
-  | 'alert.acknowledge';
+  | 'alert.acknowledge'
+  | 'notification_channel.create'
+  | 'notification_channel.update'
+  | 'notification_channel.delete'
+  | 'notification_channel.test';
 
 export interface AuditLogEntry {
   id: string;

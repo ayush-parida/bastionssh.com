@@ -6,5 +6,7 @@ export * from './types/saved-command.js';
 export * from './types/cron-job.js';
 export * from './types/ai.js';
 export * from './types/monitoring.js';
+export * from './types/notification.js';
+export * from './types/team.js';
 export * from './types/audit.js';
 export * from './types/pagination.js';
