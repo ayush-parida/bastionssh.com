@@ -1,4 +1,4 @@
-import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
+import { useEffect, useLayoutEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -9,20 +9,37 @@ export interface XTerminalHandle {
   sendInput(data: string): void;
 }
 
+/** Lifecycle of the WebSocket that carries the SSH session */
+export type TerminalConnectionStatus = 'connecting' | 'connected' | 'disconnected';
+
 interface XTerminalProps {
   sessionId: string;
   /** Triggered when the WS connection closes */
   onClose?: () => void;
   /** Called with each chunk of raw output received from the server */
   onOutput?: (text: string) => void;
+  /** Reports connection state changes so the host page can display them */
+  onStatusChange?: (status: TerminalConnectionStatus) => void;
 }
 
 const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
-  ({ sessionId, onClose, onOutput }, ref) => {
+  ({ sessionId, onClose, onOutput, onStatusChange }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const termRef = useRef<Terminal | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
     const fitAddonRef = useRef<FitAddon | null>(null);
+
+    // Keep the latest callbacks in refs so a parent re-render (e.g. toggling the AI
+    // sidebar, or a status update) never tears down the terminal and its WebSocket.
+    // The setup effect below depends only on `sessionId`.
+    const onCloseRef = useRef(onClose);
+    const onOutputRef = useRef(onOutput);
+    const onStatusChangeRef = useRef(onStatusChange);
+    useLayoutEffect(() => {
+      onCloseRef.current = onClose;
+      onOutputRef.current = onOutput;
+      onStatusChangeRef.current = onStatusChange;
+    });
 
     useImperativeHandle(ref, () => ({
       sendInput(data: string) {
@@ -79,6 +96,7 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
       fitAddonRef.current = fitAddon;
 
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      onStatusChangeRef.current?.('connecting');
       const ws = new WebSocket(
         `${protocol}://${window.location.host}/api/ssh-sessions/${sessionId}/ws`,
       );
@@ -87,6 +105,7 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
       ws.onopen = () => {
         const resize = JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows });
         ws.send(resize);
+        if (!cancelled) onStatusChangeRef.current?.('connected');
       };
 
       ws.binaryType = 'arraybuffer';
@@ -97,13 +116,14 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
             ? e.data
             : new TextDecoder().decode(e.data as ArrayBuffer);
         term.write(text);
-        onOutput?.(text);
+        onOutputRef.current?.(text);
       };
 
       ws.onclose = () => {
         if (cancelled) return;
         term.writeln('\r\n\x1b[33m[Session closed]\x1b[0m');
-        onClose?.();
+        onStatusChangeRef.current?.('disconnected');
+        onCloseRef.current?.();
       };
 
       ws.onerror = () => {
@@ -133,7 +153,7 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
         ws.close();
         term.dispose();
       };
-    }, [sessionId, onClose, onOutput]);
+    }, [sessionId]);
 
     return <div ref={containerRef} className="size-full" />;
   },
