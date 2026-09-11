@@ -109,5 +109,24 @@ export function assertSafeEndpoint(raw: string): string {
   if (url.hostname === '169.254.169.254' || url.hostname === 'metadata.google.internal') {
     throw new StorageError('That address is not allowed', 400);
   }
+  if (isAwsBucketUrl(url)) {
+    throw new StorageError(
+      'Endpoint looks like a bucket URL. Enter the S3 service endpoint (e.g. https://s3.ap-south-1.amazonaws.com) or leave it blank for AWS, then open the bucket by name',
+      400,
+    );
+  }
   return url.toString().replace(/\/$/, '');
+}
+
+/** `<bucket>.s3[.-]…amazonaws.com` — a label before `s3` is a bucket name. */
+const AWS_VIRTUAL_HOST = /^[^.]+\.s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com$/i;
+
+/**
+ * A bucket's own URL pasted in as the endpoint sends every request to the
+ * wrong place, yet ListBuckets still "succeeds" (S3 answers with the bucket's
+ * object listing), so the connection test cannot catch it. Refuse it up front.
+ */
+function isAwsBucketUrl(url: URL): boolean {
+  if (!url.hostname.toLowerCase().endsWith('.amazonaws.com')) return false;
+  return AWS_VIRTUAL_HOST.test(url.hostname) || url.pathname.replace(/\/+$/, '') !== '';
 }

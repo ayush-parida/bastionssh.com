@@ -122,4 +122,25 @@ describe('assertSafeEndpoint', () => {
     expect(() => assertSafeEndpoint('http://169.254.169.254/latest')).toThrow(StorageError);
     expect(() => assertSafeEndpoint('http://metadata.google.internal')).toThrow(StorageError);
   });
+
+  it('accepts AWS service endpoints', () => {
+    expect(assertSafeEndpoint('https://s3.amazonaws.com')).toBe('https://s3.amazonaws.com');
+    expect(assertSafeEndpoint('https://s3.ap-south-1.amazonaws.com')).toBe(
+      'https://s3.ap-south-1.amazonaws.com',
+    );
+    expect(assertSafeEndpoint('https://s3.dualstack.eu-west-1.amazonaws.com')).toBe(
+      'https://s3.dualstack.eu-west-1.amazonaws.com',
+    );
+  });
+
+  it('rejects an AWS bucket URL entered as the endpoint', () => {
+    for (const url of [
+      'https://cdn-nilson.s3.ap-south-1.amazonaws.com',
+      'https://cdn-nilson.s3.amazonaws.com',
+      'https://cdn-nilson.s3-eu-west-1.amazonaws.com',
+      'https://s3.ap-south-1.amazonaws.com/cdn-nilson',
+    ]) {
+      expect(() => assertSafeEndpoint(url)).toThrow(/bucket URL/);
+    }
+  });
 });
