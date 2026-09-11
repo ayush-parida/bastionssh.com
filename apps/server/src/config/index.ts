@@ -12,6 +12,7 @@ const envSchema = z.object({
   SMT_LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
   SMT_MAX_SSH_SESSIONS: z.coerce.number().default(5),
   SMT_SFTP_MAX_UPLOAD_BYTES: z.coerce.number().default(1_073_741_824), // 1 GiB
+  SMT_STORAGE_MAX_UPLOAD_BYTES: z.coerce.number().default(5_368_709_120), // 5 GiB
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
 
   // ── Health monitoring ──
@@ -65,6 +66,7 @@ export const config = {
   logLevel: env.SMT_LOG_LEVEL,
   maxSshSessions: env.SMT_MAX_SSH_SESSIONS,
   sftpMaxUploadBytes: env.SMT_SFTP_MAX_UPLOAD_BYTES,
+  storageMaxUploadBytes: env.SMT_STORAGE_MAX_UPLOAD_BYTES,
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
   monitoring: {
     enabled: env.SMT_MONITORING_ENABLED,

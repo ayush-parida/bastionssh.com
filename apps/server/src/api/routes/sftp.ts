@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import type { Readable } from 'node:stream';
 import posix from 'node:path/posix';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { CredentialError, resolveServerAuth } from '../../ssh/credentials.js';
@@ -27,7 +28,7 @@ const renameSchema = z.object({
 });
 const deleteSchema = z.object({
   path: z.string().min(1),
-  recursive: z.coerce.boolean().default(false),
+  recursive: boolQuery,
   keyId: z.string().optional(),
 });
 

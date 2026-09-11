@@ -37,7 +37,19 @@ export type AuditAction =
   | 'notification_channel.create'
   | 'notification_channel.update'
   | 'notification_channel.delete'
-  | 'notification_channel.test';
+  | 'notification_channel.test'
+  | 'storage_connection.create'
+  | 'storage_connection.update'
+  | 'storage_connection.delete'
+  | 'storage_connection.test'
+  | 'storage.bucket_create'
+  | 'storage.bucket_delete'
+  | 'storage.list'
+  | 'storage.download'
+  | 'storage.upload'
+  | 'storage.mkdir'
+  | 'storage.rename'
+  | 'storage.delete';
 
 export interface AuditLogEntry {
   id: string;

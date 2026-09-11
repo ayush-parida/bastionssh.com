@@ -101,7 +101,7 @@ export default function FilesPage() {
   const deleteMutation = useMutation({
     mutationFn: ({ target, recursive }: { target: string; recursive: boolean }) =>
       api.delete(
-        `/sftp/${serverId}/file?path=${encodeURIComponent(target)}&recursive=${recursive}`,
+        `/sftp/${serverId}/file?path=${encodeURIComponent(target)}${recursive ? '&recursive=true' : ''}`,
       ),
     onSuccess: () => {
       refresh();

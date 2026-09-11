@@ -366,6 +366,39 @@ export const notificationChannels = sqliteTable('notification_channels', {
     .$defaultFn(() => new Date().toISOString()),
 });
 
+// ── Object Storage ───────────────────────────────────────────────────────────
+
+/** An S3-compatible endpoint plus one access-key pair. Covers AWS S3, MinIO, and friends. */
+export const storageConnections = sqliteTable(
+  'storage_connections',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    provider: text('provider').notNull().default('s3'), // s3 | minio | other
+    endpoint: text('endpoint'), // null = AWS regional endpoint
+    region: text('region').notNull().default('us-east-1'),
+    accessKeyId: text('access_key_id').notNull(),
+    encryptedSecretAccessKey: text('encrypted_secret_access_key').notNull(),
+    forcePathStyle: integer('force_path_style', { mode: 'boolean' }).notNull().default(false),
+    lastStatus: text('last_status'), // ok | failed
+    lastError: text('last_error'),
+    lastTestedAt: text('last_tested_at'),
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text('updated_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    orgIdx: index('storage_connections_org_idx').on(t.orgId),
+  }),
+);
+
 // ── Audit Log ─────────────────────────────────────────────────────────────────
 
 export const auditLog = sqliteTable('audit_log', {

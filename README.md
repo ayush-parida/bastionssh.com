@@ -17,6 +17,7 @@
 - 💻 **In-Browser Terminal** — Full interactive SSH sessions in your browser via WebSocket + xterm.js.
 - 📌 **Saved Commands per Server** — Save frequently-used commands against any server and run them with one click.
 - ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view history, logs, and failures.
+- 🪣 **Object Storage** — Register AWS S3, MinIO, or any S3-compatible endpoint. List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
 - 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up. Nothing to install on the servers themselves.
 - 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
 - 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or binary). Each team/company runs an isolated environment they fully control.
@@ -169,6 +170,19 @@ SMT_ALERT_DISK_PERCENT=90
 SMT_ALERT_LOAD_PER_CORE=2
 SMT_ALERT_OFFLINE_FAILURES=2         # failed checks before a host is alerted as down
 ```
+
+---
+
+## 🪣 Object Storage
+
+Add an S3-compatible connection under **Object Storage** (AWS S3, MinIO, Wasabi, Cloudflare R2, DigitalOcean Spaces, Ceph RGW…) with an endpoint, region and access-key pair. The secret key is encrypted at rest with the same vault as SSH keys and never leaves the server.
+
+- Buckets: list, create, delete (optionally emptying it first, with a typed-name confirmation)
+- Objects: browse by folder, upload (streamed, multipart above 8 MiB), download, rename, delete a file or a whole folder
+- Every action is audited with the bucket and key
+- Roles: viewers browse and download, operators change objects, admins manage connections and buckets
+
+Uploads are capped by `SMT_STORAGE_MAX_UPLOAD_BYTES` (default 5 GiB).
 
 ---
 

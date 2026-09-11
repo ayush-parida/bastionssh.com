@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils.js';
 import {
   LayoutDashboard,
   Server,
+  HardDrive,
   Activity,
   Key,
   Terminal,
@@ -22,6 +23,7 @@ import { useTheme } from '@/hooks/useTheme.js';
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/servers', label: 'Servers', icon: Server },
+  { to: '/storage', label: 'Object Storage', icon: HardDrive },
   { to: '/monitoring', label: 'Monitoring', icon: Activity },
   { to: '/keys', label: 'SSH Keys', icon: Key },
   { to: '/commands', label: 'Saved Commands', icon: Terminal },

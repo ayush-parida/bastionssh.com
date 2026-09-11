@@ -158,6 +158,49 @@ REST surface, all under `/api/sftp/:serverId`:
 | `POST`   | `/rename`                  | Rename or move                   |
 | `DELETE` | `/file?path=&recursive=`   | Delete a file or directory       |
 
+### 4.4b Object Storage (`/server/storage`)
+
+S3-compatible bucket and object management, covering AWS S3, MinIO, and anything
+else that speaks the S3 API. Built on `@aws-sdk/client-s3` (+ `lib-storage` for
+streaming multipart uploads), which MinIO itself recommends for Node.
+
+- `keys.ts` — pure helpers: key/prefix normalisation (no `..`, no leading slash,
+  prefixes end in `/`), bucket-name validation, endpoint safety check.
+- `client.ts` — builds the `S3Client`. Always sets
+  `requestChecksumCalculation: 'WHEN_REQUIRED'` (newer SDKs default to CRC32 trailers
+  that older MinIO releases and some providers reject) and `followRegionRedirects`.
+- `ops.ts` — thin wrappers over SDK commands; every failure is mapped to a
+  `StorageError` carrying an HTTP status (404 missing bucket/key, 403 bad
+  credentials, 409 bucket conflicts, 502/504 unreachable/timeout).
+- `index.ts` — resolves a connection for the caller's org, decrypts the secret, and
+  caches one client per connection until the row changes.
+
+Downloads stream the SDK body straight to the response; uploads pipe a raw
+`application/octet-stream` body through `lib-storage`'s `Upload` (single PUT below
+one part, multipart above). Recursive deletes page through `ListObjectsV2` and use
+`DeleteObjects` in batches of 1000, falling back to single deletes for providers
+that reject batch deletes.
+
+REST surface, all under `/api/storage`:
+
+| Method   | Path                                                | Purpose                                      |
+| -------- | --------------------------------------------------- | -------------------------------------------- |
+| `GET`    | `/connections`                                      | List connections (secret never returned)     |
+| `GET`    | `/connections/:id`                                  | One connection                               |
+| `POST`   | `/connections`                                      | Create                                       |
+| `PATCH`  | `/connections/:id`                                  | Update (omit `secretAccessKey` to keep it)   |
+| `DELETE` | `/connections/:id`                                  | Delete                                       |
+| `POST`   | `/connections/:id/test`                             | `ListBuckets` round-trip, result recorded    |
+| `GET`    | `/connections/:id/buckets`                          | List buckets                                 |
+| `POST`   | `/connections/:id/buckets`                          | Create bucket                                |
+| `DELETE` | `/connections/:id/buckets/:bucket?force=`           | Delete bucket (`force` empties it first)     |
+| `GET`    | `/connections/:id/buckets/:bucket/objects?prefix=&token=` | One page of folders + objects        |
+| `GET`    | `/connections/:id/buckets/:bucket/object?key=`      | Stream an object down                        |
+| `PUT`    | `/connections/:id/buckets/:bucket/object?key=&contentType=` | Stream a raw body up                 |
+| `POST`   | `/connections/:id/buckets/:bucket/folder`           | Create a folder marker                       |
+| `POST`   | `/connections/:id/buckets/:bucket/rename`           | Copy + delete one object                     |
+| `DELETE` | `/connections/:id/buckets/:bucket/object?key=&recursive=` | Delete an object or a whole prefix     |
+
 ### 4.5 Secrets Vault (`/server/vault`)
 
 - Wraps libsodium.
@@ -198,6 +241,7 @@ Server       1───* ServerMetric
 Server       1───1 ServerHealth
 Server       1───* ServerAlert
 Organization 1───* AIProviderConfig
+Organization 1───* StorageConnection
 Organization 1───* AuditLogEntry
 User         1───* APIToken
 ```
@@ -216,13 +260,14 @@ User         1───* APIToken
 - **server_health** — one row per server holding its current state, so list views never scan the time series.
 - **server_alerts** — one row per alert occurrence; `resolved_at` is set when the condition clears, `acknowledged_at` when a user silences it.
 - **ai_provider_configs** — `provider`, `base_url`, `model`, `encrypted_api_key`, `default boolean`.
+- **storage_connections** — `name`, `provider` (`s3 | minio | other`), `endpoint` (null = AWS), `region`, `access_key_id`, `encrypted_secret_access_key`, `force_path_style`, last-test status.
 - **audit_log** — append-only, partitioned by month.
 - **sessions** — browser auth sessions (Lucia).
 - **api_tokens** — programmatic access tokens, scoped + hashed.
 
 ### Encrypted columns
 
-`ssh_keys.encrypted_private_key` and `ai_provider_configs.encrypted_api_key` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
+`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key` and `storage_connections.encrypted_secret_access_key` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
 
 ---
 
@@ -323,6 +368,10 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | SSH sessions (terminal)     | —        | operator    |
 | SFTP list / download / read | viewer   | —           |
 | SFTP upload / mkdir / rename / delete | — | operator |
+| Storage connections         | viewer   | admin       |
+| Buckets (create / delete)   | viewer   | admin       |
+| Objects list / download     | viewer   | —           |
+| Objects upload / folder / rename / delete | — | operator |
 | AI chat                     | —        | operator    |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
@@ -404,6 +453,7 @@ server-management-tool/
 │       │   ├── worker/   # BullMQ processors
 │       │   ├── monitoring/ # Agentless SSH health checks + alerting
 │       │   ├── ssh/      # SSH broker
+│       │   ├── storage/  # S3 / MinIO client + ops
 │       │   ├── ai/       # AI provider adapters
 │       │   ├── vault/    # Secrets encryption
 │       │   ├── audit/    # Audit logging
@@ -443,6 +493,7 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_MAX_SSH_SESSIONS`   | no       | Per-user concurrent SSH session cap                           |
 | `SMT_AI_REQUEST_TIMEOUT` | no       | Timeout for outbound AI calls (ms)                            |
 | `SMT_SFTP_MAX_UPLOAD_BYTES` | no    | Max SFTP upload size in bytes (default 1 GiB)                 |
+| `SMT_STORAGE_MAX_UPLOAD_BYTES` | no | Max object-storage upload size in bytes (default 5 GiB)       |
 | `SMT_MONITORING_ENABLED` | no       | Run agentless health checks (default `true`)                  |
 | `SMT_MONITORING_INTERVAL` | no      | Seconds between health sweeps (default 60, minimum 15)        |
 | `SMT_MONITORING_CONCURRENCY` | no   | Servers probed in parallel (default 5)                        |

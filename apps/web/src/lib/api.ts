@@ -66,8 +66,8 @@ async function stream(path: string, body: unknown, init?: RequestInit): Promise<
   return res;
 }
 
-/** Stream a raw file body to the server (used for SFTP uploads). */
-async function upload(path: string, file: Blob): Promise<{ path: string; size: number }> {
+/** Stream a raw file body to the server (SFTP and object-storage uploads). */
+async function upload<T = { path: string; size: number }>(path: string, file: Blob): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/octet-stream' },
@@ -75,7 +75,7 @@ async function upload(path: string, file: Blob): Promise<{ path: string; size: n
     credentials: 'include',
   });
   if (!res.ok) await fail(res, path);
-  return res.json();
+  return res.json() as Promise<T>;
 }
 
 /** Fetch a binary response and trigger a browser download. */
@@ -93,6 +93,8 @@ async function download(path: string, filename: string): Promise<void> {
 }
 
 export const api = {
+  /** Absolute URL for a path, for links the browser should open itself. */
+  url: (path: string) => `${BASE}${path}`,
   get: <T>(path: string) => request<T>(path, { method: 'GET' }),
   stream,
   upload,
