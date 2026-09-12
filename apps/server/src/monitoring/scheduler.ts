@@ -38,15 +38,28 @@ async function pooled<T, R>(
 }
 
 /**
- * Check every monitored server once. Servers with monitoring switched off are
- * moved to `paused` so the UI can distinguish them from never-checked hosts.
+ * A server is probed unless monitoring is off or its cloud provider reports it
+ * stopped or gone — probing those would only raise offline alerts nobody can act on.
+ */
+export function isMonitored(server: {
+  monitoringEnabled: boolean;
+  cloudState: string | null;
+}): boolean {
+  if (!server.monitoringEnabled) return false;
+  return server.cloudState !== 'stopped' && server.cloudState !== 'missing';
+}
+
+/**
+ * Check every monitored server once. Servers with monitoring switched off (or
+ * stopped in their cloud) are moved to `paused` so the UI can distinguish them
+ * from never-checked hosts.
  */
 export async function runSweep(): Promise<CheckOutcome[]> {
   const db = getDb();
   const all = db.select().from(servers).all();
 
-  const monitored = all.filter((s) => s.monitoringEnabled);
-  const excluded = all.filter((s) => !s.monitoringEnabled);
+  const monitored = all.filter(isMonitored);
+  const excluded = all.filter((s) => !isMonitored(s));
 
   for (const server of excluded) {
     const current = db

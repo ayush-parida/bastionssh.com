@@ -1,5 +1,17 @@
-import type { CloudInstance, CloudInstanceState, CloudProvider, SyncSummary } from '@smt/shared';
+import { eq } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
+import {
+  CLOUD_PROVIDER_LABEL,
+  type CloudInstance,
+  type CloudInstanceState,
+  type CloudProvider,
+  type SyncSummary,
+} from '@smt/shared';
+import { getDb } from '../db/index.js';
+import { cloudAccounts, servers } from '../db/schema.js';
 import { pickHost } from './types.js';
+
+export type CloudAccountRow = typeof cloudAccounts.$inferSelect;
 
 /** The slice of a `servers` row the planner needs. */
 export interface ExistingCloudServer {
@@ -81,4 +93,57 @@ export function summarize(plan: SyncPlan, discovered: number): SyncSummary {
     missing: plan.markMissing.length,
     skipped: plan.skipped.length,
   };
+}
+
+/** Write a plan to the servers table in one transaction. */
+export function applyPlan(account: CloudAccountRow, plan: SyncPlan, now: string): void {
+  const provider = account.provider as CloudProvider;
+  const label = CLOUD_PROVIDER_LABEL[provider];
+
+  getDb().transaction((tx) => {
+    for (const instance of plan.create) {
+      tx.insert(servers)
+        .values({
+          id: nanoid(),
+          orgId: account.orgId,
+          createdBy: account.createdBy,
+          name: instance.name,
+          host: pickHost(instance)!,
+          port: 22,
+          username: account.defaultUsername,
+          defaultKeyId: account.defaultKeyId,
+          tags: JSON.stringify(importTags(provider, instance)),
+          notes: `Imported from ${label} (${instance.id}, ${instance.region})`,
+          cloudAccountId: account.id,
+          cloudProvider: provider,
+          cloudInstanceId: instance.id,
+          cloudRegion: instance.region,
+          cloudState: instance.state,
+          cloudSyncedAt: now,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+    }
+
+    for (const update of plan.update) {
+      tx.update(servers)
+        .set({
+          ...(update.host !== null && { host: update.host }),
+          cloudRegion: update.region,
+          cloudState: update.state,
+          cloudSyncedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(servers.id, update.serverId))
+        .run();
+    }
+
+    for (const serverId of plan.markMissing) {
+      tx.update(servers)
+        .set({ cloudState: 'missing', cloudSyncedAt: now, updatedAt: now })
+        .where(eq(servers.id, serverId))
+        .run();
+    }
+  });
 }

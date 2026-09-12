@@ -34,6 +34,13 @@ const envSchema = z.object({
   SMT_ALERT_LOAD_PER_CORE: z.coerce.number().min(0.1).default(2),
   /** Consecutive failed checks before a server is alerted as down. */
   SMT_ALERT_OFFLINE_FAILURES: z.coerce.number().min(1).default(2),
+  // ── Cloud inventory sync ──
+  SMT_CLOUD_SYNC_ENABLED: z
+    .string()
+    .transform((v) => v !== 'false')
+    .default('true'),
+  SMT_CLOUD_SYNC_INTERVAL: z.coerce.number().min(5).default(15), // minutes between syncs
+  SMT_CLOUD_REQUEST_TIMEOUT: z.coerce.number().default(30_000),
   SMT_WORKER_IN_PROCESS: z
     .string()
     .transform((v) => v === 'true')
@@ -92,6 +99,11 @@ export const config = {
       loadPerCore: env.SMT_ALERT_LOAD_PER_CORE,
       offlineFailures: env.SMT_ALERT_OFFLINE_FAILURES,
     },
+  },
+  cloudSync: {
+    enabled: env.SMT_CLOUD_SYNC_ENABLED,
+    intervalMinutes: env.SMT_CLOUD_SYNC_INTERVAL,
+    timeoutMs: env.SMT_CLOUD_REQUEST_TIMEOUT,
   },
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,
