@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
-import type {
-  CreateNotificationChannelRequest,
-  NotificationCapabilities,
-  NotificationChannel,
-  NotificationChannelType,
-  NotificationTestResult,
-  UpdateNotificationChannelRequest,
+import {
+  CHANNEL_TYPES,
+  channelMeta,
+  type ChannelField,
+  type ChannelGroup,
+  type CreateNotificationChannelRequest,
+  type NotificationCapabilities,
+  type NotificationChannel,
+  type NotificationChannelType,
+  type NotificationTestResult,
+  type UpdateNotificationChannelRequest,
 } from '@smt/shared';
 import {
   Plus,
@@ -16,20 +20,26 @@ import {
   Send,
   BellRing,
   Webhook,
-  Hash,
   Mail,
-  MessageCircle,
+  MessageSquare,
+  Siren,
+  Smartphone,
   CircleAlert,
   CircleCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
+/** Every possible input, as strings; only the type's own fields are rendered and sent. */
 interface ChannelForm {
   name: string;
   type: NotificationChannelType;
   url: string;
-  /** Comma / newline separated in the form; sent as an array. */
   recipients: string;
+  token: string;
+  chatId: string;
+  userKey: string;
+  routingKey: string;
+  region: 'us' | 'eu';
   minSeverity: 'warning' | 'critical';
   notifyOnResolve: boolean;
 }
@@ -39,37 +49,66 @@ const emptyForm: ChannelForm = {
   type: 'slack',
   url: '',
   recipients: '',
+  token: '',
+  chatId: '',
+  userKey: '',
+  routingKey: '',
+  region: 'us',
   minSeverity: 'warning',
   notifyOnResolve: true,
 };
 
-const URL_PLACEHOLDER: Record<Exclude<NotificationChannelType, 'email'>, string> = {
-  slack: 'https://hooks.slack.com/services/…',
-  discord: 'https://discord.com/api/webhooks/…',
-  webhook: 'https://example.com/hooks/alerts',
+const GROUP_LABEL: Record<ChannelGroup, string> = {
+  chat: 'Chat',
+  paging: 'On-call paging',
+  push: 'Push notifications',
+  other: 'Other',
 };
 
-const TYPE_ICON: Record<NotificationChannelType, typeof Hash> = {
-  slack: Hash,
-  discord: MessageCircle,
-  email: Mail,
-  webhook: Webhook,
+const GROUP_ICON: Record<ChannelGroup, typeof Webhook> = {
+  chat: MessageSquare,
+  paging: Siren,
+  push: Smartphone,
+  other: Webhook,
 };
 
-function splitRecipients(input: string): string[] {
+const FIELD_LABEL: Record<ChannelField, string> = {
+  url: 'URL',
+  recipients: 'Recipients',
+  token: 'Token',
+  chatId: 'Chat id',
+  userKey: 'User key',
+  routingKey: 'Integration key',
+  region: 'Region',
+};
+
+const SECRET_FIELDS = new Set<ChannelField>(['token', 'userKey', 'routingKey']);
+
+const QUERY_KEY = ['notification-channels'];
+
+const inputClass =
+  'w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary';
+
+function splitList(input: string): string[] {
   return [...new Set(input.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean))];
 }
 
-/** Only the field that matches the channel type is sent; blank means "keep" on edit. */
-function targetFields(form: ChannelForm): { url?: string; recipients?: string[] } {
-  if (form.type === 'email') {
-    const recipients = splitRecipients(form.recipients);
-    return recipients.length ? { recipients } : {};
+/**
+ * Only the type's own fields are sent, and only when filled in — on edit a
+ * blank set means "keep the stored target", which is never returned to us.
+ */
+function targetFields(form: ChannelForm): Partial<CreateNotificationChannelRequest> {
+  const out: Partial<CreateNotificationChannelRequest> = {};
+  const fields = channelMeta(form.type).fields;
+  const filled = fields.filter((f) => f !== 'region' && form[f].trim() !== '');
+  if (filled.length === 0) return out;
+  for (const field of fields) {
+    if (field === 'recipients') out.recipients = splitList(form.recipients);
+    else if (field === 'region') out.region = form.region;
+    else if (form[field].trim()) out[field] = form[field].trim();
   }
-  return form.url ? { url: form.url } : {};
+  return out;
 }
-
-const QUERY_KEY = ['notification-channels'];
 
 export default function NotificationChannels() {
   const qc = useQueryClient();
@@ -108,7 +147,6 @@ export default function NotificationChannels() {
 
   const updateMutation = useMutation({
     mutationFn: ({ id, body }: { id: string; body: ChannelForm }) => {
-      // Blank target means "keep the stored one" — it is never sent back to the client
       const payload: UpdateNotificationChannelRequest = {
         name: body.name,
         minSeverity: body.minSeverity,
@@ -147,10 +185,9 @@ export default function NotificationChannels() {
   function openEdit(channel: NotificationChannel) {
     setEditingId(channel.id);
     setForm({
+      ...emptyForm,
       name: channel.name,
       type: channel.type,
-      url: '',
-      recipients: '',
       minSeverity: channel.minSeverity,
       notifyOnResolve: channel.notifyOnResolve,
     });
@@ -167,6 +204,60 @@ export default function NotificationChannels() {
     e.preventDefault();
     if (editingId) updateMutation.mutate({ id: editingId, body: form });
     else createMutation.mutate(form);
+  }
+
+  const meta = channelMeta(form.type);
+  const groups = (['chat', 'paging', 'push', 'other'] as const).map((g) => ({
+    group: g,
+    types: CHANNEL_TYPES.filter((m) => m.group === g),
+  }));
+
+  function renderField(field: ChannelField) {
+    if (field === 'recipients') {
+      return (
+        <div key={field} className="col-span-2">
+          <label className="block text-sm font-medium mb-1">Recipients</label>
+          <textarea
+            required={!editingId}
+            rows={2}
+            value={form.recipients}
+            onChange={(e) => setForm((p) => ({ ...p, recipients: e.target.value }))}
+            placeholder="ops@example.com, oncall@example.com"
+            className={`${inputClass} font-mono`}
+          />
+        </div>
+      );
+    }
+    if (field === 'region') {
+      return (
+        <div key={field}>
+          <label className="block text-sm font-medium mb-1">Region</label>
+          <select
+            value={form.region}
+            onChange={(e) => setForm((p) => ({ ...p, region: e.target.value as 'us' | 'eu' }))}
+            className={inputClass}
+          >
+            <option value="us">US (api.opsgenie.com)</option>
+            <option value="eu">EU (api.eu.opsgenie.com)</option>
+          </select>
+        </div>
+      );
+    }
+    const wide = field === 'url' || meta.fields.length === 1;
+    return (
+      <div key={field} className={wide ? 'col-span-2' : ''}>
+        <label className="block text-sm font-medium mb-1">{FIELD_LABEL[field]}</label>
+        <input
+          type={field === 'url' ? 'url' : SECRET_FIELDS.has(field) ? 'password' : 'text'}
+          required={!editingId}
+          autoComplete={SECRET_FIELDS.has(field) ? 'new-password' : 'off'}
+          value={form[field]}
+          onChange={(e) => setForm((p) => ({ ...p, [field]: e.target.value }))}
+          placeholder={field === 'url' ? meta.urlPlaceholder : undefined}
+          className={`${inputClass} font-mono`}
+        />
+      </div>
+    );
   }
 
   return (
@@ -197,7 +288,7 @@ export default function NotificationChannels() {
                   value={form.name}
                   onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
                   placeholder="#ops-alerts"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  className={inputClass}
                 />
               </div>
               <div>
@@ -205,59 +296,34 @@ export default function NotificationChannels() {
                 <select
                   value={form.type}
                   disabled={editingId !== null}
-                  onChange={(e) => setForm((p) => ({ ...p, type: e.target.value as ChannelForm['type'] }))}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+                  onChange={(e) => setForm((p) => ({ ...p, type: e.target.value as NotificationChannelType }))}
+                  className={`${inputClass} disabled:opacity-50`}
                 >
-                  <option value="slack">Slack (incoming webhook)</option>
-                  <option value="discord">Discord (webhook)</option>
-                  <option value="email" disabled={!emailOn}>
-                    Email{emailOn ? '' : ' (SMTP not configured)'}
-                  </option>
-                  <option value="webhook">Webhook (JSON POST)</option>
+                  {groups.map(({ group, types }) => (
+                    <optgroup key={group} label={GROUP_LABEL[group]}>
+                      {types.map((t) => (
+                        <option key={t.type} value={t.type} disabled={t.type === 'email' && !emailOn}>
+                          {t.label}
+                          {t.type === 'email' && !emailOn ? ' (SMTP not configured)' : ''}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </select>
               </div>
+              {meta.fields.map(renderField)}
             </div>
-            {form.type === 'email' ? (
-              <div>
-                <label className="block text-sm font-medium mb-1">Recipients</label>
-                <textarea
-                  required={!editingId}
-                  rows={2}
-                  value={form.recipients}
-                  onChange={(e) => setForm((p) => ({ ...p, recipients: e.target.value }))}
-                  placeholder="ops@example.com, oncall@example.com"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
-                />
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {editingId
-                    ? 'Leave blank to keep the existing recipients. '
-                    : 'Up to 20 addresses, separated by commas or newlines. '}
-                  Sent from the address in SMT_SMTP_FROM.
-                </p>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-sm font-medium mb-1">URL</label>
-                <input
-                  type="url"
-                  required={!editingId}
-                  value={form.url}
-                  onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))}
-                  placeholder={URL_PLACEHOLDER[form.type]}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
-                />
-                {editingId && (
-                  <p className="mt-1 text-xs text-muted-foreground">Leave blank to keep the existing URL.</p>
-                )}
-              </div>
-            )}
+            <p className="text-xs text-muted-foreground">
+              {meta.help}
+              {editingId ? ' Leave the credential fields blank to keep the existing ones.' : ''}
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-sm font-medium mb-1">Send when</label>
                 <select
                   value={form.minSeverity}
                   onChange={(e) => setForm((p) => ({ ...p, minSeverity: e.target.value as ChannelForm['minSeverity'] }))}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  className={inputClass}
                 >
                   <option value="warning">Warning and above</option>
                   <option value="critical">Critical only</option>
@@ -298,56 +364,58 @@ export default function NotificationChannels() {
         ) : (
           <div className="divide-y divide-border">
             {channels.map((c) => {
-              const Icon = TYPE_ICON[c.type] ?? Webhook;
+              const m = channelMeta(c.type);
+              const Icon = c.type === 'email' ? Mail : GROUP_ICON[m.group];
               return (
-              <div key={c.id} className="flex items-center gap-3 px-4 py-3">
-                <Icon size={16} className="text-muted-foreground" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium flex items-center gap-2">
-                    {c.name}
-                    {!c.enabled && <span className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">Disabled</span>}
-                  </p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    <span className="font-mono">{c.targetHint}</span>
-                    {' · '}
-                    {c.minSeverity === 'critical' ? 'critical only' : 'warning and above'}
-                    {c.notifyOnResolve ? ' · notifies on resolve' : ''}
-                  </p>
-                  {c.lastStatus && (
-                    <p className={`mt-0.5 flex items-center gap-1 text-xs ${c.lastStatus === 'ok' ? 'text-emerald-500' : 'text-red-500'}`}>
-                      {c.lastStatus === 'ok' ? <CircleCheck size={11} /> : <CircleAlert size={11} />}
-                      {c.lastStatus === 'ok'
-                        ? `Last delivery OK${c.lastSentAt ? ` · ${new Date(c.lastSentAt).toLocaleString()}` : ''}`
-                        : `Last delivery failed: ${c.lastError ?? 'unknown error'}`}
+                <div key={c.id} className="flex items-center gap-3 px-4 py-3">
+                  <Icon size={16} className="text-muted-foreground" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium flex items-center gap-2">
+                      {c.name}
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">{m.label}</span>
+                      {!c.enabled && <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">Disabled</span>}
                     </p>
-                  )}
+                    <p className="text-xs text-muted-foreground truncate">
+                      <span className="font-mono">{c.targetHint}</span>
+                      {' · '}
+                      {c.minSeverity === 'critical' ? 'critical only' : 'warning and above'}
+                      {c.notifyOnResolve ? ' · notifies on resolve' : ''}
+                    </p>
+                    {c.lastStatus && (
+                      <p className={`mt-0.5 flex items-center gap-1 text-xs ${c.lastStatus === 'ok' ? 'text-emerald-500' : 'text-red-500'}`}>
+                        {c.lastStatus === 'ok' ? <CircleCheck size={11} /> : <CircleAlert size={11} />}
+                        {c.lastStatus === 'ok'
+                          ? `Last delivery OK${c.lastSentAt ? ` · ${new Date(c.lastSentAt).toLocaleString()}` : ''}`
+                          : `Last delivery failed: ${c.lastError ?? 'unknown error'}`}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => toggleMutation.mutate({ id: c.id, enabled: !c.enabled })}
+                    className="text-xs text-muted-foreground hover:text-foreground mr-1"
+                    title={c.enabled ? 'Disable' : 'Enable'}
+                  >
+                    {c.enabled ? 'Disable' : 'Enable'}
+                  </button>
+                  <button
+                    onClick={() => testMutation.mutate(c.id)}
+                    disabled={testMutation.isPending}
+                    className="text-muted-foreground hover:text-foreground mr-1 disabled:opacity-50"
+                    title="Send test notification"
+                  >
+                    <Send size={14} />
+                  </button>
+                  <button onClick={() => openEdit(c)} className="text-muted-foreground hover:text-foreground mr-1" title="Edit">
+                    <Pencil size={14} />
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(`Remove ${c.name}?`)) deleteMutation.mutate(c.id); }}
+                    className="text-red-500 hover:text-red-600"
+                    title="Delete"
+                  >
+                    <Trash2 size={14} />
+                  </button>
                 </div>
-                <button
-                  onClick={() => toggleMutation.mutate({ id: c.id, enabled: !c.enabled })}
-                  className="text-xs text-muted-foreground hover:text-foreground mr-1"
-                  title={c.enabled ? 'Disable' : 'Enable'}
-                >
-                  {c.enabled ? 'Disable' : 'Enable'}
-                </button>
-                <button
-                  onClick={() => testMutation.mutate(c.id)}
-                  disabled={testMutation.isPending}
-                  className="text-muted-foreground hover:text-foreground mr-1 disabled:opacity-50"
-                  title="Send test notification"
-                >
-                  <Send size={14} />
-                </button>
-                <button onClick={() => openEdit(c)} className="text-muted-foreground hover:text-foreground mr-1" title="Edit">
-                  <Pencil size={14} />
-                </button>
-                <button
-                  onClick={() => { if (confirm(`Remove ${c.name}?`)) deleteMutation.mutate(c.id); }}
-                  className="text-red-500 hover:text-red-600"
-                  title="Delete"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
               );
             })}
           </div>
