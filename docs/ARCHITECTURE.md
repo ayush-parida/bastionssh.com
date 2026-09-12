@@ -131,12 +131,16 @@ them current. Read-only and one-way: the app never creates, stops or deletes clo
 resources. Like the health monitor it runs in-process on a plain interval
 (`SMT_CLOUD_SYNC_INTERVAL` minutes) so it needs no Redis.
 
-- `providers/{aws,digitalocean,hetzner}.ts` — one adapter per provider, each with a
-  pure `toInstance()` mapper from the provider's wire shape to a normalised
-  `CloudInstance` (id, name, region, running/stopped/other, public and private IP,
-  tags, instance type). AWS uses `@aws-sdk/client-ec2`; the other two are one
-  paginated `fetch` each. Errors become a `CloudError` carrying an HTTP status
-  (403 for rejected credentials, 504 for timeouts, 502 otherwise).
+- `providers/{aws,gcp,azure,digitalocean,hetzner}.ts` — one adapter per provider,
+  each with a pure `toInstance()` mapper from the provider's wire shape to a
+  normalised `CloudInstance` (id, name, region, running/stopped/other, public and
+  private IP, tags, instance type). AWS uses `@aws-sdk/client-ec2`; GCP signs an
+  RS256 service-account JWT with Node `crypto` and pages the aggregated instances
+  list; Azure exchanges a service-principal secret for a token and runs one Resource
+  Graph query that joins VMs, NICs and public IPs; DigitalOcean and Hetzner are one
+  paginated `fetch` each. Short-lived tokens sit in a `TokenCache` refreshed five
+  minutes early. Errors become a `CloudError` carrying an HTTP status (403 for
+  rejected credentials or missing roles, 504 for timeouts, 502 otherwise).
 - `sync.ts` — `planSync()` is pure: existing cloud servers plus discovered instances
   in, a plan of creates / updates / mark-missing / skipped out. `applyPlan()` writes
   it in one transaction. A matched server only has host, region and state
@@ -156,12 +160,16 @@ cloud servers so they do not raise offline alerts.
 ### 4.3d Alert Notifications (`/server/notifications`)
 
 Alert events from the health monitor fan out to every enabled channel of the
-organisation, filtered by minimum severity and the resolve opt-in. Channel types:
-`slack` and `discord` (incoming webhooks, provider-specific payloads), `webhook`
-(structured JSON) and `email` (SMTP via nodemailer, configured instance-wide by
-`SMT_SMTP_URL` / `SMT_SMTP_FROM`). A channel's target — the webhook URL or the
-recipient list — is vault-encrypted; only a masked hint is returned to the client.
-Delivery is fire-and-forget with one retry; a 4xx from a webhook is final.
+organisation, filtered by minimum severity and the resolve opt-in. Each channel
+type is a `ChannelAdapter` in `notifications/channels/`: `prepare()` validates the
+form input and packs it into the single vault-encrypted target string (plus a masked
+hint), `build()` turns an event into the outbound request. Types: `slack`
+(also Mattermost), `discord`, `teams` (Adaptive Card), `googlechat`, `telegram`,
+`ntfy`, `gotify`, `pushover`, `pagerduty` and `opsgenie` (open/resolve keyed on
+`smt:<serverId>:<alertType>`; a test triggers then resolves), `webhook` (structured
+JSON) and `email` (SMTP via nodemailer, configured instance-wide by `SMT_SMTP_URL`
+/ `SMT_SMTP_FROM`). `user:pass@` in a URL becomes an HTTP Basic header. Delivery is
+fire-and-forget with one retry; a 4xx is final.
 
 ### 4.4 SSH Broker (`/server/ssh`)
 

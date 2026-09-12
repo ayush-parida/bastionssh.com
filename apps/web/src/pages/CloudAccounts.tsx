@@ -31,6 +31,11 @@ interface AccountForm {
   accessKeyId: string;
   secretAccessKey: string;
   token: string;
+  serviceAccountJson: string;
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  subscriptionId: string;
   /** Comma separated; AWS only. */
   regions: string;
   defaultUsername: string;
@@ -45,6 +50,11 @@ const empty: AccountForm = {
   accessKeyId: '',
   secretAccessKey: '',
   token: '',
+  serviceAccountJson: '',
+  tenantId: '',
+  clientId: '',
+  clientSecret: '',
+  subscriptionId: '',
   regions: '',
   defaultUsername: 'root',
   defaultKeyId: '',
@@ -54,6 +64,8 @@ const empty: AccountForm = {
 
 const PERMISSION_HINT: Record<CloudProvider, string> = {
   aws: 'Needs an IAM user or role with ec2:DescribeInstances and ec2:DescribeRegions. Nothing is ever created or changed in your account.',
+  gcp: 'Create a service account with the Compute Viewer role, download a JSON key, and paste the whole file here.',
+  azure: 'Register an app (Entra ID → App registrations), create a client secret, and give the app the Reader role on the subscription.',
   digitalocean: 'Create a personal access token with read scope only (API → Tokens).',
   hetzner: 'Create a read-only API token for the project (Security → API tokens).',
 };
@@ -77,13 +89,30 @@ function describeSummary(s: SyncSummary): string {
 }
 
 /** Only the credential that matches the provider is sent; blank means "keep" on edit. */
-function credentialFields(form: AccountForm): Pick<CreateCloudAccountRequest, 'aws' | 'token'> {
-  if (form.provider === 'aws') {
-    return form.accessKeyId && form.secretAccessKey
-      ? { aws: { accessKeyId: form.accessKeyId, secretAccessKey: form.secretAccessKey } }
-      : {};
+function credentialFields(
+  form: AccountForm,
+): Pick<CreateCloudAccountRequest, 'aws' | 'gcp' | 'azure' | 'token'> {
+  switch (form.provider) {
+    case 'aws':
+      return form.accessKeyId && form.secretAccessKey
+        ? { aws: { accessKeyId: form.accessKeyId, secretAccessKey: form.secretAccessKey } }
+        : {};
+    case 'gcp':
+      return form.serviceAccountJson.trim() ? { gcp: { serviceAccountJson: form.serviceAccountJson.trim() } } : {};
+    case 'azure':
+      return form.tenantId && form.clientId && form.clientSecret && form.subscriptionId
+        ? {
+            azure: {
+              tenantId: form.tenantId.trim(),
+              clientId: form.clientId.trim(),
+              clientSecret: form.clientSecret,
+              subscriptionId: form.subscriptionId.trim(),
+            },
+          }
+        : {};
+    default:
+      return form.token ? { token: form.token } : {};
   }
-  return form.token ? { token: form.token } : {};
 }
 
 export default function CloudAccountsPage() {
@@ -178,11 +207,9 @@ export default function CloudAccountsPage() {
   function openEdit(a: CloudAccount) {
     setEditId(a.id);
     setForm({
+      ...empty,
       name: a.name,
       provider: a.provider,
-      accessKeyId: '',
-      secretAccessKey: '',
-      token: '',
       regions: a.regions.join(', '),
       defaultUsername: a.defaultUsername,
       defaultKeyId: a.defaultKeyId ?? '',
@@ -221,7 +248,7 @@ export default function CloudAccountsPage() {
         <div>
           <h1 className="text-2xl font-bold">Cloud Accounts</h1>
           <p className="text-muted-foreground text-sm">
-            Import and keep servers in sync from AWS EC2, DigitalOcean and Hetzner Cloud
+            Import and keep servers in sync from AWS, Google Cloud, Azure, DigitalOcean and Hetzner
           </p>
         </div>
         {canManage && (
@@ -302,6 +329,53 @@ export default function CloudAccountsPage() {
                     value={form.regions}
                     onChange={(e) => setForm((p) => ({ ...p, regions: e.target.value }))}
                     placeholder="us-east-1, eu-west-1"
+                    className={`${inputClass} font-mono`}
+                  />
+                </div>
+              </>
+            ) : form.provider === 'gcp' ? (
+              <div className="col-span-2">
+                <label className="mb-1 block text-sm font-medium">Service account key (JSON)</label>
+                <textarea
+                  required={!editId}
+                  rows={6}
+                  autoComplete="off"
+                  value={form.serviceAccountJson}
+                  onChange={(e) => setForm((p) => ({ ...p, serviceAccountJson: e.target.value }))}
+                  placeholder='{ "type": "service_account", "project_id": "…", "client_email": "…", "private_key": "…" }'
+                  className={`${inputClass} font-mono text-xs`}
+                />
+              </div>
+            ) : form.provider === 'azure' ? (
+              <>
+                {(
+                  [
+                    ['tenantId', 'Tenant (directory) id'],
+                    ['clientId', 'Client (application) id'],
+                    ['subscriptionId', 'Subscription id'],
+                  ] as const
+                ).map(([field, label]) => (
+                  <div key={field}>
+                    <label className="mb-1 block text-sm font-medium">{label}</label>
+                    <input
+                      type="text"
+                      required={!editId}
+                      autoComplete="off"
+                      value={form[field]}
+                      onChange={(e) => setForm((p) => ({ ...p, [field]: e.target.value }))}
+                      placeholder="00000000-0000-0000-0000-000000000000"
+                      className={`${inputClass} font-mono`}
+                    />
+                  </div>
+                ))}
+                <div>
+                  <label className="mb-1 block text-sm font-medium">Client secret</label>
+                  <input
+                    type="password"
+                    required={!editId}
+                    autoComplete="new-password"
+                    value={form.clientSecret}
+                    onChange={(e) => setForm((p) => ({ ...p, clientSecret: e.target.value }))}
                     className={`${inputClass} font-mono`}
                   />
                 </div>

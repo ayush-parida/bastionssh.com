@@ -22,12 +22,20 @@ import {
   type CloudAccountRow,
   type CloudCredentials,
 } from '../../cloud/index.js';
+import { parseServiceAccount } from '../../cloud/providers/gcp.js';
 
 const awsSchema = z.object({
   accessKeyId: z.string().min(16).max(128),
   secretAccessKey: z.string().min(16).max(256),
 });
 const tokenSchema = z.string().min(8).max(512);
+const gcpSchema = z.object({ serviceAccountJson: z.string().min(50).max(20_000) });
+const azureSchema = z.object({
+  tenantId: z.string().uuid(),
+  clientId: z.string().uuid(),
+  clientSecret: z.string().min(8).max(512),
+  subscriptionId: z.string().uuid(),
+});
 
 const base = z.object({
   name: z.string().min(1).max(100),
@@ -40,21 +48,55 @@ const base = z.object({
 
 const createSchema = z.discriminatedUnion('provider', [
   base.extend({ provider: z.literal('aws'), aws: awsSchema }),
+  base.extend({ provider: z.literal('gcp'), gcp: gcpSchema }),
+  base.extend({ provider: z.literal('azure'), azure: azureSchema }),
   base.extend({ provider: z.literal('digitalocean'), token: tokenSchema }),
   base.extend({ provider: z.literal('hetzner'), token: tokenSchema }),
 ]);
 
-const updateSchema = base.partial().extend({
+const credentialInputs = {
   aws: awsSchema.optional(),
+  gcp: gcpSchema.optional(),
+  azure: azureSchema.optional(),
   token: tokenSchema.optional(),
-});
+};
 
-type CreateBody = z.infer<typeof createSchema>;
+const updateSchema = base.partial().extend(credentialInputs);
 
-function toCredentials(body: CreateBody): CloudCredentials {
-  return body.provider === 'aws'
-    ? { kind: 'aws', ...body.aws }
-    : { kind: 'token', token: body.token };
+type CredentialInput = z.infer<z.ZodObject<typeof credentialInputs>>;
+
+/** Which input field carries the secret for each provider. */
+const CREDENTIAL_FIELD: Record<CloudProvider, keyof CredentialInput> = {
+  aws: 'aws',
+  gcp: 'gcp',
+  azure: 'azure',
+  digitalocean: 'token',
+  hetzner: 'token',
+};
+
+/**
+ * Build credentials from whichever field the provider uses. Returns null when
+ * none was sent (an update keeping the stored secret); throws a CloudError 400
+ * when a field for a different provider was sent or the key file is unusable.
+ */
+function credentialsFrom(provider: CloudProvider, body: CredentialInput): CloudCredentials | null {
+  const expected = CREDENTIAL_FIELD[provider];
+  for (const field of Object.keys(credentialInputs) as (keyof CredentialInput)[]) {
+    if (field !== expected && body[field] !== undefined) {
+      throw new CloudError(`"${field}" credentials do not match a ${provider} account`, 400);
+    }
+  }
+  if (body[expected] === undefined) return null;
+  switch (provider) {
+    case 'aws':
+      return { kind: 'aws', ...body.aws! };
+    case 'gcp':
+      return parseServiceAccount(body.gcp!.serviceAccountJson);
+    case 'azure':
+      return { kind: 'azure', ...body.azure! };
+    default:
+      return { kind: 'token', token: body.token! };
+  }
 }
 
 /** Credentials never leave the server; regions and the summary are stored as JSON. */
@@ -123,7 +165,12 @@ export async function cloudRoutes(app: FastifyInstance) {
     }
 
     // Prove the credentials work before storing them
-    const creds = toCredentials(body);
+    let creds: CloudCredentials;
+    try {
+      creds = credentialsFrom(body.provider, body)!;
+    } catch (err) {
+      return sendError(reply, err);
+    }
     const test = await testCredentials(body.provider, creds, body.regions);
     if (!test.ok) return reply.status(400).send({ error: test.error ?? 'Credential check failed' });
 
@@ -164,11 +211,11 @@ export async function cloudRoutes(app: FastifyInstance) {
     }
 
     const provider = existing.provider as CloudProvider;
-    let creds: CloudCredentials | null = null;
-    if (provider === 'aws' && body.aws) creds = { kind: 'aws', ...body.aws };
-    if (provider !== 'aws' && body.token) creds = { kind: 'token', token: body.token };
-    if ((provider === 'aws' && body.token) || (provider !== 'aws' && body.aws)) {
-      return reply.status(400).send({ error: `Credentials do not match a ${provider} account` });
+    let creds: CloudCredentials | null;
+    try {
+      creds = credentialsFrom(provider, body);
+    } catch (err) {
+      return sendError(reply, err);
     }
 
     const regions = body.regions ?? parseRegions(existing.regions);

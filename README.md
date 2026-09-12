@@ -17,9 +17,9 @@
 - 💻 **In-Browser Terminal** — Full interactive SSH sessions in your browser via WebSocket + xterm.js.
 - 📌 **Saved Commands per Server** — Save frequently-used commands against any server and run them with one click.
 - ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view history, logs, and failures.
-- ☁️ **Cloud Inventory Sync** — Register an AWS, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
+- ☁️ **Cloud Inventory Sync** — Register an AWS, Google Cloud, Azure, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
 - 🪣 **Object Storage** — Register AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, Google Cloud Storage, Hetzner Object Storage or any S3-compatible endpoint (presets fill in the endpoint shape and region). List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
-- 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up — delivered to Slack, Discord, email or any webhook. Nothing to install on the servers themselves.
+- 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up — delivered to Slack, Discord, Teams, Google Chat, Telegram, PagerDuty, Opsgenie, ntfy, Gotify, Pushover, email or any webhook. Nothing to install on the servers themselves.
 - 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
 - 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or binary). Each team/company runs an isolated environment they fully control.
 - 🤖 **Bring Your Own AI** — Plug in OpenAI, Anthropic Claude, or any local model (Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible endpoint) to:
@@ -178,10 +178,18 @@ Under **Settings → Alert notifications**, add one or more channels. Each chann
 
 | Channel | What you need |
 | ------- | ------------- |
-| Slack | An incoming-webhook URL |
+| Slack / Mattermost | An incoming-webhook URL |
 | Discord | A channel webhook URL (Channel settings → Integrations → Webhooks) |
+| Microsoft Teams | A Workflows webhook URL (posts an Adaptive Card) |
+| Google Chat | A space webhook URL |
+| Telegram | A bot token from @BotFather and the chat id |
+| PagerDuty | An Events API v2 integration key — incidents open on alert and resolve when it clears |
+| Opsgenie | An API integration key and region (US / EU) — alerts are created and closed by alias |
+| ntfy | The topic URL; `user:password@host` for a protected server |
+| Gotify | Your server's `/message?token=…` URL |
+| Pushover | An application token and your user key |
 | Email | SMTP configured on the instance (below); the channel lists up to 20 recipients |
-| Webhook | Any HTTPS endpoint — receives a structured JSON body |
+| Webhook | Any HTTPS endpoint — receives a structured JSON body; `user:password@` becomes Basic auth |
 
 Email needs two environment variables. The Email option stays disabled in the UI until they are set:
 
@@ -199,6 +207,8 @@ Under **Cloud Accounts**, register a provider credential once and stop adding se
 | Provider | Credential | Minimum permission |
 | -------- | ---------- | ------------------ |
 | AWS EC2 | Access key ID + secret | `ec2:DescribeInstances`, `ec2:DescribeRegions` |
+| Google Cloud | Service account JSON key | Compute Viewer on the project |
+| Microsoft Azure | Service principal (tenant, client id, secret, subscription) | Reader on the subscription |
 | DigitalOcean | Personal access token | read scope |
 | Hetzner Cloud | Project API token | read |
 

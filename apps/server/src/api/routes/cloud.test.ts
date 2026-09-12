@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { generateKeyPairSync } from 'node:crypto';
 import type { CloudInstance } from '@smt/shared';
 
 // No network: the provider adapter is replaced, everything around it is real.
@@ -215,6 +216,46 @@ describe('cloud account routes', () => {
     const account = (await app.inject({ method: 'GET', url: '/api/cloud/accounts', headers: viewer.headers })).json()[0];
     expect(account.lastStatus).toBe('failed');
     expect(account.lastError).toContain('timed out');
+  });
+
+  it('accepts a GCP service account key and an Azure service principal', async () => {
+    const post = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/api/cloud/accounts', headers: admin.headers, payload });
+
+    const badJson = await post({ name: 'g', provider: 'gcp', gcp: { serviceAccountJson: '{ not json at all, but long enough to pass the length check' } });
+    expect(badJson.statusCode).toBe(400);
+    expect(badJson.json().error).toContain('valid JSON');
+
+    const pem = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+    const keyFile = JSON.stringify({
+      type: 'service_account',
+      project_id: 'proj',
+      client_email: 'sync@proj.iam.gserviceaccount.com',
+      private_key: pem,
+    });
+    provider.list.mockResolvedValueOnce([]);
+    const gcp = await post({ name: 'GCP', provider: 'gcp', gcp: { serviceAccountJson: keyFile } });
+    expect(gcp.statusCode).toBe(201);
+    expect(gcp.json().credentialHint).toBe('sync@proj.iam.gserviceaccount.com');
+    expect(JSON.stringify(gcp.json())).not.toContain('PRIVATE KEY');
+
+    const wrongShape = await post({ name: 'x', provider: 'azure', token: 'a-token-for-hetzner' });
+    expect(wrongShape.statusCode).toBe(400);
+
+    provider.list.mockResolvedValueOnce([]);
+    const azure = await post({
+      name: 'Azure',
+      provider: 'azure',
+      azure: {
+        tenantId: '11111111-1111-1111-1111-111111111111',
+        clientId: '22222222-2222-2222-2222-222222222222',
+        clientSecret: 'very-secret-value',
+        subscriptionId: '33333333-3333-3333-3333-333333333333',
+      },
+    });
+    expect(azure.statusCode).toBe(201);
+    expect(azure.json().credentialHint).toBe('22222222… / 33333333…');
+    expect(JSON.stringify(azure.json())).not.toContain('very-secret');
   });
 
   it('hides the account from another organisation', async () => {
