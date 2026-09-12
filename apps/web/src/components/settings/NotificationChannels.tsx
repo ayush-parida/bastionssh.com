@@ -1,14 +1,35 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
-import type { NotificationChannel, NotificationTestResult } from '@smt/shared';
-import { Plus, Trash2, Pencil, Send, BellRing, Webhook, Hash, CircleAlert, CircleCheck } from 'lucide-react';
+import type {
+  CreateNotificationChannelRequest,
+  NotificationCapabilities,
+  NotificationChannel,
+  NotificationChannelType,
+  NotificationTestResult,
+  UpdateNotificationChannelRequest,
+} from '@smt/shared';
+import {
+  Plus,
+  Trash2,
+  Pencil,
+  Send,
+  BellRing,
+  Webhook,
+  Hash,
+  Mail,
+  MessageCircle,
+  CircleAlert,
+  CircleCheck,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ChannelForm {
   name: string;
-  type: 'webhook' | 'slack';
+  type: NotificationChannelType;
   url: string;
+  /** Comma / newline separated in the form; sent as an array. */
+  recipients: string;
   minSeverity: 'warning' | 'critical';
   notifyOnResolve: boolean;
 }
@@ -17,9 +38,36 @@ const emptyForm: ChannelForm = {
   name: '',
   type: 'slack',
   url: '',
+  recipients: '',
   minSeverity: 'warning',
   notifyOnResolve: true,
 };
+
+const URL_PLACEHOLDER: Record<Exclude<NotificationChannelType, 'email'>, string> = {
+  slack: 'https://hooks.slack.com/services/…',
+  discord: 'https://discord.com/api/webhooks/…',
+  webhook: 'https://example.com/hooks/alerts',
+};
+
+const TYPE_ICON: Record<NotificationChannelType, typeof Hash> = {
+  slack: Hash,
+  discord: MessageCircle,
+  email: Mail,
+  webhook: Webhook,
+};
+
+function splitRecipients(input: string): string[] {
+  return [...new Set(input.split(/[\s,;]+/).map((s) => s.trim()).filter(Boolean))];
+}
+
+/** Only the field that matches the channel type is sent; blank means "keep" on edit. */
+function targetFields(form: ChannelForm): { url?: string; recipients?: string[] } {
+  if (form.type === 'email') {
+    const recipients = splitRecipients(form.recipients);
+    return recipients.length ? { recipients } : {};
+  }
+  return form.url ? { url: form.url } : {};
+}
 
 const QUERY_KEY = ['notification-channels'];
 
@@ -34,23 +82,41 @@ export default function NotificationChannels() {
     queryFn: () => api.get('/notifications/channels'),
   });
 
+  const { data: caps } = useQuery<NotificationCapabilities>({
+    queryKey: ['notification-capabilities'],
+    queryFn: () => api.get('/notifications/capabilities'),
+    staleTime: 5 * 60_000,
+  });
+  const emailOn = caps?.email ?? false;
+
   const invalidate = () => qc.invalidateQueries({ queryKey: QUERY_KEY });
 
   const createMutation = useMutation({
-    mutationFn: (body: ChannelForm) => api.post('/notifications/channels', body),
+    mutationFn: (body: ChannelForm) => {
+      const payload: CreateNotificationChannelRequest = {
+        name: body.name,
+        type: body.type,
+        minSeverity: body.minSeverity,
+        notifyOnResolve: body.notifyOnResolve,
+        ...targetFields(body),
+      };
+      return api.post('/notifications/channels', payload);
+    },
     onSuccess: () => { invalidate(); closeForm(); toast.success('Channel added'); },
     onError: (err: Error) => toast.error(err.message),
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, body }: { id: string; body: ChannelForm }) =>
-      api.patch(`/notifications/channels/${id}`, {
+    mutationFn: ({ id, body }: { id: string; body: ChannelForm }) => {
+      // Blank target means "keep the stored one" — it is never sent back to the client
+      const payload: UpdateNotificationChannelRequest = {
         name: body.name,
-        // Blank means "keep the stored URL" — it is never sent back to the client
-        ...(body.url ? { url: body.url } : {}),
         minSeverity: body.minSeverity,
         notifyOnResolve: body.notifyOnResolve,
-      }),
+        ...targetFields(body),
+      };
+      return api.patch(`/notifications/channels/${id}`, payload);
+    },
     onSuccess: () => { invalidate(); closeForm(); toast.success('Channel updated'); },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -84,6 +150,7 @@ export default function NotificationChannels() {
       name: channel.name,
       type: channel.type,
       url: '',
+      recipients: '',
       minSeverity: channel.minSeverity,
       notifyOnResolve: channel.notifyOnResolve,
     });
@@ -142,24 +209,48 @@ export default function NotificationChannels() {
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
                 >
                   <option value="slack">Slack (incoming webhook)</option>
+                  <option value="discord">Discord (webhook)</option>
+                  <option value="email" disabled={!emailOn}>
+                    Email{emailOn ? '' : ' (SMTP not configured)'}
+                  </option>
                   <option value="webhook">Webhook (JSON POST)</option>
                 </select>
               </div>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">URL</label>
-              <input
-                type="url"
-                required={!editingId}
-                value={form.url}
-                onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))}
-                placeholder={form.type === 'slack' ? 'https://hooks.slack.com/services/…' : 'https://example.com/hooks/alerts'}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-              {editingId && (
-                <p className="mt-1 text-xs text-muted-foreground">Leave blank to keep the existing URL.</p>
-              )}
-            </div>
+            {form.type === 'email' ? (
+              <div>
+                <label className="block text-sm font-medium mb-1">Recipients</label>
+                <textarea
+                  required={!editingId}
+                  rows={2}
+                  value={form.recipients}
+                  onChange={(e) => setForm((p) => ({ ...p, recipients: e.target.value }))}
+                  placeholder="ops@example.com, oncall@example.com"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {editingId
+                    ? 'Leave blank to keep the existing recipients. '
+                    : 'Up to 20 addresses, separated by commas or newlines. '}
+                  Sent from the address in SMT_SMTP_FROM.
+                </p>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-sm font-medium mb-1">URL</label>
+                <input
+                  type="url"
+                  required={!editingId}
+                  value={form.url}
+                  onChange={(e) => setForm((p) => ({ ...p, url: e.target.value }))}
+                  placeholder={URL_PLACEHOLDER[form.type]}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+                {editingId && (
+                  <p className="mt-1 text-xs text-muted-foreground">Leave blank to keep the existing URL.</p>
+                )}
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-sm font-medium mb-1">Send when</label>
@@ -206,9 +297,11 @@ export default function NotificationChannels() {
           </div>
         ) : (
           <div className="divide-y divide-border">
-            {channels.map((c) => (
+            {channels.map((c) => {
+              const Icon = TYPE_ICON[c.type] ?? Webhook;
+              return (
               <div key={c.id} className="flex items-center gap-3 px-4 py-3">
-                {c.type === 'slack' ? <Hash size={16} className="text-muted-foreground" /> : <Webhook size={16} className="text-muted-foreground" />}
+                <Icon size={16} className="text-muted-foreground" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium flex items-center gap-2">
                     {c.name}
@@ -255,7 +348,8 @@ export default function NotificationChannels() {
                   <Trash2 size={14} />
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
