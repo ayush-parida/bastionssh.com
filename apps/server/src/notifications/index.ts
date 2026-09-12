@@ -4,9 +4,20 @@ import { getDb } from '../db/index.js';
 import { notificationChannels, servers } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import logger from '../logger.js';
-import { buildPayload, maskUrl, passesSeverityFilter, type AlertEvent, type ServerRef } from './format.js';
+import {
+  buildPayload,
+  emailBody,
+  emailSubject,
+  maskUrl,
+  parseRecipients,
+  passesSeverityFilter,
+  type AlertEvent,
+  type ServerRef,
+} from './format.js';
+import { emailAvailable, sendEmail } from './email.js';
 
-export { maskUrl, type AlertEvent } from './format.js';
+export { describeRecipients, maskUrl, type AlertEvent } from './format.js';
+export { emailAvailable } from './email.js';
 
 const TIMEOUT_MS = 10_000;
 const MAX_ATTEMPTS = 2;
@@ -14,7 +25,9 @@ const RETRY_DELAY_MS = 1_000;
 
 type ChannelRow = typeof notificationChannels.$inferSelect;
 
-export class InvalidWebhookUrlError extends Error {}
+/** Bad channel input the caller can fix — maps to a 400. */
+export class ChannelInputError extends Error {}
+export class InvalidWebhookUrlError extends ChannelInputError {}
 
 /**
  * Reject URLs we should never POST to. This is a guard against an obvious
@@ -41,36 +54,56 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+class FinalDeliveryError extends Error {}
+
 /**
- * POST the payload, retrying once on a network error or 5xx. A 4xx is final —
- * a deleted Slack hook will not start working on the second try.
+ * Run `fn`, retrying once after a short pause. A `FinalDeliveryError` is not
+ * retried — the caller already knows the second attempt cannot succeed.
  */
-async function post(url: string, body: unknown): Promise<void> {
+async function withRetry(fn: () => Promise<void>): Promise<void> {
   let lastError = '';
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
-
-      if (res.ok) return;
-
-      lastError = `HTTP ${res.status}`;
-      if (res.status < 500) throw new Error(lastError);
+      await fn();
+      return;
     } catch (err) {
+      if (err instanceof FinalDeliveryError) throw new Error(err.message);
       lastError = err instanceof Error ? err.message : String(err);
-      // A 4xx was rethrown above and should not be retried
-      if (lastError.startsWith('HTTP 4')) throw new Error(lastError);
     }
-
     if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS);
   }
 
   throw new Error(lastError || 'Delivery failed');
+}
+
+/**
+ * POST the payload, retrying once on a network error or 5xx. A 4xx is final —
+ * a deleted Slack hook will not start working on the second try.
+ */
+function post(url: string, body: unknown): Promise<void> {
+  return withRetry(async () => {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.ok) return;
+    if (res.status < 500) throw new FinalDeliveryError(`HTTP ${res.status}`);
+    throw new Error(`HTTP ${res.status}`);
+  });
+}
+
+/** Deliver an email alert; the recipient list is what the channel has vaulted. */
+function mail(recipients: string, event: AlertEvent, server: ServerRef, sentAt: string): Promise<void> {
+  if (!emailAvailable()) {
+    return Promise.reject(new Error('Email delivery is not configured on this instance'));
+  }
+  const { text, html } = emailBody(event, server, sentAt);
+  return withRetry(() =>
+    sendEmail({ to: parseRecipients(recipients), subject: emailSubject(event, server), text, html }),
+  );
 }
 
 function recordResult(channelId: string, error: string | null): void {
@@ -93,14 +126,14 @@ function recordResult(channelId: string, error: string | null): void {
 /** Deliver one event to one channel. Resolves either way — never throws. */
 async function deliver(channel: ChannelRow, event: AlertEvent, server: ServerRef): Promise<boolean> {
   try {
-    const url = await vault.decrypt(channel.encryptedUrl, channel.id);
-    const payload = buildPayload(
-      channel.type as NotificationChannelType,
-      event,
-      server,
-      new Date().toISOString(),
-    );
-    await post(url, payload);
+    // For webhook-style channels this is the URL; for email it is the recipient list.
+    const target = await vault.decrypt(channel.encryptedUrl, channel.id);
+    const sentAt = new Date().toISOString();
+    if (channel.type === 'email') {
+      await mail(target, event, server, sentAt);
+    } else {
+      await post(target, buildPayload(channel.type as NotificationChannelType, event, server, sentAt));
+    }
     recordResult(channel.id, null);
     return true;
   } catch (err) {
