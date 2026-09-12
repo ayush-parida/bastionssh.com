@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, index } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // ── Users & Auth ─────────────────────────────────────────────────────────────
 
@@ -119,30 +119,82 @@ export const sshKeys = sqliteTable('ssh_keys', {
     .$defaultFn(() => new Date().toISOString()),
 });
 
+// ── Cloud Accounts ────────────────────────────────────────────────────────────
+
+/** One provider credential (AWS key pair, DO / Hetzner token) whose instances are synced into `servers`. */
+export const cloudAccounts = sqliteTable(
+  'cloud_accounts',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    provider: text('provider').notNull(), // aws | digitalocean | hetzner
+    encryptedCredentials: text('encrypted_credentials').notNull(), // vault-encrypted JSON
+    credentialHint: text('credential_hint').notNull(), // masked, safe to show
+    regions: text('regions').notNull().default('[]'), // JSON array, aws only; [] = discover
+    defaultUsername: text('default_username').notNull().default('root'),
+    defaultKeyId: text('default_key_id').references(() => sshKeys.id, { onDelete: 'set null' }),
+    autoImport: integer('auto_import', { mode: 'boolean' }).notNull().default(true),
+    syncEnabled: integer('sync_enabled', { mode: 'boolean' }).notNull().default(true),
+    lastSyncAt: text('last_sync_at'),
+    lastStatus: text('last_status'), // ok | failed
+    lastError: text('last_error'),
+    lastSummary: text('last_summary'), // JSON SyncSummary
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text('updated_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    orgIdx: index('cloud_accounts_org_idx').on(t.orgId),
+  }),
+);
+
 // ── Servers ───────────────────────────────────────────────────────────────────
 
-export const servers = sqliteTable('servers', {
-  id: text('id').primaryKey(),
-  orgId: text('org_id')
-    .notNull()
-    .references(() => organizations.id, { onDelete: 'cascade' }),
-  name: text('name').notNull(),
-  host: text('host').notNull(),
-  port: integer('port').notNull().default(22),
-  username: text('username').notNull(),
-  defaultKeyId: text('default_key_id').references(() => sshKeys.id),
-  encryptedPassword: text('encrypted_password'), // AES-256-GCM encrypted, null = key-based auth
-  tags: text('tags').notNull().default('[]'), // JSON array
-  notes: text('notes'),
-  monitoringEnabled: integer('monitoring_enabled', { mode: 'boolean' }).notNull().default(true),
-  createdBy: text('created_by').notNull(),
-  createdAt: text('created_at')
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-  updatedAt: text('updated_at')
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-});
+export const servers = sqliteTable(
+  'servers',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    host: text('host').notNull(),
+    port: integer('port').notNull().default(22),
+    username: text('username').notNull(),
+    defaultKeyId: text('default_key_id').references(() => sshKeys.id),
+    encryptedPassword: text('encrypted_password'), // AES-256-GCM encrypted, null = key-based auth
+    tags: text('tags').notNull().default('[]'), // JSON array
+    notes: text('notes'),
+    monitoringEnabled: integer('monitoring_enabled', { mode: 'boolean' }).notNull().default(true),
+    // Set when the row was imported from a cloud account. The account link is
+    // dropped when the account is deleted; the server itself stays.
+    cloudAccountId: text('cloud_account_id').references(() => cloudAccounts.id, {
+      onDelete: 'set null',
+    }),
+    cloudProvider: text('cloud_provider'), // aws | digitalocean | hetzner
+    cloudInstanceId: text('cloud_instance_id'),
+    cloudRegion: text('cloud_region'),
+    cloudState: text('cloud_state'), // running | stopped | other | missing
+    cloudSyncedAt: text('cloud_synced_at'),
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text('updated_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    cloudInstanceIdx: uniqueIndex('servers_cloud_instance_idx').on(t.cloudAccountId, t.cloudInstanceId),
+  }),
+);
 
 // ── Saved Commands ────────────────────────────────────────────────────────────
 
