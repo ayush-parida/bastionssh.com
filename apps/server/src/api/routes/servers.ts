@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import type { CloudProvider, CloudServerState, Server } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
@@ -33,13 +34,36 @@ export function parseTags(raw: string | null): string[] {
   }
 }
 
-function sanitize(row: typeof servers.$inferSelect) {
-  const { encryptedPassword, ...safe } = row;
+/** Strip the secret, expand tags, and fold the cloud_* columns into one object. */
+export function sanitize(row: typeof servers.$inferSelect): Server {
+  const {
+    encryptedPassword,
+    cloudAccountId,
+    cloudProvider,
+    cloudInstanceId,
+    cloudRegion,
+    cloudState,
+    cloudSyncedAt,
+    ...safe
+  } = row;
   return {
     ...safe,
+    defaultKeyId: safe.defaultKeyId ?? undefined,
+    notes: safe.notes ?? undefined,
     tags: parseTags(row.tags),
     authType: encryptedPassword ? 'password' : 'key',
-  } as const;
+    cloud:
+      cloudInstanceId && cloudProvider
+        ? {
+            accountId: cloudAccountId,
+            provider: cloudProvider as CloudProvider,
+            instanceId: cloudInstanceId,
+            region: cloudRegion,
+            state: (cloudState ?? 'other') as CloudServerState,
+            syncedAt: cloudSyncedAt,
+          }
+        : null,
+  };
 }
 
 export async function serverRoutes(app: FastifyInstance) {
