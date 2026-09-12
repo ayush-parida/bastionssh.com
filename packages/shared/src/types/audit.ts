@@ -49,7 +49,12 @@ export type AuditAction =
   | 'storage.upload'
   | 'storage.mkdir'
   | 'storage.rename'
-  | 'storage.delete';
+  | 'storage.delete'
+  | 'cloud_account.create'
+  | 'cloud_account.update'
+  | 'cloud_account.delete'
+  | 'cloud_account.test'
+  | 'cloud_account.sync';
 
 export interface AuditLogEntry {
   id: string;

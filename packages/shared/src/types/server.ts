@@ -1,3 +1,5 @@
+import type { ServerCloudInfo } from './cloud.js';
+
 export interface Server {
   id: string;
   orgId: string;
@@ -9,6 +11,8 @@ export interface Server {
   defaultKeyId?: string;
   tags: string[];
   notes?: string;
+  /** Present when the server came from a cloud account sync. */
+  cloud: ServerCloudInfo | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
