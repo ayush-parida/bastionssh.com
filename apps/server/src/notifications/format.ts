@@ -1,9 +1,5 @@
-import type {
-  AlertSeverity,
-  AlertType,
-  AlertWebhookPayload,
-  NotificationChannelType,
-} from '@smt/shared';
+import type { AlertSeverity, AlertType, NotificationChannelType } from '@smt/shared';
+import { getAdapter } from './channels/index.js';
 
 /** One thing worth telling someone about. Pure data — no DB rows, so it is testable. */
 export interface AlertEvent {
@@ -76,19 +72,6 @@ export function summarize(event: AlertEvent, server: ServerRef): string {
   return `${alertLabel(event.type)} on ${server.name} (${server.host}) — ${event.message}`;
 }
 
-const DISCORD_COLOR = {
-  critical: 0xef4444,
-  warning: 0xf59e0b,
-  resolved: 0x22c55e,
-  test: 0x3b82f6,
-} as const;
-
-function eventTone(event: AlertEvent): keyof typeof DISCORD_COLOR {
-  if (event.kind === 'resolved') return 'resolved';
-  if (event.kind === 'test') return 'test';
-  return event.severity;
-}
-
 function escapeHtml(s: string): string {
   const map: Record<string, string> = {
     '&': '&amp;',
@@ -146,15 +129,9 @@ export function parseRecipients(stored: string): string[] {
     .filter(Boolean);
 }
 
-function slackIcon(event: AlertEvent): string {
-  if (event.kind === 'resolved') return ':white_check_mark:';
-  if (event.kind === 'test') return ':bell:';
-  return event.severity === 'critical' ? ':rotating_light:' : ':warning:';
-}
-
 /**
- * Build the request body for a channel. Slack gets its incoming-webhook shape;
- * a plain webhook gets structured JSON it can route on.
+ * Build the request body for an HTTP channel. Kept as a thin wrapper over the
+ * channel adapters so callers (and older tests) have one simple entry point.
  */
 export function buildPayload(
   type: NotificationChannelType,
@@ -162,36 +139,5 @@ export function buildPayload(
   server: ServerRef,
   sentAt: string,
 ): unknown {
-  if (type === 'slack') {
-    const prefix = event.kind === 'opened' ? `[${event.severity.toUpperCase()}] ` : '';
-    return { text: `${slackIcon(event)} ${prefix}${summarize(event, server)}` };
-  }
-
-  if (type === 'discord') {
-    const title =
-      event.kind === 'test'
-        ? 'Test notification'
-        : `${event.kind === 'resolved' ? 'Resolved: ' : ''}${alertLabel(event.type)}`;
-    const description =
-      `${server.name} (${server.host})` + (event.kind === 'opened' ? `\n${event.message}` : '');
-    return {
-      content: summarize(event, server),
-      embeds: [{ title, description, color: DISCORD_COLOR[eventTone(event)] }],
-    };
-  }
-
-  const payload: AlertWebhookPayload = {
-    event: event.kind === 'test' ? 'test' : `alert.${event.kind}`,
-    alert: {
-      type: event.type,
-      severity: event.severity,
-      message: event.kind === 'test' ? summarize(event, server) : event.message,
-      ...(event.value !== undefined && { value: event.value }),
-      ...(event.threshold !== undefined && { threshold: event.threshold }),
-      ...(event.openedAt && { openedAt: event.openedAt }),
-    },
-    server: { id: server.id, name: server.name, host: server.host },
-    sentAt,
-  };
-  return payload;
+  return getAdapter(type).build('https://example.invalid', event, server, sentAt).body;
 }

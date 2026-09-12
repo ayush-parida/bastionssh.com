@@ -9,11 +9,9 @@ import { notificationChannels } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
 import { audit } from '../../audit/index.js';
 import {
-  assertSafeUrl,
   ChannelInputError,
-  describeRecipients,
   emailAvailable,
-  maskUrl,
+  getAdapter,
   sendTestNotification,
 } from '../../notifications/index.js';
 
@@ -46,30 +44,16 @@ const updateSchema = z.object({
   enabled: z.boolean().optional(),
 });
 
-/**
- * What gets vaulted for a channel and how it is described in the UI. Throws a
- * ChannelInputError (→ 400) when the input does not fit the channel type.
- */
+/** Validate per-type input and produce what to vault; throws ChannelInputError (→ 400). */
 function resolveTarget(
   type: NotificationChannelType,
   url: string | undefined,
   recipients: string[] | undefined,
 ): { target: string; hint: string } {
-  if (type === 'email') {
-    if (!recipients?.length) throw new ChannelInputError('Email channels need at least one recipient');
-    if (!emailAvailable()) {
-      throw new ChannelInputError(
-        'Email delivery is not configured on this instance (set SMT_SMTP_URL and SMT_SMTP_FROM)',
-      );
-    }
-    return { target: recipients.join(','), hint: describeRecipients(recipients) };
-  }
-  if (recipients !== undefined) {
+  if (type !== 'email' && recipients !== undefined) {
     throw new ChannelInputError('Recipients only apply to email channels');
   }
-  if (!url) throw new ChannelInputError('A webhook URL is required');
-  assertSafeUrl(url);
-  return { target: url, hint: maskUrl(url) };
+  return getAdapter(type).prepare({ url, recipients });
 }
 
 /** The encrypted URL never leaves the server. */

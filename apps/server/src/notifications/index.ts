@@ -5,7 +5,6 @@ import { notificationChannels, servers } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import logger from '../logger.js';
 import {
-  buildPayload,
   emailBody,
   emailSubject,
   maskUrl,
@@ -15,40 +14,23 @@ import {
   type ServerRef,
 } from './format.js';
 import { emailAvailable, sendEmail } from './email.js';
+import { getAdapter, type OutboundRequest } from './channels/index.js';
 
 export { describeRecipients, maskUrl, type AlertEvent } from './format.js';
 export { emailAvailable } from './email.js';
+export {
+  assertSafeUrl,
+  ChannelInputError,
+  InvalidWebhookUrlError,
+  getAdapter,
+  type ChannelInput,
+} from './channels/index.js';
 
 const TIMEOUT_MS = 10_000;
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 1_000;
 
 type ChannelRow = typeof notificationChannels.$inferSelect;
-
-/** Bad channel input the caller can fix — maps to a 400. */
-export class ChannelInputError extends Error {}
-export class InvalidWebhookUrlError extends ChannelInputError {}
-
-/**
- * Reject URLs we should never POST to. This is a guard against an obvious
- * mistake, not a complete SSRF defence: a hostname that resolves to a private
- * address still passes, since only a literal match is checked here.
- */
-export function assertSafeUrl(raw: string): void {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new InvalidWebhookUrlError('Not a valid URL');
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new InvalidWebhookUrlError('Webhook URL must use http or https');
-  }
-  // The cloud instance-metadata address — never a legitimate webhook target
-  if (url.hostname === '169.254.169.254' || url.hostname === 'metadata.google.internal') {
-    throw new InvalidWebhookUrlError('That address is not allowed');
-  }
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -78,21 +60,43 @@ async function withRetry(fn: () => Promise<void>): Promise<void> {
 }
 
 /**
- * POST the payload, retrying once on a network error or 5xx. A 4xx is final —
- * a deleted Slack hook will not start working on the second try.
+ * `fetch` refuses URLs with embedded credentials, so `https://user:pass@host/…`
+ * is split into a clean URL and an HTTP Basic header. This is how ntfy, Gotify
+ * behind a proxy, and many internal webhooks are protected.
  */
-function post(url: string, body: unknown): Promise<void> {
-  return withRetry(async () => {
+export function splitBasicAuth(raw: string): { url: string; headers: Record<string, string> } {
+  const url = new URL(raw);
+  if (!url.username && !url.password) return { url: raw, headers: {} };
+  const user = decodeURIComponent(url.username);
+  const pass = decodeURIComponent(url.password);
+  url.username = '';
+  url.password = '';
+  return {
+    url: url.toString(),
+    headers: { Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}` },
+  };
+}
+
+/**
+ * POST one request, retrying once on a network error or 5xx. A 4xx is final —
+ * a deleted Slack hook will not start working on the second try. A follow-up
+ * (paging tools resolving their own test incident) goes out only after the
+ * first request succeeded.
+ */
+async function sendRequest(req: OutboundRequest): Promise<void> {
+  const { url, headers: authHeaders } = splitBasicAuth(req.url);
+  await withRetry(async () => {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'application/json', ...authHeaders, ...req.headers },
+      body: JSON.stringify(req.body),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (res.ok) return;
     if (res.status < 500) throw new FinalDeliveryError(`HTTP ${res.status}`);
     throw new Error(`HTTP ${res.status}`);
   });
+  if (req.followUp) await sendRequest(req.followUp);
 }
 
 /** Deliver an email alert; the recipient list is what the channel has vaulted. */
@@ -132,7 +136,8 @@ async function deliver(channel: ChannelRow, event: AlertEvent, server: ServerRef
     if (channel.type === 'email') {
       await mail(target, event, server, sentAt);
     } else {
-      await post(target, buildPayload(channel.type as NotificationChannelType, event, server, sentAt));
+      const adapter = getAdapter(channel.type as NotificationChannelType);
+      await sendRequest(adapter.build(target, event, server, sentAt));
     }
     recordResult(channel.id, null);
     return true;
