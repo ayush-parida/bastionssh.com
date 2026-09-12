@@ -171,6 +171,22 @@ JSON) and `email` (SMTP via nodemailer, configured instance-wide by `SMT_SMTP_UR
 / `SMT_SMTP_FROM`). `user:pass@` in a URL becomes an HTTP Basic header. Delivery is
 fire-and-forget with one retry; a 4xx is final.
 
+### 4.3e DNS Lookup (`/server/dns`)
+
+Stateless: no table, no credentials, one read-only endpoint. `domain.ts` reduces
+whatever was pasted (a URL, a trailing dot, a unicode name, a port) to the
+lowercase punycode form, rejecting anything that is not a domain, and owns the
+private-address guard. `records.ts` runs one query per record type through
+`node:dns`, treating an empty answer as an empty set rather than a failure.
+`propagation.ts` repeats the A lookup against a **fixed** list of public
+resolvers and reports which answers differ from the majority. `index.ts` ties
+them together and labels record values that match a server's host.
+
+Two guards matter. The resolver list is fixed, so a caller cannot aim the
+endpoint at an arbitrary host on port 53; and a nameserver's own address comes
+from the domain under test, so it is checked against loopback, private,
+link-local, CGNAT and unique-local ranges before anything is sent to it.
+
 ### 4.4 SSH Broker (`/server/ssh`)
 
 - Wraps `ssh2`. Responsibilities:

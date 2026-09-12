@@ -54,7 +54,8 @@ export type AuditAction =
   | 'cloud_account.update'
   | 'cloud_account.delete'
   | 'cloud_account.test'
-  | 'cloud_account.sync';
+  | 'cloud_account.sync'
+  | 'dns.lookup';
 
 export interface AuditLogEntry {
   id: string;

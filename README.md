@@ -18,6 +18,7 @@
 - 📌 **Saved Commands per Server** — Save frequently-used commands against any server and run them with one click.
 - ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view history, logs, and failures.
 - ☁️ **Cloud Inventory Sync** — Register an AWS, Google Cloud, Azure, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
+- 🌐 **DNS Lookup** — Check a domain's records and nameservers from inside the tool. Addresses that belong to a server you manage are labelled with its name, and the same lookup is run against several public resolvers plus the domain's own nameservers so you can see whether a change has propagated.
 - 🪣 **Object Storage** — Register AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, Google Cloud Storage, Hetzner Object Storage or any S3-compatible endpoint (presets fill in the endpoint shape and region). List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
 - 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up — delivered to Slack, Discord, Teams, Google Chat, Telegram, PagerDuty, Opsgenie, ntfy, Gotify, Pushover, email or any webhook. Nothing to install on the servers themselves.
 - 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
@@ -226,6 +227,21 @@ SMT_CLOUD_SYNC_ENABLED=true     # set false to turn the scheduled sync off (manu
 SMT_CLOUD_SYNC_INTERVAL=15      # minutes between syncs (minimum 5)
 SMT_CLOUD_REQUEST_TIMEOUT=30000 # per-request provider timeout in ms
 ```
+
+---
+
+## 🌐 DNS Lookup
+
+Open **DNS Lookup**, enter a domain, and get back:
+
+- **Nameservers**, each with the addresses they resolve to.
+- **Records**: A, AAAA, CNAME, MX, TXT, SOA and CAA, with TTLs where the resolver reports them.
+- **Server matches** — an A, AAAA or CNAME value that equals one of your servers' hosts is labelled with that server's name and links to its health page. This is the "which of my machines is this domain pointing at?" question.
+- **Propagation** — the same A lookup run against Cloudflare, Google, Quad9 and OpenDNS plus the domain's own nameservers, with any resolver that disagrees flagged. Useful right after you repoint an app.
+
+Paste whatever you have: a bare domain, a full URL, a trailing dot, or a unicode domain. It is normalised before the query.
+
+The resolver list is fixed, so the endpoint cannot be used to send traffic to an arbitrary host, and a nameserver that resolves to a private or link-local address is never queried. Lookups are read-only, available to any signed-in role, and recorded in the audit log.
 
 ---
 
