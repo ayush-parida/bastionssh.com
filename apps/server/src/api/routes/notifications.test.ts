@@ -131,6 +131,70 @@ describe('notification channel routes', () => {
     expect(msg.subject).toBe('Test notification from Server Manager');
   });
 
+  it('creates the new channel types from their own fields', async () => {
+    const post = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/api/notifications/channels', headers: admin.headers, payload });
+
+    const telegram = await post({ name: 't', type: 'telegram', token: '123456:ABCdefGHIjklMNOpqrSTUvwxYZ12345', chatId: '-100' });
+    expect(telegram.statusCode).toBe(201);
+    expect(telegram.json().targetHint).toBe('chat -100');
+    expect(JSON.stringify(telegram.json())).not.toContain('ABCdef');
+
+    const halfTelegram = await post({ name: 't', type: 'telegram', token: '123456:ABCdefGHIjklMNOpqrSTUvwxYZ12345' });
+    expect(halfTelegram.statusCode).toBe(400);
+    expect(halfTelegram.json().error).toContain('both');
+
+    const pd = await post({ name: 'pd', type: 'pagerduty', routingKey: 'R0123456789abcdef0123456789abcdef' });
+    expect(pd.statusCode).toBe(201);
+    expect(pd.json().targetHint).toBe('…cdef');
+
+    const og = await post({ name: 'og', type: 'opsgenie', routingKey: '01234567-89ab-cdef-0123-456789abcdef', region: 'eu' });
+    expect(og.statusCode).toBe(201);
+    expect(og.json().targetHint).toBe('eu …cdef');
+
+    const ntfy = await post({ name: 'n', type: 'ntfy', url: 'https://user:secretpw@ntfy.example.com/alerts' });
+    expect(ntfy.statusCode).toBe(201);
+    expect(ntfy.json().targetHint).toBe('ntfy.example.com/alerts');
+    expect(JSON.stringify(ntfy.json())).not.toContain('secretpw');
+
+    const push = await post({ name: 'p', type: 'pushover', token: 'a'.repeat(30), userKey: 'b'.repeat(30) });
+    expect(push.statusCode).toBe(201);
+
+    const wrongField = await post({ name: 'x', type: 'teams', routingKey: 'R0123456789abcdef0123456789abcdef' });
+    expect(wrongField.statusCode).toBe(400);
+    expect(wrongField.json().error).toContain('does not apply');
+  });
+
+  it('sends a paging test as trigger then resolve', async () => {
+    const calls: { url: string; body: { event_action: string; dedup_key: string } }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+      return new Response('{"status":"success"}', { status: 202 });
+    }) as typeof fetch;
+    try {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/notifications/channels',
+        headers: admin.headers,
+        payload: { name: 'pd2', type: 'pagerduty', routingKey: 'R0123456789abcdef0123456789abcdef' },
+      });
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/notifications/channels/${created.json().id}/test`,
+        headers: admin.headers,
+      });
+      expect(res.json()).toEqual({ ok: true });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.url).toBe('https://events.pagerduty.com/v2/enqueue');
+    expect(calls[0]!.body.event_action).toBe('trigger');
+    expect(calls[1]!.body.event_action).toBe('resolve');
+    expect(calls[1]!.body.dedup_key).toBe(calls[0]!.body.dedup_key);
+  });
+
   it('refuses a viewer', async () => {
     const res = await app.inject({
       method: 'POST',

@@ -2,7 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import type { NotificationCapabilities, NotificationChannelType } from '@smt/shared';
+import {
+  CHANNEL_TYPE_IDS,
+  channelMeta,
+  type ChannelField,
+  type NotificationCapabilities,
+  type NotificationChannelType,
+} from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { notificationChannels } from '../../db/schema.js';
@@ -13,47 +19,69 @@ import {
   emailAvailable,
   getAdapter,
   sendTestNotification,
+  type ChannelInput,
 } from '../../notifications/index.js';
 
-const urlSchema = z.string().url().max(2000);
-const recipientsSchema = z.array(z.string().email().max(254)).min(1).max(20);
+const targetFields = {
+  url: z.string().url().max(2000),
+  recipients: z.array(z.string().email().max(254)).min(1).max(20),
+  token: z.string().min(1).max(256),
+  chatId: z.string().min(1).max(64),
+  userKey: z.string().min(1).max(64),
+  routingKey: z.string().min(1).max(256),
+  region: z.enum(['us', 'eu']),
+} satisfies Record<ChannelField, z.ZodTypeAny>;
 
-const baseCreate = z.object({
+const optionalTargetFields = Object.fromEntries(
+  Object.entries(targetFields).map(([k, v]) => [k, v.optional()]),
+) as { [K in ChannelField]: z.ZodOptional<(typeof targetFields)[K]> };
+
+const createSchema = z.object({
   name: z.string().min(1).max(100),
+  type: z.enum(CHANNEL_TYPE_IDS),
   minSeverity: z.enum(['warning', 'critical']).default('warning'),
   notifyOnResolve: z.boolean().default(true),
   enabled: z.boolean().default(true),
+  ...optionalTargetFields,
 });
-
-/** Webhook-style channels take a URL; email takes recipients. Neither accepts the other. */
-const createSchema = z.discriminatedUnion('type', [
-  baseCreate.extend({
-    type: z.enum(['webhook', 'slack', 'discord']),
-    url: urlSchema,
-    recipients: z.undefined(),
-  }),
-  baseCreate.extend({ type: z.literal('email'), recipients: recipientsSchema, url: z.undefined() }),
-]);
 
 const updateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  url: urlSchema.optional(),
-  recipients: recipientsSchema.optional(),
   minSeverity: z.enum(['warning', 'critical']).optional(),
   notifyOnResolve: z.boolean().optional(),
   enabled: z.boolean().optional(),
+  ...optionalTargetFields,
 });
 
-/** Validate per-type input and produce what to vault; throws ChannelInputError (→ 400). */
-function resolveTarget(
-  type: NotificationChannelType,
-  url: string | undefined,
-  recipients: string[] | undefined,
-): { target: string; hint: string } {
-  if (type !== 'email' && recipients !== undefined) {
-    throw new ChannelInputError('Recipients only apply to email channels');
+const FIELD_NAMES = Object.keys(targetFields) as ChannelField[];
+
+/** The target fields present in a body, or null when none were sent. */
+function pickTarget(body: Partial<ChannelInput>): ChannelInput | null {
+  const input: ChannelInput = {};
+  let any = false;
+  for (const field of FIELD_NAMES) {
+    const value = body[field];
+    if (value !== undefined) {
+      (input as Record<string, unknown>)[field] = value;
+      any = true;
+    }
   }
-  return getAdapter(type).prepare({ url, recipients });
+  return any ? input : null;
+}
+
+/**
+ * Validate per-type input and produce what to vault. Fields that do not belong
+ * to the type are refused rather than ignored, so a typo never silently
+ * creates a channel with the wrong target.
+ */
+function resolveTarget(type: NotificationChannelType, input: ChannelInput): { target: string; hint: string } {
+  const allowed = channelMeta(type).fields;
+  for (const field of FIELD_NAMES) {
+    if (input[field] !== undefined && !allowed.includes(field)) {
+      throw new ChannelInputError(`"${field}" does not apply to ${channelMeta(type).label} channels`);
+    }
+  }
+  return getAdapter(type).prepare(input);
 }
 
 /** The encrypted URL never leaves the server. */
@@ -93,7 +121,7 @@ export async function notificationRoutes(app: FastifyInstance) {
     const body = createSchema.parse(req.body);
     let resolved: { target: string; hint: string };
     try {
-      resolved = resolveTarget(body.type, body.url, body.recipients);
+      resolved = resolveTarget(body.type, pickTarget(body) ?? {});
     } catch (err) {
       if (err instanceof ChannelInputError) {
         return reply.status(400).send({ error: err.message });
@@ -137,15 +165,12 @@ export async function notificationRoutes(app: FastifyInstance) {
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
 
-    // A new URL or recipient list replaces the stored target
+    // Any target field replaces the stored target as a whole
     let resolved: { target: string; hint: string } | null = null;
-    if (body.url !== undefined || body.recipients !== undefined) {
+    const targetInput = pickTarget(body);
+    if (targetInput) {
       try {
-        resolved = resolveTarget(
-          existing.type as NotificationChannelType,
-          body.url,
-          body.recipients,
-        );
+        resolved = resolveTarget(existing.type as NotificationChannelType, targetInput);
       } catch (err) {
         if (err instanceof ChannelInputError) {
           return reply.status(400).send({ error: err.message });
