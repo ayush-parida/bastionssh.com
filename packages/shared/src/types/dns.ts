@@ -57,6 +57,8 @@ export interface DnsLookupResult {
   domain: string;
   /** What the user typed, when it differed. */
   input?: string;
+  /** The name does not exist at all, as opposed to having no records. */
+  notFound: boolean;
   nameservers: DnsNameserver[];
   records: DnsRecordSet[];
   propagation: DnsPropagation;

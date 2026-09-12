@@ -239,7 +239,7 @@ Open **DNS Lookup**, enter a domain, and get back:
 - **Server matches** — an A, AAAA or CNAME value that equals one of your servers' hosts is labelled with that server's name and links to its health page. This is the "which of my machines is this domain pointing at?" question.
 - **Propagation** — the same A lookup run against Cloudflare, Google, Quad9 and OpenDNS plus the domain's own nameservers, with any resolver that disagrees flagged. Useful right after you repoint an app.
 
-Paste whatever you have: a bare domain, a full URL, a trailing dot, or a unicode domain. It is normalised before the query.
+Paste whatever you have: a bare domain, a full URL, a trailing dot, or a unicode domain. It is normalised before the query. A domain that does not exist is called out as such, rather than looking the same as one with no records.
 
 The resolver list is fixed, so the endpoint cannot be used to send traffic to an arbitrary host, and a nameserver that resolves to a private or link-local address is never queried. Lookups are read-only, available to any signed-in role, and recorded in the audit log.
 

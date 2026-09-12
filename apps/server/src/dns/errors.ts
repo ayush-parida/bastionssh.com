@@ -31,8 +31,23 @@ export function describeDnsError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** True when the type simply has no records, which is not a failure worth reporting loudly. */
+/** Shown for every record type once the name itself turns out not to exist. */
+export const NXDOMAIN_MESSAGE = MESSAGES['ENOTFOUND']!;
+
+function codeOf(err: unknown): string | undefined {
+  return (err as { code?: string } | null)?.code;
+}
+
+/**
+ * The name exists but has no records of this type. Not a failure: the resolver
+ * answered, the answer was empty. Distinct from the name not existing at all,
+ * which every type reports as ENOTFOUND and which the user needs to be told.
+ */
 export function isEmptyAnswer(err: unknown): boolean {
-  const code = (err as { code?: string } | null)?.code;
-  return code === 'ENODATA' || code === 'ENOTFOUND';
+  return codeOf(err) === 'ENODATA';
+}
+
+/** The name does not exist (NXDOMAIN). */
+export function isNotFound(err: unknown): boolean {
+  return codeOf(err) === 'ENOTFOUND';
 }

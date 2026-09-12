@@ -167,6 +167,19 @@ export default function DnsLookupPage() {
             <span>{data.durationMs} ms</span>
           </div>
 
+          {data.notFound && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+              <p className="flex items-center gap-1.5 text-sm font-medium text-amber-600">
+                <CircleAlert size={14} /> No such domain
+              </p>
+              <p className="text-muted-foreground mt-1 text-sm">
+                Nothing answers for {data.domain}. It is not registered, its delegation is missing,
+                or the name is misspelled.
+              </p>
+            </div>
+          )}
+
+          {!data.notFound && (
           <section>
             <h2 className="mb-2 text-lg font-semibold">Nameservers</h2>
             <div className="border-border bg-card overflow-hidden rounded-lg border">
@@ -188,6 +201,7 @@ export default function DnsLookupPage() {
               )}
             </div>
           </section>
+          )}
 
           {data.propagation.answers.length > 0 && (
             <section>
@@ -223,14 +237,16 @@ export default function DnsLookupPage() {
             </section>
           )}
 
-          <section>
-            <h2 className="mb-2 text-lg font-semibold">Records</h2>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {data.records.map((set) => (
-                <RecordCard key={set.type} set={set} />
-              ))}
-            </div>
-          </section>
+          {!data.notFound && (
+            <section>
+              <h2 className="mb-2 text-lg font-semibold">Records</h2>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {data.records.map((set) => (
+                  <RecordCard key={set.type} set={set} />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       )}
     </div>

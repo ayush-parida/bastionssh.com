@@ -1,4 +1,5 @@
 import type { DnsLookupResult, DnsNameserver, DnsRecordSet, DnsServerMatch } from '@smt/shared';
+import { NXDOMAIN_MESSAGE } from './errors.js';
 import { isPublicAddress, normalizeDomain } from './domain.js';
 import { createResolver, DEFAULT_TIMEOUT_MS, fetchAllRecords, resolveNameserver } from './records.js';
 import {
@@ -43,6 +44,18 @@ export function matchServers(sets: DnsRecordSet[], servers: ServerRef[]): DnsRec
           }),
         }
       : set,
+  );
+}
+
+/**
+ * True when the name itself does not exist, rather than merely having no
+ * records: every type came back empty and at least one said so with NXDOMAIN.
+ */
+export function isNxdomain(sets: DnsRecordSet[]): boolean {
+  return (
+    sets.length > 0 &&
+    sets.every((set) => set.records.length === 0) &&
+    sets.some((set) => set.error === NXDOMAIN_MESSAGE)
   );
 }
 
@@ -96,10 +109,13 @@ export async function lookupDomain(
   const started = Date.now();
 
   const records = await fetchAllRecords(createResolver(undefined, timeoutMs), domain);
-  const nameservers = await describeNameservers(records, timeoutMs);
+  const notFound = isNxdomain(records);
+  const nameservers = notFound ? [] : await describeNameservers(records, timeoutMs);
 
-  const propagation = options.skipPropagation
-    ? { answers: [], consistent: true }
+  // Comparing resolvers on a name that does not exist tells nobody anything.
+  const propagation =
+    options.skipPropagation || notFound
+      ? { answers: [], consistent: true }
     : await checkPropagation(
         domain,
         [
@@ -112,6 +128,7 @@ export async function lookupDomain(
   return {
     domain,
     ...(domain !== input.trim().toLowerCase() && { input: input.trim() }),
+    notFound,
     nameservers,
     records: matchServers(records, servers),
     propagation,
