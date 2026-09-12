@@ -4,14 +4,30 @@ import { webhook } from './webhook.js';
 import { slack } from './slack.js';
 import { discord } from './discord.js';
 import { email } from './email.js';
+import { teams } from './teams.js';
+import { googlechat } from './googlechat.js';
+import { telegram } from './telegram.js';
+import { ntfy } from './ntfy.js';
+import { gotify } from './gotify.js';
+import { pushover } from './pushover.js';
+import { pagerduty } from './pagerduty.js';
+import { opsgenie } from './opsgenie.js';
 
 export * from './types.js';
 
-const ADAPTERS: Partial<Record<NotificationChannelType, ChannelAdapter>> = {
+const ADAPTERS: Record<NotificationChannelType, ChannelAdapter> = {
   webhook,
   slack,
   discord,
   email,
+  teams,
+  googlechat,
+  telegram,
+  ntfy,
+  gotify,
+  pushover,
+  pagerduty,
+  opsgenie,
 };
 
 export function getAdapter(type: NotificationChannelType): ChannelAdapter {
