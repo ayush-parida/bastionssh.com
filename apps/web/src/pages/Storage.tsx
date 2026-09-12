@@ -3,12 +3,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
-import type {
-  CreateStorageConnectionRequest,
-  StorageConnection,
-  StorageProvider,
-  StorageTestResult,
-  UpdateStorageConnectionRequest,
+import {
+  STORAGE_PROVIDER_PRESETS,
+  endpointNeedsInput,
+  storagePreset,
+  type CreateStorageConnectionRequest,
+  type StorageConnection,
+  type StorageProvider,
+  type StorageTestResult,
+  type UpdateStorageConnectionRequest,
 } from '@smt/shared';
 import {
   CircleAlert,
@@ -40,12 +43,6 @@ const empty: ConnectionForm = {
   accessKeyId: '',
   secretAccessKey: '',
   forcePathStyle: true,
-};
-
-const PROVIDER_LABEL: Record<StorageProvider, string> = {
-  s3: 'AWS S3',
-  minio: 'MinIO',
-  other: 'S3-compatible',
 };
 
 const QUERY_KEY = ['storage-connections'];
@@ -139,9 +136,22 @@ export default function StoragePage() {
     setForm(empty);
   }
 
+  const preset = storagePreset(form.provider);
+
   function setProvider(provider: StorageProvider) {
-    // AWS prefers virtual-host addressing; everyone else usually needs path style
-    setForm((p) => ({ ...p, provider, forcePathStyle: provider !== 's3' }));
+    const next = storagePreset(provider);
+    setForm((p) => ({
+      ...p,
+      provider,
+      region: next.defaultRegion,
+      forcePathStyle: next.forcePathStyle,
+      // A fixed endpoint (GCS) is filled in; a template with placeholders is left
+      // for the user, shown as the placeholder text.
+      endpoint:
+        next.endpointTemplate && !endpointNeedsInput(next.endpointTemplate)
+          ? next.endpointTemplate
+          : '',
+    }));
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -179,7 +189,9 @@ export default function StoragePage() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Object Storage</h1>
-          <p className="text-muted-foreground text-sm">Browse and manage S3 and MinIO buckets</p>
+          <p className="text-muted-foreground text-sm">
+            Browse and manage S3-compatible buckets — AWS, MinIO, R2, B2, Wasabi and more
+          </p>
         </div>
         {canManage && (
           <button
@@ -213,11 +225,14 @@ export default function StoragePage() {
                 onChange={(e) => setProvider(e.target.value as StorageProvider)}
                 className={inputClass}
               >
-                <option value="minio">MinIO</option>
-                <option value="s3">AWS S3</option>
-                <option value="other">Other S3-compatible (Wasabi, R2, Spaces, Ceph…)</option>
+                {STORAGE_PROVIDER_PRESETS.map((p) => (
+                  <option key={p.provider} value={p.provider}>
+                    {p.label}
+                  </option>
+                ))}
               </select>
             </div>
+            <p className="text-muted-foreground col-span-2 -mt-2 text-xs">{preset.hint}</p>
             <div>
               <label className="mb-1 block text-sm font-medium">
                 Endpoint{' '}
@@ -230,21 +245,25 @@ export default function StoragePage() {
                 required={form.provider !== 's3'}
                 value={form.endpoint}
                 onChange={(e) => setForm((p) => ({ ...p, endpoint: e.target.value }))}
-                placeholder={
-                  form.provider === 's3' ? 'https://s3.amazonaws.com' : 'http://minio.internal:9000'
-                }
+                placeholder={preset.endpointTemplate ?? 'https://s3.example.com'}
                 className={`${inputClass} font-mono`}
               />
             </div>
             <div>
-              <label className="mb-1 block text-sm font-medium">Region</label>
+              <label className="mb-1 block text-sm font-medium">
+                Region{' '}
+                {!preset.regionEditable && (
+                  <span className="text-muted-foreground text-xs">(fixed for this provider)</span>
+                )}
+              </label>
               <input
                 type="text"
                 required
+                readOnly={!preset.regionEditable}
                 value={form.region}
                 onChange={(e) => setForm((p) => ({ ...p, region: e.target.value }))}
-                placeholder="us-east-1"
-                className={`${inputClass} font-mono`}
+                placeholder={preset.defaultRegion}
+                className={`${inputClass} font-mono ${preset.regionEditable ? '' : 'opacity-60'}`}
               />
             </div>
             <div>
@@ -334,7 +353,7 @@ export default function StoragePage() {
                   </p>
                 </div>
                 <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
-                  {PROVIDER_LABEL[c.provider]}
+                  {storagePreset(c.provider).label}
                 </span>
               </div>
               {c.lastStatus && (
