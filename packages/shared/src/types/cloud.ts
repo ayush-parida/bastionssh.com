@@ -1,9 +1,17 @@
-export type CloudProvider = 'aws' | 'digitalocean' | 'hetzner';
+export type CloudProvider = 'aws' | 'gcp' | 'azure' | 'digitalocean' | 'hetzner';
 
-export const CLOUD_PROVIDERS = ['aws', 'digitalocean', 'hetzner'] as const satisfies readonly CloudProvider[];
+export const CLOUD_PROVIDERS = [
+  'aws',
+  'gcp',
+  'azure',
+  'digitalocean',
+  'hetzner',
+] as const satisfies readonly CloudProvider[];
 
 export const CLOUD_PROVIDER_LABEL: Record<CloudProvider, string> = {
   aws: 'AWS',
+  gcp: 'Google Cloud',
+  azure: 'Microsoft Azure',
   digitalocean: 'DigitalOcean',
   hetzner: 'Hetzner Cloud',
 };
@@ -71,11 +79,27 @@ export interface AwsCredentialsInput {
   secretAccessKey: string;
 }
 
+export interface GcpCredentialsInput {
+  /** The downloaded service-account key file, pasted as-is. */
+  serviceAccountJson: string;
+}
+
+export interface AzureCredentialsInput {
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  subscriptionId: string;
+}
+
 export interface CreateCloudAccountRequest {
   name: string;
   provider: CloudProvider;
   /** Required for aws. */
   aws?: AwsCredentialsInput;
+  /** Required for gcp. */
+  gcp?: GcpCredentialsInput;
+  /** Required for azure. */
+  azure?: AzureCredentialsInput;
   /** Required for digitalocean and hetzner. */
   token?: string;
   regions?: string[];
@@ -89,6 +113,8 @@ export interface UpdateCloudAccountRequest {
   name?: string;
   /** Omit to keep the stored credentials. */
   aws?: AwsCredentialsInput;
+  gcp?: GcpCredentialsInput;
+  azure?: AzureCredentialsInput;
   token?: string;
   regions?: string[];
   defaultUsername?: string;

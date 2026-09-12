@@ -18,19 +18,26 @@ export function encodeCredentials(creds: CloudCredentials): string {
 
 export function decodeCredentials(json: string): CloudCredentials {
   const parsed = JSON.parse(json) as CloudCredentials;
-  if (parsed.kind !== 'aws' && parsed.kind !== 'token') {
+  if (!['aws', 'token', 'gcp', 'azure'].includes(parsed.kind)) {
     throw new CloudError('Stored credentials are unreadable', 500);
   }
   return parsed;
 }
 
-/** `AKIA…F3Q` for a key pair, `…9c2f` for a token — enough to tell accounts apart. */
+/** `AKIA…F3Q`, `…9c2f`, the service-account email, or client/subscription prefixes. */
 export function credentialHint(creds: CloudCredentials): string {
-  if (creds.kind === 'aws') {
-    const id = creds.accessKeyId;
-    return id.length > 8 ? `${id.slice(0, 4)}…${id.slice(-3)}` : `${id.slice(0, 2)}…`;
+  switch (creds.kind) {
+    case 'aws': {
+      const id = creds.accessKeyId;
+      return id.length > 8 ? `${id.slice(0, 4)}…${id.slice(-3)}` : `${id.slice(0, 2)}…`;
+    }
+    case 'gcp':
+      return creds.clientEmail;
+    case 'azure':
+      return `${creds.clientId.slice(0, 8)}… / ${creds.subscriptionId.slice(0, 8)}…`;
+    default:
+      return `…${creds.token.slice(-4)}`;
   }
-  return `…${creds.token.slice(-4)}`;
 }
 
 export function parseRegions(raw: string): string[] {
