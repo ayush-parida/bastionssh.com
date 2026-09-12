@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.30.0",
+    "@aws-sdk/client-ec2": "^3.1131.0",
     "@aws-sdk/client-s3": "^3.1129.0",
     "@aws-sdk/lib-storage": "^3.1129.0",
     "@fastify/cookie": "^11.0.0",
@@ -43,6 +44,7 @@
     "lucia": "^3.2.0",
     "nanoid": "^5.0.0",
     "node-cron": "^3.0.3",
+    "nodemailer": "^10.0.9",
     "openai": "^4.0.0",
     "pino": "^9.0.0",
     "postgres": "^3.4.0",
@@ -53,6 +55,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/libsodium-wrappers": "^0.7.14",
     "@types/node": "^22.0.0",
+    "@types/nodemailer": "^8.0.1",
     "@types/ssh2": "^1.15.0",
     "@types/ws": "^8.18.1",
     "dotenv-cli": "^11.0.0",

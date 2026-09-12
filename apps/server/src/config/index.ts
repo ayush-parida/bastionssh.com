@@ -15,6 +15,10 @@ const envSchema = z.object({
   SMT_STORAGE_MAX_UPLOAD_BYTES: z.coerce.number().default(5_368_709_120), // 5 GiB
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
 
+  // ── Outbound email (alert notifications) ──
+  SMT_SMTP_URL: z.string().url().optional(), // smtp://user:pass@host:587 or smtps://…:465
+  SMT_SMTP_FROM: z.string().min(3).optional(), // "BastionSSH <alerts@example.com>"
+
   // ── Health monitoring ──
   SMT_MONITORING_ENABLED: z
     .string()
@@ -54,6 +58,11 @@ if (!parsed.success) {
 
 const env = parsed.data;
 
+if (env.SMT_SMTP_URL && !env.SMT_SMTP_FROM) {
+  console.error('Invalid environment variables: SMT_SMTP_FROM is required when SMT_SMTP_URL is set');
+  process.exit(1);
+}
+
 export const config = {
   env: env.NODE_ENV,
   baseUrl: env.SMT_BASE_URL,
@@ -68,6 +77,8 @@ export const config = {
   sftpMaxUploadBytes: env.SMT_SFTP_MAX_UPLOAD_BYTES,
   storageMaxUploadBytes: env.SMT_STORAGE_MAX_UPLOAD_BYTES,
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
+  /** null = email delivery unavailable; the notifications UI says so. */
+  smtp: env.SMT_SMTP_URL ? { url: env.SMT_SMTP_URL, from: env.SMT_SMTP_FROM ?? '' } : null,
   monitoring: {
     enabled: env.SMT_MONITORING_ENABLED,
     intervalSeconds: env.SMT_MONITORING_INTERVAL,
