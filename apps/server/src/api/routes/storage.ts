@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { Readable } from 'node:stream';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import type { StorageConnection, StorageProvider } from '@smt/shared';
+import { STORAGE_PROVIDERS, type StorageConnection, type StorageProvider } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
@@ -24,7 +24,7 @@ import {
   validateBucketName,
 } from '../../storage/index.js';
 
-const providerSchema = z.enum(['s3', 'minio', 'other']);
+const providerSchema = z.enum(STORAGE_PROVIDERS);
 const endpointSchema = z.string().min(1).max(2000);
 const keySchema = z.string().min(1).max(1024);
 
@@ -93,7 +93,7 @@ function resolveEndpoint(
   if (endpoint) return assertSafeEndpoint(endpoint);
   if (provider !== 's3') {
     throw new StorageError(
-      'An endpoint is required for MinIO and other S3-compatible providers',
+      'An endpoint is required for every provider except AWS S3',
       400,
     );
   }

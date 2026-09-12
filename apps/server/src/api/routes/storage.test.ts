@@ -119,6 +119,31 @@ describe('storage routes', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('accepts preset providers and still requires their endpoint', async () => {
+    const post = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: 'POST',
+        url: '/api/storage/connections',
+        headers: admin.headers,
+        payload: { ...connectionBody, ...payload },
+      });
+
+    const r2 = await post({
+      name: 'r2',
+      provider: 'r2',
+      endpoint: 'https://abc123.r2.cloudflarestorage.com',
+      region: 'auto',
+    });
+    expect(r2.statusCode).toBe(201);
+    expect(r2.json().provider).toBe('r2');
+
+    const gcsNoEndpoint = await post({ name: 'gcs', provider: 'gcs', endpoint: null });
+    expect(gcsNoEndpoint.statusCode).toBe(400);
+
+    const unknown = await post({ name: 'x', provider: 'nope' });
+    expect(unknown.statusCode).toBe(400);
+  });
+
   it('hides a connection from another organisation', async () => {
     const res = await app.inject({
       method: 'GET',
