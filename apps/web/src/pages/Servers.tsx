@@ -2,8 +2,15 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
-import type { Server, CreateServerRequest, MonitoringOverview, ServerStatus } from '@smt/shared';
-import type { SSHKey } from '@smt/shared';
+import {
+  CLOUD_PROVIDER_LABEL,
+  type CreateServerRequest,
+  type MonitoringOverview,
+  type Server,
+  type ServerCloudInfo,
+  type ServerStatus,
+  type SSHKey,
+} from '@smt/shared';
 import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
@@ -25,6 +32,25 @@ const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root
 /** Tags are entered as a comma-separated list and stored as an array. */
 function splitTags(input: string): string[] {
   return [...new Set(input.split(',').map((t) => t.trim()).filter(Boolean))];
+}
+
+/** `AWS · running` badge; amber when the provider says stopped, red when it no longer lists it. */
+function CloudBadge({ cloud }: { cloud: ServerCloudInfo }) {
+  const tone =
+    cloud.state === 'missing'
+      ? 'bg-red-500/10 text-red-600'
+      : cloud.state === 'stopped'
+        ? 'bg-amber-500/10 text-amber-600'
+        : 'bg-muted text-muted-foreground';
+  const synced = cloud.syncedAt ? ` · synced ${new Date(cloud.syncedAt).toLocaleString()}` : '';
+  return (
+    <span
+      title={`${cloud.instanceId}${cloud.region ? ` in ${cloud.region}` : ''}${synced}`}
+      className={`rounded px-1.5 py-0.5 text-xs ${tone}`}
+    >
+      {CLOUD_PROVIDER_LABEL[cloud.provider]} · {cloud.state}
+    </span>
+  );
 }
 
 export default function ServersPage() {
@@ -271,8 +297,9 @@ export default function ServersPage() {
                   );
                 })()}
               </div>
-              {s.tags?.length > 0 && (
+              {(s.cloud || s.tags?.length > 0) && (
                 <div className="flex flex-wrap gap-1">
+                  {s.cloud && <CloudBadge cloud={s.cloud} />}
                   {s.tags.map((tag) => (
                     <button
                       key={tag}

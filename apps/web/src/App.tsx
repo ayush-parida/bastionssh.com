@@ -18,6 +18,7 @@ import ServerHealthPage from '@/pages/ServerHealth.js';
 import StoragePage from '@/pages/Storage.js';
 import StorageBucketsPage from '@/pages/StorageBuckets.js';
 import StorageObjectsPage from '@/pages/StorageObjects.js';
+import CloudAccountsPage from '@/pages/CloudAccounts.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="storage" element={<StoragePage />} />
           <Route path="storage/:id" element={<StorageBucketsPage />} />
           <Route path="storage/:id/buckets/:bucket" element={<StorageObjectsPage />} />
+          <Route path="cloud" element={<CloudAccountsPage />} />
           <Route path="monitoring" element={<MonitoringPage />} />
           <Route path="keys" element={<KeysPage />} />
           <Route path="commands" element={<CommandsPage />} />
