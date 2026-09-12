@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
+import type { NotificationCapabilities, NotificationChannelType } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import { notificationChannels } from '../../db/schema.js';
@@ -9,27 +10,67 @@ import { vault } from '../../vault/index.js';
 import { audit } from '../../audit/index.js';
 import {
   assertSafeUrl,
-  InvalidWebhookUrlError,
+  ChannelInputError,
+  describeRecipients,
+  emailAvailable,
   maskUrl,
   sendTestNotification,
 } from '../../notifications/index.js';
 
-const createSchema = z.object({
+const urlSchema = z.string().url().max(2000);
+const recipientsSchema = z.array(z.string().email().max(254)).min(1).max(20);
+
+const baseCreate = z.object({
   name: z.string().min(1).max(100),
-  type: z.enum(['webhook', 'slack']),
-  url: z.string().url().max(2000),
   minSeverity: z.enum(['warning', 'critical']).default('warning'),
   notifyOnResolve: z.boolean().default(true),
   enabled: z.boolean().default(true),
 });
 
+/** Webhook-style channels take a URL; email takes recipients. Neither accepts the other. */
+const createSchema = z.discriminatedUnion('type', [
+  baseCreate.extend({
+    type: z.enum(['webhook', 'slack', 'discord']),
+    url: urlSchema,
+    recipients: z.undefined(),
+  }),
+  baseCreate.extend({ type: z.literal('email'), recipients: recipientsSchema, url: z.undefined() }),
+]);
+
 const updateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  url: z.string().url().max(2000).optional(),
+  url: urlSchema.optional(),
+  recipients: recipientsSchema.optional(),
   minSeverity: z.enum(['warning', 'critical']).optional(),
   notifyOnResolve: z.boolean().optional(),
   enabled: z.boolean().optional(),
 });
+
+/**
+ * What gets vaulted for a channel and how it is described in the UI. Throws a
+ * ChannelInputError (→ 400) when the input does not fit the channel type.
+ */
+function resolveTarget(
+  type: NotificationChannelType,
+  url: string | undefined,
+  recipients: string[] | undefined,
+): { target: string; hint: string } {
+  if (type === 'email') {
+    if (!recipients?.length) throw new ChannelInputError('Email channels need at least one recipient');
+    if (!emailAvailable()) {
+      throw new ChannelInputError(
+        'Email delivery is not configured on this instance (set SMT_SMTP_URL and SMT_SMTP_FROM)',
+      );
+    }
+    return { target: recipients.join(','), hint: describeRecipients(recipients) };
+  }
+  if (recipients !== undefined) {
+    throw new ChannelInputError('Recipients only apply to email channels');
+  }
+  if (!url) throw new ChannelInputError('A webhook URL is required');
+  assertSafeUrl(url);
+  return { target: url, hint: maskUrl(url) };
+}
 
 /** The encrypted URL never leaves the server. */
 const publicColumns = {
@@ -51,6 +92,10 @@ const publicColumns = {
 export async function notificationRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
+  app.get('/capabilities', async (): Promise<NotificationCapabilities> => ({
+    email: emailAvailable(),
+  }));
+
   app.get('/channels', async (req) => {
     return getDb()
       .select(publicColumns)
@@ -62,10 +107,11 @@ export async function notificationRoutes(app: FastifyInstance) {
 
   app.post('/channels', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
+    let resolved: { target: string; hint: string };
     try {
-      assertSafeUrl(body.url);
+      resolved = resolveTarget(body.type, body.url, body.recipients);
     } catch (err) {
-      if (err instanceof InvalidWebhookUrlError) {
+      if (err instanceof ChannelInputError) {
         return reply.status(400).send({ error: err.message });
       }
       throw err;
@@ -80,8 +126,8 @@ export async function notificationRoutes(app: FastifyInstance) {
         orgId: req.orgId,
         name: body.name,
         type: body.type,
-        encryptedUrl: await vault.encrypt(body.url, id),
-        targetHint: maskUrl(body.url),
+        encryptedUrl: await vault.encrypt(resolved.target, id),
+        targetHint: resolved.hint,
         enabled: body.enabled,
         minSeverity: body.minSeverity,
         notifyOnResolve: body.notifyOnResolve,
@@ -107,11 +153,17 @@ export async function notificationRoutes(app: FastifyInstance) {
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
 
-    if (body.url !== undefined) {
+    // A new URL or recipient list replaces the stored target
+    let resolved: { target: string; hint: string } | null = null;
+    if (body.url !== undefined || body.recipients !== undefined) {
       try {
-        assertSafeUrl(body.url);
+        resolved = resolveTarget(
+          existing.type as NotificationChannelType,
+          body.url,
+          body.recipients,
+        );
       } catch (err) {
-        if (err instanceof InvalidWebhookUrlError) {
+        if (err instanceof ChannelInputError) {
           return reply.status(400).send({ error: err.message });
         }
         throw err;
@@ -124,10 +176,10 @@ export async function notificationRoutes(app: FastifyInstance) {
         ...(body.minSeverity !== undefined && { minSeverity: body.minSeverity }),
         ...(body.notifyOnResolve !== undefined && { notifyOnResolve: body.notifyOnResolve }),
         ...(body.enabled !== undefined && { enabled: body.enabled }),
-        // A new URL invalidates whatever the last delivery reported
-        ...(body.url !== undefined && {
-          encryptedUrl: await vault.encrypt(body.url, id),
-          targetHint: maskUrl(body.url),
+        // A new target invalidates whatever the last delivery reported
+        ...(resolved && {
+          encryptedUrl: await vault.encrypt(resolved.target, id),
+          targetHint: resolved.hint,
           lastStatus: null,
           lastError: null,
           lastSentAt: null,
