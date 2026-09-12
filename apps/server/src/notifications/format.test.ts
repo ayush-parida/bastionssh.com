@@ -3,12 +3,18 @@ import type { AlertWebhookPayload } from '@smt/shared';
 import {
   alertLabel,
   buildPayload,
+  describeRecipients,
+  emailBody,
+  emailSubject,
   maskUrl,
+  parseRecipients,
   passesSeverityFilter,
   summarize,
   type AlertEvent,
   type ServerRef,
 } from './format.js';
+
+const NOW = '2026-09-13T10:00:00.000Z';
 
 const SERVER: ServerRef = { id: 'srv1', name: 'web-01', host: '10.0.0.4' };
 
@@ -113,5 +119,60 @@ describe('summarize', () => {
   it('labels alert types readably', () => {
     expect(alertLabel('memory_high')).toBe('Memory high');
     expect(alertLabel('offline')).toBe('Offline');
+  });
+});
+
+describe('discord payload', () => {
+  it('uses an embed coloured by severity', () => {
+    const body = buildPayload('discord', { ...opened, severity: 'critical' }, SERVER, NOW) as {
+      content: string;
+      embeds: { title: string; description: string; color: number }[];
+    };
+    expect(body.embeds[0]!.color).toBe(0xef4444);
+    expect(body.embeds[0]!.title).toContain('CPU high');
+    expect(body.content).toContain('web-01');
+  });
+
+  it('turns green on resolve', () => {
+    const body = buildPayload('discord', { ...opened, kind: 'resolved' }, SERVER, NOW) as {
+      embeds: { color: number }[];
+    };
+    expect(body.embeds[0]!.color).toBe(0x22c55e);
+  });
+});
+
+describe('email', () => {
+  it('prefixes the subject with severity', () => {
+    expect(emailSubject(opened, SERVER)).toBe('[WARNING] CPU high on web-01');
+    expect(emailSubject({ ...opened, kind: 'resolved' }, SERVER)).toBe('[Resolved] CPU high on web-01');
+    expect(emailSubject({ ...opened, kind: 'test', type: 'test' }, SERVER)).toBe(
+      'Test notification from Server Manager',
+    );
+  });
+
+  it('renders text and html bodies with the message and host', () => {
+    const { text, html } = emailBody(opened, SERVER, NOW);
+    expect(text).toContain('10.0.0.4');
+    expect(text).toContain('CPU at 91.0%');
+    expect(html).toContain('<strong>');
+    expect(html).not.toContain('<script');
+  });
+
+  it('escapes html in the message', () => {
+    const { html } = emailBody({ ...opened, message: '<b>x</b>' }, SERVER, NOW);
+    expect(html).toContain('&lt;b&gt;x&lt;/b&gt;');
+    expect(html).not.toContain('<b>x</b>');
+  });
+});
+
+describe('recipients', () => {
+  it('shows the first address and a count', () => {
+    expect(describeRecipients(['a@x.com'])).toBe('a@x.com');
+    expect(describeRecipients(['a@x.com', 'b@x.com', 'c@x.com'])).toBe('a@x.com +2');
+  });
+
+  it('round-trips through the stored form', () => {
+    expect(parseRecipients('a@x.com,b@x.com')).toEqual(['a@x.com', 'b@x.com']);
+    expect(parseRecipients('')).toEqual([]);
   });
 });

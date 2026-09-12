@@ -76,6 +76,76 @@ export function summarize(event: AlertEvent, server: ServerRef): string {
   return `${alertLabel(event.type)} on ${server.name} (${server.host}) — ${event.message}`;
 }
 
+const DISCORD_COLOR = {
+  critical: 0xef4444,
+  warning: 0xf59e0b,
+  resolved: 0x22c55e,
+  test: 0x3b82f6,
+} as const;
+
+function eventTone(event: AlertEvent): keyof typeof DISCORD_COLOR {
+  if (event.kind === 'resolved') return 'resolved';
+  if (event.kind === 'test') return 'test';
+  return event.severity;
+}
+
+function escapeHtml(s: string): string {
+  const map: Record<string, string> = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  return s.replace(/[&<>"']/g, (c) => map[c]!);
+}
+
+/** `[WARNING] CPU high on web-01` / `[Resolved] …` / a fixed line for tests. */
+export function emailSubject(event: AlertEvent, server: ServerRef): string {
+  if (event.kind === 'test') return 'Test notification from Server Manager';
+  const prefix = event.kind === 'resolved' ? '[Resolved]' : `[${event.severity.toUpperCase()}]`;
+  return `${prefix} ${alertLabel(event.type)} on ${server.name}`;
+}
+
+/** Plain-text and HTML bodies with the same content; HTML is escaped, never templated. */
+export function emailBody(
+  event: AlertEvent,
+  server: ServerRef,
+  sentAt: string,
+): { text: string; html: string } {
+  const details = [
+    `Server: ${server.name} (${server.host})`,
+    ...(event.kind !== 'test'
+      ? [`Alert: ${alertLabel(event.type)}`, `Severity: ${event.severity}`]
+      : []),
+    ...(event.value !== undefined ? [`Value: ${event.value}`] : []),
+    ...(event.threshold !== undefined ? [`Threshold: ${event.threshold}`] : []),
+    ...(event.openedAt ? [`Opened: ${event.openedAt}`] : []),
+    `Sent: ${sentAt}`,
+  ];
+  const headline = summarize(event, server);
+  const text = [headline, '', ...details].join('\n');
+  const html =
+    `<p><strong>${escapeHtml(headline)}</strong></p>` +
+    `<pre style="font-family:monospace">${escapeHtml(details.join('\n'))}</pre>`;
+  return { text, html };
+}
+
+/** `ops@example.com +2` — enough to tell two email channels apart in a list. */
+export function describeRecipients(recipients: string[]): string {
+  if (recipients.length === 0) return '';
+  if (recipients.length === 1) return recipients[0]!;
+  return `${recipients[0]} +${recipients.length - 1}`;
+}
+
+/** Recipients are vaulted as one comma-joined string, like a webhook URL. */
+export function parseRecipients(stored: string): string[] {
+  return stored
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function slackIcon(event: AlertEvent): string {
   if (event.kind === 'resolved') return ':white_check_mark:';
   if (event.kind === 'test') return ':bell:';
@@ -95,6 +165,19 @@ export function buildPayload(
   if (type === 'slack') {
     const prefix = event.kind === 'opened' ? `[${event.severity.toUpperCase()}] ` : '';
     return { text: `${slackIcon(event)} ${prefix}${summarize(event, server)}` };
+  }
+
+  if (type === 'discord') {
+    const title =
+      event.kind === 'test'
+        ? 'Test notification'
+        : `${event.kind === 'resolved' ? 'Resolved: ' : ''}${alertLabel(event.type)}`;
+    const description =
+      `${server.name} (${server.host})` + (event.kind === 'opened' ? `\n${event.message}` : '');
+    return {
+      content: summarize(event, server),
+      embeds: [{ title, description, color: DISCORD_COLOR[eventTone(event)] }],
+    };
   }
 
   const payload: AlertWebhookPayload = {
