@@ -17,8 +17,9 @@
 - 💻 **In-Browser Terminal** — Full interactive SSH sessions in your browser via WebSocket + xterm.js.
 - 📌 **Saved Commands per Server** — Save frequently-used commands against any server and run them with one click.
 - ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view history, logs, and failures.
-- 🪣 **Object Storage** — Register AWS S3, MinIO, or any S3-compatible endpoint. List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
-- 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up. Nothing to install on the servers themselves.
+- ☁️ **Cloud Inventory Sync** — Register an AWS, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
+- 🪣 **Object Storage** — Register AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, Google Cloud Storage, Hetzner Object Storage or any S3-compatible endpoint (presets fill in the endpoint shape and region). List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
+- 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up — delivered to Slack, Discord, email or any webhook. Nothing to install on the servers themselves.
 - 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
 - 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or binary). Each team/company runs an isolated environment they fully control.
 - 🤖 **Bring Your Own AI** — Plug in OpenAI, Anthropic Claude, or any local model (Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible endpoint) to:
@@ -171,11 +172,56 @@ SMT_ALERT_LOAD_PER_CORE=2
 SMT_ALERT_OFFLINE_FAILURES=2         # failed checks before a host is alerted as down
 ```
 
+### Alert notifications
+
+Under **Settings → Alert notifications**, add one or more channels. Each channel can be limited to critical alerts and can opt out of "resolved" notices.
+
+| Channel | What you need |
+| ------- | ------------- |
+| Slack | An incoming-webhook URL |
+| Discord | A channel webhook URL (Channel settings → Integrations → Webhooks) |
+| Email | SMTP configured on the instance (below); the channel lists up to 20 recipients |
+| Webhook | Any HTTPS endpoint — receives a structured JSON body |
+
+Email needs two environment variables. The Email option stays disabled in the UI until they are set:
+
+```bash
+SMT_SMTP_URL=smtp://user:password@smtp.example.com:587   # or smtps://…:465
+SMT_SMTP_FROM="BastionSSH <alerts@example.com>"
+```
+
+---
+
+## ☁️ Cloud Accounts
+
+Under **Cloud Accounts**, register a provider credential once and stop adding servers by hand:
+
+| Provider | Credential | Minimum permission |
+| -------- | ---------- | ------------------ |
+| AWS EC2 | Access key ID + secret | `ec2:DescribeInstances`, `ec2:DescribeRegions` |
+| DigitalOcean | Personal access token | read scope |
+| Hetzner Cloud | Project API token | read |
+
+Each account has a default SSH username and key that imported servers start with. A sync then:
+
+- imports instances that are not known yet (public IP preferred, private IP as fallback; instances with neither are skipped),
+- refreshes the host, region and state of servers it already imported — your name, tags, credentials and notes are never overwritten,
+- marks servers whose instance has disappeared as **missing** and never deletes them,
+- excludes **stopped** and **missing** cloud servers from health checks so they do not raise offline alerts.
+
+Sync runs on a schedule and on demand (**Sync now**). Deleting an account keeps the servers and only unlinks them.
+
+```bash
+SMT_CLOUD_SYNC_ENABLED=true     # set false to turn the scheduled sync off (manual sync still works)
+SMT_CLOUD_SYNC_INTERVAL=15      # minutes between syncs (minimum 5)
+SMT_CLOUD_REQUEST_TIMEOUT=30000 # per-request provider timeout in ms
+```
+
 ---
 
 ## 🪣 Object Storage
 
-Add an S3-compatible connection under **Object Storage** (AWS S3, MinIO, Wasabi, Cloudflare R2, DigitalOcean Spaces, Ceph RGW…) with an endpoint, region and access-key pair. The secret key is encrypted at rest with the same vault as SSH keys and never leaves the server.
+Add an S3-compatible connection under **Object Storage** with an endpoint, region and access-key pair. Presets for AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, Google Cloud Storage (HMAC) and Hetzner Object Storage fill in the endpoint shape, region and addressing style; anything else that speaks S3 (Ceph RGW, Garage, Linode, Scaleway, OVH…) works under "Other". The secret key is encrypted at rest with the same vault as SSH keys and never leaves the server.
 
 - Buckets: list, create, delete (optionally emptying it first, with a typed-name confirmation)
 - Objects: browse by folder, upload (streamed, multipart above 8 MiB), download, rename, delete a file or a whole folder

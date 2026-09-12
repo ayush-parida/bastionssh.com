@@ -124,6 +124,45 @@ CPU utilisation is a delta of `/proc/stat` jiffies against the previous stored
 sample, so the first check after a restart or reboot reports no CPU figure rather
 than a wrong one.
 
+### 4.3c Cloud Inventory Sync (`/server/cloud`)
+
+Pulls compute instances from a provider account into the `servers` table and keeps
+them current. Read-only and one-way: the app never creates, stops or deletes cloud
+resources. Like the health monitor it runs in-process on a plain interval
+(`SMT_CLOUD_SYNC_INTERVAL` minutes) so it needs no Redis.
+
+- `providers/{aws,digitalocean,hetzner}.ts` — one adapter per provider, each with a
+  pure `toInstance()` mapper from the provider's wire shape to a normalised
+  `CloudInstance` (id, name, region, running/stopped/other, public and private IP,
+  tags, instance type). AWS uses `@aws-sdk/client-ec2`; the other two are one
+  paginated `fetch` each. Errors become a `CloudError` carrying an HTTP status
+  (403 for rejected credentials, 504 for timeouts, 502 otherwise).
+- `sync.ts` — `planSync()` is pure: existing cloud servers plus discovered instances
+  in, a plan of creates / updates / mark-missing / skipped out. `applyPlan()` writes
+  it in one transaction. A matched server only has host, region and state
+  refreshed; name, tags, credentials and notes belong to the user after import.
+- `index.ts` — credential encode/decode (vault-encrypted JSON), `testCredentials()`
+  (run before an account is saved), `syncAccount()` (records the outcome on the
+  account row either way), and `unlinkAccountServers()` for account deletion.
+- `scheduler.ts` — the interval loop; accounts sync one at a time and one failure
+  never stops the next.
+
+Servers carry `cloud_account_id`, `cloud_provider`, `cloud_instance_id`,
+`cloud_region`, `cloud_state` and `cloud_synced_at`, unique on
+`(cloud_account_id, cloud_instance_id)`. Instances the provider no longer lists are
+marked `missing`, never deleted. The health sweep skips `stopped` and `missing`
+cloud servers so they do not raise offline alerts.
+
+### 4.3d Alert Notifications (`/server/notifications`)
+
+Alert events from the health monitor fan out to every enabled channel of the
+organisation, filtered by minimum severity and the resolve opt-in. Channel types:
+`slack` and `discord` (incoming webhooks, provider-specific payloads), `webhook`
+(structured JSON) and `email` (SMTP via nodemailer, configured instance-wide by
+`SMT_SMTP_URL` / `SMT_SMTP_FROM`). A channel's target — the webhook URL or the
+recipient list — is vault-encrypted; only a masked hint is returned to the client.
+Delivery is fire-and-forget with one retry; a 4xx from a webhook is final.
+
 ### 4.4 SSH Broker (`/server/ssh`)
 
 - Wraps `ssh2`. Responsibilities:
@@ -502,6 +541,11 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_ALERT_*_PERCENT`    | no       | CPU / memory / disk alert thresholds (default 90 each)        |
 | `SMT_ALERT_LOAD_PER_CORE` | no      | Load-average alert threshold, per core (default 2)            |
 | `SMT_ALERT_OFFLINE_FAILURES` | no   | Failed checks before a host is alerted as down (default 2)    |
+| `SMT_SMTP_URL`           | no       | `smtp://` or `smtps://` URL; enables email alert channels     |
+| `SMT_SMTP_FROM`          | if SMTP  | Sender address for alert emails                               |
+| `SMT_CLOUD_SYNC_ENABLED` | no       | Run the scheduled cloud inventory sync (default `true`)       |
+| `SMT_CLOUD_SYNC_INTERVAL` | no      | Minutes between cloud syncs (default 15, minimum 5)           |
+| `SMT_CLOUD_REQUEST_TIMEOUT` | no    | Per-request provider timeout in ms (default 30000)            |
 
 ---
 
