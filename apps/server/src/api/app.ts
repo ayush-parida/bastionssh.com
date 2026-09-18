@@ -19,6 +19,7 @@ import { auditRoutes } from './routes/audit.js';
 import { sshSessionRoutes } from './routes/ssh-sessions.js';
 import { sftpRoutes } from './routes/sftp.js';
 import { storageRoutes } from './routes/storage.js';
+import { ftpRoutes } from './routes/ftp.js';
 import { monitoringRoutes } from './routes/monitoring.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { cloudRoutes } from './routes/cloud.js';
@@ -73,6 +74,7 @@ export async function buildApp() {
   await app.register(sshSessionRoutes, { prefix: '/api/ssh-sessions' });
   await app.register(sftpRoutes, { prefix: '/api/sftp' });
   await app.register(storageRoutes, { prefix: '/api/storage' });
+  await app.register(ftpRoutes, { prefix: '/api/ftp' });
   await app.register(monitoringRoutes, { prefix: '/api/monitoring' });
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(cloudRoutes, { prefix: '/api/cloud' });

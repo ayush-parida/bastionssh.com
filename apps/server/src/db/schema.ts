@@ -451,6 +451,37 @@ export const storageConnections = sqliteTable(
   }),
 );
 
+export const ftpConnections = sqliteTable(
+  'ftp_connections',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    host: text('host').notNull(),
+    port: integer('port').notNull().default(21),
+    protocol: text('protocol').notNull().default('ftps'), // ftp | ftps | ftps-implicit
+    username: text('username').notNull(),
+    encryptedPassword: text('encrypted_password').notNull(),
+    verifyTls: integer('verify_tls', { mode: 'boolean' }).notNull().default(true),
+    rootPath: text('root_path'), // null = the account's login directory
+    lastStatus: text('last_status'), // ok | failed
+    lastError: text('last_error'),
+    lastTestedAt: text('last_tested_at'),
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text('updated_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    orgIdx: index('ftp_connections_org_idx').on(t.orgId),
+  }),
+);
+
 // ── Audit Log ─────────────────────────────────────────────────────────────────
 
 export const auditLog = sqliteTable('audit_log', {

@@ -20,6 +20,7 @@
 - ☁️ **Cloud Inventory Sync** — Register an AWS, Google Cloud, Azure, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
 - 🌐 **DNS Lookup** — Check a domain's records and nameservers from inside the tool. Addresses that belong to a server you manage are labelled with its name, and the same lookup is run against several public resolvers plus the domain's own nameservers so you can see whether a change has propagated.
 - 🪣 **Object Storage** — Register AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, Google Cloud Storage, Hetzner Object Storage or any S3-compatible endpoint (presets fill in the endpoint shape and region). List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
+- 📂 **FTP / FTPS** — Register FTP, explicit-FTPS or implicit-FTPS servers (shared hosting, cPanel, legacy appliances) with a stored, vault-encrypted password. Browse directories, upload, download, rename and delete — same roles and audit log as everything else.
 - 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up — delivered to Slack, Discord, Teams, Google Chat, Telegram, PagerDuty, Opsgenie, ntfy, Gotify, Pushover, email or any webhook. Nothing to install on the servers themselves.
 - 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
 - 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or binary). Each team/company runs an isolated environment they fully control.
@@ -255,6 +256,17 @@ Add an S3-compatible connection under **Object Storage** with an endpoint, regio
 - Roles: viewers browse and download, operators change objects, admins manage connections and buckets
 
 Uploads are capped by `SMT_STORAGE_MAX_UPLOAD_BYTES` (default 5 GiB).
+
+## 📂 FTP / FTPS
+
+Some hosts only speak FTP. Add one under **FTP** with a host, port, protocol and username/password. Explicit FTPS (TLS upgrade on port 21) is the default; implicit FTPS (port 990) and plain FTP are available for servers that need them, and certificate verification can be turned off for a self-signed box. The password is encrypted at rest with the same vault as SSH keys and never leaves the server.
+
+- Browse from the account's login directory or a configured start directory
+- Upload (streamed), download, create folders, rename, delete a file or a whole tree
+- Roles: viewers browse and download, operators change files, admins manage connections
+- One logged-in session per user per connection, reused across requests and closed after two minutes idle
+
+Uploads are capped by `SMT_FTP_MAX_UPLOAD_BYTES` (default 1 GiB).
 
 ---
 

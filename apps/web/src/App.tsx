@@ -18,6 +18,8 @@ import ServerHealthPage from '@/pages/ServerHealth.js';
 import StoragePage from '@/pages/Storage.js';
 import StorageBucketsPage from '@/pages/StorageBuckets.js';
 import StorageObjectsPage from '@/pages/StorageObjects.js';
+import FtpPage from '@/pages/Ftp.js';
+import FtpFilesPage from '@/pages/FtpFiles.js';
 import CloudAccountsPage from '@/pages/CloudAccounts.js';
 import DnsLookupPage from '@/pages/DnsLookup.js';
 
@@ -49,6 +51,8 @@ export default function App() {
           <Route path="storage" element={<StoragePage />} />
           <Route path="storage/:id" element={<StorageBucketsPage />} />
           <Route path="storage/:id/buckets/:bucket" element={<StorageObjectsPage />} />
+          <Route path="ftp" element={<FtpPage />} />
+          <Route path="ftp/:id" element={<FtpFilesPage />} />
           <Route path="cloud" element={<CloudAccountsPage />} />
           <Route path="dns" element={<DnsLookupPage />} />
           <Route path="monitoring" element={<MonitoringPage />} />

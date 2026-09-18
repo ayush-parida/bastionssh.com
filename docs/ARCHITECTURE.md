@@ -264,6 +264,61 @@ REST surface, all under `/api/storage`:
 | `POST`   | `/connections/:id/buckets/:bucket/rename`           | Copy + delete one object                     |
 | `DELETE` | `/connections/:id/buckets/:bucket/object?key=&recursive=` | Delete an object or a whole prefix     |
 
+### 4.4c FTP (`/server/ftp`)
+
+Plain FTP and FTPS for the hosts that only offer that: shared hosting, cPanel,
+appliances, legacy boxes. Built on `basic-ftp`, which handles explicit TLS
+(`AUTH TLS` on port 21), implicit TLS (conventionally port 990), passive mode
+and both Unix and MLSD listing formats.
+
+- `paths.ts` — pure helpers: absolute POSIX path normalisation (`..` collapses
+  rather than escaping, no null bytes or line breaks, since a path is spliced
+  into a control-channel command), plus the host guard (a hostname or IP, not a
+  URL; metadata addresses refused).
+- `errors.ts` — maps FTP reply codes onto HTTP statuses. `550` is overloaded in
+  the protocol, so the server's own wording decides between 404 and 403.
+  Socket failures and the client's inactivity watchdog become 502 / 504.
+- `client.ts` — builds the access options (TLS mode, certificate verification)
+  and logs in.
+- `ops.ts` — thin wrappers over the client: listing (directories first, mode
+  bits rendered as `rwxr-xr-x` when the server reports them), a `stat` built
+  from listing the parent (FTP has no stat; `SIZE` and `MDTM` are optional
+  extensions), mkdir, rename, single and recursive delete, streamed upload and
+  download, and the connection test.
+- `index.ts` — resolves a connection for the caller's org, decrypts the
+  password, and keeps one logged-in client per `orgId:connectionId:userId`.
+
+The pool matters more here than for S3: an FTP control connection runs one
+command at a time, so each pooled client carries a promise chain that
+serialises the operations queued against it. A failure that is not a plain FTP
+reply — a dropped socket, a timeout, an aborted transfer — leaves the control
+connection in an unknown state, so the client is closed and the next call
+reconnects. Idle clients close after two minutes; editing or deleting a
+connection evicts its clients immediately.
+
+Downloads list the parent first so a missing path is a clean 404 rather than a
+broken stream after the headers have gone out, then pipe the data connection
+straight to the response. Uploads pipe a raw `application/octet-stream` body
+to the server, capped by `SMT_FTP_MAX_UPLOAD_BYTES`. `.` as a path opens the
+connection's configured start directory, else the login directory.
+
+REST surface, all under `/api/ftp`:
+
+| Method   | Path                                   | Purpose                                      |
+| -------- | -------------------------------------- | -------------------------------------------- |
+| `GET`    | `/connections`                         | List connections (password never returned)   |
+| `GET`    | `/connections/:id`                     | One connection                               |
+| `POST`   | `/connections`                         | Create (port defaults per protocol)          |
+| `PATCH`  | `/connections/:id`                     | Update (omit `password` to keep it)          |
+| `DELETE` | `/connections/:id`                     | Delete                                       |
+| `POST`   | `/connections/:id/test`                | Log in and list the login directory, result recorded |
+| `GET`    | `/connections/:id/list?path=`          | Directory listing (`.` = start directory)    |
+| `GET`    | `/connections/:id/download?path=`      | Stream a file to the client                  |
+| `PUT`    | `/connections/:id/file?path=`          | Upload a raw body to that path               |
+| `POST`   | `/connections/:id/mkdir`               | Create a directory                           |
+| `POST`   | `/connections/:id/rename`              | Rename or move                               |
+| `DELETE` | `/connections/:id/file?path=&recursive=` | Delete a file, an empty directory, or a tree |
+
 ### 4.5 Secrets Vault (`/server/vault`)
 
 - Wraps libsodium.
@@ -305,6 +360,7 @@ Server       1───1 ServerHealth
 Server       1───* ServerAlert
 Organization 1───* AIProviderConfig
 Organization 1───* StorageConnection
+Organization 1───* FtpConnection
 Organization 1───* AuditLogEntry
 User         1───* APIToken
 ```
@@ -324,13 +380,14 @@ User         1───* APIToken
 - **server_alerts** — one row per alert occurrence; `resolved_at` is set when the condition clears, `acknowledged_at` when a user silences it.
 - **ai_provider_configs** — `provider`, `base_url`, `model`, `encrypted_api_key`, `default boolean`.
 - **storage_connections** — `name`, `provider` (`s3 | minio | other`), `endpoint` (null = AWS), `region`, `access_key_id`, `encrypted_secret_access_key`, `force_path_style`, last-test status.
+- **ftp_connections** — `name`, `host`, `port`, `protocol` (`ftp | ftps | ftps-implicit`), `username`, `encrypted_password`, `verify_tls`, `root_path`, last-test status.
 - **audit_log** — append-only, partitioned by month.
 - **sessions** — browser auth sessions (Lucia).
 - **api_tokens** — programmatic access tokens, scoped + hashed.
 
 ### Encrypted columns
 
-`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key` and `storage_connections.encrypted_secret_access_key` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
+`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key`, `storage_connections.encrypted_secret_access_key` and `ftp_connections.encrypted_password` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
 
 ---
 
@@ -435,6 +492,9 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Buckets (create / delete)   | viewer   | admin       |
 | Objects list / download     | viewer   | —           |
 | Objects upload / folder / rename / delete | — | operator |
+| FTP connections             | viewer   | admin       |
+| FTP list / download         | viewer   | —           |
+| FTP upload / mkdir / rename / delete | — | operator |
 | AI chat                     | —        | operator    |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
@@ -517,6 +577,7 @@ server-management-tool/
 │       │   ├── monitoring/ # Agentless SSH health checks + alerting
 │       │   ├── ssh/      # SSH broker
 │       │   ├── storage/  # S3 / MinIO client + ops
+│       │   ├── ftp/      # FTP / FTPS client + ops
 │       │   ├── ai/       # AI provider adapters
 │       │   ├── vault/    # Secrets encryption
 │       │   ├── audit/    # Audit logging
@@ -557,6 +618,7 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_AI_REQUEST_TIMEOUT` | no       | Timeout for outbound AI calls (ms)                            |
 | `SMT_SFTP_MAX_UPLOAD_BYTES` | no    | Max SFTP upload size in bytes (default 1 GiB)                 |
 | `SMT_STORAGE_MAX_UPLOAD_BYTES` | no | Max object-storage upload size in bytes (default 5 GiB)       |
+| `SMT_FTP_MAX_UPLOAD_BYTES` | no     | Max FTP upload size in bytes (default 1 GiB)                  |
 | `SMT_MONITORING_ENABLED` | no       | Run agentless health checks (default `true`)                  |
 | `SMT_MONITORING_INTERVAL` | no      | Seconds between health sweeps (default 60, minimum 15)        |
 | `SMT_MONITORING_CONCURRENCY` | no   | Servers probed in parallel (default 5)                        |

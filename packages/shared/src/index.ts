@@ -3,6 +3,7 @@ export * from './types/server.js';
 export * from './types/ssh-key.js';
 export * from './types/sftp.js';
 export * from './types/storage.js';
+export * from './types/ftp.js';
 export * from './types/cloud.js';
 export * from './types/dns.js';
 export * from './types/saved-command.js';

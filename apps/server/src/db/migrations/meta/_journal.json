@@ -43,6 +43,13 @@
       "when": 1777300000000,
       "tag": "0005_add_cloud_accounts",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1777400000000,
+      "tag": "0006_add_ftp_connections",
+      "breakpoints": true
     }
   ]
 }
