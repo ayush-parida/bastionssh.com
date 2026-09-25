@@ -3,6 +3,8 @@ import { useAuthStore } from '@/store/auth.js';
 import Layout from '@/components/layout/Layout.js';
 import LoginPage from '@/pages/Login.js';
 import AcceptInvitePage from '@/pages/AcceptInvite.js';
+import ResetPasswordPage from '@/pages/ResetPassword.js';
+import TeamPage from '@/pages/Team.js';
 import DashboardPage from '@/pages/Dashboard.js';
 import ServersPage from '@/pages/Servers.js';
 import KeysPage from '@/pages/Keys.js';
@@ -34,6 +36,7 @@ export default function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/invite/:token" element={<AcceptInvitePage />} />
+        <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
         <Route path="/register" element={<Navigate to="/login" replace />} />
         <Route
           path="/"
@@ -61,6 +64,7 @@ export default function App() {
           <Route path="cron-jobs" element={<CronJobsPage />} />
           <Route path="ai" element={<AIChatPage />} />
           <Route path="audit" element={<AuditPage />} />
+          <Route path="team" element={<TeamPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>

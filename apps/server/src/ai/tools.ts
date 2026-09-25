@@ -1,8 +1,14 @@
 import { getDb } from '../db/index.js';
-import { servers, savedCommands, cronJobs, auditLog } from '../db/schema.js';
+import { servers, savedCommands, cronJobs, auditLog, memberships } from '../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { SSHBroker, execOnServer } from '../ssh/broker.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
+import {
+  accessibleSavedCommandFilter,
+  accessibleServerFilter,
+  canAccessServer,
+} from '../auth/server-access.js';
+import { rank } from '../auth/middleware.js';
 import type { AITool } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
@@ -11,7 +17,7 @@ export const AGENT_TOOLS: AITool[] = [
   {
     name: 'run_command',
     description:
-      'Execute a shell command on a server and return stdout/stderr. Use for diagnostics, health checks, log inspection, and server management. Prefer non-destructive read-only commands unless the user explicitly asks to make changes.',
+      'Execute a shell command on a server and return stdout/stderr. Use for diagnostics, health checks, log inspection, and server management. Read-only commands run immediately; anything that could change the server waits for the user to approve it. Prefer non-destructive read-only commands unless the user explicitly asks to make changes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -81,7 +87,7 @@ export class ToolExecutor {
   async execute(name: string, input: Record<string, unknown>): Promise<string> {
     switch (name) {
       case 'run_command':
-        return this.runCommand(input);
+        return (await this.runCommand(input)).output;
       case 'list_servers':
         return this.listServers();
       case 'list_saved_commands':
@@ -93,27 +99,38 @@ export class ToolExecutor {
     }
   }
 
-  private async runCommand(input: Record<string, unknown>): Promise<string> {
+  /**
+   * Work out which server `run_command` would target for this input, without
+   * running anything — used to show the target on an approval card and in the
+   * audit log. The name is looked up within the org only.
+   */
+  resolveTarget(input: Record<string, unknown>): { serverId?: string; serverName?: string } {
+    const { serverId } = this.target(input);
+    if (!serverId || !this.canUse(serverId)) return {};
+    const row = getDb()
+      .select({ name: servers.name })
+      .from(servers)
+      .where(and(eq(servers.id, serverId), eq(servers.orgId, this.orgId)))
+      .get();
+    return { serverId, serverName: row?.name };
+  }
+
+  /** Run a command and keep the exit code, which the formatted output only mentions. */
+  async runCommand(
+    input: Record<string, unknown>,
+  ): Promise<{ output: string; exitCode: number; serverId: string | undefined }> {
     const command = (input.command as string | undefined)?.trim();
     if (!command) throw new Error('"command" is required');
 
-    const requestedServerId = (input.server_id as string | undefined) || this.activeServerId;
     const owner = { userId: this.userId, orgId: this.orgId };
-
-    // Reuse the interactive session only if it is the caller's and is connected
-    // to the server the command targets — never run on some other host.
-    const session = this.sessionId
-      ? SSHBroker.getSessionForUser(this.sessionId, owner.userId, owner.orgId)
-      : undefined;
-    const sessionServerId = session
-      ? (session.server as { id?: string }).id
-      : undefined;
-    const serverId = requestedServerId ?? sessionServerId;
+    const { session, sessionServerId, serverId } = this.target(input);
+    // Same answer as a server that does not exist, so restricted members learn nothing
+    if (serverId && !this.canUse(serverId)) throw new Error('Server not found');
 
     if (session && sessionServerId && serverId === sessionServerId) {
       try {
         const result = await SSHBroker.exec(session.id, command, undefined, owner);
-        return formatExecResult(result);
+        return { output: formatExecResult(result), exitCode: result.exitCode, serverId };
       } catch {
         // Session may have expired — fall through to direct exec
       }
@@ -132,12 +149,35 @@ export class ToolExecutor {
       command,
     );
 
-    return formatExecResult(result);
+    return { output: formatExecResult(result), exitCode: result.exitCode, serverId };
+  }
+
+  private canUse(serverId: string): boolean {
+    return canAccessServer({ orgId: this.orgId, userId: this.userId }, serverId);
+  }
+
+  private target(input: Record<string, unknown>) {
+    const requestedServerId = (input.server_id as string | undefined) || this.activeServerId;
+
+    // Reuse the interactive session only if it is the caller's and is connected
+    // to the server the command targets — never run on some other host.
+    const session = this.sessionId
+      ? SSHBroker.getSessionForUser(this.sessionId, this.userId, this.orgId)
+      : undefined;
+    const sessionServerId = session
+      ? (session.server as { id?: string }).id
+      : undefined;
+    return { session, sessionServerId, serverId: requestedServerId ?? sessionServerId };
   }
 
   private listServers(): string {
     const db = getDb();
-    const rows = db.select().from(servers).where(eq(servers.orgId, this.orgId)).all();
+    const who = { orgId: this.orgId, userId: this.userId };
+    const rows = db
+      .select()
+      .from(servers)
+      .where(and(eq(servers.orgId, this.orgId), accessibleServerFilter(who, servers.id)))
+      .all();
     if (rows.length === 0) return 'No servers registered.';
 
     return rows
@@ -152,13 +192,18 @@ export class ToolExecutor {
     const db = getDb();
     const serverId = input.server_id as string | undefined;
 
+    const who = { orgId: this.orgId, userId: this.userId };
+
+    // Commands bound to a server the user cannot access stay hidden
     const rows = db
       .select()
       .from(savedCommands)
       .where(
-        serverId
-          ? and(eq(savedCommands.orgId, this.orgId), eq(savedCommands.serverId, serverId))
-          : eq(savedCommands.orgId, this.orgId),
+        and(
+          eq(savedCommands.orgId, this.orgId),
+          serverId ? eq(savedCommands.serverId, serverId) : undefined,
+          accessibleSavedCommandFilter(who),
+        ),
       )
       .all();
 
@@ -171,10 +216,22 @@ export class ToolExecutor {
     const db = getDb();
     const limit = Math.min((input.limit as number | undefined) ?? 10, 50);
 
+    // The audit log route is admin-only; below that, the agent only sees the caller's own actions
+    const membership = db
+      .select({ role: memberships.role })
+      .from(memberships)
+      .where(and(eq(memberships.userId, this.userId), eq(memberships.orgId, this.orgId)))
+      .get();
+    const ownOnly = rank(membership?.role ?? 'viewer') < rank('admin');
+
     const rows = db
       .select()
       .from(auditLog)
-      .where(eq(auditLog.orgId, this.orgId))
+      .where(
+        ownOnly
+          ? and(eq(auditLog.orgId, this.orgId), eq(auditLog.actorId, this.userId))
+          : eq(auditLog.orgId, this.orgId),
+      )
       .orderBy(desc(auditLog.createdAt))
       .limit(limit)
       .all();
@@ -209,17 +266,27 @@ function formatExecResult(result: { stdout: string; stderr: string; exitCode: nu
 /** Build the system prompt injected into every AI chat request */
 export function buildSystemPrompt(opts: {
   orgId: string;
+  userId: string;
   terminalOutput?: string;
   sessionServerId?: string;
 }): string {
   const db = getDb();
-  const allServers = db.select().from(servers).where(eq(servers.orgId, opts.orgId)).all();
+  const who = { orgId: opts.orgId, userId: opts.userId };
+  const allServers = db
+    .select()
+    .from(servers)
+    .where(and(eq(servers.orgId, opts.orgId), accessibleServerFilter(who, servers.id)))
+    .all();
   const allCommands = db
     .select()
     .from(savedCommands)
-    .where(eq(savedCommands.orgId, opts.orgId))
+    .where(and(eq(savedCommands.orgId, opts.orgId), accessibleSavedCommandFilter(who)))
     .all();
-  const allCrons = db.select().from(cronJobs).where(eq(cronJobs.orgId, opts.orgId)).all();
+  const allCrons = db
+    .select()
+    .from(cronJobs)
+    .where(and(eq(cronJobs.orgId, opts.orgId), accessibleServerFilter(who, cronJobs.serverId)))
+    .all();
 
   const serverList =
     allServers.length > 0
@@ -251,7 +318,10 @@ export function buildSystemPrompt(opts: {
     'You are BastionSSH AI Assistant, an expert DevOps engineer helping manage Linux servers.',
     'You have access to tools that let you run commands on servers and inspect the infrastructure.',
     'Always explain what you are doing before executing commands.',
-    'Prefer read-only diagnostic commands first. Ask for confirmation before destructive actions.',
+    'Prefer read-only diagnostic commands first.',
+    'Read-only commands run immediately. Any command that could change a server (restarts, installs, edits, deletes, writes to files, sudo, and anything not recognised as read-only) is shown to the user, who must approve it before it runs — you do not need to ask for confirmation in chat first, but do say what the change will do.',
+    'Repository config can make git run programs, so most git commands need approval. To inspect a repository without it, use `git diff --no-ext-diff --no-textconv …`, or put `--no-ext-diff --no-textconv --no-show-signature` plus an explicit format such as `--oneline` right after `git log` / `git show`.',
+    'If the user declines a command, or the approval expires, do not retry the same command or a variation of it. Explain what you would have done and ask how they want to proceed.',
     '',
     '## Registered Servers',
     serverList,

@@ -6,6 +6,11 @@ import type { AIProviderConfig, AIAgentEvent } from '@smt/shared';
 import { Send, Bot, User, Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import {
+  ApprovalCard,
+  settleWaitingApprovals,
+  type ToolApproval,
+} from '@/components/ai/ApprovalCard.js';
 
 interface ToolCallRecord {
   id: string;
@@ -14,6 +19,8 @@ interface ToolCallRecord {
   output?: string;
   isError?: boolean;
   expanded: boolean;
+  /** Set when the command needed the user's approval */
+  approval?: ToolApproval;
 }
 
 interface Message {
@@ -28,6 +35,7 @@ export default function AIChatPage() {
   const [streaming, setStreaming] = useState(false);
   const [providerId, setProviderId] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const { data: providers } = useQuery<AIProviderConfig[]>({
     queryKey: ['ai-providers'],
@@ -41,6 +49,18 @@ export default function AIChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Leaving the page ends the stream, which denies any command still awaiting approval.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  /** Apply `fn` to the tool calls of the assistant message being streamed. */
+  function updateToolCalls(fn: (toolCalls: ToolCallRecord[]) => ToolCallRecord[]) {
+    setMessages((prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.role !== 'assistant') return prev;
+      return [...prev.slice(0, -1), { ...last, toolCalls: fn(last.toolCalls ?? []) }];
+    });
+  }
 
   function toggleToolCall(msgIdx: number, tcId: string) {
     setMessages((prev) =>
@@ -65,13 +85,19 @@ export default function AIChatPage() {
     const assistantMsg: Message = { role: 'assistant', content: '', toolCalls: [] };
     setMessages((prev) => [...prev, { role: 'user', content: userMsg }, assistantMsg]);
     setStreaming(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
 
     try {
-      const res = await api.stream('/ai/chat', {
-        providerId,
-        agentMode: true,
-        messages: [...messages, { role: 'user', content: userMsg }],
-      });
+      const res = await api.stream(
+        '/ai/chat',
+        {
+          providerId,
+          agentMode: true,
+          messages: [...messages, { role: 'user', content: userMsg }],
+        },
+        { signal: ctrl.signal },
+      );
 
       for await (const event of readSSE<AIAgentEvent>(res)) {
         if (event.type === 'delta') {
@@ -101,6 +127,31 @@ export default function AIChatPage() {
             );
             return [...prev.slice(0, -1), { ...last, toolCalls }];
           });
+        } else if (event.type === 'approval_required') {
+          updateToolCalls((toolCalls) =>
+            toolCalls.map((tc) =>
+              tc.id === event.id
+                ? {
+                    ...tc,
+                    approval: {
+                      status: 'waiting',
+                      reason: event.reason,
+                      serverId: event.serverId,
+                      serverName: event.serverName,
+                    },
+                  }
+                : tc,
+            ),
+          );
+        } else if (event.type === 'approval_resolved') {
+          const status = event.approved ? 'approved' : event.expired ? 'expired' : 'denied';
+          updateToolCalls((toolCalls) =>
+            toolCalls.map((tc) =>
+              tc.id === event.id && tc.approval
+                ? { ...tc, approval: { ...tc.approval, status } }
+                : tc,
+            ),
+          );
         } else if (event.type === 'done' || event.type === 'error') {
           if (event.type === 'error') {
             setMessages((prev) => {
@@ -113,12 +164,16 @@ export default function AIChatPage() {
         }
       }
     } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') return;
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (!last) return prev;
         return [...prev.slice(0, -1), { ...last, content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}` }];
       });
     } finally {
+      // The server denies anything still undecided once the stream closes.
+      updateToolCalls((toolCalls) => settleWaitingApprovals(toolCalls, 'denied'));
+      if (abortRef.current === ctrl) abortRef.current = null;
       setStreaming(false);
     }
   }
@@ -176,6 +231,16 @@ export default function AIChatPage() {
                     )}
                     {tc.isError && <span className="ml-auto text-destructive text-[10px]">error</span>}
                   </button>
+                  {tc.approval && (
+                    <div className="px-3 pb-2">
+                      <ApprovalCard
+                        toolCallId={tc.id}
+                        command={String(tc.input.command ?? '')}
+                        approval={tc.approval}
+                        variant="app"
+                      />
+                    </div>
+                  )}
                   {tc.expanded && (
                     <div className="px-3 pb-2 space-y-1.5 border-t border-border">
                       <div className="mt-1.5">

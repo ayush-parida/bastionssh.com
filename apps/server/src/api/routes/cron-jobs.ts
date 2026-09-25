@@ -1,6 +1,11 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import {
+  accessibleSavedCommandFilter,
+  accessibleServerFilter,
+  canAccessServer,
+} from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { cronJobs, cronRuns, savedCommands } from '../../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
@@ -35,12 +40,39 @@ const createCronSchema = createCronBaseSchema.refine((d) => d.savedCommandId ?? 
 // the inline one instead of the saved command the user picked.
 const BOTH_COMMANDS_ERROR = 'Provide either savedCommandId or inlineCommand, not both';
 
-/** A saved command can only be referenced by a job in the same org. */
-function savedCommandInOrg(id: string, orgId: string) {
+/**
+ * A saved command can only be referenced by a job in the same org, and only
+ * one the caller can see (not bound to a server they cannot access).
+ */
+function savedCommandInOrg(req: FastifyRequest, id: string) {
   return getDb()
     .select({ id: savedCommands.id })
     .from(savedCommands)
-    .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, orgId)))
+    .where(
+      and(
+        eq(savedCommands.id, id),
+        eq(savedCommands.orgId, req.orgId),
+        accessibleSavedCommandFilter(req),
+      ),
+    )
+    .get();
+}
+
+/**
+ * A job in the caller's org whose server they may access. Jobs on servers a
+ * restricted member cannot see are reported as not found, like the server.
+ */
+function loadJob(req: FastifyRequest, id: string) {
+  return getDb()
+    .select()
+    .from(cronJobs)
+    .where(
+      and(
+        eq(cronJobs.id, id),
+        eq(cronJobs.orgId, req.orgId),
+        accessibleServerFilter(req, cronJobs.serverId),
+      ),
+    )
     .get();
 }
 
@@ -49,7 +81,11 @@ export async function cronJobRoutes(app: FastifyInstance) {
 
   app.get('/', async (req) => {
     const db = getDb();
-    return db.select().from(cronJobs).where(eq(cronJobs.orgId, req.orgId)).all();
+    return db
+      .select()
+      .from(cronJobs)
+      .where(and(eq(cronJobs.orgId, req.orgId), accessibleServerFilter(req, cronJobs.serverId)))
+      .all();
   });
 
   app.post('/', { preHandler: requireRole('operator') }, async (req, reply) => {
@@ -58,8 +94,12 @@ export async function cronJobRoutes(app: FastifyInstance) {
 
     if (body.savedCommandId && body.inlineCommand)
       return reply.status(400).send({ error: BOTH_COMMANDS_ERROR });
-    if (body.savedCommandId && !savedCommandInOrg(body.savedCommandId, req.orgId))
+    if (body.savedCommandId && !savedCommandInOrg(req, body.savedCommandId))
       return reply.status(404).send({ error: 'Saved command not found' });
+    // The worker runs the job as its creator with no request to check against,
+    // so the creator's access is settled here, once.
+    if (!canAccessServer(req, body.serverId))
+      return reply.status(404).send({ error: 'Server not found' });
 
     const parsed = parseCronSchedule(body.schedule, body.timezone);
     if (!parsed.isValid) {
@@ -90,16 +130,14 @@ export async function cronJobRoutes(app: FastifyInstance) {
     const body = createCronBaseSchema.partial().parse(req.body);
     const db = getDb();
 
-    const job = db
-      .select()
-      .from(cronJobs)
-      .where(and(eq(cronJobs.id, id), eq(cronJobs.orgId, req.orgId)))
-      .get();
+    const job = loadJob(req, id);
     if (!job) return reply.status(404).send({ error: 'Not found' });
 
+    if (body.serverId && !canAccessServer(req, body.serverId))
+      return reply.status(404).send({ error: 'Server not found' });
     if (body.savedCommandId && body.inlineCommand)
       return reply.status(400).send({ error: BOTH_COMMANDS_ERROR });
-    if (body.savedCommandId && !savedCommandInOrg(body.savedCommandId, req.orgId))
+    if (body.savedCommandId && !savedCommandInOrg(req, body.savedCommandId))
       return reply.status(404).send({ error: 'Saved command not found' });
 
     // A bad timezone alone would otherwise be saved and the job never scheduled.
@@ -135,11 +173,7 @@ export async function cronJobRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const db = getDb();
 
-    const job = db
-      .select()
-      .from(cronJobs)
-      .where(and(eq(cronJobs.id, id), eq(cronJobs.orgId, req.orgId)))
-      .get();
+    const job = loadJob(req, id);
     if (!job) return reply.status(404).send({ error: 'Not found' });
 
     db.delete(cronJobs).where(eq(cronJobs.id, id)).run();
@@ -154,11 +188,7 @@ export async function cronJobRoutes(app: FastifyInstance) {
   app.get('/:id/runs', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
-    const job = db
-      .select()
-      .from(cronJobs)
-      .where(and(eq(cronJobs.id, id), eq(cronJobs.orgId, req.orgId)))
-      .get();
+    const job = loadJob(req, id);
     if (!job) return reply.status(404).send({ error: 'Not found' });
     return db
       .select()

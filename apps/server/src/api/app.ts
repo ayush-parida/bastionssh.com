@@ -25,6 +25,7 @@ import { notificationRoutes } from './routes/notifications.js';
 import { cloudRoutes } from './routes/cloud.js';
 import { dnsRoutes } from './routes/dns.js';
 import { teamRoutes, publicInviteRoutes } from './routes/team.js';
+import { publicPasswordResetRoutes } from './routes/password-reset.js';
 import { apiTokenRoutes } from './routes/tokens.js';
 import { healthRoutes } from './routes/health.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
@@ -86,6 +87,8 @@ export async function buildApp() {
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });
   // Unauthenticated: reading and accepting an invite happens before an account exists
   await app.register(publicInviteRoutes, { prefix: '/api/invites' });
+  // Unauthenticated: redeeming an admin-issued reset link
+  await app.register(publicPasswordResetRoutes, { prefix: '/api/password-reset' });
 
   if (config.staticDir) {
     const staticPath = path.resolve(config.staticDir);

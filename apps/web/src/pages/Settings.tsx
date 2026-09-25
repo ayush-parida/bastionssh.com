@@ -5,8 +5,8 @@ import type { AIProviderConfig } from '@smt/shared';
 import { Plus, Trash2, Bot, Pencil } from 'lucide-react';
 import { toast } from 'sonner';
 import NotificationChannels from '@/components/settings/NotificationChannels.js';
-import TeamMembers from '@/components/settings/TeamMembers.js';
 import AccountSettings from '@/components/settings/AccountSettings.js';
+import Sessions from '@/components/settings/Sessions.js';
 import ApiTokens from '@/components/settings/ApiTokens.js';
 
 interface ProviderForm {
@@ -170,8 +170,8 @@ export default function SettingsPage() {
       </section>
 
       <NotificationChannels />
-      <TeamMembers />
       <AccountSettings />
+      <Sessions />
       <ApiTokens />
     </div>
   );

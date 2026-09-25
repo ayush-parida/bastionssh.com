@@ -203,6 +203,34 @@ export function evictServer(orgId: string, serverId: string) {
   }
 }
 
+/**
+ * Drop a user's pooled connections after their access is revoked. Scoped to
+ * one org when `orgId` is given; servers in `keepServerIds` stay open.
+ * In-flight transfers on a dropped connection fail. Returns how many closed.
+ */
+export function evictUser(
+  userId: string,
+  scope: { orgId?: string; keepServerIds?: Iterable<string> } = {},
+): number {
+  const keep = new Set(scope.keepServerIds ?? []);
+  let closed = 0;
+  for (const [key, pending] of pool) {
+    const [orgId, serverId, owner] = key.split(':');
+    if (owner !== userId) continue;
+    if (scope.orgId && orgId !== scope.orgId) continue;
+    if (serverId && keep.has(serverId)) continue;
+    pool.delete(key);
+    pending
+      .then((conn) => {
+        clearTimeout(conn.idleTimer);
+        conn.client.end();
+      })
+      .catch(() => {});
+    closed++;
+  }
+  return closed;
+}
+
 export function poolKey(orgId: string, serverId: string, userId: string) {
   return `${orgId}:${serverId}:${userId}`;
 }

@@ -1,8 +1,8 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { validateSession } from './session.js';
+import { touchSession, validateSession } from './session.js';
 import { getDb } from '../db/index.js';
 import { users, memberships, apiTokens } from '../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, asc } from 'drizzle-orm';
 import {
   bearerFrom,
   effectiveRole,
@@ -23,7 +23,41 @@ declare module 'fastify' {
     role: Role;
     /** True when the caller authenticated with an API token rather than a session. */
     viaApiToken: boolean;
+    /** The session cookie that authenticated this request; null for API tokens. */
+    sessionId: string | null;
   }
+}
+
+export const SUSPENDED_MESSAGE =
+  'Your access to this organization has been suspended. Contact an organization admin.';
+
+type Membership = typeof memberships.$inferSelect;
+
+export type MembershipResolution =
+  | { status: 'ok'; membership: Membership }
+  /** Memberships exist, but none the caller may use right now. */
+  | { status: 'suspended' }
+  | { status: 'none' };
+
+/**
+ * Pick the org a request acts in: the preferred one (a session's active org)
+ * when it is still an active membership, else the oldest active membership.
+ * A suspended membership is never chosen — suspension would otherwise only
+ * last until the next fallback.
+ */
+export function resolveMembership(userId: string, preferredOrgId?: string | null): MembershipResolution {
+  const rows = getDb()
+    .select()
+    .from(memberships)
+    .where(eq(memberships.userId, userId))
+    .orderBy(asc(memberships.joinedAt))
+    .all();
+  if (rows.length === 0) return { status: 'none' };
+
+  const active = rows.filter((m) => m.status === 'active');
+  const preferred = preferredOrgId ? active.find((m) => m.orgId === preferredOrgId) : undefined;
+  const chosen = preferred ?? active[0];
+  return chosen ? { status: 'ok', membership: chosen } : { status: 'suspended' };
 }
 
 export function rank(role: string): number {
@@ -106,6 +140,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   const apiToken = await resolveApiToken(req);
   let userId: string;
   let scopes: TokenScope[] | null = null;
+  let session: Awaited<ReturnType<typeof validateSession>> = null;
 
   if (apiToken.status === 'ok') {
     userId = apiToken.userId;
@@ -119,7 +154,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     const sessionId = req.cookies['smt_session'];
     if (!sessionId) return reply.status(401).send({ error: 'Unauthorized' });
 
-    const session = await validateSession(sessionId);
+    session = await validateSession(sessionId);
     if (!session) return reply.status(401).send({ error: 'Session expired' });
     userId = session.userId;
   }
@@ -127,17 +162,23 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   const user = db.select().from(users).where(eq(users.id, userId)).get();
   if (!user) return reply.status(401).send({ error: 'Unauthorized' });
 
-  // Resolve orgId from URL param or default to user's first org
+  // Resolve orgId from URL param, else the session's chosen org, else the first active one
   const orgIdParam = (req.params as Record<string, string>)['orgId'];
-  const membership = orgIdParam
-    ? db
-        .select()
-        .from(memberships)
-        .where(and(eq(memberships.userId, user.id), eq(memberships.orgId, orgIdParam)))
-        .get()
-    : db.select().from(memberships).where(eq(memberships.userId, user.id)).get();
-
-  if (!membership) return reply.status(403).send({ error: 'Forbidden' });
+  let membership: Membership | undefined;
+  if (orgIdParam) {
+    membership = db
+      .select()
+      .from(memberships)
+      .where(and(eq(memberships.userId, user.id), eq(memberships.orgId, orgIdParam)))
+      .get();
+    if (!membership) return reply.status(403).send({ error: 'Forbidden' });
+    if (membership.status !== 'active') return reply.status(403).send({ error: SUSPENDED_MESSAGE });
+  } else {
+    const resolved = resolveMembership(user.id, session?.activeOrgId);
+    if (resolved.status === 'suspended') return reply.status(403).send({ error: SUSPENDED_MESSAGE });
+    if (resolved.status === 'none') return reply.status(403).send({ error: 'Forbidden' });
+    membership = resolved.membership;
+  }
 
   const membershipRole = ROLES.includes(membership.role as Role)
     ? (membership.role as Role)
@@ -154,4 +195,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   // A token can only narrow what its owner may do, never widen it.
   req.role = scopes ? effectiveRole(membershipRole, scopes) : membershipRole;
   req.viaApiToken = scopes !== null;
+  req.sessionId = session?.id ?? null;
+
+  if (session) touchSession(session, req.ip);
 }

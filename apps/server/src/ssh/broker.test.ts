@@ -218,3 +218,50 @@ describe('exec', () => {
     expect(ch.close).toHaveBeenCalled();
   });
 });
+
+describe('closeForUser', () => {
+  async function sessionFor(userId: string, orgId: string, serverId: string) {
+    const id = await SSHBroker.createSession({
+      server: { id: serverId, host: 'h', port: 22, username: 'root' },
+      password: 'pw',
+      userId,
+      orgId,
+      cols: 80,
+      rows: 24,
+    });
+    await flush();
+    await flush();
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq({ userId, orgId }));
+    return { id, client: state.clients.at(-1), sock };
+  }
+
+  it('closes every session and socket the user holds, in every org', async () => {
+    const a = await sessionFor('rv1', 'oa', 's1');
+    const b = await sessionFor('rv1', 'ob', 's2');
+    const other = await sessionFor('rv2', 'oa', 's1');
+
+    expect(SSHBroker.closeForUser('rv1')).toBe(2);
+    for (const s of [a, b]) {
+      expect(s.client.end).toHaveBeenCalled();
+      expect(s.sock.close).toHaveBeenCalledWith(4403, 'Access revoked');
+    }
+    expect(getSessionForUser(a.id, 'rv1', 'oa')).toBeUndefined();
+    expect(getSessionForUser(b.id, 'rv1', 'ob')).toBeUndefined();
+    // Someone else's session is untouched
+    expect(other.client.end).not.toHaveBeenCalled();
+    expect(getSessionForUser(other.id, 'rv2', 'oa')).toBeDefined();
+  });
+
+  it('limits to one org and keeps sessions on servers still granted', async () => {
+    const kept = await sessionFor('rv3', 'oa', 'keep');
+    const dropped = await sessionFor('rv3', 'oa', 'drop');
+    const elsewhere = await sessionFor('rv3', 'ob', 'drop');
+
+    expect(SSHBroker.closeForUser('rv3', { orgId: 'oa', keepServerIds: ['keep'] })).toBe(1);
+    expect(dropped.client.end).toHaveBeenCalled();
+    expect(kept.client.end).not.toHaveBeenCalled();
+    expect(elsewhere.client.end).not.toHaveBeenCalled();
+    expect(getSessionForUser(kept.id, 'rv3', 'oa')).toBeDefined();
+  });
+});

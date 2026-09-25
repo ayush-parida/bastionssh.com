@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { ApprovalCard, settleWaitingApprovals, type ToolApproval } from './ApprovalCard.js';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -31,6 +32,8 @@ interface ToolCallRecord {
   output?: string;
   isError?: boolean;
   expanded: boolean;
+  /** Set when the command needed the user's approval */
+  approval?: ToolApproval;
 }
 
 interface AISidebarProps {
@@ -101,7 +104,19 @@ export default function AISidebar({
   }, [messages]);
 
   // Closing the panel must stop the agent — otherwise it keeps running tools unseen.
+  // The server also denies any command still waiting for approval when the stream closes.
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  /** Apply `fn` to the tool calls of the assistant message being streamed. */
+  const updateToolCalls = useCallback(
+    (fn: (toolCalls: ToolCallRecord[]) => ToolCallRecord[]) =>
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (!last || last.role !== 'assistant') return prev;
+        return [...prev.slice(0, -1), { ...last, toolCalls: fn(last.toolCalls ?? []) }];
+      }),
+    [],
+  );
 
   const sendMessage = useCallback(
     async (userText: string) => {
@@ -169,6 +184,31 @@ export default function AISidebar({
               );
               return [...prev.slice(0, -1), { ...last, toolCalls }];
             });
+          } else if (event.type === 'approval_required') {
+            updateToolCalls((toolCalls) =>
+              toolCalls.map((tc) =>
+                tc.id === event.id
+                  ? {
+                      ...tc,
+                      approval: {
+                        status: 'waiting',
+                        reason: event.reason,
+                        serverId: event.serverId,
+                        serverName: event.serverName,
+                      },
+                    }
+                  : tc,
+              ),
+            );
+          } else if (event.type === 'approval_resolved') {
+            const status = event.approved ? 'approved' : event.expired ? 'expired' : 'denied';
+            updateToolCalls((toolCalls) =>
+              toolCalls.map((tc) =>
+                tc.id === event.id && tc.approval
+                  ? { ...tc, approval: { ...tc.approval, status } }
+                  : tc,
+              ),
+            );
           } else if (event.type === 'done' || event.type === 'error') {
             if (event.type === 'error') {
               setMessages((prev) => {
@@ -186,14 +226,11 @@ export default function AISidebar({
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
           // Stopped by the user — settle any tool call still waiting on a result.
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (!last || last.role !== 'assistant') return prev;
-            const toolCalls = (last.toolCalls ?? []).map((tc) =>
+          updateToolCalls((toolCalls) =>
+            toolCalls.map((tc) =>
               tc.output === undefined ? { ...tc, output: '(stopped)', isError: true } : tc,
-            );
-            return [...prev.slice(0, -1), { ...last, toolCalls }];
-          });
+            ),
+          );
           return;
         }
         setMessages((prev) => {
@@ -209,10 +246,12 @@ export default function AISidebar({
           ];
         });
       } finally {
+        // The server denies anything still undecided once the stream closes.
+        updateToolCalls((toolCalls) => settleWaitingApprovals(toolCalls, 'denied'));
         setStreaming(false);
       }
     },
-    [messages, providerId, serverId, sessionId, streaming, terminalOutput],
+    [messages, providerId, serverId, sessionId, streaming, terminalOutput, updateToolCalls],
   );
 
   function handleStop() {
@@ -347,6 +386,17 @@ export default function AISidebar({
                           <span className="ml-auto text-[#ff7b72] text-[10px]">error</span>
                         )}
                       </button>
+
+                      {tc.approval && (
+                        <div className="px-2.5 pb-2">
+                          <ApprovalCard
+                            toolCallId={tc.id}
+                            command={String(tc.input.command ?? '')}
+                            approval={tc.approval}
+                            variant="terminal"
+                          />
+                        </div>
+                      )}
 
                       {tc.expanded && (
                         <div className="px-2.5 pb-2 space-y-1.5 border-t border-[#30363d]">

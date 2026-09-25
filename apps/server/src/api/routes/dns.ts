@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import type { DnsLookupResult } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { accessibleServerFilter } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
@@ -23,10 +24,11 @@ export async function dnsRoutes(app: FastifyInstance) {
     const { domain } = lookupQuery.parse(req.query);
 
     // Only host, name and id: enough to label records that point at a server.
+    // Limited to servers the caller may see, or the labels would name the rest.
     const inventory = getDb()
       .select({ id: servers.id, name: servers.name, host: servers.host })
       .from(servers)
-      .where(eq(servers.orgId, req.orgId))
+      .where(and(eq(servers.orgId, req.orgId), accessibleServerFilter(req, servers.id)))
       .all();
 
     try {

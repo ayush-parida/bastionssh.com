@@ -50,6 +50,13 @@
       "when": 1777400000000,
       "tag": "0006_add_ftp_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1777500000000,
+      "tag": "0007_user_access_management",
+      "breakpoints": true
     }
   ]
 }

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CloudProvider, CloudServerState, Server } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { servers, sshKeys } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -82,7 +83,12 @@ export async function serverRoutes(app: FastifyInstance) {
 
   app.get('/', async (req) => {
     const db = getDb();
-    return db.select().from(servers).where(eq(servers.orgId, req.orgId)).all().map(sanitize);
+    return db
+      .select()
+      .from(servers)
+      .where(and(eq(servers.orgId, req.orgId), accessibleServerFilter(req, servers.id)))
+      .all()
+      .map(sanitize);
   });
 
   app.post('/', { preHandler: requireRole('admin') }, async (req, reply) => {
@@ -126,6 +132,8 @@ export async function serverRoutes(app: FastifyInstance) {
   app.get('/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
+    // Not granted reads as not found, so a restricted member cannot probe ids
+    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
     const server = db
       .select()
       .from(servers)

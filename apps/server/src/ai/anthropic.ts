@@ -33,7 +33,7 @@ export class AnthropicProvider implements AIProvider {
   async *agentLoop(
     messages: AIMessage[],
     tools: AITool[],
-    executeToolFn: (name: string, input: Record<string, unknown>) => Promise<string>,
+    executeToolFn: (name: string, input: Record<string, unknown>, id: string) => Promise<string>,
     opts?: { maxTurns?: number },
   ): AsyncGenerator<AIAgentEvent> {
     const maxTurns = opts?.maxTurns ?? 6;
@@ -93,7 +93,7 @@ export class AnthropicProvider implements AIProvider {
         let output: string;
         let isError = false;
         try {
-          output = await executeToolFn(tc.name, input);
+          output = await executeToolFn(tc.name, input, tc.id);
         } catch (err) {
           output = err instanceof Error ? err.message : 'Tool execution failed';
           isError = true;

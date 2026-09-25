@@ -1,6 +1,8 @@
 import { useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { OrgSummary, Role, User } from '@smt/shared';
+import { toast } from 'sonner';
 import { useAuthStore } from '@/store/auth.js';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
@@ -18,6 +20,8 @@ import {
   Bot,
   ScrollText,
   Settings,
+  Users,
+  Building2,
   LogOut,
   ChevronRight,
   Sun,
@@ -38,13 +42,14 @@ const navItems = [
   { to: '/cron-jobs', label: 'Cron Jobs', icon: Clock },
   { to: '/ai', label: 'AI Assistant', icon: Bot },
   { to: '/audit', label: 'Audit Log', icon: ScrollText },
+  { to: '/team', label: 'Team & Access', icon: Users },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
 export default function Layout() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const { user, clearUser } = useAuthStore();
+  const { user, orgId, clearUser, setUser } = useAuthStore();
   const { theme, toggle } = useTheme();
   const queryClient = useQueryClient();
 
@@ -57,6 +62,23 @@ export default function Layout() {
       }),
     [queryClient],
   );
+
+  const { data: orgs } = useQuery<OrgSummary[]>({
+    queryKey: ['auth-orgs'],
+    queryFn: () => api.get('/auth/orgs'),
+  });
+
+  async function switchOrg(nextOrgId: string) {
+    try {
+      const res = await api.post<{ user: User; orgId: string; role: Role }>('/auth/switch-org', { orgId: nextOrgId });
+      setUser({ ...(user as User), ...res.user }, res.orgId, res.role);
+      // Query keys are not scoped by org — everything cached belongs to the old one
+      await queryClient.resetQueries();
+      navigate('/');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not switch organization');
+    }
+  }
 
   async function handleLogout() {
     await api.post('/auth/logout').catch(() => {});
@@ -73,6 +95,26 @@ export default function Layout() {
           <Server size={20} className="text-primary" />
           <span className="font-semibold text-sm">Server Manager</span>
         </div>
+
+        {orgs && orgs.length > 1 && (
+          <div className="border-b border-border p-2">
+            <label className="flex items-center gap-2 rounded-md border border-input bg-background px-2 py-1.5">
+              <Building2 size={14} className="shrink-0 text-muted-foreground" />
+              <select
+                value={orgId ?? ''}
+                onChange={(e) => switchOrg(e.target.value)}
+                className="w-full min-w-0 bg-transparent text-sm focus:outline-none"
+                title="Switch organization"
+              >
+                {orgs.map((o) => (
+                  <option key={o.orgId} value={o.orgId} disabled={o.status === 'suspended'}>
+                    {o.name}{o.status === 'suspended' ? ' (suspended)' : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
 
         <nav className="flex-1 overflow-y-auto p-2">
           {navItems.map(({ to, label, icon: Icon }) => {

@@ -43,6 +43,22 @@ export type AIAgentEvent =
   | { type: 'delta'; content: string }
   | { type: 'tool_call'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; id: string; name: string; output: string; isError: boolean }
+  /**
+   * A command that may change the server is waiting for the user. Settle it with
+   * `POST /api/ai/approvals/:id` ({ approved }); `id` is the tool call's id.
+   */
+  | {
+      type: 'approval_required';
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+      /** Why the command was judged to make changes */
+      reason: string;
+      serverId?: string;
+      serverName?: string;
+    }
+  /** The pending approval settled; `expired` is set when it timed out undecided */
+  | { type: 'approval_resolved'; id: string; approved: boolean; expired?: boolean }
   | { type: 'done' }
   | { type: 'error'; error: string };
 
@@ -62,7 +78,7 @@ export interface AIChatRequest {
 }
 
 export interface AIChatChunk {
-  type: 'delta' | 'done' | 'error' | 'tool_call' | 'tool_result';
+  type: AIAgentEvent['type'];
   content?: string;
   error?: string;
   id?: string;

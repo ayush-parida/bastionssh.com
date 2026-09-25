@@ -6,6 +6,7 @@ const broker = vi.hoisted(() => ({
   execOnServer: vi.fn(),
 }));
 const credentials = vi.hoisted(() => ({ resolveServerAuth: vi.fn() }));
+const access = vi.hoisted(() => ({ canAccessServer: vi.fn() }));
 
 vi.mock('../ssh/broker.js', () => ({
   SSHBroker: { getSessionForUser: broker.getSessionForUser, exec: broker.exec },
@@ -13,6 +14,10 @@ vi.mock('../ssh/broker.js', () => ({
 }));
 vi.mock('../ssh/credentials.js', () => ({ resolveServerAuth: credentials.resolveServerAuth }));
 vi.mock('../db/index.js', () => ({ getDb: vi.fn() }));
+vi.mock('../auth/server-access.js', () => ({
+  canAccessServer: access.canAccessServer,
+  accessibleServerFilter: vi.fn(),
+}));
 
 import { ToolExecutor } from './tools.js';
 
@@ -29,6 +34,7 @@ function sessionOn(serverId: string) {
 
 beforeEach(() => {
   vi.resetAllMocks();
+  access.canAccessServer.mockReturnValue(true);
   broker.exec.mockResolvedValue(ok('via-session'));
   broker.execOnServer.mockResolvedValue(ok('via-direct'));
   credentials.resolveServerAuth.mockImplementation(async (_orgId: string, serverId: string) => ({
@@ -38,6 +44,17 @@ beforeEach(() => {
 });
 
 describe('ToolExecutor run_command', () => {
+  it('refuses a server the member has no access to, even through their session', async () => {
+    sessionOn('prod');
+    access.canAccessServer.mockImplementation((_who: unknown, id: string) => id !== 'prod');
+    const tools = new ToolExecutor('org-1', 'user-1', 'sess-1', 'prod');
+
+    await expect(tools.runCommand({ command: 'uptime' })).rejects.toThrow('Server not found');
+    expect(tools.resolveTarget({ command: 'uptime' })).toEqual({});
+    expect(broker.exec).not.toHaveBeenCalled();
+    expect(broker.execOnServer).not.toHaveBeenCalled();
+  });
+
   it('uses the session when no server_id is given', async () => {
     sessionOn('staging');
     const tools = new ToolExecutor('org-1', 'user-1', 'sess-1', 'staging');

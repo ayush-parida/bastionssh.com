@@ -1,9 +1,10 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { pipeline } from 'node:stream/promises';
 import type { Readable } from 'node:stream';
 import posix from 'node:path/posix';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { canAccessServer } from '../../auth/server-access.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
@@ -48,7 +49,11 @@ export async function sftpRoutes(app: FastifyInstance) {
   });
 
   /** Open a pooled SFTP channel for the caller against the given server. */
-  async function lease(orgId: string, serverId: string, userId: string, keyId?: string) {
+  async function lease(req: FastifyRequest, serverId: string, keyId?: string) {
+    const { orgId } = req;
+    const userId = req.user.id;
+    // Same answer as a server that does not exist
+    if (!canAccessServer(req, serverId)) throw new CredentialError('Server not found', 404);
     const { server, auth } = await resolveServerAuth(orgId, serverId, keyId);
     const held = await sftp.acquire(
       sftp.poolKey(orgId, serverId, userId),
@@ -65,7 +70,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, query.keyId);
+      const opened = await lease(req, serverId, query.keyId);
       held = opened.held;
 
       // "." resolves to the login user's home directory
@@ -96,7 +101,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, query.keyId);
+      const opened = await lease(req, serverId, query.keyId);
       held = opened.held;
 
       const target = sftp.normalizeRemotePath(query.path);
@@ -139,7 +144,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, query.keyId);
+      const opened = await lease(req, serverId, query.keyId);
       held = opened.held;
 
       const target = sftp.normalizeRemotePath(query.path);
@@ -185,7 +190,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, query.keyId);
+      const opened = await lease(req, serverId, query.keyId);
       held = opened.held;
 
       const target = sftp.normalizeRemotePath(query.path);
@@ -225,7 +230,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, body.keyId);
+      const opened = await lease(req, serverId, body.keyId);
       held = opened.held;
 
       const target = sftp.normalizeRemotePath(body.path);
@@ -247,7 +252,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, body.keyId);
+      const opened = await lease(req, serverId, body.keyId);
       held = opened.held;
 
       const from = sftp.normalizeRemotePath(body.from);
@@ -270,7 +275,7 @@ export async function sftpRoutes(app: FastifyInstance) {
 
     let held: SftpLease | undefined;
     try {
-      const opened = await lease(req.orgId, serverId, req.user.id, query.keyId);
+      const opened = await lease(req, serverId, query.keyId);
       held = opened.held;
 
       const target = sftp.normalizeRemotePath(query.path);

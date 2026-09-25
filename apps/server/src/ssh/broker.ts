@@ -13,7 +13,7 @@ export interface ExecResult {
 }
 
 interface SessionMeta {
-  server: { host: string; port: number; username: string };
+  server: { id?: string; host: string; port: number; username: string };
   key?: { id: string; encryptedPrivateKey: string };
   password?: string; // plaintext, decrypted by caller
   userId: string;
@@ -291,6 +291,39 @@ async function close(sessionId: string, owner: SessionOwner) {
   if (ownedSession(sessionId, owner)) destroy(sessionId);
 }
 
+/** What to close when a user's access is revoked. */
+export interface RevokeScope {
+  /** Only sessions in this org; omit for every org. */
+  orgId?: string;
+  /** Leave sessions on these servers open (the ones the user may still use). */
+  keepServerIds?: Iterable<string>;
+}
+
+/**
+ * Close a user's live terminals after their access changes — suspension,
+ * removal, a narrowed server grant, a password reset or "sign out everywhere".
+ * The WebSocket is closed with a policy code so the browser can say why.
+ * Returns how many sessions were closed.
+ */
+function closeForUser(userId: string, scope: RevokeScope = {}): number {
+  const keep = new Set(scope.keepServerIds ?? []);
+  let closed = 0;
+  for (const [id, session] of [...sessions]) {
+    if (session.meta.userId !== userId) continue;
+    if (scope.orgId && session.meta.orgId !== scope.orgId) continue;
+    const serverId = session.meta.server.id;
+    if (serverId && keep.has(serverId)) continue;
+    try {
+      session.socket?.close(4403, 'Access revoked');
+    } catch {
+      /* already closed */
+    }
+    destroy(id);
+    closed++;
+  }
+  return closed;
+}
+
 /**
  * Execute a command on an existing session's SSH connection (separate channel).
  * The interactive shell stream is unaffected.
@@ -404,4 +437,4 @@ export async function execOnServer(
   });
 }
 
-export const SSHBroker = { createSession, attach, close, exec, getSessionForUser };
+export const SSHBroker = { createSession, attach, close, closeForUser, exec, getSessionForUser };

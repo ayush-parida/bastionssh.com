@@ -5,6 +5,7 @@ import { getDb } from '../../db/index.js';
 import { cronJobs, cronRuns, savedCommands } from '../../db/schema.js';
 import { resolveServerAuth } from '../../ssh/credentials.js';
 import { execOnServer } from '../../ssh/broker.js';
+import { canAccessServer } from '../../auth/server-access.js';
 import { COMMAND_TIMEOUT_MS, interpolate } from '../../commands/run.js';
 import logger from '../../logger.js';
 
@@ -62,6 +63,11 @@ export async function runCronJob(data: CronJobData) {
   };
 
   try {
+    // A job runs as its creator: once they are suspended, removed or no longer
+    // granted the server, it records a failure instead of running.
+    if (!canAccessServer({ orgId: job.orgId, userId: job.createdBy }, job.serverId)) {
+      throw new Error('The job creator no longer has access to this server');
+    }
     // Shares the resolver used everywhere else, so a password-authenticated
     // server runs its schedule instead of silently doing nothing.
     const { server, auth } = await resolveServerAuth(job.orgId, job.serverId);

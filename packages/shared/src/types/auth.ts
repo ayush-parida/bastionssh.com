@@ -30,6 +30,27 @@ export interface Session {
   expiresAt: string;
 }
 
+/** One of the caller's signed-in browsers. `id` is a handle, never the cookie value. */
+export interface SessionInfo {
+  id: string;
+  createdAt: string;
+  lastSeenAt: string | null;
+  expiresAt: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+  current: boolean;
+}
+
+/** An organization the caller belongs to, for the org switcher. */
+export interface OrgSummary {
+  orgId: string;
+  name: string;
+  slug: string;
+  role: Role;
+  status: 'active' | 'suspended';
+  current: boolean;
+}
+
 /** 'read' alone caps a token at viewer, whatever role its owner holds. */
 export type TokenScope = 'read' | 'write';
 

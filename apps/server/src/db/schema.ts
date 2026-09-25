@@ -24,6 +24,34 @@ export const sessions = sqliteTable('sessions', {
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   expiresAt: text('expires_at').notNull(),
+  createdAt: text('created_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  // Bumped at most once a minute by requireAuth, so it is "last active", not "last request"
+  lastSeenAt: text('last_seen_at'),
+  ipAddress: text('ip_address'),
+  userAgent: text('user_agent'),
+  // The org this browser is working in; null or stale falls back to the first active membership
+  activeOrgId: text('active_org_id').references(() => organizations.id, { onDelete: 'set null' }),
+});
+
+/** One-time, admin-issued links that let a user set a new password. Only the hash is stored. */
+export const passwordResets = sqliteTable('password_resets', {
+  id: text('id').primaryKey(),
+  userId: text('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  // The org whose admin issued it — where issuing and redeeming are audited
+  orgId: text('org_id')
+    .notNull()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: text('expires_at').notNull(),
+  usedAt: text('used_at'),
+  createdBy: text('created_by').notNull(),
+  createdAt: text('created_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
 });
 
 export const apiTokens = sqliteTable('api_tokens', {
@@ -68,18 +96,30 @@ export const organizations = sqliteTable('organizations', {
     .$defaultFn(() => new Date().toISOString()),
 });
 
-export const memberships = sqliteTable('memberships', {
-  userId: text('user_id')
-    .notNull()
-    .references(() => users.id, { onDelete: 'cascade' }),
-  orgId: text('org_id')
-    .notNull()
-    .references(() => organizations.id, { onDelete: 'cascade' }),
-  role: text('role').notNull().default('viewer'), // owner | admin | operator | viewer
-  joinedAt: text('joined_at')
-    .notNull()
-    .$defaultFn(() => new Date().toISOString()),
-});
+export const memberships = sqliteTable(
+  'memberships',
+  {
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    role: text('role').notNull().default('viewer'), // owner | admin | operator | viewer
+    status: text('status').notNull().default('active'), // active | suspended
+    suspendedAt: text('suspended_at'),
+    suspendedBy: text('suspended_by'),
+    // 'restricted' limits operators and viewers to the servers in member_server_access;
+    // owners and admins always see every server regardless.
+    serverAccess: text('server_access').notNull().default('all'), // all | restricted
+    joinedAt: text('joined_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    userOrgIdx: uniqueIndex('memberships_user_org_idx').on(t.userId, t.orgId),
+  }),
+);
 
 export const invites = sqliteTable('invites', {
   id: text('id').primaryKey(),
@@ -193,6 +233,29 @@ export const servers = sqliteTable(
   },
   (t) => ({
     cloudInstanceIdx: uniqueIndex('servers_cloud_instance_idx').on(t.cloudAccountId, t.cloudInstanceId),
+  }),
+);
+
+/** Servers a `restricted` member may use. Meaningless while their membership is `all`. */
+export const memberServerAccess = sqliteTable(
+  'member_server_access',
+  {
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    serverId: text('server_id')
+      .notNull()
+      .references(() => servers.id, { onDelete: 'cascade' }),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    memberServerIdx: uniqueIndex('member_server_access_idx').on(t.orgId, t.userId, t.serverId),
+    serverIdx: index('member_server_access_server_idx').on(t.serverId),
   }),
 );
 

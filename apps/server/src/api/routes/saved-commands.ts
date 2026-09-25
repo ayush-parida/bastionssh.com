@@ -1,6 +1,11 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import {
+  accessibleSavedCommandFilter,
+  accessibleServerFilter,
+  canAccessServer,
+} from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { savedCommands, commandRuns, servers, cronJobs } from '../../db/schema.js';
 import { eq, and, desc, inArray } from 'drizzle-orm';
@@ -62,18 +67,66 @@ async function runInlineFanout(jobs: Parameters<typeof executeSavedCommand>[0][]
   await Promise.all(workers);
 }
 
+/**
+ * Load a command the caller may see: in their org and either unbound or bound
+ * to a server they can access. Anything else is reported as not found.
+ */
+function visibleCommand(req: FastifyRequest, id: string) {
+  return getDb()
+    .select()
+    .from(savedCommands)
+    .where(
+      and(
+        eq(savedCommands.id, id),
+        eq(savedCommands.orgId, req.orgId),
+        accessibleSavedCommandFilter(req),
+      ),
+    )
+    .get();
+}
+
+/**
+ * Changing or deleting a command changes what every cron job using it runs —
+ * as that job's creator, on that job's server. So the caller must be able to
+ * access every such server too, or they could plant commands on servers they
+ * were never granted. Sends a 403 and returns false when blocked.
+ */
+function mayRewriteCommand(req: FastifyRequest, reply: FastifyReply, commandId: string): boolean {
+  const jobs = getDb()
+    .select({ serverId: cronJobs.serverId })
+    .from(cronJobs)
+    .where(and(eq(cronJobs.savedCommandId, commandId), eq(cronJobs.orgId, req.orgId)))
+    .all();
+  if (jobs.some((job) => !canAccessServer(req, job.serverId))) {
+    reply.status(403).send({
+      error:
+        'This command is used by a cron job on a server you do not have access to, so you cannot change or delete it',
+    });
+    return false;
+  }
+  return true;
+}
+
 export async function savedCommandRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
   app.get('/', async (req) => {
     const db = getDb();
-    return db.select().from(savedCommands).where(eq(savedCommands.orgId, req.orgId)).all();
+    return db
+      .select()
+      .from(savedCommands)
+      .where(and(eq(savedCommands.orgId, req.orgId), accessibleSavedCommandFilter(req)))
+      .all();
   });
 
   app.post('/', { preHandler: requireRole('operator') }, async (req, reply) => {
     const body = createCommandSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
+
+    if (body.serverId && !canAccessServer(req, body.serverId)) {
+      return reply.status(404).send({ error: 'Server not found' });
+    }
 
     db.insert(savedCommands)
       .values({
@@ -95,20 +148,13 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     const body = updateCommandSchema.parse(req.body);
     const db = getDb();
 
-    const command = db
-      .select()
-      .from(savedCommands)
-      .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, req.orgId)))
-      .get();
+    // Bound to a server the caller cannot access: as if it did not exist
+    const command = visibleCommand(req, id);
     if (!command) return reply.status(404).send({ error: 'Not found' });
+    if (!mayRewriteCommand(req, reply, id)) return reply;
 
-    if (body.serverId) {
-      const target = db
-        .select({ id: servers.id })
-        .from(servers)
-        .where(and(eq(servers.id, body.serverId), eq(servers.orgId, req.orgId)))
-        .get();
-      if (!target) return reply.status(404).send({ error: 'Server not found' });
+    if (body.serverId && !canAccessServer(req, body.serverId)) {
+      return reply.status(404).send({ error: 'Server not found' });
     }
 
     db.update(savedCommands)
@@ -132,17 +178,14 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     const { variables, serverId, serverIds, tag } = runCommandSchema.parse(req.body ?? {});
     const db = getDb();
 
-    const command = db
-      .select()
-      .from(savedCommands)
-      .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, req.orgId)))
-      .get();
+    const command = visibleCommand(req, id);
     if (!command) return reply.status(404).send({ error: 'Not found' });
 
+    // A restricted member's fan-out (by tag or id) only ever reaches their servers
     const orgServers = db
       .select({ id: servers.id, name: servers.name, tags: servers.tags })
       .from(servers)
-      .where(eq(servers.orgId, req.orgId))
+      .where(and(eq(servers.orgId, req.orgId), accessibleServerFilter(req, servers.id)))
       .all();
 
     let targets: { id: string; name: string }[];
@@ -242,7 +285,13 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .select({ run: commandRuns })
       .from(commandRuns)
       .innerJoin(savedCommands, eq(commandRuns.commandId, savedCommands.id))
-      .where(and(inArray(commandRuns.id, wanted), eq(savedCommands.orgId, req.orgId)))
+      .where(
+        and(
+          inArray(commandRuns.id, wanted),
+          eq(savedCommands.orgId, req.orgId),
+          accessibleServerFilter(req, commandRuns.serverId),
+        ),
+      )
       .all()
       .map((row) => row.run);
   });
@@ -257,7 +306,13 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .select({ run: commandRuns })
       .from(commandRuns)
       .innerJoin(savedCommands, eq(commandRuns.commandId, savedCommands.id))
-      .where(and(eq(commandRuns.id, runId), eq(savedCommands.orgId, req.orgId)))
+      .where(
+        and(
+          eq(commandRuns.id, runId),
+          eq(savedCommands.orgId, req.orgId),
+          accessibleServerFilter(req, commandRuns.serverId),
+        ),
+      )
       .get();
     if (!row) return reply.status(404).send({ error: 'Not found' });
 
@@ -268,17 +323,13 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const db = getDb();
 
-    const command = db
-      .select()
-      .from(savedCommands)
-      .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, req.orgId)))
-      .get();
+    const command = visibleCommand(req, id);
     if (!command) return reply.status(404).send({ error: 'Not found' });
 
     return db
       .select()
       .from(commandRuns)
-      .where(eq(commandRuns.commandId, id))
+      .where(and(eq(commandRuns.commandId, id), accessibleServerFilter(req, commandRuns.serverId)))
       .orderBy(desc(commandRuns.startedAt))
       .limit(20)
       .all();
@@ -288,12 +339,9 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const db = getDb();
 
-    const command = db
-      .select()
-      .from(savedCommands)
-      .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, req.orgId)))
-      .get();
+    const command = visibleCommand(req, id);
     if (!command) return reply.status(404).send({ error: 'Not found' });
+    if (!mayRewriteCommand(req, reply, id)) return reply;
 
     // cron_jobs references this row without ON DELETE, so the delete would fail
     // with a bare foreign-key error. Explain what is in the way instead.

@@ -1,6 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import {
+  accessibleSavedCommandFilter,
+  accessibleServerFilter,
+  canAccessServer,
+} from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { aiProviderConfigs, servers, savedCommands, cronJobs } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -8,6 +13,19 @@ import { nanoid } from 'nanoid';
 import { vault } from '../../vault/index.js';
 import { getAIProvider } from '../../ai/registry.js';
 import { AGENT_TOOLS, ToolExecutor, buildSystemPrompt } from '../../ai/tools.js';
+import { classifyCommand } from '../../ai/command-safety.js';
+import { resolveApproval, waitForApproval } from '../../ai/approvals.js';
+import { registerAgentStream } from '../../ai/streams.js';
+import { audit } from '../../audit/index.js';
+import type { AIAgentEvent } from '@smt/shared';
+
+/** While a command waits for approval, keep proxies from closing the idle stream. */
+const APPROVAL_HEARTBEAT_MS = 15_000;
+
+/** Tool results the model sees when a command is not run. */
+const DECLINED = 'The user declined to run this command. Do not retry it.';
+const EXPIRED =
+  'The user did not approve this command in time, so it was not run. Do not retry it.';
 
 const createProviderSchema = z.object({
   name: z.string().min(1).max(100),
@@ -144,7 +162,7 @@ export async function aiRoutes(app: FastifyInstance) {
         tags: servers.tags,
       })
       .from(servers)
-      .where(eq(servers.orgId, req.orgId))
+      .where(and(eq(servers.orgId, req.orgId), accessibleServerFilter(req, servers.id)))
       .all()
       .map((s) => ({ ...s, tags: s.tags ? (JSON.parse(s.tags) as string[]) : [] }));
 
@@ -156,7 +174,7 @@ export async function aiRoutes(app: FastifyInstance) {
         serverId: savedCommands.serverId,
       })
       .from(savedCommands)
-      .where(eq(savedCommands.orgId, req.orgId))
+      .where(and(eq(savedCommands.orgId, req.orgId), accessibleSavedCommandFilter(req)))
       .all();
 
     const allCrons = db
@@ -167,7 +185,7 @@ export async function aiRoutes(app: FastifyInstance) {
         enabled: cronJobs.enabled,
       })
       .from(cronJobs)
-      .where(eq(cronJobs.orgId, req.orgId))
+      .where(and(eq(cronJobs.orgId, req.orgId), accessibleServerFilter(req, cronJobs.serverId)))
       .all();
 
     return { servers: allServers, commands: allCommands, cronJobs: allCrons };
@@ -177,6 +195,9 @@ export async function aiRoutes(app: FastifyInstance) {
   app.post('/chat', { preHandler: requireRole('operator') }, async (req, reply) => {
     const body = chatSchema.parse(req.body);
     const db = getDb();
+    if (body.context?.serverId && !canAccessServer(req, body.context.serverId)) {
+      return reply.status(404).send({ error: 'Server not found' });
+    }
 
     const providerConfig = body.providerId
       ? db
@@ -200,6 +221,7 @@ export async function aiRoutes(app: FastifyInstance) {
     // Build the rich system prompt with all app context
     const systemPrompt = buildSystemPrompt({
       orgId: req.orgId,
+      userId: req.user.id,
       terminalOutput: body.context?.lastOutput,
       sessionServerId: body.context?.serverId,
     });
@@ -215,15 +237,38 @@ export async function aiRoutes(app: FastifyInstance) {
       Connection: 'keep-alive',
     });
 
-    const send = (event: Record<string, unknown>) =>
-      reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-
     // The browser aborts when the user stops or closes the panel. Stop the agent
-    // then, so it does not keep running tools nobody is watching.
+    // then, so it does not keep running tools nobody is watching — and deny any
+    // command still waiting for approval.
     let clientGone = false;
+    /** Stopped from outside by an access revocation, not by the browser. */
+    let revoked = false;
+    const disconnected = new AbortController();
+    // Registered so revoking the user's access (suspension, removal, a narrowed
+    // grant, a password reset) can stop this stream from outside the request.
+    const tracked = registerAgentStream({ orgId: req.orgId, userId: req.user.id }, disconnected);
     reply.raw.on('close', () => {
       clientGone = true;
+      disconnected.abort();
     });
+
+    const send = (event: AIAgentEvent) => {
+      if (!clientGone) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+
+    // Revoked while streaming: tell the browser why and end the response now,
+    // rather than waiting for the provider's next event.
+    disconnected.signal.addEventListener(
+      'abort',
+      () => {
+        if (clientGone) return;
+        revoked = true;
+        send({ type: 'error', error: 'Your access has changed. This conversation was stopped.' });
+        clientGone = true;
+        reply.raw.end();
+      },
+      { once: true },
+    );
 
     try {
       // Use agent loop if provider supports it and agent mode is enabled
@@ -235,11 +280,87 @@ export async function aiRoutes(app: FastifyInstance) {
           body.context?.serverId,
         );
 
+        /**
+         * run_command goes through here: read-only commands run straight away,
+         * anything else waits for the user's decision. Every run and decision
+         * is audited against the target server.
+         */
+        const runCommand = async (id: string, input: Record<string, unknown>) => {
+          const command = typeof input.command === 'string' ? input.command.trim() : '';
+          const { serverId, serverName } = executor.resolveTarget(input);
+          const { mutating, reason } = classifyCommand(command);
+          const details = { command, mutating, toolCallId: id };
+
+          if (mutating) {
+            send({
+              type: 'approval_required',
+              id,
+              name: 'run_command',
+              input,
+              reason,
+              serverId,
+              serverName,
+            });
+            const heartbeat = setInterval(() => {
+              if (!clientGone) reply.raw.write(': waiting for approval\n\n');
+            }, APPROVAL_HEARTBEAT_MS);
+            const outcome = await waitForApproval(
+              id,
+              { orgId: req.orgId, userId: req.user.id },
+              { signal: disconnected.signal },
+            ).finally(() => clearInterval(heartbeat));
+
+            send({
+              type: 'approval_resolved',
+              id,
+              approved: outcome === 'approved',
+              ...(outcome === 'expired' && { expired: true }),
+            });
+
+            if (outcome !== 'approved') {
+              await audit(req, 'ai.command_denied', 'server', serverId, serverName, {
+                ...details,
+                reason,
+                deniedBy:
+                  outcome === 'denied'
+                    ? 'user'
+                    : outcome === 'expired'
+                      ? 'timeout'
+                      : revoked
+                        ? 'access_revoked'
+                        : 'disconnect',
+              });
+              if (outcome === 'cancelled') throw new Error('Client disconnected');
+              throw new Error(outcome === 'expired' ? EXPIRED : DECLINED);
+            }
+            await audit(req, 'ai.command_approved', 'server', serverId, serverName, {
+              ...details,
+              reason,
+            });
+          }
+
+          try {
+            const result = await executor.runCommand(input);
+            await audit(req, 'ai.command_run', 'server', result.serverId ?? serverId, serverName, {
+              ...details,
+              exitCode: result.exitCode,
+            });
+            return result.output;
+          } catch (err) {
+            await audit(req, 'ai.command_run', 'server', serverId, serverName, {
+              ...details,
+              error: err instanceof Error ? err.message : 'Command failed',
+            });
+            throw err;
+          }
+        };
+
         for await (const event of provider.agentLoop(
           messagesWithSystem,
           AGENT_TOOLS,
-          (name, input) => {
+          (name, input, id) => {
             if (clientGone) throw new Error('Client disconnected');
+            if (name === 'run_command') return runCommand(id, input);
             return executor.execute(name, input);
           },
         )) {
@@ -259,7 +380,19 @@ export async function aiRoutes(app: FastifyInstance) {
       const message = err instanceof Error ? err.message : 'AI request failed';
       send({ type: 'error', error: message });
     } finally {
-      reply.raw.end();
+      tracked.release();
+      if (!reply.raw.writableEnded) reply.raw.end();
     }
+  });
+
+  // ── Command approvals ─────────────────────────────────────────
+  // Settles a command the agent is waiting on. Only the user whose chat raised
+  // it can decide; anyone else gets the same 404 as for an unknown id.
+  app.post('/approvals/:id', { preHandler: requireRole('operator') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { approved } = z.object({ approved: z.boolean() }).parse(req.body);
+    const settled = resolveApproval(id, { orgId: req.orgId, userId: req.user.id }, approved);
+    if (!settled) return reply.status(404).send({ error: 'No pending approval with this id' });
+    return reply.send({ id, approved });
   });
 }

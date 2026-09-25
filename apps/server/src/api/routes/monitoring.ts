@@ -14,6 +14,7 @@ import type {
 } from '@smt/shared';
 import { METRIC_RANGES } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { serverAlerts, serverHealth, serverMetrics, servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
@@ -197,7 +198,11 @@ export async function monitoringRoutes(app: FastifyInstance) {
   /** Fleet-wide health, alert feed and counts — the Monitoring page's single fetch. */
   app.get('/overview', async (req): Promise<MonitoringOverview> => {
     const db = getDb();
-    const orgServers = db.select().from(servers).where(eq(servers.orgId, req.orgId)).all();
+    const orgServers = db
+      .select()
+      .from(servers)
+      .where(and(eq(servers.orgId, req.orgId), accessibleServerFilter(req, servers.id)))
+      .all();
 
     const healthRows = orgServers.length
       ? db
@@ -245,7 +250,13 @@ export async function monitoringRoutes(app: FastifyInstance) {
     const openAlerts = db
       .select()
       .from(serverAlerts)
-      .where(and(eq(serverAlerts.orgId, req.orgId), isNull(serverAlerts.resolvedAt)))
+      .where(
+        and(
+          eq(serverAlerts.orgId, req.orgId),
+          isNull(serverAlerts.resolvedAt),
+          accessibleServerFilter(req, serverAlerts.serverId),
+        ),
+      )
       .orderBy(desc(serverAlerts.openedAt))
       .limit(50)
       .all();
@@ -273,6 +284,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
   app.get('/servers/:id', async (req, reply): Promise<ServerHealthDetail | undefined> => {
     const { id } = req.params as { id: string };
     const db = getDb();
+    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
 
     const server = db
       .select()
@@ -310,6 +322,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const { range } = metricsQuerySchema.parse(req.query);
     const db = getDb();
+    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
 
     const server = db
       .select({ id: servers.id })
@@ -332,6 +345,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
   /** Probe a server right now instead of waiting for the next sweep. */
   app.post('/servers/:id/check', { preHandler: requireRole('operator') }, async (req, reply) => {
     const { id } = req.params as { id: string };
+    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
     const outcome = await checkServerById(req.orgId, id);
     if (!outcome) return reply.status(404).send({ error: 'Not found' });
 
@@ -344,6 +358,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const { enabled } = monitoringSettingsSchema.parse(req.body);
     const db = getDb();
+    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
 
     const server = db
       .select()
@@ -371,10 +386,11 @@ export async function monitoringRoutes(app: FastifyInstance) {
     const { status, limit } = alertsQuerySchema.parse(req.query);
     const db = getDb();
 
-    const where =
-      status === 'active'
-        ? and(eq(serverAlerts.orgId, req.orgId), isNull(serverAlerts.resolvedAt))
-        : eq(serverAlerts.orgId, req.orgId);
+    const where = and(
+      eq(serverAlerts.orgId, req.orgId),
+      status === 'active' ? isNull(serverAlerts.resolvedAt) : undefined,
+      accessibleServerFilter(req, serverAlerts.serverId),
+    );
 
     const rows = db
       .select()
@@ -404,7 +420,13 @@ export async function monitoringRoutes(app: FastifyInstance) {
     const alert = db
       .select()
       .from(serverAlerts)
-      .where(and(eq(serverAlerts.id, id), eq(serverAlerts.orgId, req.orgId)))
+      .where(
+        and(
+          eq(serverAlerts.id, id),
+          eq(serverAlerts.orgId, req.orgId),
+          accessibleServerFilter(req, serverAlerts.serverId),
+        ),
+      )
       .get();
     if (!alert) return reply.status(404).send({ error: 'Not found' });
 

@@ -18,7 +18,8 @@ vi.mock('../../ssh/credentials.js', () => ({
 import { nanoid } from 'nanoid';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { cronJobs, cronRuns, savedCommands, servers } from '../../db/schema.js';
+import { cronJobs, cronRuns, memberships, savedCommands, servers } from '../../db/schema.js';
+import { and, eq } from 'drizzle-orm';
 import { seedOrg, seedUser } from '../../api/routes/test-utils.js';
 import { runCronJob } from './cron.js';
 
@@ -65,5 +66,26 @@ describe('runCronJob', () => {
     await runCronJob({ cronJobId: jobId, scheduledAt: new Date().toISOString() });
     expect(ssh.execOnServer).not.toHaveBeenCalled();
     expect(getDb().select().from(cronRuns).all().some((r) => r.cronJobId === jobId)).toBe(false);
+  });
+
+  it('records a failure instead of running once the creator loses access', async () => {
+    const db = getDb();
+    const operator = seedUser(orgId, 'operator').userId;
+    const jobId = nanoid();
+    db.insert(cronJobs)
+      .values({ id: jobId, orgId, serverId, name: 'r', schedule: '0 * * * *', inlineCommand: 'uptime', createdBy: operator })
+      .run();
+    db.update(memberships)
+      .set({ serverAccess: 'restricted' })
+      .where(and(eq(memberships.userId, operator), eq(memberships.orgId, orgId)))
+      .run();
+
+    ssh.execOnServer.mockClear();
+    await runCronJob({ cronJobId: jobId, scheduledAt: new Date().toISOString() });
+
+    expect(ssh.execOnServer).not.toHaveBeenCalled();
+    const run = db.select().from(cronRuns).where(eq(cronRuns.cronJobId, jobId)).get();
+    expect(run?.status).toBe('failure');
+    expect(run?.stderr).toMatch(/no longer has access/);
   });
 });

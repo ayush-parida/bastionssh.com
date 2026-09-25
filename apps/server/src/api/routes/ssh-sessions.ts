@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { canAccessServer } from '../../auth/server-access.js';
 import { SSHBroker } from '../../ssh/broker.js';
 import { getDb } from '../../db/index.js';
 import { servers, sshKeys } from '../../db/schema.js';
@@ -26,6 +27,9 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     const body = createSessionSchema.parse(req.body);
     const db = getDb();
 
+    if (!canAccessServer(req, body.serverId)) {
+      return reply.status(404).send({ error: 'Server not found' });
+    }
     const server = db
       .select()
       .from(servers)
@@ -77,6 +81,14 @@ export async function sshSessionRoutes(app: FastifyInstance) {
   /** WebSocket /api/sessions/:id/ws → interactive terminal */
   app.get('/:id/ws', { websocket: true }, async (socket, req) => {
     const { id } = req.params as { id: string };
+    // Access may have been withdrawn since the session was opened; re-attaching
+    // (e.g. after a page reload) must not outlive the grant.
+    const owned = SSHBroker.getSessionForUser(id, req.user.id, req.orgId);
+    if (owned?.server.id && !canAccessServer(req, owned.server.id)) {
+      await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
+      socket.close(4404, 'Session not found');
+      return;
+    }
     await SSHBroker.attach(id, socket, req);
   });
 
