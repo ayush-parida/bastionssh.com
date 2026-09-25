@@ -354,8 +354,27 @@ Then put it behind your reverse proxy of choice (Caddy / Nginx / Traefik) with T
 **Authentication options:**
 
 - Built-in email/password
+- Passkeys (WebAuthn) — passwordless sign-in, or a second step after the password
 - OAuth / SSO (Google, GitHub, GitLab, generic OIDC)
 - Optional 2FA (TOTP)
+
+### Passkeys
+
+Anyone can add passkeys under **Settings → Passkeys**. Once an account has one, signing in with the password also asks for it, and **Sign in with a passkey** on the login page works without the password. Owners can turn on **Team → Require passkeys for this organization**: members then have to have used a passkey in their current session to do anything in that org, and anyone without one is asked to create it right after signing in. Enabling it requires the owner's own session to be passkey-verified, so an owner cannot lock themselves out, and ends open terminals, file sessions and AI chats in that org for members who have no passkey-verified session. Under the policy only API tokens created from a passkey-verified session work; older tokens must be recreated.
+
+A first passkey needs the account password again and a sign-in from the last 15 minutes; enrolling it signs out the account's other password-only sessions. Once an account has a passkey, changing the password, creating API tokens, and (for admins) issuing password-reset links or resetting someone's passkeys need a session that has used it. When SMTP is configured (`SMT_SMTP_URL`), people are emailed whenever a passkey is added to their account.
+
+Lost passkey? An admin or owner who outranks the member can **Reset passkeys** on the Team page. That removes all of their passkeys and signs them out; they sign in with their password and enroll a new one. As with admin password resets, this is refused for someone who also belongs to another organization.
+
+Browsers only offer passkeys on **HTTPS** pages or on **localhost**, and a passkey is bound to the RP ID (a domain), so choose it before your team enrolls:
+
+```bash
+SMT_WEBAUTHN_RP_ID=bastionssh.yourcompany.com   # default: hostname of SMT_BASE_URL
+SMT_WEBAUTHN_RP_NAME=BastionSSH                 # shown in the browser prompt
+SMT_WEBAUTHN_ORIGINS=https://bastionssh.yourcompany.com  # comma list; default: origin of SMT_BASE_URL
+```
+
+With `NODE_ENV=development` the Vite dev server (`http://localhost:5173`) is allowed too, unless `SMT_WEBAUTHN_ORIGINS` is set. Changing the RP ID later makes every existing passkey unusable.
 
 ---
 

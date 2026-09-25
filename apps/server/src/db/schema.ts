@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, blob, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 // ── Users & Auth ─────────────────────────────────────────────────────────────
 
@@ -33,7 +33,60 @@ export const sessions = sqliteTable('sessions', {
   userAgent: text('user_agent'),
   // The org this browser is working in; null or stale falls back to the first active membership
   activeOrgId: text('active_org_id').references(() => organizations.id, { onDelete: 'set null' }),
+  // Signed in (or stepped up) with a passkey. Orgs that require passkeys refuse sessions without it.
+  passkeyVerified: integer('passkey_verified', { mode: 'boolean' }).notNull().default(false),
 });
+
+/** WebAuthn credentials. Discoverable and user-verifying, so one alone is a full sign-in. */
+export const passkeys = sqliteTable(
+  'passkeys',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // base64url, as the browser reports it
+    credentialId: text('credential_id').notNull().unique(),
+    publicKey: blob('public_key', { mode: 'buffer' }).notNull(),
+    counter: integer('counter').notNull().default(0),
+    transports: text('transports').notNull().default('[]'), // JSON array
+    deviceType: text('device_type').notNull(), // singleDevice | multiDevice
+    backedUp: integer('backed_up', { mode: 'boolean' }).notNull().default(false),
+    name: text('name').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    lastUsedAt: text('last_used_at'),
+  },
+  (t) => ({
+    userIdx: index('passkeys_user_idx').on(t.userId),
+  }),
+);
+
+/**
+ * Outstanding WebAuthn challenges, deleted on use and short-lived. A
+ * `second_factor` row is also the pending-login ticket issued after a correct
+ * password; only the ticket's hash is kept.
+ */
+export const webauthnChallenges = sqliteTable(
+  'webauthn_challenges',
+  {
+    id: text('id').primaryKey(),
+    challenge: text('challenge').notNull(),
+    purpose: text('purpose').notNull(), // register | login | second_factor | step_up
+    userId: text('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    // publicSessionId() of the session that asked, for register and step_up
+    sessionHash: text('session_hash'),
+    ticketHash: text('ticket_hash').unique(),
+    expiresAt: text('expires_at').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    expiresIdx: index('webauthn_challenges_expires_idx').on(t.expiresAt),
+  }),
+);
 
 /** One-time, admin-issued links that let a user set a new password. Only the hash is stored. */
 export const passwordResets = sqliteTable('password_resets', {
@@ -63,6 +116,8 @@ export const apiTokens = sqliteTable('api_tokens', {
   hashedToken: text('hashed_token').notNull().unique(),
   prefix: text('prefix').notNull(),
   scopes: text('scopes').notNull().default('[]'), // JSON array
+  // Minted from a passkey-verified session. Orgs that require passkeys refuse tokens without it.
+  passkeyVerified: integer('passkey_verified', { mode: 'boolean' }).notNull().default(false),
   lastUsedAt: text('last_used_at'),
   expiresAt: text('expires_at'),
   createdAt: text('created_at')
@@ -88,6 +143,8 @@ export const organizations = sqliteTable('organizations', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
   slug: text('slug').notNull().unique(),
+  // Members must sign in with a passkey before their session may act here
+  requirePasskey: integer('require_passkey', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

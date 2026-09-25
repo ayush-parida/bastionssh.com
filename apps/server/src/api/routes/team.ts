@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, count, desc, eq, inArray, isNull, max, ne, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import type { MemberServerAccess, OrgMember, PasswordResetLink } from '@smt/shared';
+import type { MemberServerAccess, OrgMember, OrgSecuritySettings, PasswordResetLink } from '@smt/shared';
 import { rank, requireAuth, requireRole, ROLES, type Role } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import {
@@ -10,10 +10,12 @@ import {
   memberServerAccess,
   memberships,
   organizations,
+  passkeys,
   passwordResets,
   servers,
   sessions,
   users,
+  webauthnChallenges,
 } from '../../db/schema.js';
 import { hashPassword, verifyPassword } from '../../auth/password.js';
 import {
@@ -39,6 +41,7 @@ import {
 } from '../../auth/invite.js';
 import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
+import { passkeyCount, requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { config } from '../../config/index.js';
 
 const roleSchema = z.enum(ROLES);
@@ -63,6 +66,8 @@ const joinInviteSchema = z.object({
   email: z.string().trim().max(254).optional(),
   password: z.string().max(200).optional(),
 });
+
+const settingsSchema = z.object({ requirePasskey: z.boolean() });
 
 const serverAccessSchema = z.object({
   serverAccess: z.enum(['all', 'restricted']),
@@ -143,6 +148,54 @@ function targetMember(
   return member;
 }
 
+function orgSettings(orgId: string): OrgSecuritySettings {
+  const db = getDb();
+  const org = db
+    .select({ requirePasskey: organizations.requirePasskey })
+    .from(organizations)
+    .where(eq(organizations.id, orgId))
+    .get();
+  const withoutPasskey = db
+    .select({ n: count() })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.orgId, orgId),
+        eq(memberships.status, 'active'),
+        sql`not exists (select 1 from ${passkeys} where ${passkeys.userId} = ${memberships.userId})`,
+      ),
+    )
+    .get();
+  return { requirePasskey: org?.requirePasskey ?? false, membersWithoutPasskey: withoutPasskey?.n ?? 0 };
+}
+
+/** End live access in `orgId` for active members (bar `exceptUserId`) with no passkey-verified session. */
+function revokeUnverifiedLiveAccess(orgId: string, exceptUserId: string) {
+  const db = getDb();
+  const members = db
+    .select({ userId: memberships.userId })
+    .from(memberships)
+    .where(
+      and(
+        eq(memberships.orgId, orgId),
+        eq(memberships.status, 'active'),
+        ne(memberships.userId, exceptUserId),
+        sql`not exists (select 1 from ${sessions} where ${sessions.userId} = ${memberships.userId} and ${sessions.passkeyVerified} = 1)`,
+      ),
+    )
+    .all();
+  const total = { members: 0, terminals: 0, sftp: 0, agents: 0 };
+  for (const { userId } of members) {
+    const r = revokeLiveAccess(userId, { orgId });
+    if (r.terminals + r.sftp + r.agents === 0) continue;
+    total.members++;
+    total.terminals += r.terminals;
+    total.sftp += r.sftp;
+    total.agents += r.agents;
+  }
+  return total;
+}
+
 function userEmail(userId: string) {
   return getDb().select({ email: users.email }).from(users).where(eq(users.id, userId)).get()?.email;
 }
@@ -192,6 +245,19 @@ export async function teamRoutes(app: FastifyInstance) {
             .map((s) => [s.userId, s.at])
         : [],
     );
+    // Who has enrolled is an admin's concern (recovery, the policy warning), not everyone's
+    const seesPasskeys = rank(req.role) >= rank('admin');
+    const passkeyCounts = new Map(
+      userIds.length && seesPasskeys
+        ? db
+            .select({ userId: passkeys.userId, n: count() })
+            .from(passkeys)
+            .where(inArray(passkeys.userId, userIds))
+            .groupBy(passkeys.userId)
+            .all()
+            .map((p) => [p.userId, p.n])
+        : [],
+    );
 
     return rows.map((r) => ({
       ...r,
@@ -200,7 +266,52 @@ export async function teamRoutes(app: FastifyInstance) {
       serverAccess: r.serverAccess === 'restricted' ? 'restricted' : 'all',
       serverCount: grants.get(r.userId) ?? 0,
       lastActiveAt: lastSeen.get(r.userId) ?? null,
+      ...(seesPasskeys && { passkeyCount: passkeyCounts.get(r.userId) ?? 0 }),
     }));
+  });
+
+  /** Org-wide security policy. Every member may read it; the count is what owners weigh before enabling. */
+  app.get('/settings', async (req): Promise<OrgSecuritySettings> => {
+    const settings = orgSettings(req.orgId);
+    return rank(req.role) >= rank('admin') ? settings : { requirePasskey: settings.requirePasskey };
+  });
+
+  /**
+   * Owners only. Turning the requirement on needs the owner's own session to
+   * have used a passkey — proof they can still get in once it applies.
+   */
+  app.patch('/settings', { preHandler: requireRole('owner') }, async (req, reply) => {
+    const { requirePasskey } = settingsSchema.parse(req.body);
+    const before = orgSettings(req.orgId);
+
+    if (requirePasskey && !before.requirePasskey && !req.passkeyVerified) {
+      return reply.status(403).send({
+        error:
+          passkeyCount(req.user.id) === 0
+            ? 'Add a passkey to your own account before requiring them'
+            : 'Verify with your passkey before requiring them for everyone',
+        code: 'PASSKEY_STEP_UP_REQUIRED',
+      });
+    }
+
+    if (requirePasskey !== before.requirePasskey) {
+      getDb()
+        .update(organizations)
+        .set({ requirePasskey, updatedAt: new Date().toISOString() })
+        .where(eq(organizations.id, req.orgId))
+        .run();
+      // Open terminals, file sessions and agent streams were started without a
+      // passkey and would outlive the switch. They are tracked per user, not
+      // per browser, so end them in this org for every member with no
+      // passkey-verified session at all. Members who have one keep theirs.
+      const live = requirePasskey ? revokeUnverifiedLiveAccess(req.orgId, req.user.id) : undefined;
+      await audit(req, 'org.passkey_policy', 'organization', req.orgId, undefined, {
+        requirePasskey,
+        membersWithoutPasskey: before.membersWithoutPasskey,
+        ...(live && { live }),
+      });
+    }
+    return orgSettings(req.orgId);
   });
 
   app.patch('/members/:userId', { preHandler: requireRole('admin') }, async (req, reply) => {
@@ -415,8 +526,13 @@ export async function teamRoutes(app: FastifyInstance) {
   /** Issue a one-time link that lets the member set a new password. Shown once. */
   app.post('/members/:userId/password-reset', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { userId } = req.params as { userId: string };
+    // Hands over someone else's account: a person at a browser, and as strongly signed in as they can be
+    if (!requireBrowserSession(req, reply, 'Issuing a password reset requires a signed-in browser, not an API token')) {
+      return reply;
+    }
     const member = targetMember(req, reply, userId, 'reset the password of', 'strictlyBelow');
     if (!member) return reply;
+    if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
     const db = getDb();
 
     // A password is per account, not per org. An admin here must not be able to
@@ -448,6 +564,50 @@ export async function teamRoutes(app: FastifyInstance) {
     await audit(req, 'user.password_reset_issued', 'user', userId, userEmail(userId), { resetId: id });
     // The only time the link is ever returned.
     return reply.status(201).send({ link: resetLink(token), expiresAt } satisfies PasswordResetLink);
+  });
+
+  /**
+   * Recovery for a lost passkey: remove all of a member's passkeys and sign
+   * them out. They sign in with their password and enroll again.
+   */
+  app.delete('/members/:userId/passkeys', { preHandler: requireRole('admin') }, async (req, reply) => {
+    const { userId } = req.params as { userId: string };
+    // Strictly higher, like a password reset: removing the second factor is half a takeover
+    if (!requireBrowserSession(req, reply, 'Resetting passkeys requires a signed-in browser, not an API token')) {
+      return reply;
+    }
+    const member = targetMember(req, reply, userId, 'reset the passkeys of', 'strictlyBelow');
+    if (!member) return reply;
+    if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
+    const db = getDb();
+
+    // Passkeys are per account, not per org — same reasoning as a password reset
+    const elsewhere = db
+      .select({ orgId: memberships.orgId })
+      .from(memberships)
+      .where(and(eq(memberships.userId, userId), ne(memberships.orgId, req.orgId)))
+      .get();
+    if (elsewhere) {
+      return reply.status(409).send({
+        error: 'This person also belongs to another organization, so their passkeys cannot be reset from here',
+      });
+    }
+
+    const removed = db.transaction(() => {
+      const n = db.delete(passkeys).where(eq(passkeys.userId, userId)).run().changes;
+      // A pending sign-in ticket or ceremony must not complete against the old state
+      db.delete(webauthnChallenges).where(eq(webauthnChallenges.userId, userId)).run();
+      return n;
+    });
+    const revoked = invalidateUserSessions(userId);
+    const live = revokeLiveAccess(userId);
+
+    await audit(req, 'member.passkeys_reset', 'member', userId, userEmail(userId), {
+      removed,
+      sessionsRevoked: revoked,
+      live,
+    });
+    return { removed, revoked };
   });
 
   /** Sign a member out of every browser. */
@@ -691,6 +851,12 @@ async function joinWithExistingAccount(
       return reply.status(401).send({
         // Only reachable with the invited address, so this reveals nothing new
         error: 'Invalid credentials. This address already has an account — sign in with its password to accept.',
+      });
+    }
+    // The password alone is not a sign-in for an account with passkeys
+    if (passkeyCount(account.id) > 0) {
+      return reply.status(401).send({
+        error: 'This account uses a passkey. Sign in first, then open this link again.',
       });
     }
   }

@@ -13,6 +13,8 @@ export interface SessionContext {
   ipAddress?: string | null;
   userAgent?: string | null;
   activeOrgId?: string | null;
+  /** The sign-in used a passkey. Password-only sessions start unverified. */
+  passkeyVerified?: boolean;
 }
 
 export async function createSession(userId: string, context: SessionContext = {}) {
@@ -31,6 +33,7 @@ export async function createSession(userId: string, context: SessionContext = {}
       // Browsers send long strings; nothing useful lives past the first few hundred chars
       userAgent: context.userAgent?.slice(0, 500) ?? null,
       activeOrgId: context.activeOrgId ?? null,
+      passkeyVerified: context.passkeyVerified ?? false,
     })
     .run();
   return { id, userId, expiresAt };

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
+import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { useAuthStore, useHasRole } from '@/store/auth.js';
 import type {
@@ -26,6 +27,7 @@ import {
   ServerCog,
   KeyRound,
   LogOut,
+  Fingerprint,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -304,13 +306,25 @@ export default function TeamMembers() {
   });
 
   const resetMutation = useMutation({
+    // Taking over an account: the server may first want this session to confirm a passkey
     mutationFn: (member: OrgMember) =>
-      api.post<PasswordResetLink>(`/team/members/${member.userId}/password-reset`),
+      withStepUp(() => api.post<PasswordResetLink>(`/team/members/${member.userId}/password-reset`)),
     onSuccess: async (res, member) => {
       setResetLink({ ...res, email: member.email });
       await copyText(res.link, 'Reset link created — copied to clipboard', 'Copy the reset link below');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => { if (!isPasskeyCancel(err)) toast.error(passkeyErrorMessage(err)); },
+  });
+
+  const passkeyResetMutation = useMutation({
+    mutationFn: (userId: string) =>
+      withStepUp(() => api.delete<{ removed: number; revoked: number }>(`/team/members/${userId}/passkeys`)),
+    onSuccess: (res) => {
+      refresh();
+      qc.invalidateQueries({ queryKey: ['team-settings'] });
+      toast.success(`Removed ${res.removed} passkey${res.removed === 1 ? '' : 's'} and signed them out`);
+    },
+    onError: (err: Error) => { if (!isPasskeyCancel(err)) toast.error(passkeyErrorMessage(err)); },
   });
 
   const signOutMutation = useMutation({
@@ -431,6 +445,7 @@ export default function TeamMembers() {
                 <th className="px-4 py-2 font-medium">Role</th>
                 <th className="px-4 py-2 font-medium">Status</th>
                 <th className="px-4 py-2 font-medium">Servers</th>
+                {isAdmin && <th className="px-4 py-2 font-medium">Passkeys</th>}
                 <th className="px-4 py-2 font-medium">Last active</th>
                 {isAdmin && <th className="px-4 py-2" />}
               </tr>
@@ -442,7 +457,7 @@ export default function TeamMembers() {
                 const manageable = isAdmin && !isSelf && rank(m.role) <= rank(myRole);
                 const privileged = rank(m.role) >= rank('admin');
                 // Suspend / reactivate / sign out need a higher rank, except owner on owner;
-                // a password reset always needs a strictly higher rank.
+                // a password or passkey reset always needs a strictly higher rank.
                 const canLockOut = rank(m.role) < rank(myRole) || (myRole === 'owner' && m.role === 'owner');
                 const canReset = rank(m.role) < rank(myRole);
                 return (
@@ -478,6 +493,11 @@ export default function TeamMembers() {
                     </td>
                     <td className="px-4 py-3"><StatusPill status={m.status} /></td>
                     <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{accessSummary(m)}</td>
+                    {isAdmin && (
+                      <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
+                        {m.passkeyCount || '—'}
+                      </td>
+                    )}
                     <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                       {m.lastActiveAt ? relativeTime(m.lastActiveAt) : '—'}
                     </td>
@@ -522,6 +542,18 @@ export default function TeamMembers() {
                                 title="Issue password reset link"
                               >
                                 <KeyRound size={14} />
+                              </button>
+                            )}
+                            {canReset && (m.passkeyCount ?? 0) > 0 && (
+                              <button
+                                onClick={() => {
+                                  if (confirm(`Remove all of ${m.email}'s passkeys and sign them out? They sign in with their password and create a new one.`))
+                                    passkeyResetMutation.mutate(m.userId);
+                                }}
+                                className="text-muted-foreground hover:text-foreground"
+                                title="Reset passkeys"
+                              >
+                                <Fingerprint size={14} />
                               </button>
                             )}
                             {canLockOut && (

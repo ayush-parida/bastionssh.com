@@ -7,6 +7,7 @@ import { getDb } from '../../db/index.js';
 import { apiTokens } from '../../db/schema.js';
 import { generateApiToken, isExpired } from '../../auth/token.js';
 import { audit } from '../../audit/index.js';
+import { anyActiveOrgRequiresPasskey, passkeyCount } from '../../auth/passkey.js';
 
 const createTokenSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -37,6 +38,7 @@ export async function apiTokenRoutes(app: FastifyInstance) {
       expiresAt: token.expiresAt,
       createdAt: token.createdAt,
       expired: isExpired(token.expiresAt),
+      passkeyVerified: token.passkeyVerified,
     }));
   });
 
@@ -49,6 +51,16 @@ export async function apiTokenRoutes(app: FastifyInstance) {
       return reply
         .status(403)
         .send({ error: 'API tokens cannot create other tokens' });
+    }
+    // A token outlives the sign-in that made it, so it may only be as strong
+    // as that sign-in: with any passkey on the account, or in any org that
+    // requires one (a token is not tied to one org), the session must have
+    // used a passkey. Tokens minted that way pass the org passkey policy.
+    if (!req.passkeyVerified && (passkeyCount(req.user.id) > 0 || anyActiveOrgRequiresPasskey(req.user.id))) {
+      return reply.status(403).send({
+        error: 'Verify with your passkey to create API tokens',
+        code: 'PASSKEY_STEP_UP_REQUIRED',
+      });
     }
 
     const id = nanoid();
@@ -66,6 +78,7 @@ export async function apiTokenRoutes(app: FastifyInstance) {
         hashedToken,
         prefix,
         scopes: JSON.stringify(body.scopes),
+        passkeyVerified: req.passkeyVerified,
         expiresAt,
       })
       .run();
@@ -81,6 +94,7 @@ export async function apiTokenRoutes(app: FastifyInstance) {
       expiresAt,
       createdAt: new Date().toISOString(),
       expired: false,
+      passkeyVerified: req.passkeyVerified,
       token,
     });
   });

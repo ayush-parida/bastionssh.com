@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
+import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { useAuthStore } from '@/store/auth.js';
 import type { Role, User } from '@smt/shared';
 import { KeyRound, UserCog } from 'lucide-react';
@@ -23,14 +24,15 @@ export default function AccountSettings() {
   });
 
   const passwordMutation = useMutation({
-    mutationFn: () => api.post('/auth/change-password', { currentPassword, newPassword }),
+    // With a passkey on the account, this session must have used it
+    mutationFn: () => withStepUp(() => api.post('/auth/change-password', { currentPassword, newPassword })),
     onSuccess: () => {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       toast.success('Password changed — other sessions were signed out');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => { if (!isPasskeyCancel(err)) toast.error(passkeyErrorMessage(err)); },
   });
 
   function submitPassword(e: React.FormEvent) {

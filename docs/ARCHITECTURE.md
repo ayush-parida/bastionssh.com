@@ -632,6 +632,9 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_CLOUD_SYNC_ENABLED` | no       | Run the scheduled cloud inventory sync (default `true`)       |
 | `SMT_CLOUD_SYNC_INTERVAL` | no      | Minutes between cloud syncs (default 15, minimum 5)           |
 | `SMT_CLOUD_REQUEST_TIMEOUT` | no    | Per-request provider timeout in ms (default 30000)            |
+| `SMT_WEBAUTHN_RP_ID`     | no       | Passkey RP ID (default: hostname of `SMT_BASE_URL`)           |
+| `SMT_WEBAUTHN_RP_NAME`   | no       | Name shown in passkey prompts (default `BastionSSH`)          |
+| `SMT_WEBAUTHN_ORIGINS`   | no       | Comma list of origins allowed to use passkeys (default: origin of `SMT_BASE_URL`, plus the Vite dev server in development) |
 
 ---
 

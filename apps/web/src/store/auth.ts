@@ -11,9 +11,15 @@ interface AuthState {
   role: Role | null;
   /** True when the server rejected the session, so the login screen can say why. */
   sessionExpired: boolean;
-  setUser: (user: User, orgId: string, role: Role) => void;
+  /**
+   * The current org requires a passkey sign-in this session has not done.
+   * `RequireAuth` holds the app at /passkey-setup until it is cleared.
+   */
+  passkeyGate: boolean;
+  setUser: (user: User, orgId: string | null, role: Role) => void;
   clearUser: () => void;
   expireSession: () => void;
+  setPasskeyGate: (on: boolean) => void;
 }
 
 const signedOut = { user: null, orgId: null, role: null } as const;
@@ -23,18 +29,21 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       ...signedOut,
       sessionExpired: false,
+      passkeyGate: false,
       setUser: (user, orgId, role) => set({ user, orgId, role, sessionExpired: false }),
-      clearUser: () => set({ ...signedOut, sessionExpired: false }),
+      clearUser: () => set({ ...signedOut, sessionExpired: false, passkeyGate: false }),
       /**
        * Sign out because the server no longer accepts the session. Idempotent, so
        * a burst of concurrent 401s only raises the notice once.
        */
       expireSession: () =>
-        set((state) => (state.user ? { ...signedOut, sessionExpired: true } : state)),
+        set((state) => (state.user ? { ...signedOut, sessionExpired: true, passkeyGate: false } : state)),
+      setPasskeyGate: (on) => set((state) => (state.passkeyGate === on ? state : { passkeyGate: on })),
     }),
     {
       name: 'smt-auth',
-      // `sessionExpired` describes this page load only — never restore it.
+      // `sessionExpired` and `passkeyGate` describe this page load only — never
+      // restore them. The server re-raises the gate on the next request.
       partialize: ({ user, orgId, role }) => ({ user, orgId, role }),
     },
   ),

@@ -18,6 +18,15 @@ export interface OrgMember {
   serverCount: number;
   /** Most recent activity across the member's sessions, if any. */
   lastActiveAt: string | null;
+  /** Passkeys registered to the account (they are per account, not per org). Admins and owners only. */
+  passkeyCount?: number;
+}
+
+/** Org-wide security policy, readable by every member; only owners change it. */
+export interface OrgSecuritySettings {
+  requirePasskey: boolean;
+  /** Active members who have no passkey yet — they must enroll at their next sign-in. Admins and owners only. */
+  membersWithoutPasskey?: number;
 }
 
 export interface MemberServerAccess {

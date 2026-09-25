@@ -3,22 +3,27 @@ import { useAuthStore } from '@/store/auth.js';
 const BASE = '/api';
 
 /** These answer 401 for bad credentials, which is not a lapsed session. */
-const CREDENTIAL_PATHS = ['/auth/login', '/auth/register'];
+const CREDENTIAL_PATHS = ['/auth/login', '/auth/register', '/auth/passkey/'];
 
 export class ApiError extends Error {
   readonly status: number;
+  /** Machine-readable reason, when the server gives one (e.g. PASSKEY_REQUIRED). */
+  readonly code?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = code;
   }
 }
 
 /**
  * Convert a failed response into an ApiError. A 401 from anything but the sign-in
  * form means the server-side session is gone, so drop the persisted user —
- * `RequireAuth` then renders the app back at the login screen.
+ * `RequireAuth` then renders the app back at the login screen. A 403
+ * PASSKEY_REQUIRED means the org wants a passkey sign-in this session has not
+ * done; `RequireAuth` then sends the user to set one up or verify.
  */
 async function fail(res: Response, path: string): Promise<never> {
   if (res.status === 401 && !CREDENTIAL_PATHS.some((p) => path.startsWith(p))) {
@@ -26,13 +31,18 @@ async function fail(res: Response, path: string): Promise<never> {
   }
   const text = await res.text().catch(() => '');
   let message = text || res.statusText;
+  let code: string | undefined;
   try {
-    const body = JSON.parse(text) as { message?: string; error?: string };
+    const body = JSON.parse(text) as { message?: string; error?: string; code?: string };
     message = body.message ?? body.error ?? message;
+    code = body.code;
   } catch {
     // Not JSON — the raw body is the best message we have.
   }
-  throw new ApiError(message, res.status);
+  if (res.status === 403 && code === 'PASSKEY_REQUIRED') {
+    useAuthStore.getState().setPasskeyGate(true);
+  }
+  throw new ApiError(message, res.status, code);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

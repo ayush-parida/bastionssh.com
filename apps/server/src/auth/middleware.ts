@@ -11,6 +11,7 @@ import {
   secretMatches,
   type TokenScope,
 } from './token.js';
+import { orgRequiresPasskey, PASSKEY_REQUIRED_MESSAGE, TOKEN_PASSKEY_REQUIRED_MESSAGE } from './passkey.js';
 
 /** Ordered least- to most-privileged; every role implies the ones before it. */
 export const ROLES = ['viewer', 'operator', 'admin', 'owner'] as const;
@@ -25,6 +26,16 @@ declare module 'fastify' {
     viaApiToken: boolean;
     /** The session cookie that authenticated this request; null for API tokens. */
     sessionId: string | null;
+    /** The session signed in or stepped up with a passkey. Always false for API tokens. */
+    passkeyVerified: boolean;
+  }
+  interface FastifyContextConfig {
+    /**
+     * Reachable by a session that has not yet used a passkey, even in an org
+     * that requires one — just enough to find out why, enroll or verify, sign
+     * out, or move to another org.
+     */
+    passkeyExempt?: boolean;
   }
 }
 
@@ -88,7 +99,7 @@ type TokenAuth =
   | { status: 'absent' }
   /** One of ours, but unknown, wrong, or past its expiry. */
   | { status: 'invalid' }
-  | { status: 'ok'; userId: string; scopes: TokenScope[] };
+  | { status: 'ok'; userId: string; scopes: TokenScope[]; passkeyVerified: boolean };
 
 /**
  * Resolve the caller from an `Authorization: Bearer smt_…` header.
@@ -127,7 +138,7 @@ async function resolveApiToken(req: FastifyRequest): Promise<TokenAuth> {
     scopes = [];
   }
 
-  return { status: 'ok', userId: token.userId, scopes };
+  return { status: 'ok', userId: token.userId, scopes, passkeyVerified: token.passkeyVerified };
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -140,11 +151,13 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   const apiToken = await resolveApiToken(req);
   let userId: string;
   let scopes: TokenScope[] | null = null;
+  let tokenPasskeyVerified = false;
   let session: Awaited<ReturnType<typeof validateSession>> = null;
 
   if (apiToken.status === 'ok') {
     userId = apiToken.userId;
     scopes = apiToken.scopes;
+    tokenPasskeyVerified = apiToken.passkeyVerified;
   } else {
     if (apiToken.status === 'invalid') {
       // A presented-but-unusable token should say so, not fall through to
@@ -180,6 +193,19 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     membership = resolved.membership;
   }
 
+  // A session must have signed in or stepped up with a passkey; a token must
+  // have been minted by such a session. Only sessions get the exempt routes —
+  // they exist to reach enrollment and verification, which tokens cannot do.
+  const passkeyMissing = scopes
+    ? !tokenPasskeyVerified
+    : !session!.passkeyVerified && !req.routeOptions.config.passkeyExempt;
+  if (passkeyMissing && orgRequiresPasskey(membership.orgId)) {
+    return reply.status(403).send({
+      error: scopes ? TOKEN_PASSKEY_REQUIRED_MESSAGE : PASSKEY_REQUIRED_MESSAGE,
+      code: 'PASSKEY_REQUIRED',
+    });
+  }
+
   const membershipRole = ROLES.includes(membership.role as Role)
     ? (membership.role as Role)
     : 'viewer';
@@ -196,6 +222,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   req.role = scopes ? effectiveRole(membershipRole, scopes) : membershipRole;
   req.viaApiToken = scopes !== null;
   req.sessionId = session?.id ?? null;
+  req.passkeyVerified = session?.passkeyVerified ?? false;
 
   if (session) touchSession(session, req.ip);
 }

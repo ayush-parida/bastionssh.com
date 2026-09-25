@@ -107,3 +107,59 @@ describe('migration 0007 (user & access management)', () => {
     expect(db.prepare('SELECT count(*) AS n FROM member_server_access').get()).toEqual({ n: 0 });
   });
 });
+
+const PASSKEYS_TAG = '0008_passkeys';
+
+describe('migration 0008 (passkeys)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(PASSKEYS_TAG);
+  });
+
+  it('upgrades existing data: orgs do not require passkeys, sessions and tokens start unverified', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < PASSKEYS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, joined_at) VALUES ('u1', 'o1', 'owner', 'now');
+      INSERT INTO sessions (id, user_id, expires_at, active_org_id) VALUES ('s1', 'u1', '2999-01-01', 'o1');
+      INSERT INTO api_tokens (id, user_id, name, hashed_token, prefix, created_at) VALUES ('t1', 'u1', 'ci', 'h', 'p', 'now');
+    `);
+
+    apply(db, [PASSKEYS_TAG]);
+
+    // Tokens minted before passkeys existed do not count as passkey-verified
+    expect(db.prepare('SELECT id, passkey_verified FROM api_tokens').get()).toEqual({ id: 't1', passkey_verified: 0 });
+
+    expect(db.prepare('SELECT require_passkey FROM organizations').get()).toEqual({ require_passkey: 0 });
+    expect(db.prepare('SELECT id, passkey_verified FROM sessions').get()).toEqual({ id: 's1', passkey_verified: 0 });
+  });
+
+  it('keeps credential ids unique and drops passkeys and challenges with their user', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO passkeys (id, user_id, credential_id, public_key, device_type, name, created_at)
+        VALUES ('p1', 'u1', 'cred', x'0102', 'multiDevice', 'Laptop', 'now');
+      INSERT INTO webauthn_challenges (id, challenge, purpose, user_id, ticket_hash, expires_at, created_at)
+        VALUES ('c1', 'ch', 'second_factor', 'u1', 'hash', '2999-01-01', 'now');
+      -- Challenges without a ticket may share the (null) ticket hash
+      INSERT INTO webauthn_challenges (id, challenge, purpose, expires_at, created_at) VALUES ('c2', 'ch', 'login', '2999-01-01', 'now');
+      INSERT INTO webauthn_challenges (id, challenge, purpose, expires_at, created_at) VALUES ('c3', 'ch', 'login', '2999-01-01', 'now');
+    `);
+    expect(db.prepare('SELECT counter, transports, backed_up FROM passkeys').get()).toEqual({
+      counter: 0,
+      transports: '[]',
+      backed_up: 0,
+    });
+    expect(() =>
+      db.exec(`INSERT INTO passkeys (id, user_id, credential_id, public_key, device_type, name, created_at)
+        VALUES ('p2', 'u1', 'cred', x'01', 'singleDevice', 'Key', 'now')`),
+    ).toThrow(/UNIQUE/);
+
+    db.exec("DELETE FROM users WHERE id = 'u1'");
+    expect(db.prepare('SELECT count(*) AS n FROM passkeys').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT id FROM webauthn_challenges ORDER BY id').all()).toEqual([{ id: 'c2' }, { id: 'c3' }]);
+  });
+});

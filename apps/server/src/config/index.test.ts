@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DEV_ADMIN_PASSWORD, parseTrustProxy, resolveAdminPassword } from './index.js';
+import { DEV_ADMIN_PASSWORD, DEV_WEB_ORIGINS, parseTrustProxy, resolveAdminPassword, resolveWebauthn } from './index.js';
 
 describe('resolveAdminPassword', () => {
   it('falls back to the dev password when NODE_ENV is explicitly development or test', () => {
@@ -35,5 +35,45 @@ describe('parseTrustProxy', () => {
     expect(parseTrustProxy('true')).toBe(true);
     expect(parseTrustProxy('1')).toBe(1);
     expect(parseTrustProxy(' 10.0.0.0/8,127.0.0.1 ')).toBe('10.0.0.0/8,127.0.0.1');
+  });
+});
+
+describe('resolveWebauthn', () => {
+  const base = { rpName: 'BastionSSH' };
+
+  it('defaults the RP ID and origin to SMT_BASE_URL', () => {
+    expect(
+      resolveWebauthn({ ...base, nodeEnv: 'production', baseUrl: 'https://ssh.example.com/app/' }),
+    ).toEqual({ rpId: 'ssh.example.com', rpName: 'BastionSSH', origins: ['https://ssh.example.com'] });
+  });
+
+  it('also allows the Vite dev server in development', () => {
+    const { rpId, origins } = resolveWebauthn({ ...base, nodeEnv: 'development', baseUrl: 'http://localhost:8080' });
+    expect(rpId).toBe('localhost');
+    expect(origins).toEqual(['http://localhost:8080', ...DEV_WEB_ORIGINS]);
+  });
+
+  it('uses explicit values as given', () => {
+    expect(
+      resolveWebauthn({
+        ...base,
+        nodeEnv: 'development',
+        baseUrl: 'https://ssh.example.com',
+        rpId: 'example.com',
+        origins: 'https://ssh.example.com/, https://admin.example.com',
+      }),
+    ).toEqual({
+      rpId: 'example.com',
+      rpName: 'BastionSSH',
+      origins: ['https://ssh.example.com', 'https://admin.example.com'],
+    });
+  });
+
+  it('names a bad origin instead of failing with a bare "Invalid URL"', () => {
+    for (const bad of ['ssh.example.com', 'not a url', 'mailto:x@example.com']) {
+      expect(() =>
+        resolveWebauthn({ ...base, nodeEnv: 'production', baseUrl: 'https://ssh.example.com', origins: `https://ok.example.com,${bad}` }),
+      ).toThrow(`SMT_WEBAUTHN_ORIGINS: "${bad}" is not an origin`);
+    }
   });
 });

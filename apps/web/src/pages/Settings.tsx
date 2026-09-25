@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import NotificationChannels from '@/components/settings/NotificationChannels.js';
 import AccountSettings from '@/components/settings/AccountSettings.js';
 import Sessions from '@/components/settings/Sessions.js';
+import Passkeys from '@/components/settings/Passkeys.js';
 import ApiTokens from '@/components/settings/ApiTokens.js';
 
 interface ProviderForm {
@@ -171,6 +172,7 @@ export default function SettingsPage() {
 
       <NotificationChannels />
       <AccountSettings />
+      <Passkeys />
       <Sessions />
       <ApiTokens />
     </div>

@@ -58,6 +58,13 @@ const envSchema = z.object({
   /** Fastify `trustProxy`: false (default), true, a hop count, or a comma-separated IP/CIDR list. */
   SMT_TRUST_PROXY: z.string().optional(),
   SMT_STATIC_DIR: z.string().optional(),
+
+  // ── Passkeys (WebAuthn) ──
+  /** Defaults to the hostname of SMT_BASE_URL. Passkeys are bound to it — changing it orphans them. */
+  SMT_WEBAUTHN_RP_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
+  SMT_WEBAUTHN_RP_NAME: z.string().min(1).default('BastionSSH'),
+  /** Comma-separated origins allowed to complete a ceremony; defaults to SMT_BASE_URL's origin. */
+  SMT_WEBAUTHN_ORIGINS: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -100,6 +107,62 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
   if (value === 'true') return true;
   if (/^\d+$/.test(value)) return Number(value);
   return value;
+}
+
+/** The Vite dev server (apps/web/vite.config.ts), which proxies /api to this server. */
+export const DEV_WEB_ORIGINS = ['http://localhost:5173'];
+
+/**
+ * Where passkeys may be created and used. The RP ID is a hostname every
+ * allowed origin must sit under; browsers only offer WebAuthn over HTTPS or on
+ * localhost.
+ */
+export function resolveWebauthn(opts: {
+  nodeEnv: string | undefined;
+  baseUrl: string;
+  rpId?: string;
+  rpName: string;
+  origins?: string;
+}): { rpId: string; rpName: string; origins: string[] } {
+  const base = new URL(opts.baseUrl);
+  const listed = opts.origins
+    ?.split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+    // Compare as origins: a trailing slash or path must not make a valid origin miss
+    .map((o) => {
+      let url: URL | null = null;
+      try {
+        url = new URL(o);
+      } catch {
+        /* reported below */
+      }
+      if (!url || url.origin === 'null') {
+        throw new Error(`SMT_WEBAUTHN_ORIGINS: "${o}" is not an origin (expected e.g. https://ssh.example.com)`);
+      }
+      return url.origin;
+    });
+  const origins = listed?.length ? listed : [base.origin];
+  if (!listed?.length && opts.nodeEnv === 'development') origins.push(...DEV_WEB_ORIGINS);
+  return {
+    rpId: opts.rpId?.trim() || base.hostname,
+    rpName: opts.rpName,
+    origins: [...new Set(origins)],
+  };
+}
+
+let webauthn: ReturnType<typeof resolveWebauthn>;
+try {
+  webauthn = resolveWebauthn({
+    nodeEnv: env.NODE_ENV,
+    baseUrl: env.SMT_BASE_URL,
+    rpId: env.SMT_WEBAUTHN_RP_ID,
+    rpName: env.SMT_WEBAUTHN_RP_NAME,
+    origins: env.SMT_WEBAUTHN_ORIGINS,
+  });
+} catch (err) {
+  console.error(`Invalid environment variables: ${(err as Error).message}`);
+  process.exit(1);
 }
 
 if (env.SMT_SMTP_URL && !env.SMT_SMTP_FROM) {
@@ -150,6 +213,7 @@ export const config = {
   // unlock the dev password for an install that simply never set it.
   adminPassword: resolveAdminPassword(process.env.NODE_ENV, env.SMT_ADMIN_PASSWORD),
   trustProxy: parseTrustProxy(env.SMT_TRUST_PROXY),
+  webauthn,
   oauth: {
     google:
       env.SMT_OAUTH_GOOGLE_CLIENT_ID && env.SMT_OAUTH_GOOGLE_CLIENT_SECRET

@@ -64,6 +64,65 @@ export interface ApiToken {
   expiresAt?: string | null;
   createdAt: string;
   expired: boolean;
+  /** Created from a passkey-verified session; only such tokens work in orgs that require passkeys. */
+  passkeyVerified: boolean;
+}
+
+export type PasskeyDeviceType = 'singleDevice' | 'multiDevice';
+
+/** A registered passkey, as listed in settings. The credential itself never leaves the server. */
+export interface PasskeyInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  deviceType: PasskeyDeviceType;
+  /** Synced to a cloud keychain, so it survives losing the device. */
+  backedUp: boolean;
+}
+
+/**
+ * Error codes a 403 may carry. PASSKEY_REQUIRED: the org requires a passkey
+ * sign-in and this session has not done one. PASSKEY_STEP_UP_REQUIRED: the
+ * action needs this session to confirm with an existing passkey first.
+ */
+export type PasskeyErrorCode = 'PASSKEY_REQUIRED' | 'PASSKEY_STEP_UP_REQUIRED';
+
+/** A signed-in session, as returned by every sign-in endpoint. */
+export interface SignedIn {
+  user: { id: string; email: string; displayName: string };
+  orgId: string | null;
+  role: Role;
+  passkeyVerified: boolean;
+  /** The org requires passkeys and this account has none: enroll before anything else. */
+  passkeyEnrollmentRequired: boolean;
+}
+
+/**
+ * The password was right, but the account has passkeys: finish with one. The
+ * ticket stands in for the password for five minutes, once.
+ */
+export interface PasskeyLoginStep {
+  step: 'passkey';
+  ticket: string;
+  /** PublicKeyCredentialRequestOptionsJSON for `startAuthentication`. */
+  options: object;
+}
+
+export type LoginResponse = SignedIn | PasskeyLoginStep;
+
+/** GET /auth/me */
+export interface Me {
+  id: string;
+  email: string;
+  displayName: string;
+  orgId: string;
+  role: Role;
+  /** This session signed in (or stepped up) with a passkey. Always false for API tokens. */
+  passkeyVerified: boolean;
+  /** The current org requires passkeys. */
+  requirePasskey: boolean;
+  passkeyCount: number;
 }
 
 export interface LoginRequest {

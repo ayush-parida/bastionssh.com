@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
+import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import type { ApiToken, CreatedApiToken, TokenScope } from '@smt/shared';
 import { Plus, Trash2, Terminal, Copy, X, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
@@ -28,12 +29,15 @@ export default function ApiTokens() {
   });
 
   const createMutation = useMutation({
+    // With a passkey on the account (or a passkey policy), this session must have used one
     mutationFn: () =>
-      api.post<CreatedApiToken>('/tokens', {
-        name,
-        scopes: (writable ? ['read', 'write'] : ['read']) as TokenScope[],
-        ...(expiresIn ? { expiresInDays: Number(expiresIn) } : {}),
-      }),
+      withStepUp(() =>
+        api.post<CreatedApiToken>('/tokens', {
+          name,
+          scopes: (writable ? ['read', 'write'] : ['read']) as TokenScope[],
+          ...(expiresIn ? { expiresInDays: Number(expiresIn) } : {}),
+        }),
+      ),
     onSuccess: async (token) => {
       qc.invalidateQueries({ queryKey: QUERY_KEY });
       setShowForm(false);
@@ -41,7 +45,7 @@ export default function ApiTokens() {
       setCreated(token);
       await copy(token.token, 'Token created — copied to clipboard');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error) => { if (!isPasskeyCancel(err)) toast.error(passkeyErrorMessage(err)); },
   });
 
   const revokeMutation = useMutation({
@@ -180,6 +184,14 @@ export default function ApiTokens() {
                       {t.scopes.includes('write') ? 'read/write' : 'read-only'}
                     </span>
                     {t.expired && <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-xs text-red-500">Expired</span>}
+                    {!t.passkeyVerified && (
+                      <span
+                        className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                        title="Created without a passkey. Refused in organizations that require passkeys — create a new one after verifying with your passkey."
+                      >
+                        No passkey
+                      </span>
+                    )}
                   </p>
                   <p className="text-xs text-muted-foreground truncate">
                     <span className="font-mono">smt_{t.prefix}…</span>

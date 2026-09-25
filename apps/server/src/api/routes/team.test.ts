@@ -138,7 +138,9 @@ describe('team & access', () => {
   });
 
   describe('password reset', () => {
-    async function issue(userId: string, headers = admin.headers) {
+    // Issuing a reset needs a signed-in browser, not an API token
+    async function issue(userId: string, actor = admin) {
+      const { headers } = await seedSession(actor.userId);
       return app.inject({ method: 'POST', url: `/api/team/members/${userId}/password-reset`, headers });
     }
     const tokenOf = (link: string) => link.split('/reset-password/')[1]!;
@@ -440,6 +442,8 @@ describe('team & access', () => {
   describe('rank guards for account actions', () => {
     const act = (method: 'POST' | 'DELETE', path: string, headers: Record<string, string>) =>
       app.inject({ method, url: `/api/team/members/${path}`, headers });
+    // Password resets need a signed-in browser, not an API token
+    const browser = async (user: { userId: string }) => (await seedSession(user.userId)).headers;
 
     it('stops an admin suspending, reactivating, signing out or resetting another admin', async () => {
       const org = seedOrg('org-peer-admins');
@@ -450,7 +454,7 @@ describe('team & access', () => {
       expect((await act('POST', `${b.userId}/suspend`, a.headers)).statusCode).toBe(403);
       expect((await act('POST', `${b.userId}/reactivate`, a.headers)).statusCode).toBe(403);
       expect((await act('DELETE', `${b.userId}/sessions`, a.headers)).statusCode).toBe(403);
-      expect((await act('POST', `${b.userId}/password-reset`, a.headers)).statusCode).toBe(403);
+      expect((await act('POST', `${b.userId}/password-reset`, await browser(a))).statusCode).toBe(403);
 
       // Still fine on someone below them
       const op = seedUser(org, 'operator');
@@ -465,12 +469,12 @@ describe('team & access', () => {
       const b = seedUser(org, 'owner');
       const orgAdmin = seedUser(org, 'admin');
 
-      expect((await act('POST', `${orgAdmin.userId}/password-reset`, a.headers)).statusCode).toBe(201);
+      expect((await act('POST', `${orgAdmin.userId}/password-reset`, await browser(a))).statusCode).toBe(201);
       expect((await act('DELETE', `${b.userId}/sessions`, a.headers)).statusCode).toBe(200);
       expect((await act('POST', `${b.userId}/suspend`, a.headers)).statusCode).toBe(200);
       expect((await act('POST', `${b.userId}/reactivate`, a.headers)).statusCode).toBe(200);
       // Nobody can take over an owner's account through a reset link
-      const reset = await act('POST', `${b.userId}/password-reset`, a.headers);
+      const reset = await act('POST', `${b.userId}/password-reset`, await browser(a));
       expect(reset.statusCode).toBe(403);
       expect(reset.json().error).toMatch(/owner/);
     });
@@ -490,8 +494,13 @@ describe('team & access', () => {
     const tokenOf = (link: string) => link.split('/reset-password/')[1]!;
     const issue = async (userId: string) =>
       tokenOf(
-        (await app.inject({ method: 'POST', url: `/api/team/members/${userId}/password-reset`, headers: admin.headers })).json()
-          .link,
+        (
+          await app.inject({
+            method: 'POST',
+            url: `/api/team/members/${userId}/password-reset`,
+            headers: (await seedSession(admin.userId)).headers,
+          })
+        ).json().link,
       );
     const redeem = (token: string) =>
       app.inject({ method: 'POST', url: `/api/password-reset/${token}`, payload: { password: 'brand-new-password' } });

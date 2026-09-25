@@ -27,7 +27,7 @@ vi.mock('../../ai/streams.js', async (importOriginal) => {
 
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
-import { seedOrg, seedServer, seedUser } from './test-utils.js';
+import { seedOrg, seedServer, seedSession, seedUser } from './test-utils.js';
 
 describe('live access revocation', () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
@@ -106,7 +106,14 @@ describe('live access revocation', () => {
 
   it('closes everything, in every org, when a password reset is used', async () => {
     const member = seedUser(orgId, 'viewer');
-    const { link } = (await call('POST', `/api/team/members/${member.userId}/password-reset`)).json();
+    // Issuing needs a signed-in browser, not the admin's API token
+    const { link } = (
+      await app.inject({
+        method: 'POST',
+        url: `/api/team/members/${member.userId}/password-reset`,
+        headers: (await seedSession(admin.userId)).headers,
+      })
+    ).json();
     vi.clearAllMocks();
     const res = await app.inject({
       method: 'POST',

@@ -20,7 +20,8 @@ describe('generateApiToken', () => {
 
   it('never stores the secret itself', () => {
     const { token, hashedToken, prefix } = generateApiToken();
-    const secret = token.split('_')[2]!;
+    // The secret may itself contain '_', so take everything after the prefix
+    const secret = token.slice(`smt_${prefix}_`.length);
     expect(hashedToken).not.toContain(secret);
     expect(hashedToken).toHaveLength(64);
     expect(token.startsWith(`smt_${prefix}_`)).toBe(true);

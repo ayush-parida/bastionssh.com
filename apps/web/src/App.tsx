@@ -5,6 +5,7 @@ import LoginPage from '@/pages/Login.js';
 import AcceptInvitePage from '@/pages/AcceptInvite.js';
 import ResetPasswordPage from '@/pages/ResetPassword.js';
 import TeamPage from '@/pages/Team.js';
+import PasskeySetupPage from '@/pages/PasskeySetup.js';
 import DashboardPage from '@/pages/Dashboard.js';
 import ServersPage from '@/pages/Servers.js';
 import KeysPage from '@/pages/Keys.js';
@@ -27,6 +28,15 @@ import DnsLookupPage from '@/pages/DnsLookup.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
+  // The org requires a passkey this session has not used: nothing else works until it has
+  const passkeyGate = useAuthStore((s) => s.passkeyGate);
+  if (!user) return <Navigate to="/login" replace />;
+  if (passkeyGate) return <Navigate to="/passkey-setup" replace />;
+  return <>{children}</>;
+}
+
+function RequireSignedIn({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore((s) => s.user);
   return user ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
@@ -38,6 +48,14 @@ export default function App() {
         <Route path="/invite/:token" element={<AcceptInvitePage />} />
         <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
         <Route path="/register" element={<Navigate to="/login" replace />} />
+        <Route
+          path="/passkey-setup"
+          element={
+            <RequireSignedIn>
+              <PasskeySetupPage />
+            </RequireSignedIn>
+          }
+        />
         <Route
           path="/"
           element={
