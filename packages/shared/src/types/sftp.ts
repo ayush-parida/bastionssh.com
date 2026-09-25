@@ -13,6 +13,8 @@ export interface SftpEntry {
   uid: number;
   gid: number;
   modifiedAt: string;
+  /** For a symlink, the type of what it points to; null for other entries or a dangling link */
+  targetType: SftpEntryType | null;
 }
 
 export interface SftpListResponse {

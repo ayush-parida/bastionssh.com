@@ -1,4 +1,4 @@
-import { FileInfo, FileType, type Client } from 'basic-ftp';
+import { FileInfo, FileType, FTPError, type Client } from 'basic-ftp';
 import type { Readable, Writable } from 'node:stream';
 import type { FtpEntry, FtpEntryType, FtpTestResult } from '@smt/shared';
 import { openClient, type FtpTarget } from './client.js';
@@ -49,6 +49,7 @@ export function toEntry(dir: string, info: FileInfo): FtpEntry {
     modifiedAt: info.modifiedAt?.toISOString() ?? null,
     rawModifiedAt: info.rawModifiedAt ?? '',
     link: info.link ?? null,
+    targetType: null,
   };
 }
 
@@ -62,13 +63,57 @@ export function sortEntries(entries: FtpEntry[]): FtpEntry[] {
   });
 }
 
-export function list(client: Client, dir: string): Promise<FtpEntry[]> {
+function listRaw(client: Client, dir: string): Promise<FtpEntry[]> {
   return run('Could not list directory', async () => {
     const infos = await client.list(dir);
     return sortEntries(
       infos.filter((f) => f.name !== '.' && f.name !== '..').map((f) => toEntry(dir, f)),
     );
   });
+}
+
+/**
+ * Each probe is a serial round trip on the user's one connection, so a folder
+ * full of links (/etc/alternatives) would stall the listing. Links past this
+ * many stay unresolved (targetType null).
+ */
+export const MAX_RESOLVED_LINKS = 50;
+
+/**
+ * FTP has no way to ask what a link points at, and listing a link to a file
+ * succeeds on most servers (LIST <file> prints that one file). CWD is the one
+ * probe every server answers the same way: it only succeeds on a directory.
+ * The working directory is put back afterwards, so `home` stays correct.
+ */
+export async function resolveLinks(client: Client, entries: FtpEntry[]): Promise<void> {
+  const links = entries.filter((e) => e.type === 'symlink').slice(0, MAX_RESOLVED_LINKS);
+  if (links.length === 0) return;
+  await run('Could not resolve symlinks', async () => {
+    const cwd = await client.pwd();
+    try {
+      for (const link of links) {
+        try {
+          await client.cd(link.path);
+          link.targetType = 'directory';
+        } catch (err) {
+          // Anything that is not an FTP reply, such as a dropped connection,
+          // is a real failure.
+          if (!(err instanceof FTPError)) throw err;
+          // A 5xx reply means "not a directory" (or dangling). A 4xx is
+          // transient and says nothing about the target, so leave it unknown.
+          if (err.code >= 500) link.targetType = 'file';
+        }
+      }
+    } finally {
+      await client.cd(cwd);
+    }
+  });
+}
+
+export async function list(client: Client, dir: string): Promise<FtpEntry[]> {
+  const entries = await listRaw(client, dir);
+  await resolveLinks(client, entries);
+  return entries;
 }
 
 /**
@@ -100,10 +145,11 @@ export async function stat(client: Client, path: string): Promise<FtpEntry> {
       modifiedAt: null,
       rawModifiedAt: '',
       link: null,
+      targetType: null,
     };
   }
   const name = baseName(path);
-  const entry = (await list(client, parent)).find((e) => e.name === name);
+  const entry = (await listRaw(client, parent)).find((e) => e.name === name);
   if (!entry) throw new FtpError(`No such file or directory: ${path}`, 404);
   return entry;
 }
@@ -144,6 +190,22 @@ export function removeDirRecursive(client: Client, path: string): Promise<void> 
 // ── Transfers ────────────────────────────────────────────────────────────────
 
 /** Resolves once the whole file has been written to `destination`. */
+/**
+ * Size of the file a symlink points at. The listing row only describes the link
+ * itself, so ask the server with SIZE, which follows links and refuses anything
+ * that is not a regular file — a link to a directory lands here as a 400.
+ */
+export async function linkTargetSize(client: Client, path: string): Promise<number> {
+  try {
+    return await client.size(path);
+  } catch (err) {
+    if (err instanceof FTPError && err.code >= 500) {
+      throw new FtpError('Link does not point to a downloadable file', 400);
+    }
+    throw toFtpError(err, 'Could not download file');
+  }
+}
+
 export function download(client: Client, path: string, destination: Writable): Promise<void> {
   return run('Could not download file', async () => {
     await client.downloadTo(destination, path);

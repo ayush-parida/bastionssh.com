@@ -6,10 +6,10 @@ import { hashPassword, verifyPassword } from '../../auth/password.js';
 import { createSession, invalidateSession } from '../../auth/session.js';
 import { requireAuth } from '../../auth/middleware.js';
 import { audit } from '../../audit/index.js';
-import { and, eq, ne } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 
 const loginSchema = z.object({
-  email: z.string().trim().email(),
+  email: z.string().trim().toLowerCase().email(),
   password: z.string().min(1),
 });
 
@@ -23,11 +23,18 @@ const updateProfileSchema = z.object({
 });
 
 export async function authRoutes(app: FastifyInstance) {
-  app.post('/login', async (req, reply) => {
+  // Tighter than the global limit: this is the only unauthenticated password check.
+  app.post('/login', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const body = loginSchema.parse(req.body);
     const db = getDb();
 
-    const user = db.select().from(users).where(eq(users.email, body.email)).get();
+    // Emails are case-insensitive in practice; lower() also matches rows stored
+    // before addresses were normalized.
+    const user = db
+      .select()
+      .from(users)
+      .where(sql`lower(${users.email}) = ${body.email}`)
+      .get();
     if (!user || !user.passwordHash) {
       return reply.status(401).send({ error: 'Invalid credentials' });
     }

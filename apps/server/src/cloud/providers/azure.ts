@@ -2,6 +2,7 @@ import type { CloudInstance, CloudInstanceState } from '@smt/shared';
 import {
   CloudError,
   TokenCache,
+  credentialKey,
   postForm,
   postJson,
   type CloudCredentials,
@@ -93,7 +94,7 @@ export function foldRows(rows: AzureRow[]): CloudInstance[] {
 const tokens = new TokenCache();
 
 async function getAccessToken(creds: AzureCredentials, timeoutMs: number): Promise<string> {
-  return tokens.get(`${creds.tenantId}/${creds.clientId}`, async () => {
+  return tokens.get(credentialKey(creds.tenantId, creds.clientId, creds.clientSecret), async () => {
     const out = await postForm<{ access_token: string; expires_in: number | string }>(
       `https://login.microsoftonline.com/${encodeURIComponent(creds.tenantId)}/oauth2/v2.0/token`,
       {

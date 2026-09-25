@@ -116,6 +116,13 @@ export interface FtpEntry {
   rawModifiedAt: string;
   /** Target of a symlink, when the listing shows it. */
   link: string | null;
+  /**
+   * For a symlink in a directory listing, whether it leads to a directory or
+   * not (`file` also covers a dangling link); null for every other entry, and
+   * for a link the server could not resolve (transient error, or past the
+   * per-listing cap).
+   */
+  targetType: 'file' | 'directory' | null;
 }
 
 export interface FtpListResponse {

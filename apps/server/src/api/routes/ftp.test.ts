@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import type { Readable, Writable } from 'node:stream';
+import { Readable, type Writable } from 'node:stream';
 
 // Must run before `config` is imported: a tiny cap lets the upload guard be
 // exercised with a handful of bytes.
@@ -28,6 +28,7 @@ vi.mock('../../ftp/ops.js', async (importOriginal) => {
     modifiedAt: null,
     rawModifiedAt: 'Sep 18 10:22',
     link: null,
+    targetType: null,
   });
   return {
     ...actual,
@@ -38,9 +39,15 @@ vi.mock('../../ftp/ops.js', async (importOriginal) => {
     })),
     home: vi.fn(async (_c: unknown, rootPath: string | null) => rootPath ?? '/home/deploy'),
     list: vi.fn(async () => [entry('logs', 'directory'), entry('index.html', 'file', 5)]),
-    stat: vi.fn(async (_c: unknown, path: string) =>
-      path.endsWith('/logs') ? entry('logs', 'directory') : entry('index.html', 'file', 5),
-    ),
+    stat: vi.fn(async (_c: unknown, path: string) => {
+      if (path.endsWith('/logs')) return entry('logs', 'directory');
+      if (path.endsWith('/current')) {
+        // The listing sizes a link by its target string, not the file behind it
+        return { ...entry('current', 'file', 34), type: 'symlink', link: '/srv/releases/42' };
+      }
+      return entry('index.html', 'file', 5);
+    }),
+    linkTargetSize: vi.fn(async () => 5),
     mkdir: vi.fn(async () => {}),
     rename: vi.fn(async () => {}),
     removeFile: vi.fn(async () => {}),
@@ -240,6 +247,33 @@ describe('ftp routes', () => {
     expect(res.body).toBe('hello');
   });
 
+  it('sizes a symlink download by its target, not the link row', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/ftp/connections/${connectionId}/download?path=/home/deploy/current`,
+      headers: viewer.headers,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-length']).toBe('5');
+    expect(res.body).toBe('hello');
+  });
+
+  it('refuses a symlink to a directory before any header goes out', async () => {
+    const { FtpError } = await import('../../ftp/errors.js');
+    vi.mocked(ops.linkTargetSize).mockRejectedValueOnce(
+      new FtpError('Link does not point to a downloadable file', 400),
+    );
+    vi.mocked(ops.download).mockClear();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/ftp/connections/${connectionId}/download?path=/home/deploy/current`,
+      headers: viewer.headers,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/downloadable/);
+    expect(ops.download).not.toHaveBeenCalled();
+  });
+
   it('refuses to download a directory', async () => {
     const res = await app.inject({
       method: 'GET',
@@ -296,6 +330,83 @@ describe('ftp routes', () => {
       expect.anything(),
       '/home/deploy/small.bin',
     );
+  });
+
+  it('hands the whole body to the upload even when the transfer starts late', async () => {
+    // basic-ftp only pipes the body after login, EPSV and STOR round trips;
+    // nothing may be consumed before then.
+    let received = Buffer.alloc(0);
+    vi.mocked(ops.upload).mockImplementationOnce(async (_c, body) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const chunks: Buffer[] = [];
+      for await (const chunk of body) chunks.push(chunk as Buffer);
+      received = Buffer.concat(chunks);
+    });
+    const payload = Buffer.from('<h1>hi</h1>\n');
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/api/ftp/connections/${connectionId}/file?path=/home/deploy/index.html`,
+      headers: { ...operator.headers, 'content-type': 'application/octet-stream' },
+      payload,
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toEqual({ path: '/home/deploy/index.html', size: payload.length });
+    expect(received.equals(payload)).toBe(true);
+  });
+
+  it('fails a chunked upload that runs past the cap', async () => {
+    vi.mocked(ops.upload).mockClear();
+    const res = await app.inject({
+      method: 'PUT',
+      url: `/api/ftp/connections/${connectionId}/file?path=/home/deploy/big.bin`,
+      headers: {
+        ...operator.headers,
+        'content-type': 'application/octet-stream',
+        'transfer-encoding': 'chunked',
+      },
+      payload: Readable.from([Buffer.alloc(10), Buffer.alloc(10)]),
+    });
+    expect(res.statusCode).toBe(413);
+  });
+
+  it('survives a client that aborts before the transfer starts', async () => {
+    // The body errors while the upload is still waiting on login/STOR, before
+    // anything consumes it; that must not become an uncaught exception.
+    let consumeError: unknown = null;
+    let finished!: () => void;
+    const uploadDone = new Promise<void>((resolve) => (finished = resolve));
+    vi.mocked(ops.upload).mockImplementationOnce(async (_c, body) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        for await (const _chunk of body) {
+          /* drain */
+        }
+      } catch (err) {
+        consumeError = err;
+        throw err;
+      } finally {
+        finished();
+      }
+    });
+    const body = new Readable({ read() {} });
+    body.push(Buffer.alloc(4));
+    setTimeout(() => body.destroy(new Error('aborted')), 10);
+    // The injector itself rejects with the payload's error, like a dropped
+    // socket; what matters is what the route does afterwards.
+    await app
+      .inject({
+        method: 'PUT',
+        url: `/api/ftp/connections/${connectionId}/file?path=/home/deploy/cut.bin`,
+        headers: {
+          ...operator.headers,
+          'content-type': 'application/octet-stream',
+          'transfer-encoding': 'chunked',
+        },
+        payload: body,
+      })
+      .catch(() => {});
+    await uploadDone;
+    expect(consumeError).not.toBeNull();
   });
 
   it('answers 400, not 500, when the upload body is not a raw stream', async () => {

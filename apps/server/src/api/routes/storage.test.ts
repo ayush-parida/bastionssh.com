@@ -18,6 +18,8 @@ vi.mock('../../storage/ops.js', async (importOriginal) => {
     deletePrefix: vi.fn(async () => 2),
     deleteBucket: vi.fn(async () => {}),
     deleteObject: vi.fn(async () => {}),
+    objectExists: vi.fn(async () => false),
+    renameObject: vi.fn(async () => {}),
     putObject: vi.fn(async (_c: unknown, _b: string, _k: string, body: Readable) => {
       for await (const _chunk of body) {
         /* drain */
@@ -238,13 +240,80 @@ describe('storage routes', () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it('deletes an odd listed folder exactly, not its parent', async () => {
+    const deletePrefix = vi.mocked(ops.deletePrefix);
+    for (const prefix of ['logs//', 'logs/./']) {
+      deletePrefix.mockClear();
+      const res = await app.inject({
+        method: 'DELETE',
+        url: `/api/storage/connections/${connectionId}/buckets/media/object?key=${encodeURIComponent(prefix)}&recursive=true`,
+        headers: admin.headers,
+      });
+      expect(res.statusCode, prefix).toBe(200);
+      expect(deletePrefix, prefix).toHaveBeenCalledWith(expect.anything(), 'media', prefix);
+    }
+  });
+
+  it('refuses to rename over an existing object unless told to overwrite', async () => {
+    const objectExists = vi.mocked(ops.objectExists);
+    const renameObject = vi.mocked(ops.renameObject);
+    const rename = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: 'POST',
+        url: `/api/storage/connections/${connectionId}/buckets/media/rename`,
+        headers: admin.headers,
+        payload,
+      });
+
+    objectExists.mockResolvedValue(true);
+    renameObject.mockClear();
+    const refused = await rename({ from: 'report-draft.pdf', to: 'report.pdf' });
+    expect(refused.statusCode).toBe(409);
+    expect(renameObject).not.toHaveBeenCalled();
+
+    const forced = await rename({ from: 'report-draft.pdf', to: 'report.pdf', overwrite: true });
+    expect(forced.statusCode).toBe(200);
+    expect(renameObject).toHaveBeenCalledWith(
+      expect.anything(),
+      'media',
+      'report-draft.pdf',
+      'report.pdf',
+    );
+
+    objectExists.mockResolvedValue(false);
+    renameObject.mockClear();
+    const free = await rename({ from: 'a.txt', to: 'b.txt' });
+    expect(free.statusCode).toBe(200);
+    expect(renameObject).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the cached client across a rename, rebuilds it when the target changes', async () => {
+    const patch = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/api/storage/connections/${connectionId}`,
+        headers: admin.headers,
+        payload,
+      });
+    const before = (await resolveConnection(orgId, connectionId)).client;
+    const destroy = vi.spyOn(before, 'destroy');
+
+    expect((await patch({ name: 'renamed-again' })).statusCode).toBe(200);
+    expect((await resolveConnection(orgId, connectionId)).client).toBe(before);
+
+    expect((await patch({ region: 'eu-west-1' })).statusCode).toBe(200);
+    expect((await resolveConnection(orgId, connectionId)).client).not.toBe(before);
+    // Nothing was running on it, so it was destroyed right away
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
+  });
+
   it('hands concurrent first requests the same cached client', async () => {
-    // Editing the row invalidates the cache, so the next two resolves both miss
+    // Changing the target invalidates the cache, so the next two resolves both miss
     await app.inject({
       method: 'PATCH',
       url: `/api/storage/connections/${connectionId}`,
       headers: admin.headers,
-      payload: { name: 'renamed' },
+      payload: { region: 'eu-central-1' },
     });
     const [a, b] = await Promise.all([
       resolveConnection(orgId, connectionId),

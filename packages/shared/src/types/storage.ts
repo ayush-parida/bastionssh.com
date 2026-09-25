@@ -232,6 +232,8 @@ export interface StorageCreateFolderRequest {
 export interface StorageRenameRequest {
   from: string;
   to: string;
+  /** Replace an existing object at `to`; without it the rename answers 409. */
+  overwrite?: boolean;
 }
 
 export interface StorageUploadResponse {

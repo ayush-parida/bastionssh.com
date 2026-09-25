@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
-import type { CronJob, Server, SavedCommand, CreateCronJobRequest } from '@smt/shared';
+import type { CronJob, CronRun, Server, SavedCommand, CreateCronJobRequest } from '@smt/shared';
 import { Plus, Clock, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -59,8 +59,9 @@ export default function CronJobsPage() {
       schedule: form.schedule,
       timezone: form.timezone,
     };
+    // The inline field is hidden once a saved command is picked; never send its stale value.
     if (form.savedCommandId) body.savedCommandId = form.savedCommandId;
-    if (form.inlineCommand) body.inlineCommand = form.inlineCommand;
+    else if (form.inlineCommand) body.inlineCommand = form.inlineCommand;
     createMutation.mutate(body);
   }
 
@@ -140,9 +141,10 @@ export default function CronJobsPage() {
             </thead>
             <tbody className="divide-y divide-border">
               {cronJobs?.map((j) => (
-                <tr key={j.id} className="hover:bg-muted/30">
+                <Fragment key={j.id}>
+                <tr className="hover:bg-muted/30">
                   <td className="px-3 py-3">
-                    <button onClick={() => setExpanded(expanded === j.id ? null : j.id)}>
+                    <button onClick={() => setExpanded(expanded === j.id ? null : j.id)} title="Run history">
                       {expanded === j.id ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                     </button>
                   </td>
@@ -159,11 +161,51 @@ export default function CronJobsPage() {
                     <button onClick={() => { if (confirm('Delete?')) deleteMutation.mutate(j.id); }} className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button>
                   </td>
                 </tr>
+                {expanded === j.id && (
+                  <tr>
+                    <td colSpan={7} className="bg-muted/20 px-4 py-3"><RunHistory jobId={j.id} /></td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Recent runs of one job, newest first, with their output. */
+function RunHistory({ jobId }: { jobId: string }) {
+  const { data: runs, isLoading } = useQuery<CronRun[]>({
+    queryKey: ['cron-runs', jobId],
+    queryFn: () => api.get(`/cron-jobs/${jobId}/runs`),
+  });
+
+  if (isLoading) return <p className="text-xs text-muted-foreground">Loading runs…</p>;
+  if (!runs?.length) return <p className="text-xs text-muted-foreground">No runs yet.</p>;
+
+  return (
+    <div className="space-y-2">
+      {runs.map((run) => (
+        <div key={run.id} className="rounded border border-border bg-card">
+          <div className="flex items-center gap-2 px-3 py-2 text-xs">
+            <span className={run.status === 'success' ? 'text-emerald-500 font-medium' : run.status === 'failure' ? 'text-red-500 font-medium' : 'text-muted-foreground font-medium'}>
+              {run.status}
+              {run.exitCode != null && ` · exit ${run.exitCode}`}
+              {run.durationMs != null && ` · ${(run.durationMs / 1000).toFixed(1)}s`}
+            </span>
+            <span className="ml-auto text-muted-foreground">{new Date(run.startedAt ?? run.scheduledAt).toLocaleString()}</span>
+          </div>
+          {run.stdout && (
+            <pre className="max-h-56 overflow-auto border-t border-border bg-muted p-2 text-xs font-mono whitespace-pre-wrap">{run.stdout}</pre>
+          )}
+          {run.stderr && (
+            <pre className="max-h-40 overflow-auto border-t border-border bg-red-500/10 p-2 text-xs font-mono text-red-500 whitespace-pre-wrap">{run.stderr}</pre>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

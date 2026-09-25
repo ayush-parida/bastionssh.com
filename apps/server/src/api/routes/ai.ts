@@ -218,22 +218,39 @@ export async function aiRoutes(app: FastifyInstance) {
     const send = (event: Record<string, unknown>) =>
       reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
 
+    // The browser aborts when the user stops or closes the panel. Stop the agent
+    // then, so it does not keep running tools nobody is watching.
+    let clientGone = false;
+    reply.raw.on('close', () => {
+      clientGone = true;
+    });
+
     try {
       // Use agent loop if provider supports it and agent mode is enabled
       if (provider.agentLoop && body.agentMode) {
-        const executor = new ToolExecutor(req.orgId, body.sessionId, body.context?.serverId);
+        const executor = new ToolExecutor(
+          req.orgId,
+          req.user.id,
+          body.sessionId,
+          body.context?.serverId,
+        );
 
         for await (const event of provider.agentLoop(
           messagesWithSystem,
           AGENT_TOOLS,
-          (name, input) => executor.execute(name, input),
+          (name, input) => {
+            if (clientGone) throw new Error('Client disconnected');
+            return executor.execute(name, input);
+          },
         )) {
+          if (clientGone) break;
           send(event);
           if (event.type === 'done' || event.type === 'error') break;
         }
       } else {
         // Fallback: simple streaming chat without tools
         for await (const token of provider.chat(messagesWithSystem)) {
+          if (clientGone) break;
           send({ type: 'delta', content: token });
         }
         send({ type: 'done' });

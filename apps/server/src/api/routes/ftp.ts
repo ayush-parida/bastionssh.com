@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { PassThrough, type Readable } from 'node:stream';
+import { PassThrough, Transform, type Readable } from 'node:stream';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import {
@@ -291,10 +291,9 @@ export async function ftpRoutes(app: FastifyInstance) {
         // of an error after the response headers have already gone out.
         const entry = await ops.stat(client, path);
         if (entry.type === 'directory') throw new FtpError('Cannot download a directory', 400);
-        await audit(req, 'ftp.download', 'ftp_connection', id, connection.name, {
-          path,
-          size: entry.size,
-        });
+        const size =
+          entry.type === 'symlink' ? await ops.linkTargetSize(client, path) : entry.size;
+        await audit(req, 'ftp.download', 'ftp_connection', id, connection.name, { path, size });
 
         const body = new PassThrough();
         void reply
@@ -303,7 +302,7 @@ export async function ftpRoutes(app: FastifyInstance) {
             'Content-Disposition',
             `attachment; filename*=UTF-8''${encodeURIComponent(baseName(path))}`,
           );
-        if (entry.size > 0) void reply.header('Content-Length', String(entry.size));
+        if (size > 0) void reply.header('Content-Length', String(size));
         void reply.send(body);
         try {
           await ops.download(client, path, body);
@@ -344,18 +343,37 @@ export async function ftpRoutes(app: FastifyInstance) {
           .send({ error: 'Upload body must be sent as application/octet-stream' });
       }
 
+      // Count through a Transform rather than a 'data' listener: a listener would
+      // set the body flowing before basic-ftp pipes it (after login, EPSV and
+      // STOR), and every chunk emitted in between would be lost. Backpressure
+      // keeps the body paused until the data socket is ready.
       let bytes = 0;
-      source.on('data', (chunk: Buffer) => {
-        bytes += chunk.length;
-        if (bytes > config.ftpMaxUploadBytes) {
-          source.destroy(
-            new FtpError(`Upload exceeds the ${config.ftpMaxUploadBytes} byte limit`, 413),
-          );
-        }
+      const counter = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          bytes += chunk.length;
+          if (bytes > config.ftpMaxUploadBytes) {
+            callback(
+              new FtpError(`Upload exceeds the ${config.ftpMaxUploadBytes} byte limit`, 413),
+            );
+          } else {
+            callback(null, chunk);
+          }
+        },
       });
+      // Errors surface through `counter`, which ops.upload consumes. Plain pipe
+      // (not pipeline) so an over-cap body is left for Node to drain and the
+      // client still gets its 413 rather than a reset socket.
+      source.on('error', (err) => counter.destroy(err));
+      // `counter` has no listener of its own until basic-ftp pipes it, which
+      // may be never (a failed login) or only after several round trips. A
+      // client abort in that window would otherwise be an unhandled 'error'
+      // that takes the process down. ops.upload still sees the error: a
+      // destroyed stream fails the pipeline it is handed to.
+      counter.on('error', () => {});
+      source.pipe(counter);
 
       await withClient(req.orgId, id, req.user.id, async (client, connection) => {
-        await ops.upload(client, source, path);
+        await ops.upload(client, counter, path);
         await audit(req, 'ftp.upload', 'ftp_connection', id, connection.name, {
           path,
           size: bytes,

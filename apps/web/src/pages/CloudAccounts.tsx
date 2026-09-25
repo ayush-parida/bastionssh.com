@@ -88,6 +88,13 @@ function describeSummary(s: SyncSummary): string {
   return parts.join(', ');
 }
 
+/** Whether any part of a multi-field credential was typed, so the rest must be too. */
+function credentialStarted(form: AccountForm): boolean {
+  if (form.provider === 'aws') return Boolean(form.accessKeyId || form.secretAccessKey);
+  if (form.provider === 'azure') return Boolean(form.tenantId || form.clientId || form.clientSecret || form.subscriptionId);
+  return false;
+}
+
 /** Only the credential that matches the provider is sent; blank means "keep" on edit. */
 function credentialFields(
   form: AccountForm,
@@ -142,10 +149,10 @@ export default function CloudAccountsPage() {
 
   const createMutation = useMutation({
     mutationFn: (body: CreateCloudAccountRequest) => api.post<CloudAccount>('/cloud/accounts', body),
-    onSuccess: () => {
+    onSuccess: (account) => {
       invalidate();
       closeForm();
-      toast.success('Account added — the first sync runs within a few seconds');
+      toast.success(account.syncEnabled ? 'Account added — the first sync is running now' : 'Account added');
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -241,6 +248,8 @@ export default function CloudAccountsPage() {
   }
 
   const busy = createMutation.isPending || updateMutation.isPending;
+  // On edit a blank credential keeps the stored one, but a partly filled one must be completed
+  const credentialRequired = !editId || credentialStarted(form);
 
   return (
     <div className="p-6">
@@ -298,7 +307,7 @@ export default function CloudAccountsPage() {
                   <label className="mb-1 block text-sm font-medium">Access key ID</label>
                   <input
                     type="text"
-                    required={!editId}
+                    required={credentialRequired}
                     autoComplete="off"
                     value={form.accessKeyId}
                     onChange={(e) => setForm((p) => ({ ...p, accessKeyId: e.target.value }))}
@@ -310,7 +319,7 @@ export default function CloudAccountsPage() {
                   <label className="mb-1 block text-sm font-medium">Secret access key</label>
                   <input
                     type="password"
-                    required={!editId}
+                    required={credentialRequired}
                     autoComplete="new-password"
                     value={form.secretAccessKey}
                     onChange={(e) => setForm((p) => ({ ...p, secretAccessKey: e.target.value }))}
@@ -359,7 +368,7 @@ export default function CloudAccountsPage() {
                     <label className="mb-1 block text-sm font-medium">{label}</label>
                     <input
                       type="text"
-                      required={!editId}
+                      required={credentialRequired}
                       autoComplete="off"
                       value={form[field]}
                       onChange={(e) => setForm((p) => ({ ...p, [field]: e.target.value }))}
@@ -372,7 +381,7 @@ export default function CloudAccountsPage() {
                   <label className="mb-1 block text-sm font-medium">Client secret</label>
                   <input
                     type="password"
-                    required={!editId}
+                    required={credentialRequired}
                     autoComplete="new-password"
                     value={form.clientSecret}
                     onChange={(e) => setForm((p) => ({ ...p, clientSecret: e.target.value }))}

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
+import { readSSE } from '@/lib/sse.js';
 import type { AIProviderConfig, AIAgentEvent } from '@smt/shared';
 import {
   Bot,
@@ -12,6 +13,7 @@ import {
   Loader2,
   Zap,
   X,
+  Square,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -98,6 +100,9 @@ export default function AISidebar({
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Closing the panel must stop the agent — otherwise it keeps running tools unseen.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   const sendMessage = useCallback(
     async (userText: string) => {
       if (!userText.trim() || streaming || !providerId) return;
@@ -131,73 +136,66 @@ export default function AISidebar({
           { signal: ctrl.signal },
         );
 
-        const reader = res.body!.getReader();
-        const decoder = new TextDecoder();
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value);
-          for (const line of chunk.split('\n')) {
-            if (!line.startsWith('data: ')) continue;
-            const raw = line.slice(6);
-            let event: AIAgentEvent;
-            try {
-              event = JSON.parse(raw) as AIAgentEvent;
-            } catch {
-              continue;
-            }
-
-            if (event.type === 'delta') {
+        for await (const event of readSSE<AIAgentEvent>(res)) {
+          if (event.type === 'delta') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last || last.role !== 'assistant') return prev;
+              return [...prev.slice(0, -1), { ...last, content: last.content + event.content }];
+            });
+          } else if (event.type === 'tool_call') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last || last.role !== 'assistant') return prev;
+              const tc: ToolCallRecord = {
+                id: event.id,
+                name: event.name,
+                input: event.input ?? {},
+                expanded: true,
+              };
+              return [
+                ...prev.slice(0, -1),
+                { ...last, toolCalls: [...(last.toolCalls ?? []), tc] },
+              ];
+            });
+          } else if (event.type === 'tool_result') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last || last.role !== 'assistant') return prev;
+              const toolCalls = (last.toolCalls ?? []).map((tc) =>
+                tc.id === event.id
+                  ? { ...tc, output: event.output, isError: event.isError }
+                  : tc,
+              );
+              return [...prev.slice(0, -1), { ...last, toolCalls }];
+            });
+          } else if (event.type === 'done' || event.type === 'error') {
+            if (event.type === 'error') {
               setMessages((prev) => {
                 const last = prev[prev.length - 1];
-                if (!last || last.role !== 'assistant') return prev;
-                return [...prev.slice(0, -1), { ...last, content: last.content + event.content }];
-              });
-            } else if (event.type === 'tool_call') {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (!last || last.role !== 'assistant') return prev;
-                const tc: ToolCallRecord = {
-                  id: event.id,
-                  name: event.name,
-                  input: event.input ?? {},
-                  expanded: true,
-                };
+                if (!last) return prev;
                 return [
                   ...prev.slice(0, -1),
-                  { ...last, toolCalls: [...(last.toolCalls ?? []), tc] },
+                  { ...last, content: last.content + `\n\n**Error:** ${event.error}` },
                 ];
               });
-            } else if (event.type === 'tool_result') {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (!last || last.role !== 'assistant') return prev;
-                const toolCalls = (last.toolCalls ?? []).map((tc) =>
-                  tc.id === event.id
-                    ? { ...tc, output: event.output, isError: event.isError }
-                    : tc,
-                );
-                return [...prev.slice(0, -1), { ...last, toolCalls }];
-              });
-            } else if (event.type === 'done' || event.type === 'error') {
-              if (event.type === 'error') {
-                setMessages((prev) => {
-                  const last = prev[prev.length - 1];
-                  if (!last) return prev;
-                  return [
-                    ...prev.slice(0, -1),
-                    { ...last, content: last.content + `\n\n**Error:** ${event.error}` },
-                  ];
-                });
-              }
-              break;
             }
+            break;
           }
         }
       } catch (err: unknown) {
-        if (err instanceof Error && err.name === 'AbortError') return;
+        if (err instanceof Error && err.name === 'AbortError') {
+          // Stopped by the user — settle any tool call still waiting on a result.
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (!last || last.role !== 'assistant') return prev;
+            const toolCalls = (last.toolCalls ?? []).map((tc) =>
+              tc.output === undefined ? { ...tc, output: '(stopped)', isError: true } : tc,
+            );
+            return [...prev.slice(0, -1), { ...last, toolCalls }];
+          });
+          return;
+        }
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           if (!last) return prev;
@@ -216,6 +214,11 @@ export default function AISidebar({
     },
     [messages, providerId, serverId, sessionId, streaming, terminalOutput],
   );
+
+  function handleStop() {
+    abortRef.current?.abort();
+    abortRef.current = null;
+  }
 
   function handleSend() {
     if (!input.trim()) return;
@@ -424,13 +427,23 @@ export default function AISidebar({
                 rows={1}
                 className="flex-1 resize-none bg-transparent text-sm text-[#c9d1d9] placeholder:text-[#8b949e] focus:outline-none"
               />
-              <button
-                onClick={handleSend}
-                disabled={!input.trim() || streaming || !providerId}
-                className="self-end rounded p-1 bg-[#58a6ff] text-[#0d1117] hover:bg-[#79c0ff] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                <Send size={12} />
-              </button>
+              {streaming ? (
+                <button
+                  onClick={handleStop}
+                  title="Stop"
+                  className="self-end rounded p-1 bg-[#ff7b72] text-[#0d1117] hover:bg-[#ffa198] transition-colors"
+                >
+                  <Square size={12} />
+                </button>
+              ) : (
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim() || !providerId}
+                  className="self-end rounded p-1 bg-[#58a6ff] text-[#0d1117] hover:bg-[#79c0ff] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Send size={12} />
+                </button>
+              )}
             </div>
           </div>
         </>

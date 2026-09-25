@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { foldRows, toInstance, type AzureRow } from './azure.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { azure, foldRows, toInstance, type AzureRow } from './azure.js';
 
 const row: AzureRow = {
   id: '/subscriptions/S/resourceGroups/RG/providers/Microsoft.Compute/virtualMachines/Web-1',
@@ -51,5 +51,44 @@ describe('foldRows', () => {
     expect(folded).toHaveLength(2);
     expect(folded[0]).toMatchObject({ name: 'web-1', publicIp: '20.1.2.3', privateIp: '10.1.0.9' });
     expect(folded[1]).toMatchObject({ name: 'db-1', publicIp: null });
+  });
+});
+
+describe('azure token cache', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('never answers a different client secret from a cached token', async () => {
+    const secrets: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        if (url.includes('login.microsoftonline.com')) {
+          const secret = new URLSearchParams(String(init.body)).get('client_secret')!;
+          secrets.push(secret);
+          if (secret !== 'good-secret-value') {
+            return new Response(JSON.stringify({ error_description: 'Invalid client secret' }), { status: 401 });
+          }
+          return new Response(JSON.stringify({ access_token: 'tok', expires_in: 3599 }));
+        }
+        return new Response(JSON.stringify({ data: [] }));
+      }),
+    );
+    const creds = {
+      kind: 'azure' as const,
+      tenantId: 'aaaaaaaa-0000-0000-0000-000000000001',
+      clientId: 'bbbbbbbb-0000-0000-0000-000000000001',
+      clientSecret: 'good-secret-value',
+      subscriptionId: 'cccccccc-0000-0000-0000-000000000001',
+    };
+    await azure.listInstances(creds, { regions: [], timeoutMs: 1000 });
+    await azure.listInstances(creds, { regions: [], timeoutMs: 1000 });
+    expect(secrets).toEqual(['good-secret-value']);
+
+    await expect(
+      azure.listInstances({ ...creds, clientSecret: 'wrong-secret-value' }, { regions: [], timeoutMs: 1000 }),
+    ).rejects.toThrow(/Invalid client secret/);
+    expect(secrets).toEqual(['good-secret-value', 'wrong-secret-value']);
   });
 });

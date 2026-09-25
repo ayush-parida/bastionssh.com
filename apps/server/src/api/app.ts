@@ -27,12 +27,15 @@ import { dnsRoutes } from './routes/dns.js';
 import { teamRoutes, publicInviteRoutes } from './routes/team.js';
 import { apiTokenRoutes } from './routes/tokens.js';
 import { healthRoutes } from './routes/health.js';
+import { untrustedForwardedForHook } from './trust-proxy.js';
 
 export async function buildApp() {
   const app = Fastify({
     loggerInstance: logger,
-    trustProxy: true,
+    trustProxy: config.trustProxy,
   });
+  const proxyHook = untrustedForwardedForHook(config.trustProxy);
+  if (proxyHook) app.addHook('onRequest', proxyHook);
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(cors, {

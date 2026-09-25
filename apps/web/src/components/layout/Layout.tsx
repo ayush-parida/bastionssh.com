@@ -1,4 +1,6 @@
+import { useEffect } from 'react';
 import { Outlet, Link, useLocation, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { useAuthStore } from '@/store/auth.js';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
@@ -44,10 +46,22 @@ export default function Layout() {
   const navigate = useNavigate();
   const { user, clearUser } = useAuthStore();
   const { theme, toggle } = useTheme();
+  const queryClient = useQueryClient();
+
+  // Query keys are not scoped by user or org, so whatever ends the session —
+  // sign-out or a 401 expiring it — must drop the cache before anyone else signs in.
+  useEffect(
+    () =>
+      useAuthStore.subscribe((state, prev) => {
+        if (prev.user && !state.user) queryClient.clear();
+      }),
+    [queryClient],
+  );
 
   async function handleLogout() {
     await api.post('/auth/logout').catch(() => {});
     clearUser();
+    queryClient.clear();
     navigate('/login');
   }
 

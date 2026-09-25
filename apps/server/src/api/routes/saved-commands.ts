@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { savedCommands, commandRuns, servers } from '../../db/schema.js';
+import { savedCommands, commandRuns, servers, cronJobs } from '../../db/schema.js';
 import { eq, and, desc, inArray } from 'drizzle-orm';
 import { parseTags } from './servers.js';
 import { nanoid } from 'nanoid';
@@ -294,6 +294,19 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, req.orgId)))
       .get();
     if (!command) return reply.status(404).send({ error: 'Not found' });
+
+    // cron_jobs references this row without ON DELETE, so the delete would fail
+    // with a bare foreign-key error. Explain what is in the way instead.
+    const usedBy = db
+      .select({ id: cronJobs.id })
+      .from(cronJobs)
+      .where(eq(cronJobs.savedCommandId, id))
+      .all();
+    if (usedBy.length > 0) {
+      return reply.status(409).send({
+        error: `This command is used by ${usedBy.length} cron job${usedBy.length > 1 ? 's' : ''}. Delete them or switch them to another command first.`,
+      });
+    }
 
     db.delete(savedCommands).where(eq(savedCommands.id, id)).run();
     return reply.status(204).send();

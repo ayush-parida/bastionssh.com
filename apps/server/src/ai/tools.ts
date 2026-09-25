@@ -1,8 +1,8 @@
 import { getDb } from '../db/index.js';
-import { servers, sshKeys, savedCommands, cronJobs, auditLog } from '../db/schema.js';
+import { servers, savedCommands, cronJobs, auditLog } from '../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
-import { vault } from '../vault/index.js';
 import { SSHBroker, execOnServer } from '../ssh/broker.js';
+import { resolveServerAuth } from '../ssh/credentials.js';
 import type { AITool } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
@@ -70,6 +70,8 @@ export const AGENT_TOOLS: AITool[] = [
 export class ToolExecutor {
   constructor(
     private orgId: string,
+    /** The user the agent acts for — an SSH session is only reused if it is theirs */
+    private userId: string,
     /** Active SSH session ID — exec goes through the existing SSH connection */
     private sessionId?: string,
     /** The server the user is currently looking at / connected to */
@@ -95,12 +97,22 @@ export class ToolExecutor {
     const command = (input.command as string | undefined)?.trim();
     if (!command) throw new Error('"command" is required');
 
-    const serverId = (input.server_id as string | undefined) || this.activeServerId;
+    const requestedServerId = (input.server_id as string | undefined) || this.activeServerId;
+    const owner = { userId: this.userId, orgId: this.orgId };
 
-    // Use an active interactive session if we have one (same SSH connection)
-    if (this.sessionId) {
+    // Reuse the interactive session only if it is the caller's and is connected
+    // to the server the command targets — never run on some other host.
+    const session = this.sessionId
+      ? SSHBroker.getSessionForUser(this.sessionId, owner.userId, owner.orgId)
+      : undefined;
+    const sessionServerId = session
+      ? (session.server as { id?: string }).id
+      : undefined;
+    const serverId = requestedServerId ?? sessionServerId;
+
+    if (session && sessionServerId && serverId === sessionServerId) {
       try {
-        const result = await SSHBroker.exec(this.sessionId, command);
+        const result = await SSHBroker.exec(session.id, command, undefined, owner);
         return formatExecResult(result);
       } catch {
         // Session may have expired — fall through to direct exec
@@ -111,28 +123,12 @@ export class ToolExecutor {
       throw new Error('No server specified and no active session available');
     }
 
-    const db = getDb();
-    const server = db
-      .select()
-      .from(servers)
-      .where(and(eq(servers.id, serverId), eq(servers.orgId, this.orgId)))
-      .get();
-    if (!server) throw new Error(`Server ${serverId} not found`);
-
-    const authOptions: { privateKey?: string; password?: string } = {};
-
-    if (server.defaultKeyId) {
-      const key = db.select().from(sshKeys).where(eq(sshKeys.id, server.defaultKeyId)).get();
-      if (key) {
-        authOptions.privateKey = await vault.decrypt(key.encryptedPrivateKey, key.id);
-      }
-    } else if (server.encryptedPassword) {
-      authOptions.password = await vault.decrypt(server.encryptedPassword, server.id);
-    }
+    // Org-scoped server and key lookup, same as the terminal and saved commands
+    const { server, auth } = await resolveServerAuth(this.orgId, serverId);
 
     const result = await execOnServer(
       { host: server.host, port: server.port, username: server.username },
-      authOptions,
+      auth,
       command,
     );
 

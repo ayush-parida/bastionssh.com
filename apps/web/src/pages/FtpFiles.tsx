@@ -36,6 +36,17 @@ function modified(entry: FtpEntry): string {
   return entry.rawModifiedAt || '—';
 }
 
+/** A symlink behaves like whatever it points at; the server resolves that for us. */
+function isFolderLike(entry: FtpEntry): boolean {
+  return (
+    entry.type === 'directory' || (entry.type === 'symlink' && entry.targetType === 'directory')
+  );
+}
+
+function isFileLike(entry: FtpEntry): boolean {
+  return entry.type === 'file' || (entry.type === 'symlink' && entry.targetType === 'file');
+}
+
 export default function FtpFilesPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -138,7 +149,8 @@ export default function FtpFilesPage() {
 
   function handleDelete(entry: FtpEntry) {
     const isDir = entry.type === 'directory';
-    if (!confirm(`Delete ${isDir ? 'folder' : 'file'} "${entry.name}"?`)) return;
+    const kind = isDir ? 'folder' : entry.type === 'symlink' ? 'link' : 'file';
+    if (!confirm(`Delete ${kind} "${entry.name}"?`)) return;
     const recursive =
       isDir && confirm('Delete contents recursively? Cancel to require it be empty.');
     deleteMutation.mutate({ target: entry.path, recursive });
@@ -285,12 +297,10 @@ export default function FtpFilesPage() {
                   <td className="px-4 py-2">
                     <button
                       onClick={() =>
-                        entry.type === 'directory' || entry.type === 'symlink'
-                          ? setPath(entry.path)
-                          : handleDownload(entry)
+                        isFolderLike(entry) ? setPath(entry.path) : handleDownload(entry)
                       }
                       className="flex items-center gap-2 text-left hover:underline"
-                      title={entry.type === 'file' ? 'Download' : undefined}
+                      title={isFileLike(entry) ? 'Download' : undefined}
                     >
                       {iconFor(entry)}
                       <span className="font-mono">{entry.name}</span>
@@ -310,7 +320,7 @@ export default function FtpFilesPage() {
                   <td className="text-muted-foreground px-4 py-2">{modified(entry)}</td>
                   <td className="px-4 py-2">
                     <div className="flex items-center justify-end gap-1">
-                      {entry.type === 'file' && (
+                      {isFileLike(entry) && (
                         <button
                           onClick={() => handleDownload(entry)}
                           title="Download"

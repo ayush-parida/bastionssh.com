@@ -3,6 +3,7 @@ import type { CloudInstance, CloudInstanceState } from '@smt/shared';
 import {
   CloudError,
   TokenCache,
+  credentialKey,
   httpJson,
   postForm,
   type CloudCredentials,
@@ -13,8 +14,27 @@ const SCOPE = 'https://www.googleapis.com/auth/compute.readonly';
 const DEFAULT_TOKEN_URI = 'https://oauth2.googleapis.com/token';
 const COMPUTE = 'https://compute.googleapis.com/compute/v1';
 const PAGE_SIZE = 500;
+const MAX_TOKEN_LIFETIME_SEC = 3600;
+const TOKEN_HOSTS = new Set(['oauth2.googleapis.com', 'accounts.google.com']);
 
 type GcpCredentials = Extract<CloudCredentials, { kind: 'gcp' }>;
+
+/**
+ * The key file names the token endpoint, and the server POSTs a signed
+ * assertion there. Only Google's own https endpoints are accepted.
+ */
+export function checkTokenUri(uri: string): string {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    throw new CloudError('The key file has an invalid token_uri', 400);
+  }
+  if (url.protocol !== 'https:' || !TOKEN_HOSTS.has(url.hostname) || url.port || url.username || url.password) {
+    throw new CloudError('The key file token_uri must be a Google OAuth endpoint (https://oauth2.googleapis.com/token)', 400);
+  }
+  return uri;
+}
 
 /** The fields of a downloaded service-account key file we rely on. */
 export function parseServiceAccount(json: string): GcpCredentials {
@@ -39,7 +59,7 @@ export function parseServiceAccount(json: string): GcpCredentials {
     projectId,
     clientEmail,
     privateKey,
-    tokenUri: str('token_uri') || DEFAULT_TOKEN_URI,
+    tokenUri: checkTokenUri(str('token_uri') || DEFAULT_TOKEN_URI),
   };
 }
 
@@ -73,14 +93,16 @@ export function buildJwt(creds: GcpCredentials, nowSec = Math.floor(Date.now() /
 const tokens = new TokenCache();
 
 async function getAccessToken(creds: GcpCredentials, timeoutMs: number): Promise<string> {
-  return tokens.get(creds.clientEmail, async () => {
+  // Stored credentials predate the token_uri check, so it runs again here
+  checkTokenUri(creds.tokenUri);
+  return tokens.get(credentialKey(creds.clientEmail, creds.privateKey, creds.tokenUri), async () => {
     const out = await postForm<{ access_token: string; expires_in: number }>(
       creds.tokenUri,
       { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: buildJwt(creds) },
       timeoutMs,
       'GCP rejected the service account',
     );
-    return { token: out.access_token, expiresInSec: out.expires_in };
+    return { token: out.access_token, expiresInSec: Math.min(Number(out.expires_in) || 0, MAX_TOKEN_LIFETIME_SEC) };
   });
 }
 

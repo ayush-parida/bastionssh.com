@@ -15,12 +15,15 @@ describe('normalizeKey', () => {
     expect(normalizeKey('docs/readme.md')).toBe('docs/readme.md');
   });
 
-  it('strips a leading slash and collapses empty or dot segments', () => {
-    expect(normalizeKey('/docs//./readme.md')).toBe('docs/readme.md');
+  it('never rewrites empty or dot segments — they are distinct real keys', () => {
+    expect(normalizeKey('/docs//./readme.md')).toBe('/docs//./readme.md');
+    expect(normalizeKey('a/.')).toBe('a/.');
+    expect(normalizeKey('a//b')).toBe('a//b');
   });
 
   it('rejects traversal, trailing slashes, empty input and null bytes', () => {
     expect(() => normalizeKey('docs/../secret')).toThrow(StorageError);
+    expect(() => normalizeKey('..')).toThrow(StorageError);
     expect(() => normalizeKey('docs/')).toThrow(StorageError);
     expect(() => normalizeKey('')).toThrow(StorageError);
     expect(() => normalizeKey('/')).toThrow(StorageError);
@@ -38,16 +41,20 @@ describe('normalizeKey', () => {
 });
 
 describe('normalizePrefix', () => {
-  it('treats empty, undefined and "/" as the bucket root', () => {
+  it('treats empty and undefined as the bucket root', () => {
     expect(normalizePrefix('')).toBe('');
     expect(normalizePrefix(undefined)).toBe('');
-    expect(normalizePrefix('/')).toBe('');
   });
 
   it('always ends a non-root prefix with a slash', () => {
     expect(normalizePrefix('docs')).toBe('docs/');
     expect(normalizePrefix('docs/')).toBe('docs/');
-    expect(normalizePrefix('/docs//2024/')).toBe('docs/2024/');
+  });
+
+  it('keeps an odd listed prefix exactly, never collapsing it to its parent', () => {
+    expect(normalizePrefix('logs//')).toBe('logs//');
+    expect(normalizePrefix('logs/./')).toBe('logs/./');
+    expect(normalizePrefix('/')).toBe('/');
   });
 
   it('rejects traversal', () => {

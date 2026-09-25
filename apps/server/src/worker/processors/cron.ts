@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getNextRun } from '@smt/cron-parser';
 import { getDb } from '../../db/index.js';
@@ -26,7 +26,7 @@ export async function runCronJob(data: CronJobData) {
     const saved = db
       .select()
       .from(savedCommands)
-      .where(eq(savedCommands.id, job.savedCommandId))
+      .where(and(eq(savedCommands.id, job.savedCommandId), eq(savedCommands.orgId, job.orgId)))
       .get();
     cmd = saved?.command ?? null;
   }

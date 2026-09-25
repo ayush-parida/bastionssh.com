@@ -165,6 +165,41 @@ describe('notification channel routes', () => {
     expect(wrongField.json().error).toContain('does not apply');
   });
 
+  it('moves an opsgenie channel to another region without the key', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/notifications/channels',
+      headers: admin.headers,
+      payload: { name: 'og2', type: 'opsgenie', routingKey: '01234567-89ab-cdef-0123-456789abcdef' },
+    });
+    expect(created.json().targetHint).toBe('us …cdef');
+    const res = await app.inject({
+      method: 'PATCH',
+      url: `/api/notifications/channels/${created.json().id}`,
+      headers: admin.headers,
+      payload: { region: 'eu' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().targetHint).toBe('eu …cdef');
+
+    const urls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      urls.push(String(input));
+      return new Response('{}', { status: 202 });
+    }) as typeof fetch;
+    try {
+      await app.inject({
+        method: 'POST',
+        url: `/api/notifications/channels/${created.json().id}/test`,
+        headers: admin.headers,
+      });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(urls[0]).toBe('https://api.eu.opsgenie.com/v2/alerts');
+  });
+
   it('sends a paging test as trigger then resolve', async () => {
     const calls: { url: string; body: { event_action: string; dedup_key: string } }[] = [];
     const realFetch = globalThis.fetch;

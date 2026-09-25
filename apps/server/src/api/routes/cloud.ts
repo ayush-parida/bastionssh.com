@@ -197,7 +197,10 @@ export async function cloudRoutes(app: FastifyInstance) {
       provider: body.provider,
       instanceCount: test.instanceCount,
     });
-    return reply.status(201).send(toPublic(loadAccount(req.orgId, id)!));
+    const created = loadAccount(req.orgId, id)!;
+    // First sync right away rather than at the next sweep; the outcome lands on the account row
+    if (created.syncEnabled) syncAccount(created).catch(() => undefined);
+    return reply.status(201).send(toPublic(created));
   });
 
   app.patch('/accounts/:id', { preHandler: requireRole('admin') }, async (req, reply) => {

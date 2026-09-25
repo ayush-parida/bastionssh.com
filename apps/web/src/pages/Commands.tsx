@@ -29,6 +29,21 @@ function extractVariables(command: string): string[] {
   return [...found];
 }
 
+/**
+ * The API returns `variables` as the stored JSON string rather than an object;
+ * parse it so defaults and labels reach the run panel.
+ */
+function parseVariables(raw: unknown): SavedCommand['variables'] {
+  if (raw && typeof raw === 'object') return raw as SavedCommand['variables'];
+  if (typeof raw !== 'string' || !raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as SavedCommand['variables']) : {};
+  } catch {
+    return {};
+  }
+}
+
 const TERMINAL_STATUSES = ['success', 'failure'];
 
 export default function CommandsPage() {
@@ -43,7 +58,10 @@ export default function CommandsPage() {
 
   const { data: commands } = useQuery<SavedCommand[]>({
     queryKey: ['saved-commands'],
-    queryFn: () => api.get('/commands'),
+    queryFn: async () => {
+      const rows = await api.get<SavedCommand[]>('/commands');
+      return rows.map((c) => ({ ...c, variables: parseVariables(c.variables) }));
+    },
   });
   const { data: servers } = useQuery<Server[]>({ queryKey: ['servers'], queryFn: () => api.get('/servers') });
 

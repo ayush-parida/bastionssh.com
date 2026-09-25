@@ -249,6 +249,7 @@ function toEntry(name: string, dir: string, attrs: Attributes): SftpEntry {
     gid: attrs.gid ?? 0,
     // ssh2 reports mtime in seconds since the epoch
     modifiedAt: new Date((attrs.mtime ?? 0) * 1000).toISOString(),
+    targetType: null,
   };
 }
 
@@ -272,6 +273,16 @@ export function stat(sftp: SFTPWrapper, path: string): Promise<Stats> {
   });
 }
 
+/** Like `stat`, but describes a symlink itself rather than what it points to. */
+export function lstat(sftp: SFTPWrapper, path: string): Promise<Stats> {
+  return new Promise((resolve, reject) => {
+    sftp.lstat(path, (err, attrs) => {
+      if (err) reject(toSftpError(err, 'Failed to stat path'));
+      else resolve(attrs);
+    });
+  });
+}
+
 export async function list(sftp: SFTPWrapper, path: string): Promise<SftpEntry[]> {
   const files = await new Promise<FileEntry[]>((resolve, reject) => {
     sftp.readdir(path, (err, entries) => {
@@ -280,16 +291,31 @@ export async function list(sftp: SFTPWrapper, path: string): Promise<SftpEntry[]
     });
   });
 
-  return files
+  const entries = files
     .filter((f) => f.filename !== '.' && f.filename !== '..')
-    .map((f) => toEntry(f.filename, path, f.attrs))
-    .sort((a, b) => {
-      // Directories first, then case-insensitive by name
-      const aDir = a.type === 'directory' ? 0 : 1;
-      const bDir = b.type === 'directory' ? 0 : 1;
-      if (aDir !== bDir) return aDir - bDir;
-      return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
-    });
+    .map((f) => toEntry(f.filename, path, f.attrs));
+
+  // readdir describes links themselves; follow each one so the UI knows whether
+  // clicking it should open a folder or a file. A dangling link stays null.
+  await Promise.all(
+    entries
+      .filter((e) => e.type === 'symlink')
+      .map(async (e) => {
+        try {
+          e.targetType = entryType((await stat(sftp, e.path)).mode ?? 0);
+        } catch {
+          e.targetType = null;
+        }
+      }),
+  );
+
+  return entries.sort((a, b) => {
+    // Directories first, then case-insensitive by name
+    const aDir = a.type === 'directory' ? 0 : 1;
+    const bDir = b.type === 'directory' ? 0 : 1;
+    if (aDir !== bDir) return aDir - bDir;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
 }
 
 export function mkdir(sftp: SFTPWrapper, path: string): Promise<void> {
@@ -328,9 +354,12 @@ export function rmdir(sftp: SFTPWrapper, path: string): Promise<void> {
   });
 }
 
-/** Depth-first recursive delete. Used only when the caller opts in. */
+/**
+ * Depth-first recursive delete. Used only when the caller opts in. Symlinks are
+ * unlinked, never followed, so a link to a directory never empties its target.
+ */
 export async function removeRecursive(sftp: SFTPWrapper, path: string): Promise<void> {
-  const attrs = await stat(sftp, path);
+  const attrs = await lstat(sftp, path);
   if (!attrs.isDirectory()) {
     await unlink(sftp, path);
     return;

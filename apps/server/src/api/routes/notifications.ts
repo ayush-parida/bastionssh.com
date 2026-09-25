@@ -168,6 +168,17 @@ export async function notificationRoutes(app: FastifyInstance) {
     // Any target field replaces the stored target as a whole
     let resolved: { target: string; hint: string } | null = null;
     const targetInput = pickTarget(body);
+    // The Opsgenie region is not secret, so it can move without re-entering the key
+    if (
+      targetInput &&
+      existing.type === 'opsgenie' &&
+      targetInput.region !== undefined &&
+      targetInput.routingKey === undefined
+    ) {
+      const stored = await vault.decrypt(existing.encryptedUrl, id);
+      const sep = stored.indexOf(':');
+      targetInput.routingKey = sep === -1 ? stored : stored.slice(sep + 1);
+    }
     if (targetInput) {
       try {
         resolved = resolveTarget(existing.type as NotificationChannelType, targetInput);

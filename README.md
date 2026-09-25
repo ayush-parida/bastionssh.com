@@ -92,7 +92,10 @@ cd server-management-tool
 ## 🚀 Quick Start
 
 1. Open `http://localhost:8080` in your browser.
-2. Create your admin account.
+2. Sign in as the first admin (an owner account seeded on first start):
+   - Set `SMT_ADMIN_EMAIL` and `SMT_ADMIN_PASSWORD` before the first start to choose the credentials.
+   - Unless `NODE_ENV` is explicitly `development` or `test`, an unset `SMT_ADMIN_PASSWORD` (or the dev default `admin1234`) gets a random password instead, printed **once** to the server's stderr (`Generated a random admin password`) whatever `SMT_LOG_LEVEL` is. This covers the Docker image and a bare `pnpm start` / `node dist/index.js`. Sign in and change it.
+   - `pnpm dev` runs with `NODE_ENV=development`, where the defaults are `admin@smt.local` / `admin1234`.
 3. **Add an SSH key** — paste an existing one or generate a new keypair from the UI.
 4. **Add a server** — host, port, user, and select the SSH key.
 5. Click **Connect** to open an in-browser terminal, or use the **Run** button to execute saved commands.
@@ -340,6 +343,8 @@ volumes:
 ```
 
 Then put it behind your reverse proxy of choice (Caddy / Nginx / Traefik) with TLS, invite your team, and you're live.
+
+**Behind a reverse proxy (upgrade note):** earlier versions trusted `X-Forwarded-For` from anyone. The server now trusts no proxy unless told to, so an existing Caddy/Nginx/Traefik deployment must set `SMT_TRUST_PROXY` (usually `1`) — otherwise every user shares the proxy's IP, and with it one rate-limit bucket (100 requests/min overall, 10 logins/min) and one audit-log IP. The server logs a warning the first time it sees a forwarded request while this is unset. Set `SMT_TRUST_PROXY` so client IPs (used for rate limiting and the audit log) come from `X-Forwarded-For`. It defaults to `false` — trust no proxy — because trusting every hop lets any client pick its own IP. Accepted values: `true` (trust all hops; only when the app is unreachable except through the proxy), a hop count such as `1`, or a comma-separated list of proxy IPs/CIDRs such as `10.0.0.0/8,127.0.0.1`.
 
 **Storage backends:**
 

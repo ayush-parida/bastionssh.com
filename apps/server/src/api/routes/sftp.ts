@@ -276,7 +276,9 @@ export async function sftpRoutes(app: FastifyInstance) {
       const target = sftp.normalizeRemotePath(query.path);
       if (target === '/') return reply.status(400).send({ error: 'Refusing to delete /' });
 
-      const attrs = await sftp.stat(held.sftp, target);
+      // lstat, not stat: a symlink is unlinked itself, never rmdir'd or recursed
+      // through into its target.
+      const attrs = await sftp.lstat(held.sftp, target);
       if (attrs.isDirectory()) {
         if (query.recursive) await sftp.removeRecursive(held.sftp, target);
         else await sftp.rmdir(held.sftp, target);

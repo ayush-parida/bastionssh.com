@@ -17,8 +17,15 @@ interface SessionMeta {
   key?: { id: string; encryptedPrivateKey: string };
   password?: string; // plaintext, decrypted by caller
   userId: string;
+  orgId: string;
   cols: number;
   rows: number;
+}
+
+/** Who is asking for a session; it must match the creator. */
+export interface SessionOwner {
+  userId: string;
+  orgId: string;
 }
 
 interface ActiveSession {
@@ -31,9 +38,82 @@ interface ActiveSession {
   outputBuffer: Buffer[];
   /** Reference to the buffer listener so attach() can remove it */
   bufferFn?: (data: Buffer) => void;
+  /** Closes the session if no socket (re)attaches within the grace period */
+  reapTimer?: ReturnType<typeof setTimeout>;
 }
 
 const sessions = new Map<string, ActiveSession>();
+
+/** How long a session may sit with no WebSocket attached before it is closed. */
+export const DETACHED_GRACE_MS = 60_000;
+
+/** Output cap per exec call; anything beyond is dropped and flagged. */
+const MAX_EXEC_STDOUT = 64_000;
+const MAX_EXEC_STDERR = 8_000;
+const TRUNCATED_MARKER = '\n[output truncated]';
+
+/** Accumulates channel output up to `limit` bytes, discarding the rest. */
+function cappedCollector(limit: number) {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let truncated = false;
+  return {
+    push(data: Buffer) {
+      if (size >= limit) {
+        truncated = true;
+        return;
+      }
+      const room = limit - size;
+      const chunk = data.length > room ? data.subarray(0, room) : data;
+      if (chunk !== data) truncated = true;
+      chunks.push(chunk);
+      size += chunk.length;
+    },
+    text() {
+      const out = Buffer.concat(chunks).toString();
+      return truncated ? out + TRUNCATED_MARKER : out;
+    },
+  };
+}
+
+function scheduleReap(id: string, session: ActiveSession) {
+  clearTimeout(session.reapTimer);
+  session.reapTimer = setTimeout(() => {
+    if (sessions.get(id) === session && !session.socket) {
+      logger.info({ sessionId: id }, 'Closing detached SSH session');
+      destroy(id);
+    }
+  }, DETACHED_GRACE_MS);
+  session.reapTimer.unref?.();
+}
+
+function destroy(sessionId: string) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    clearTimeout(session.reapTimer);
+    session.client.end();
+    session.socket?.close();
+    sessions.delete(sessionId);
+  }
+}
+
+/**
+ * Look up a session only if it belongs to this user in this org. A mismatch
+ * is indistinguishable from an unknown id.
+ */
+export function getSessionForUser(sessionId: string, userId: string, orgId: string) {
+  const session = sessions.get(sessionId);
+  if (!session || session.meta.userId !== userId || session.meta.orgId !== orgId) {
+    return undefined;
+  }
+  return { id: sessionId, userId, orgId, server: session.meta.server };
+}
+
+function ownedSession(sessionId: string, owner: SessionOwner) {
+  return getSessionForUser(sessionId, owner.userId, owner.orgId)
+    ? sessions.get(sessionId)
+    : undefined;
+}
 
 async function createSession(meta: SessionMeta): Promise<string> {
   const id = nanoid();
@@ -66,6 +146,7 @@ async function createSession(meta: SessionMeta): Promise<string> {
       .on('error', (err) => {
         logger.error({ err, sessionId: id }, 'SSH connection error');
         reject(err);
+        clearTimeout(session.reapTimer);
         sessions.delete(id);
       })
       .connect({
@@ -78,6 +159,8 @@ async function createSession(meta: SessionMeta): Promise<string> {
 
   const session: ActiveSession = { meta, client, streamPromise, outputBuffer: [] };
   sessions.set(id, session);
+  // A session that is never attached must not live forever
+  scheduleReap(id, session);
 
   // Buffer output until a WebSocket attaches
   streamPromise
@@ -93,25 +176,36 @@ async function createSession(meta: SessionMeta): Promise<string> {
       session.bufferFn = bufferFn;
       stream.on('data', bufferFn);
       stream.stderr.on('data', bufferFn);
+      // Without a listener, a channel error (e.g. write after the remote closed it) would crash the process
+      stream.on('error', (err: Error) => {
+        logger.warn({ err, sessionId: id }, 'SSH shell stream error');
+        destroy(id);
+      });
+      stream.stderr.on('error', (err: Error) => {
+        logger.warn({ err, sessionId: id }, 'SSH shell stderr error');
+      });
       stream.once('close', () => {
+        clearTimeout(session.reapTimer);
         session.socket?.close();
         session.client.end();
         sessions.delete(id);
       });
     })
     .catch(() => {
+      clearTimeout(session.reapTimer);
       sessions.delete(id);
     });
 
   return id;
 }
 
-async function attach(sessionId: string, socket: WebSocket, _req: FastifyRequest) {
-  const session = sessions.get(sessionId);
+async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest) {
+  const session = ownedSession(sessionId, { userId: req.user.id, orgId: req.orgId });
   if (!session) {
     socket.close(4404, 'Session not found');
     return;
   }
+  clearTimeout(session.reapTimer);
 
   // Detach any previous socket (e.g. React StrictMode double-mount)
   if (
@@ -130,6 +224,15 @@ async function attach(sessionId: string, socket: WebSocket, _req: FastifyRequest
     const msg = err instanceof Error ? err.message : 'SSH connection failed';
     socket.close(4500, msg);
     sessions.delete(sessionId);
+    return;
+  }
+
+  // The socket may have gone away while SSH was still connecting
+  if (socket.readyState !== socket.OPEN) {
+    if (session.socket === socket) {
+      session.socket = undefined;
+      scheduleReap(sessionId, session);
+    }
     return;
   }
 
@@ -157,6 +260,8 @@ async function attach(sessionId: string, socket: WebSocket, _req: FastifyRequest
 
   // Wire: WebSocket → SSH stream
   socket.on('message', (msg: any) => {
+    // The remote may already have closed the channel; writing then would error
+    if (!stream.writable) return;
     const data = msg instanceof Buffer ? msg : Buffer.from(msg as string);
     try {
       const parsed = JSON.parse(data.toString()) as { type: string; cols?: number; rows?: number };
@@ -174,29 +279,40 @@ async function attach(sessionId: string, socket: WebSocket, _req: FastifyRequest
     // Remove live-data listeners; stream stays open for potential re-attach
     stream.removeListener('data', onData);
     stream.stderr.removeListener('data', onData);
-    if (session.socket === socket) session.socket = undefined;
+    if (session.socket === socket) {
+      session.socket = undefined;
+      scheduleReap(sessionId, session);
+    }
   });
 }
 
-async function close(sessionId: string) {
-  const session = sessions.get(sessionId);
-  if (session) {
-    session.client.end();
-    session.socket?.close();
-    sessions.delete(sessionId);
-  }
+/** Close a session the caller owns; unknown or foreign ids are a no-op. */
+async function close(sessionId: string, owner: SessionOwner) {
+  if (ownedSession(sessionId, owner)) destroy(sessionId);
 }
 
 /**
  * Execute a command on an existing session's SSH connection (separate channel).
  * The interactive shell stream is unaffected.
  */
-async function exec(sessionId: string, command: string, timeoutMs = 30_000): Promise<ExecResult> {
-  const session = sessions.get(sessionId);
+async function exec(
+  sessionId: string,
+  command: string,
+  timeoutMs = 30_000,
+  owner?: SessionOwner,
+): Promise<ExecResult> {
+  const session = owner ? ownedSession(sessionId, owner) : sessions.get(sessionId);
   if (!session) throw new Error('Session not found');
 
   return new Promise<ExecResult>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Command timed out')), timeoutMs);
+    let channel: ClientChannel | undefined;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error('Command timed out'));
+      // Close the channel so a never-ending command stops producing output
+      channel?.close();
+    }, timeoutMs);
 
     session.client.exec(command, (err, stream) => {
       if (err) {
@@ -204,23 +320,27 @@ async function exec(sessionId: string, command: string, timeoutMs = 30_000): Pro
         reject(err);
         return;
       }
+      channel = stream;
+      if (timedOut) {
+        stream.close();
+        return;
+      }
 
-      let stdout = '';
-      let stderr = '';
+      const stdout = cappedCollector(MAX_EXEC_STDOUT);
+      const stderr = cappedCollector(MAX_EXEC_STDERR);
       let exitCode = 0;
 
-      stream.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-      stream.stderr.on('data', (data: Buffer) => {
-        stderr += data.toString();
+      stream.on('data', (data: Buffer) => stdout.push(data));
+      stream.stderr.on('data', (data: Buffer) => stderr.push(data));
+      stream.on('error', () => {
+        /* surfaced via 'close' / timeout */
       });
       stream.on('exit', (code: number | null) => {
         exitCode = code ?? 0;
       });
       stream.on('close', () => {
         clearTimeout(timer);
-        resolve({ stdout: stdout.slice(0, 64_000), stderr: stderr.slice(0, 8_000), exitCode });
+        resolve({ stdout: stdout.text(), stderr: stderr.text(), exitCode });
       });
     });
   });
@@ -253,23 +373,19 @@ export async function execOnServer(
             return;
           }
 
-          let stdout = '';
-          let stderr = '';
+          const stdout = cappedCollector(MAX_EXEC_STDOUT);
+          const stderr = cappedCollector(MAX_EXEC_STDERR);
           let exitCode = 0;
 
-          stream.on('data', (data: Buffer) => {
-            stdout += data.toString();
-          });
-          stream.stderr.on('data', (data: Buffer) => {
-            stderr += data.toString();
-          });
+          stream.on('data', (data: Buffer) => stdout.push(data));
+          stream.stderr.on('data', (data: Buffer) => stderr.push(data));
           stream.on('exit', (code: number | null) => {
             exitCode = code ?? 0;
           });
           stream.on('close', () => {
             clearTimeout(timer);
             client.end();
-            resolve({ stdout: stdout.slice(0, 64_000), stderr: stderr.slice(0, 8_000), exitCode });
+            resolve({ stdout: stdout.text(), stderr: stderr.text(), exitCode });
           });
         });
       })
@@ -288,4 +404,4 @@ export async function execOnServer(
   });
 }
 
-export const SSHBroker = { createSession, attach, close, exec };
+export const SSHBroker = { createSession, attach, close, exec, getSessionForUser };

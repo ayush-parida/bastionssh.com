@@ -138,6 +138,13 @@ describe('ntfy', () => {
       tags: ['rotating_light'],
     });
   });
+  it('keeps the base path of a server hosted under a sub-path', () => {
+    const prepared = getAdapter('ntfy').prepare({ url: 'https://u:p@example.com/ntfy/alerts' });
+    expect(prepared.hint).toBe('example.com/ntfy/alerts');
+    const req = getAdapter('ntfy').build(prepared.target, critical, SERVER, NOW);
+    expect(req.url).toBe('https://u:p@example.com/ntfy/');
+    expect((req.body as { topic: string }).topic).toBe('alerts');
+  });
   it('rejects a URL without a topic', () => {
     expect(() => getAdapter('ntfy').prepare({ url: 'https://ntfy.sh/' })).toThrow(/topic/);
   });

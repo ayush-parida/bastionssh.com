@@ -44,6 +44,17 @@ function iconFor(entry: SftpEntry) {
   return <FileIcon size={15} className="text-muted-foreground" />;
 }
 
+/** A symlink behaves like whatever it points at; the server resolves that for us. */
+function isFolderLike(entry: SftpEntry): boolean {
+  return (
+    entry.type === 'directory' || (entry.type === 'symlink' && entry.targetType === 'directory')
+  );
+}
+
+function isFileLike(entry: SftpEntry): boolean {
+  return entry.type === 'file' || (entry.type === 'symlink' && entry.targetType === 'file');
+}
+
 export default function FilesPage() {
   const { id: serverId } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -179,7 +190,8 @@ export default function FilesPage() {
 
   function handleDelete(entry: SftpEntry) {
     const isDir = entry.type === 'directory';
-    if (!confirm(`Delete ${isDir ? 'folder' : 'file'} "${entry.name}"?`)) return;
+    const kind = isDir ? 'folder' : entry.type === 'symlink' ? 'link' : 'file';
+    if (!confirm(`Delete ${kind} "${entry.name}"?`)) return;
     const recursive = isDir && confirm('Delete contents recursively? Cancel to require it be empty.');
     deleteMutation.mutate({ target: entry.path, recursive });
   }
@@ -316,9 +328,7 @@ export default function FilesPage() {
                   <td className="px-4 py-2">
                     <button
                       onClick={() =>
-                        entry.type === 'directory' || entry.type === 'symlink'
-                          ? setPath(entry.path)
-                          : handleOpenEditor(entry)
+                        isFolderLike(entry) ? setPath(entry.path) : handleOpenEditor(entry)
                       }
                       className="flex items-center gap-2 text-left hover:underline"
                     >
@@ -337,7 +347,7 @@ export default function FilesPage() {
                   </td>
                   <td className="px-4 py-2">
                     <div className="flex items-center justify-end gap-1">
-                      {entry.type === 'file' && (
+                      {isFileLike(entry) && (
                         <>
                           <button
                             onClick={() => handleOpenEditor(entry)}

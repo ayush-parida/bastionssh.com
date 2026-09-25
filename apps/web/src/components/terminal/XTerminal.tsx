@@ -110,11 +110,15 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
 
       ws.binaryType = 'arraybuffer';
 
+      // One streaming decoder per connection so a multi-byte character split
+      // across two frames is joined instead of turning into U+FFFD
+      const decoder = new TextDecoder();
+
       ws.onmessage = (e) => {
         const text =
           typeof e.data === 'string'
             ? e.data
-            : new TextDecoder().decode(e.data as ArrayBuffer);
+            : decoder.decode(e.data as ArrayBuffer, { stream: true });
         term.write(text);
         onOutputRef.current?.(text);
       };

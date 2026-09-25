@@ -96,6 +96,8 @@ async function resolveApiToken(req: FastifyRequest): Promise<TokenAuth> {
   return { status: 'ok', userId: token.userId, scopes };
 }
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   const db = getDb();
 
@@ -140,6 +142,12 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   const membershipRole = ROLES.includes(membership.role as Role)
     ? (membership.role as Role)
     : 'viewer';
+
+  // Role checks only guard routes that ask for one; a read-only token must not
+  // change anything even where a viewer session may (profile, own tokens).
+  if (scopes && !scopes.includes('write') && !SAFE_METHODS.has(req.method)) {
+    return reply.status(403).send({ error: 'This API token is read-only' });
+  }
 
   req.user = { id: user.id, email: user.email, displayName: user.displayName };
   req.orgId = membership.orgId;

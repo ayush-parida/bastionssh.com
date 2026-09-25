@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { buildClientConfig, type StorageTarget } from './client.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { createServer, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { buildClientConfig, createClient, retireClient, type StorageTarget } from './client.js';
 
 const minio: StorageTarget = {
   provider: 'minio',
@@ -36,5 +39,52 @@ describe('buildClientConfig', () => {
     expect(cfg.requestChecksumCalculation).toBe('WHEN_REQUIRED');
     expect(cfg.responseChecksumValidation).toBe('WHEN_REQUIRED');
     expect(cfg.followRegionRedirects).toBe(true);
+  });
+});
+
+describe('retireClient', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('destroys an idle client straight away', () => {
+    const client = createClient(minio, 'secret');
+    const destroy = vi.spyOn(client, 'destroy');
+    retireClient(client);
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it('waits for a request still in flight before destroying', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    let pending: ServerResponse | undefined;
+    let arrived!: () => void;
+    const requestArrived = new Promise<void>((resolve) => (arrived = resolve));
+    const server = createServer((_req, res) => {
+      pending = res;
+      arrived();
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const client = createClient({ ...minio, endpoint: `http://127.0.0.1:${port}` }, 'secret');
+      const destroy = vi.spyOn(client, 'destroy');
+      const download = client.send(new GetObjectCommand({ Bucket: 'b', Key: 'k' }));
+      await requestArrived;
+
+      retireClient(client);
+      vi.advanceTimersByTime(60_000);
+      expect(destroy).not.toHaveBeenCalled();
+
+      pending!.writeHead(200, { 'content-length': '2' }).end('ok');
+      const out = await download;
+      expect(await out.Body!.transformToString()).toBe('ok');
+
+      vi.advanceTimersByTime(60_000);
+      expect(destroy).toHaveBeenCalledOnce();
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

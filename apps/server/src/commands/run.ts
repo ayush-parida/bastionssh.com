@@ -16,23 +16,27 @@ export interface ExecuteInput {
   variables?: Record<string, string>;
 }
 
+/** `{{name}}`, tolerating inner whitespace (`{{ name }}`). */
+const PLACEHOLDER = /\{\{\s*([\w.-]+)\s*\}\}/g;
+
 /**
  * Substitute `{{name}}` placeholders. Values are inserted verbatim — a variable
  * is part of the command line, not a quoted argument, so whoever can run a saved
  * command can shape the shell string. That matches the `operator` role, which can
  * already open a terminal and type anything.
+ *
+ * The replacer is a function so `$$`, `$&` and friends in a value stay literal.
  */
 export function interpolate(template: string, variables: Record<string, string> = {}): string {
-  return Object.entries(variables).reduce(
-    (acc, [name, value]) => acc.replaceAll(`{{${name}}}`, value),
-    template,
+  return template.replace(PLACEHOLDER, (match, name: string) =>
+    Object.prototype.hasOwnProperty.call(variables, name) ? variables[name]! : match,
   );
 }
 
 /** Placeholder names appearing in a command, in order of first use. */
 export function extractVariables(template: string): string[] {
   const found = new Set<string>();
-  for (const match of template.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)) {
+  for (const match of template.matchAll(PLACEHOLDER)) {
     found.add(match[1]!);
   }
   return [...found];

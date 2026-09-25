@@ -2,12 +2,13 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { cronJobs, cronRuns } from '../../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { cronJobs, cronRuns, savedCommands } from '../../db/schema.js';
+import { eq, and, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { parseCronSchedule, getNextRun } from '@smt/cron-parser';
 import { audit } from '../../audit/index.js';
 import { scheduleCronJob, unscheduleCronJob } from '../../worker/scheduler.js';
+import logger from '../../logger.js';
 
 const createCronBaseSchema = z.object({
   serverId: z.string(),
@@ -30,6 +31,19 @@ const createCronSchema = createCronBaseSchema.refine((d) => d.savedCommandId ?? 
   message: 'Provide either savedCommandId or inlineCommand',
 });
 
+// The worker prefers an inline command, so accepting both would silently run
+// the inline one instead of the saved command the user picked.
+const BOTH_COMMANDS_ERROR = 'Provide either savedCommandId or inlineCommand, not both';
+
+/** A saved command can only be referenced by a job in the same org. */
+function savedCommandInOrg(id: string, orgId: string) {
+  return getDb()
+    .select({ id: savedCommands.id })
+    .from(savedCommands)
+    .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, orgId)))
+    .get();
+}
+
 export async function cronJobRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
@@ -41,6 +55,11 @@ export async function cronJobRoutes(app: FastifyInstance) {
   app.post('/', { preHandler: requireRole('operator') }, async (req, reply) => {
     const body = createCronSchema.parse(req.body);
     const db = getDb();
+
+    if (body.savedCommandId && body.inlineCommand)
+      return reply.status(400).send({ error: BOTH_COMMANDS_ERROR });
+    if (body.savedCommandId && !savedCommandInOrg(body.savedCommandId, req.orgId))
+      return reply.status(404).send({ error: 'Saved command not found' });
 
     const parsed = parseCronSchedule(body.schedule, body.timezone);
     if (!parsed.isValid) {
@@ -78,15 +97,29 @@ export async function cronJobRoutes(app: FastifyInstance) {
       .get();
     if (!job) return reply.status(404).send({ error: 'Not found' });
 
-    if (body.schedule) {
-      const parsed = parseCronSchedule(body.schedule, body.timezone ?? job.timezone);
+    if (body.savedCommandId && body.inlineCommand)
+      return reply.status(400).send({ error: BOTH_COMMANDS_ERROR });
+    if (body.savedCommandId && !savedCommandInOrg(body.savedCommandId, req.orgId))
+      return reply.status(404).send({ error: 'Saved command not found' });
+
+    // A bad timezone alone would otherwise be saved and the job never scheduled.
+    if (body.schedule || body.timezone) {
+      const parsed = parseCronSchedule(body.schedule ?? job.schedule, body.timezone ?? job.timezone);
       if (!parsed.isValid)
         return reply.status(400).send({ error: `Invalid cron expression: ${parsed.error}` });
     }
 
+    // Switching command source clears the other one, so only one is ever stored.
+    const commandSource = body.savedCommandId
+      ? { inlineCommand: null }
+      : body.inlineCommand
+        ? { savedCommandId: null }
+        : {};
+
     db.update(cronJobs)
       .set({
         ...body,
+        ...commandSource,
         notify: body.notify ? JSON.stringify(body.notify) : undefined,
         updatedAt: new Date().toISOString(),
       } as any)
@@ -109,8 +142,11 @@ export async function cronJobRoutes(app: FastifyInstance) {
       .get();
     if (!job) return reply.status(404).send({ error: 'Not found' });
 
-    await unscheduleCronJob(id);
     db.delete(cronJobs).where(eq(cronJobs.id, id)).run();
+    // Best effort: a queued run left behind finds no job and does nothing.
+    await unscheduleCronJob(id).catch((err) => {
+      logger.warn({ err, cronJobId: id }, 'Failed to remove queued cron runs');
+    });
     await audit(req, 'cron_job.delete', 'cron_job', id, job.name);
     return reply.status(204).send();
   });
@@ -124,7 +160,13 @@ export async function cronJobRoutes(app: FastifyInstance) {
       .where(and(eq(cronJobs.id, id), eq(cronJobs.orgId, req.orgId)))
       .get();
     if (!job) return reply.status(404).send({ error: 'Not found' });
-    return db.select().from(cronRuns).where(eq(cronRuns.cronJobId, id)).all();
+    return db
+      .select()
+      .from(cronRuns)
+      .where(eq(cronRuns.cronJobId, id))
+      .orderBy(desc(cronRuns.startedAt))
+      .limit(50)
+      .all();
   });
 
   app.get('/schedule/preview', async (req, reply) => {

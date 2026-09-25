@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { generateKeyPairSync, createVerify } from 'node:crypto';
-import { buildJwt, parseServiceAccount, toInstance, zoneToRegion, type GcpInstance } from './gcp.js';
+import { buildJwt, checkTokenUri, gcp, parseServiceAccount, toInstance, zoneToRegion, type GcpInstance } from './gcp.js';
 
 const raw: GcpInstance = {
   id: '5678',
@@ -81,5 +81,63 @@ describe('service account keys', () => {
     const verifier = createVerify('RSA-SHA256');
     verifier.update(`${header}.${claims}`);
     expect(verifier.verify(publicKey, Buffer.from(signature, 'base64url'))).toBe(true);
+  });
+});
+
+describe('token endpoint and cache', () => {
+  const pem = (generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string);
+  const otherPem = (generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string);
+  const file = (over: Record<string, unknown>) =>
+    JSON.stringify({
+      type: 'service_account',
+      project_id: 'p',
+      client_email: 'cache@p.iam.gserviceaccount.com',
+      private_key: pem,
+      ...over,
+    });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('only accepts Google https token endpoints', () => {
+    expect(checkTokenUri('https://oauth2.googleapis.com/token')).toBe('https://oauth2.googleapis.com/token');
+    expect(checkTokenUri('https://accounts.google.com/o/oauth2/token')).toBe('https://accounts.google.com/o/oauth2/token');
+    for (const bad of [
+      'http://oauth2.googleapis.com/token',
+      'https://evil.example.com/token',
+      'https://oauth2.googleapis.com.evil.com/token',
+      'https://oauth2.googleapis.com:8443/token',
+      'http://169.254.169.254/computeMetadata',
+      'not a url',
+    ]) {
+      expect(() => checkTokenUri(bad), bad).toThrow(/token_uri/);
+    }
+    expect(() => parseServiceAccount(file({ token_uri: 'https://attacker.test/token' }))).toThrow(/token_uri/);
+    expect(parseServiceAccount(file({})).tokenUri).toBe('https://oauth2.googleapis.com/token');
+  });
+
+  it('mints a new token for a different private key with the same client_email', async () => {
+    let mints = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === 'https://oauth2.googleapis.com/token') {
+        mints++;
+        return new Response(JSON.stringify({ access_token: `tok-${mints}`, expires_in: 1e9 }));
+      }
+      return new Response(JSON.stringify({ items: {} }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const a = parseServiceAccount(file({}));
+    const b = parseServiceAccount(file({ private_key: otherPem }));
+    await gcp.listInstances(a, { regions: [], timeoutMs: 1000 });
+    await gcp.listInstances(a, { regions: [], timeoutMs: 1000 });
+    expect(mints).toBe(1);
+    await gcp.listInstances(b, { regions: [], timeoutMs: 1000 });
+    expect(mints).toBe(2);
+    // Stored credentials with a foreign token_uri are refused before any request
+    await expect(
+      gcp.listInstances({ ...a, tokenUri: 'https://attacker.test/token' }, { regions: [], timeoutMs: 1000 }),
+    ).rejects.toThrow(/token_uri/);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('attacker'))).toBe(false);
   });
 });

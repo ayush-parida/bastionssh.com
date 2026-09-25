@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { CloudProvider, CloudServerState, Server } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { servers } from '../../db/schema.js';
+import { servers, sshKeys } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
@@ -66,6 +66,17 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
   };
 }
 
+/** A server may only point at a vaulted key from its own org. */
+function keyBelongsToOrg(orgId: string, keyId: string): boolean {
+  return (
+    getDb()
+      .select({ id: sshKeys.id })
+      .from(sshKeys)
+      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId)))
+      .get() !== undefined
+  );
+}
+
 export async function serverRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
@@ -76,6 +87,13 @@ export async function serverRoutes(app: FastifyInstance) {
 
   app.post('/', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = createServerSchema.parse(req.body);
+    if (
+      body.authType === 'key' &&
+      body.defaultKeyId &&
+      !keyBelongsToOrg(req.orgId, body.defaultKeyId)
+    ) {
+      return reply.status(400).send({ error: 'Unknown SSH key' });
+    }
     const db = getDb();
     const id = nanoid();
 
@@ -120,6 +138,13 @@ export async function serverRoutes(app: FastifyInstance) {
   app.patch('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = createServerSchema.partial().parse(req.body);
+    if (
+      body.authType === 'key' &&
+      body.defaultKeyId &&
+      !keyBelongsToOrg(req.orgId, body.defaultKeyId)
+    ) {
+      return reply.status(400).send({ error: 'Unknown SSH key' });
+    }
     const db = getDb();
 
     const existing = db

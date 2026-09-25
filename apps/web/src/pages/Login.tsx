@@ -73,9 +73,11 @@ export default function LoginPage() {
             {loading ? 'Signing in…' : 'Sign in'}
           </button>
         </form>
-        <p className="mt-4 text-center text-xs text-muted-foreground">
-          Default credentials: <span className="font-mono">admin@smt.local</span> / <span className="font-mono">admin1234</span>
-        </p>
+        {import.meta.env.DEV && (
+          <p className="mt-4 text-center text-xs text-muted-foreground">
+            Default credentials: <span className="font-mono">admin@smt.local</span> / <span className="font-mono">admin1234</span>
+          </p>
+        )}
       </div>
     </div>
   );

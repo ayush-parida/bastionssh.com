@@ -53,7 +53,10 @@ const envSchema = z.object({
   SMT_OAUTH_GITHUB_CLIENT_SECRET: z.string().optional(),
 
   SMT_ADMIN_EMAIL: z.string().email().default('admin@smt.local'),
-  SMT_ADMIN_PASSWORD: z.string().min(8).default('admin1234'),
+  /** Unset (outside NODE_ENV=development/test) means a random password is generated on first seed. */
+  SMT_ADMIN_PASSWORD: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(8).optional()),
+  /** Fastify `trustProxy`: false (default), true, a hop count, or a comma-separated IP/CIDR list. */
+  SMT_TRUST_PROXY: z.string().optional(),
   SMT_STATIC_DIR: z.string().optional(),
 });
 
@@ -65,6 +68,39 @@ if (!parsed.success) {
 }
 
 const env = parsed.data;
+
+/** The development password; published in docs, so never acceptable in production. */
+export const DEV_ADMIN_PASSWORD = 'admin1234';
+
+/**
+ * Password for the seeded admin, or null when one must be generated. Only an
+ * explicit NODE_ENV=development/test (set by `pnpm dev` and vitest) gets the
+ * well-known dev password; anything else — production, or a bare `node
+ * dist/index.js` with NODE_ENV unset — would hand out an owner account with it.
+ */
+export function resolveAdminPassword(
+  rawNodeEnv: string | undefined,
+  password: string | undefined,
+): string | null {
+  if (rawNodeEnv === 'development' || rawNodeEnv === 'test') {
+    return password ?? DEV_ADMIN_PASSWORD;
+  }
+  if (!password || password === DEV_ADMIN_PASSWORD) return null;
+  return password;
+}
+
+/**
+ * Parse SMT_TRUST_PROXY into what Fastify's `trustProxy` accepts. Trusting every
+ * hop lets any client pick its own req.ip through X-Forwarded-For, which defeats
+ * per-IP rate limits and forges audit IPs, so the default trusts none.
+ */
+export function parseTrustProxy(raw: string | undefined): boolean | number | string {
+  const value = raw?.trim();
+  if (!value || value === 'false') return false;
+  if (value === 'true') return true;
+  if (/^\d+$/.test(value)) return Number(value);
+  return value;
+}
 
 if (env.SMT_SMTP_URL && !env.SMT_SMTP_FROM) {
   console.error('Invalid environment variables: SMT_SMTP_FROM is required when SMT_SMTP_URL is set');
@@ -110,7 +146,10 @@ export const config = {
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,
   adminEmail: env.SMT_ADMIN_EMAIL,
-  adminPassword: env.SMT_ADMIN_PASSWORD,
+  // The raw value: the schema defaults NODE_ENV to development, which must not
+  // unlock the dev password for an install that simply never set it.
+  adminPassword: resolveAdminPassword(process.env.NODE_ENV, env.SMT_ADMIN_PASSWORD),
+  trustProxy: parseTrustProxy(env.SMT_TRUST_PROXY),
   oauth: {
     google:
       env.SMT_OAUTH_GOOGLE_CLIENT_ID && env.SMT_OAUTH_GOOGLE_CLIENT_SECRET

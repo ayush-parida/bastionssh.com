@@ -1,22 +1,20 @@
 import { StorageError } from './errors.js';
 
 /**
- * Object keys are not filesystem paths, but the browser treats `/` as a folder
- * separator, so the same hygiene applies: no empty or `.` segments, no `..`,
- * no null bytes.
+ * Object keys are not filesystem paths. `logs//tmp`, `a/.` and `/x` are real,
+ * distinct S3 keys, and the listing hands them back verbatim, so a key is used
+ * exactly as sent — rewriting it would act on a different object (deleting the
+ * folder `logs//` would empty `logs/`). Only what no sane key needs is refused:
+ * `..` segments and null bytes.
  */
-function splitSegments(input: string, what: string): string[] {
+function assertSafeSegments(input: string, what: string): void {
   if (input.includes('\0')) throw new StorageError(`${what} contains a null byte`, 400);
-  const out: string[] = [];
-  for (const segment of input.split('/')) {
-    if (segment === '' || segment === '.') continue;
-    if (segment === '..') throw new StorageError(`${what} must not contain ".." segments`, 400);
-    out.push(segment);
+  if (input.split('/').includes('..')) {
+    throw new StorageError(`${what} must not contain ".." segments`, 400);
   }
-  return out;
 }
 
-/** A single object's key: no leading slash, never ends in `/`. */
+/** A single object's key, exactly as given; never ends in `/`. */
 export function normalizeKey(input: string): string {
   if (typeof input !== 'string' || input.length === 0) {
     throw new StorageError('Key is required', 400);
@@ -24,17 +22,16 @@ export function normalizeKey(input: string): string {
   if (input.endsWith('/')) {
     throw new StorageError('Key must not end with "/" — that is a folder prefix', 400);
   }
-  const segments = splitSegments(input, 'Key');
-  if (segments.length === 0) throw new StorageError('Key is required', 400);
-  return segments.join('/');
+  assertSafeSegments(input, 'Key');
+  return input;
 }
 
-/** `''` for the bucket root, otherwise a normalized key plus a trailing `/`. */
+/** `''` for the bucket root, otherwise the prefix exactly as given plus a trailing `/`. */
 export function normalizePrefix(input: string | undefined | null): string {
   if (input == null || input === '') return '';
   if (typeof input !== 'string') throw new StorageError('Prefix must be a string', 400);
-  const segments = splitSegments(input, 'Prefix');
-  return segments.length === 0 ? '' : `${segments.join('/')}/`;
+  assertSafeSegments(input, 'Prefix');
+  return input.endsWith('/') ? input : `${input}/`;
 }
 
 export function parentPrefix(prefix: string): string | null {

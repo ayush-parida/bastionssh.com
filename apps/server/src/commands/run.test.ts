@@ -15,6 +15,21 @@ describe('interpolate', () => {
   it('is a no-op with no variables', () => {
     expect(interpolate('uptime')).toBe('uptime');
   });
+
+  it('inserts values literally, including $ replacement sequences', () => {
+    const value = "kill $$ ; awk '{print $&}' ; echo $` $' $1";
+    expect(interpolate('echo {{v}}', { v: value })).toBe(`echo ${value}`);
+  });
+
+  it('substitutes placeholders written with inner whitespace', () => {
+    expect(interpolate('rm -rf /srv/releases/{{ release }} {{release}}', { release: 'old' })).toBe(
+      'rm -rf /srv/releases/old old',
+    );
+  });
+
+  it('does not treat inherited object keys as variables', () => {
+    expect(interpolate('echo {{constructor}}', {})).toBe('echo {{constructor}}');
+  });
 });
 
 describe('extractVariables', () => {

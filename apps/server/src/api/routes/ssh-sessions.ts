@@ -63,6 +63,7 @@ export async function sshSessionRoutes(app: FastifyInstance) {
       key,
       password,
       userId: req.user.id,
+      orgId: req.orgId,
       ...body,
     });
     await audit(req, 'server.connect', 'server', server.id, server.name);
@@ -82,7 +83,7 @@ export async function sshSessionRoutes(app: FastifyInstance) {
   /** DELETE /api/sessions/:id → close the session */
   app.delete('/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    await SSHBroker.close(id);
+    await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
     return reply.status(204).send();
   });
 }

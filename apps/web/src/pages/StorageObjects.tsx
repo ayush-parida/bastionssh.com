@@ -1,13 +1,14 @@
 import { useRef, useState } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api } from '@/lib/api.js';
+import { ApiError, api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
 import { formatBytes } from '@/lib/utils.js';
 import type {
   StorageFolder,
   StorageListResponse,
   StorageObject,
+  StorageRenameRequest,
   StorageUploadResponse,
 } from '@smt/shared';
 import {
@@ -96,12 +97,21 @@ export default function StorageObjectsPage() {
   });
 
   const renameMutation = useMutation({
-    mutationFn: (body: { from: string; to: string }) => api.post(`${base}/rename`, body),
+    mutationFn: (body: StorageRenameRequest) => api.post(`${base}/rename`, body),
     onSuccess: () => {
       refresh();
       toast.success('Renamed');
     },
-    onError: (err: Error) => toast.error(err.message),
+    onError: (err: Error, body) => {
+      // The destination exists; only replace it once the user says so
+      if (err instanceof ApiError && err.status === 409 && !body.overwrite) {
+        if (confirm(`${err.message}. Replace it?`)) {
+          renameMutation.mutate({ ...body, overwrite: true });
+        }
+        return;
+      }
+      toast.error(err.message);
+    },
   });
 
   const deleteMutation = useMutation({
@@ -135,12 +145,13 @@ export default function StorageObjectsPage() {
   }
 
   function handleMkdir() {
-    const name = prompt('New folder name');
-    if (name?.trim()) mkdirMutation.mutate(prefix + name.trim());
+    // The server keeps keys verbatim, so a stray leading slash would become an empty folder
+    const name = prompt('New folder name')?.trim().replace(/^\/+/, '');
+    if (name) mkdirMutation.mutate(prefix + name);
   }
 
   function handleRename(obj: StorageObject) {
-    const name = prompt('Rename to', obj.name);
+    const name = prompt('Rename to', obj.name)?.replace(/^\/+/, '');
     if (name && name !== obj.name) renameMutation.mutate({ from: obj.key, to: prefix + name });
   }
 

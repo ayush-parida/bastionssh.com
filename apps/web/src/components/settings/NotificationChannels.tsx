@@ -96,12 +96,17 @@ function splitList(input: string): string[] {
 /**
  * Only the type's own fields are sent, and only when filled in — on edit a
  * blank set means "keep the stored target", which is never returned to us.
+ * The Opsgenie region is not secret: a change to it alone is sent on its own
+ * and the server keeps the stored key.
  */
-function targetFields(form: ChannelForm): Partial<CreateNotificationChannelRequest> {
+function targetFields(form: ChannelForm, storedRegion?: string): Partial<CreateNotificationChannelRequest> {
   const out: Partial<CreateNotificationChannelRequest> = {};
   const fields = channelMeta(form.type).fields;
   const filled = fields.filter((f) => f !== 'region' && form[f].trim() !== '');
-  if (filled.length === 0) return out;
+  if (filled.length === 0) {
+    if (storedRegion && fields.includes('region') && form.region !== storedRegion) out.region = form.region;
+    return out;
+  }
   for (const field of fields) {
     if (field === 'recipients') out.recipients = splitList(form.recipients);
     else if (field === 'region') out.region = form.region;
@@ -115,6 +120,8 @@ export default function NotificationChannels() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ChannelForm>(emptyForm);
+  /** The edited channel's region, read from its hint (`eu …abcd`). */
+  const [storedRegion, setStoredRegion] = useState<ChannelForm['region'] | undefined>();
 
   const { data: channels } = useQuery<NotificationChannel[]>({
     queryKey: QUERY_KEY,
@@ -151,7 +158,7 @@ export default function NotificationChannels() {
         name: body.name,
         minSeverity: body.minSeverity,
         notifyOnResolve: body.notifyOnResolve,
-        ...targetFields(body),
+        ...targetFields(body, storedRegion),
       };
       return api.patch(`/notifications/channels/${id}`, payload);
     },
@@ -183,13 +190,17 @@ export default function NotificationChannels() {
   });
 
   function openEdit(channel: NotificationChannel) {
+    const hintRegion = channel.type === 'opsgenie' ? channel.targetHint.split(' ')[0] : undefined;
+    const region = hintRegion === 'eu' || hintRegion === 'us' ? hintRegion : undefined;
     setEditingId(channel.id);
+    setStoredRegion(region);
     setForm({
       ...emptyForm,
       name: channel.name,
       type: channel.type,
       minSeverity: channel.minSeverity,
       notifyOnResolve: channel.notifyOnResolve,
+      region: region ?? emptyForm.region,
     });
     setShowForm(true);
   }
@@ -198,6 +209,7 @@ export default function NotificationChannels() {
     setShowForm(false);
     setEditingId(null);
     setForm(emptyForm);
+    setStoredRegion(undefined);
   }
 
   function handleSubmit(e: React.FormEvent) {
@@ -265,7 +277,7 @@ export default function NotificationChannels() {
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-lg font-semibold">Alert notifications</h2>
         <button
-          onClick={() => { setEditingId(null); setForm(emptyForm); setShowForm(true); }}
+          onClick={() => { setEditingId(null); setStoredRegion(undefined); setForm(emptyForm); setShowForm(true); }}
           className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           <Plus size={14} /> Add channel

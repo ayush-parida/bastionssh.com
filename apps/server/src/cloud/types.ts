@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { CloudInstance } from '@smt/shared';
 
 /** What a provider adapter needs to authenticate. Stored vault-encrypted as JSON. */
@@ -146,6 +147,15 @@ async function providerMessage(res: Response): Promise<string> {
   } catch {
     return '';
   }
+}
+
+/**
+ * Cache key for a token minted from these credential parts. Every part that
+ * decides whether minting would succeed (secrets included) goes in, so a
+ * wrong or different secret can never be answered from another one's token.
+ */
+export function credentialKey(...parts: string[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
 
 /**

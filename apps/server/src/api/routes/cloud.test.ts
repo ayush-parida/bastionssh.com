@@ -121,6 +121,12 @@ describe('cloud account routes', () => {
     expect(body.lastSummary).toBeNull();
     expect(JSON.stringify(body)).not.toContain('hcloud-token');
     expect(Object.keys(body).some((k) => /credential|token/i.test(k) && k !== 'credentialHint')).toBe(false);
+
+    // The first sync starts right away instead of waiting for the next sweep
+    await vi.waitFor(async () => {
+      const [account] = (await app.inject({ method: 'GET', url: '/api/cloud/accounts', headers: admin.headers })).json();
+      expect(account.lastStatus).toBe('ok');
+    });
   });
 
   it('lets an operator sync, which imports the instances as servers', async () => {
@@ -256,6 +262,26 @@ describe('cloud account routes', () => {
     expect(azure.statusCode).toBe(201);
     expect(azure.json().credentialHint).toBe('22222222… / 33333333…');
     expect(JSON.stringify(azure.json())).not.toContain('very-secret');
+  });
+
+  it('imports a new instance once when two syncs of one account overlap', async () => {
+    await app.inject({
+      method: 'PATCH',
+      url: `/api/cloud/accounts/${accountId}`,
+      headers: admin.headers,
+      payload: { autoImport: true },
+    });
+    const slow = async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      return [inst({ id: 'h1' }), inst({ id: 'h9', name: 'burst', publicIp: '7.7.7.7' })];
+    };
+    provider.list.mockImplementationOnce(slow).mockImplementationOnce(slow);
+    const sync = () =>
+      app.inject({ method: 'POST', url: `/api/cloud/accounts/${accountId}/sync`, headers: operator.headers });
+    const [first, second] = await Promise.all([sync(), sync()]);
+    expect([first.statusCode, second.statusCode]).toEqual([200, 200]);
+    expect(first.json().created + second.json().created).toBe(1);
+    expect(getDb().select().from(servers).where(eq(servers.cloudInstanceId, 'h9')).all()).toHaveLength(1);
   });
 
   it('hides the account from another organisation', async () => {

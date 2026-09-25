@@ -5,6 +5,7 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
   PutObjectCommand,
@@ -202,6 +203,19 @@ export function createFolder(client: S3Client, bucket: string, prefix: string): 
 export function deleteObject(client: S3Client, bucket: string, key: string): Promise<void> {
   return run('Could not delete object', async () => {
     await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  });
+}
+
+export function objectExists(client: S3Client, bucket: string, key: string): Promise<boolean> {
+  return run('Could not check object', async () => {
+    try {
+      await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return true;
+    } catch (err) {
+      const mapped = toStorageError(err, 'Could not check object');
+      if (mapped.statusCode === 404) return false;
+      throw mapped;
+    }
   });
 }
 

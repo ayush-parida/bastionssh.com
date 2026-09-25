@@ -58,7 +58,11 @@ const keyQuery = z.object({ key: keySchema });
 const uploadQuery = z.object({ key: keySchema, contentType: z.string().max(255).optional() });
 const deleteObjectQuery = z.object({ key: keySchema, recursive: boolQuery });
 const folderSchema = z.object({ prefix: keySchema });
-const renameSchema = z.object({ from: keySchema, to: keySchema });
+const renameSchema = z.object({
+  from: keySchema,
+  to: keySchema,
+  overwrite: z.boolean().optional(),
+});
 
 /** Everything but the secret. */
 const publicColumns = {
@@ -210,7 +214,8 @@ export async function storageRoutes(app: FastifyInstance) {
         .where(eq(storageConnections.id, id))
         .run();
 
-      evictConnection(id);
+      // A rename keeps the client, so transfers running on it are not disturbed
+      if (targetChanged) evictConnection(id);
       await audit(req, 'storage_connection.update', 'storage_connection', id, existing.name);
       return publicConnection(req.orgId, id);
     } catch (err) {
@@ -452,6 +457,10 @@ export async function storageRoutes(app: FastifyInstance) {
         const bucket = assertBucketParam(rawBucket);
         const from = normalizeKey(body.from);
         const to = normalizeKey(body.to);
+        // Copy replaces the destination silently; in an unversioned bucket that is permanent
+        if (from !== to && !body.overwrite && (await ops.objectExists(client, bucket, to))) {
+          return reply.status(409).send({ error: `An object named "${to}" already exists` });
+        }
         await ops.renameObject(client, bucket, from, to);
         await audit(req, 'storage.rename', 'storage_connection', id, connection.name, {
           bucket,

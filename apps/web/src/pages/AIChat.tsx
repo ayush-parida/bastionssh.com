@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
+import { readSSE } from '@/lib/sse.js';
 import type { AIProviderConfig, AIAgentEvent } from '@smt/shared';
 import { Send, Bot, User, Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -72,60 +73,43 @@ export default function AIChatPage() {
         messages: [...messages, { role: 'user', content: userMsg }],
       });
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value);
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          const raw = line.slice(6);
-          let event: AIAgentEvent;
-          try {
-            event = JSON.parse(raw) as AIAgentEvent;
-          } catch {
-            continue;
+      for await (const event of readSSE<AIAgentEvent>(res)) {
+        if (event.type === 'delta') {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (!last || last.role !== 'assistant') return prev;
+            return [...prev.slice(0, -1), { ...last, content: last.content + event.content }];
+          });
+        } else if (event.type === 'tool_call') {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (!last || last.role !== 'assistant') return prev;
+            const tc: ToolCallRecord = {
+              id: event.id,
+              name: event.name,
+              input: event.input ?? {},
+              expanded: true,
+            };
+            return [...prev.slice(0, -1), { ...last, toolCalls: [...(last.toolCalls ?? []), tc] }];
+          });
+        } else if (event.type === 'tool_result') {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (!last || last.role !== 'assistant') return prev;
+            const toolCalls = (last.toolCalls ?? []).map((tc) =>
+              tc.id === event.id ? { ...tc, output: event.output, isError: event.isError } : tc,
+            );
+            return [...prev.slice(0, -1), { ...last, toolCalls }];
+          });
+        } else if (event.type === 'done' || event.type === 'error') {
+          if (event.type === 'error') {
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (!last) return prev;
+              return [...prev.slice(0, -1), { ...last, content: last.content + `\n\n**Error:** ${event.error}` }];
+            });
           }
-
-          if (event.type === 'delta') {
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (!last || last.role !== 'assistant') return prev;
-              return [...prev.slice(0, -1), { ...last, content: last.content + event.content }];
-            });
-          } else if (event.type === 'tool_call') {
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (!last || last.role !== 'assistant') return prev;
-              const tc: ToolCallRecord = {
-                id: event.id,
-                name: event.name,
-                input: event.input ?? {},
-                expanded: true,
-              };
-              return [...prev.slice(0, -1), { ...last, toolCalls: [...(last.toolCalls ?? []), tc] }];
-            });
-          } else if (event.type === 'tool_result') {
-            setMessages((prev) => {
-              const last = prev[prev.length - 1];
-              if (!last || last.role !== 'assistant') return prev;
-              const toolCalls = (last.toolCalls ?? []).map((tc) =>
-                tc.id === event.id ? { ...tc, output: event.output, isError: event.isError } : tc,
-              );
-              return [...prev.slice(0, -1), { ...last, toolCalls }];
-            });
-          } else if (event.type === 'done' || event.type === 'error') {
-            if (event.type === 'error') {
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (!last) return prev;
-                return [...prev.slice(0, -1), { ...last, content: last.content + `\n\n**Error:** ${event.error}` }];
-              });
-            }
-            break;
-          }
+          break;
         }
       }
     } catch (err: unknown) {
