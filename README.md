@@ -95,7 +95,7 @@ cd server-management-tool
 2. Sign in as the first admin (an owner account seeded on first start):
    - Set `SMT_ADMIN_EMAIL` and `SMT_ADMIN_PASSWORD` before the first start to choose the credentials.
    - Unless `NODE_ENV` is explicitly `development` or `test`, an unset `SMT_ADMIN_PASSWORD` (or the dev default `admin1234`) gets a random password instead, printed **once** to the server's stderr (`Generated a random admin password`) whatever `SMT_LOG_LEVEL` is. This covers the Docker image and a bare `pnpm start` / `node dist/index.js`. Sign in and change it.
-   - `pnpm dev` runs with `NODE_ENV=development`, where the defaults are `admin@smt.local` / `admin1234`.
+   - `pnpm dev` runs with `NODE_ENV=development`, where the defaults are `ayush.parida@fgshq.com` / `admin1234`.
 3. **Add an SSH key** — paste an existing one or generate a new keypair from the UI.
 4. **Add a server** — host, port, user, and select the SSH key.
 5. Click **Connect** to open an in-browser terminal, or use the **Run** button to execute saved commands.

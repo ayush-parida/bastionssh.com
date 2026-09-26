@@ -52,7 +52,7 @@ const envSchema = z.object({
   SMT_OAUTH_GITHUB_CLIENT_ID: z.string().optional(),
   SMT_OAUTH_GITHUB_CLIENT_SECRET: z.string().optional(),
 
-  SMT_ADMIN_EMAIL: z.string().email().default('admin@smt.local'),
+  SMT_ADMIN_EMAIL: z.string().email().default('ayush.parida@fgshq.com'),
   /** Unset (outside NODE_ENV=development/test) means a random password is generated on first seed. */
   SMT_ADMIN_PASSWORD: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(8).optional()),
   /** Fastify `trustProxy`: false (default), true, a hop count, or a comma-separated IP/CIDR list. */

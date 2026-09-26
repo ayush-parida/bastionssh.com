@@ -19,7 +19,7 @@ services:
       SMT_SFTP_MAX_UPLOAD_BYTES: ${SMT_SFTP_MAX_UPLOAD_BYTES:-1073741824}
       # First-start owner account. Leave the password unset to have a random one
       # generated and printed once in the logs (docker compose logs smt).
-      SMT_ADMIN_EMAIL: ${SMT_ADMIN_EMAIL:-admin@smt.local}
+      SMT_ADMIN_EMAIL: ${SMT_ADMIN_EMAIL:-ayush.parida@fgshq.com}
       SMT_ADMIN_PASSWORD: ${SMT_ADMIN_PASSWORD:-}
       # Proxies whose X-Forwarded-For is believed: false (default), true, a hop
       # count, or a comma-separated IP/CIDR list. Behind Caddy/Nginx/Traefik set

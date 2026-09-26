@@ -294,7 +294,7 @@ export default function LoginPage() {
         )}
         {import.meta.env.DEV && (
           <p className="mt-4 text-center text-xs text-muted-foreground">
-            Default credentials: <span className="font-mono">admin@smt.local</span> / <span className="font-mono">admin1234</span>
+            Default credentials: <span className="font-mono">ayush.parida@fgshq.com</span> / <span className="font-mono">admin1234</span>
           </p>
         )}
       </div>
