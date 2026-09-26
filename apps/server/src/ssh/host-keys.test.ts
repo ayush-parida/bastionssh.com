@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { and, eq } from 'drizzle-orm';
 
 // Fake ssh2 Client for scanHostKey: connect() runs the verifier on the key in
@@ -235,6 +236,75 @@ describe('checkHostKey', () => {
     expect(guard.error(generic)).toBe(generic);
     expect(guard.hostVerifier(blobOf(RSA_LINE))).toBe(false);
     expect(guard.error(generic)).toBeInstanceOf(hk.HostKeyMismatchError);
+  });
+
+  it('refuses, without pinning or recording, a connection opened to an address the server no longer has', () => {
+    // A connection (or a re-keying terminal) to the old address, verified
+    // after an admin moved the server and its key was cleared
+    const id = seedServer(orgId, userId);
+    const staleGuard = hk.sshConnectConfig(
+      { id, host: '10.0.0.1', port: 22, username: 'root' },
+      { password: 'p' },
+      'terminal',
+    ).guard;
+    getDb().update(servers).set({ host: '10.9.9.9', ...hk.clearedColumns() }).where(eq(servers.id, id)).run();
+
+    expect(staleGuard.hostVerifier(blobOf(ED25519_LINE))).toBe(false);
+    expect(staleGuard.error(new Error('Host denied'))).not.toBeInstanceOf(hk.HostKeyMismatchError);
+    expect(row(id).hostKeyFingerprint).toBeNull();
+    expect(auditFor(id, 'server.host_key_trusted')).toHaveLength(0);
+
+    // Pinned for the new address: the old host's key is not a "mismatch" either
+    hk.pinHostKey(row(id), RSA_FP, 'ssh-rsa', userId);
+    expect(staleGuard.hostVerifier(blobOf(ED25519_LINE))).toBe(false);
+    expect(row(id).hostKeyMismatchFingerprint).toBeNull();
+    expect(alertsFor(id)).toHaveLength(0);
+
+    // A connection to the current address is checked as usual
+    const fresh = hk.sshConnectConfig(
+      { id, host: '10.9.9.9', port: 22, username: 'root' },
+      { password: 'p' },
+      'terminal',
+    ).guard;
+    expect(fresh.hostVerifier(blobOf(RSA_LINE))).toBe(true);
+  });
+
+  it('sshConnectConfig asks for the pinned key type first, keeping the others', () => {
+    const id = seedServer(orgId, userId);
+    const target = { id, host: '10.0.0.1', port: 22, username: 'root' };
+    // Nothing pinned: ssh2's defaults
+    expect(hk.sshConnectConfig(target, { password: 'p' }, 'exec').config.algorithms).toBeUndefined();
+
+    hk.checkHostKey(id, blobOf(RSA_LINE), 'exec');
+    const rsa = ['rsa-sha2-512', 'rsa-sha2-256', 'ssh-rsa'];
+    const { config } = hk.sshConnectConfig(target, { password: 'p' }, 'exec');
+    expect(config.algorithms).toEqual({ serverHostKey: { remove: rsa, prepend: rsa } });
+
+    // What ssh2 actually offers: the pinned type first, then everything else
+    const require = createRequire(import.meta.url);
+    const utils = require('ssh2/lib/utils.js');
+    const constants = require('ssh2/lib/protocol/constants.js');
+    const offered: string[] = utils.generateAlgorithmList(
+      (config.algorithms as any).serverHostKey,
+      constants.DEFAULT_SERVER_HOST_KEY,
+      constants.SUPPORTED_SERVER_HOST_KEY,
+    );
+    expect(offered.slice(0, 3)).toEqual(rsa);
+    expect(offered).toContain('ssh-ed25519');
+
+    // A pinned fingerprint with no known type yet leaves the defaults alone
+    hk.pinHostKey(row(id), ED25519_FP, null, userId);
+    expect(hk.sshConnectConfig(target, { password: 'p' }, 'exec').config.algorithms).toBeUndefined();
+  });
+
+  it('sshConnectConfig never lets a hostHash through (the verifier needs the raw blob)', () => {
+    const { config } = hk.sshConnectConfig(
+      { id: 'x', host: 'h', port: 22, username: 'u' },
+      { password: 'p' },
+      'exec',
+      { hostHash: 'sha256' } as never,
+    );
+    expect(config.hostHash).toBeUndefined();
   });
 
   it('sshConnectConfig attaches the verifier and exactly one credential', () => {

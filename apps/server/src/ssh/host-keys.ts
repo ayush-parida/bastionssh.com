@@ -129,12 +129,29 @@ function mismatchMessage(expected: string, presented: string) {
 
 export type HostKeyCheck = { ok: true } | { ok: false; error: Error };
 
+/** The address a connection was actually opened to. */
+export interface HostKeyEndpoint {
+  host: string;
+  port: number;
+}
+
 /**
  * Decide whether `blob` is an acceptable host key for the server, recording a
  * first-use key or a mismatch as a side effect. Synchronous so it can run
  * inside ssh2's key exchange.
+ *
+ * `endpoint` is where the connection was opened. The row is keyed by server id,
+ * so a connection that started before an admin changed the host or port (or a
+ * long-lived session re-keying afterwards) would otherwise be judged against —
+ * and could trust on first use for — an endpoint it never talked to. Such a
+ * connection is refused without recording anything.
  */
-export function checkHostKey(serverId: string, blob: Buffer, purpose: HostKeyPurpose): HostKeyCheck {
+export function checkHostKey(
+  serverId: string,
+  blob: Buffer,
+  purpose: HostKeyPurpose,
+  endpoint?: HostKeyEndpoint,
+): HostKeyCheck {
   const presented = hostKeyFingerprint(blob);
   const type = hostKeyType(blob);
   const db = getDb();
@@ -144,6 +161,16 @@ export function checkHostKey(serverId: string, blob: Buffer, purpose: HostKeyPur
   for (let attempt = 0; attempt < 2; attempt++) {
     const row = loadServer(serverId);
     if (!row) return { ok: false, error: new Error('Host key could not be verified: server not found') };
+    if (endpoint && (row.host !== endpoint.host || row.port !== endpoint.port)) {
+      logger.warn(
+        { serverId, connectedTo: endpoint, current: { host: row.host, port: row.port }, purpose },
+        'Server address changed while connecting — host key not checked, connection refused',
+      );
+      return {
+        ok: false,
+        error: new Error('Host key could not be verified: the server address changed while connecting. Retry.'),
+      };
+    }
 
     if (!row.hostKeyFingerprint) {
       const now = new Date().toISOString();
@@ -172,7 +199,10 @@ export function checkHostKey(serverId: string, blob: Buffer, purpose: HostKeyPur
     if (row.hostKeyFingerprint === presented) {
       // A pre-pinned fingerprint carries no type; fill it in from the real key
       if (!row.hostKeyType && type) {
-        db.update(servers).set({ hostKeyType: type }).where(eq(servers.id, serverId)).run();
+        db.update(servers)
+          .set({ hostKeyType: type })
+          .where(and(eq(servers.id, serverId), eq(servers.hostKeyFingerprint, presented)))
+          .run();
       }
       return { ok: true };
     }
@@ -235,13 +265,17 @@ export interface HostKeyGuard {
   error: (err: Error) => Error;
 }
 
-export function hostKeyGuard(serverId: string, purpose: HostKeyPurpose): HostKeyGuard {
+export function hostKeyGuard(
+  serverId: string,
+  purpose: HostKeyPurpose,
+  endpoint?: HostKeyEndpoint,
+): HostKeyGuard {
   let refusal: Error | undefined;
   return {
     hostVerifier: (key: Buffer) => {
       let check: HostKeyCheck;
       try {
-        check = checkHostKey(serverId, key, purpose);
+        check = checkHostKey(serverId, key, purpose, endpoint);
       } catch (err) {
         // Fail closed: a key we could not check is a key we do not trust
         logger.error({ err, serverId }, 'Host key verification failed unexpectedly');
@@ -252,6 +286,43 @@ export function hostKeyGuard(serverId: string, purpose: HostKeyPurpose): HostKey
     },
     error: (err: Error) => refusal ?? err,
   };
+}
+
+const PREFERABLE_KEY_TYPES = new Set([
+  'ssh-ed25519',
+  'ecdsa-sha2-nistp256',
+  'ecdsa-sha2-nistp384',
+  'ecdsa-sha2-nistp521',
+  'ssh-rsa',
+]);
+
+/** ssh2 host key algorithms that yield a key of the given blob type. */
+function algorithmsForKeyType(type: string): string[] {
+  return type === 'ssh-rsa' ? ['rsa-sha2-512', 'rsa-sha2-256', 'ssh-rsa'] : [type];
+}
+
+/**
+ * Ask for the pinned key's type first, as OpenSSH does for known hosts. Without
+ * this, a host that later gains a key type ssh2 ranks higher (e.g. ed25519 next
+ * to a pinned rsa key) would present that one instead and every connection
+ * would be refused as a "changed" key. Other types stay offered afterwards, so
+ * an impostor with a different key still shows up as a mismatch.
+ */
+function preferPinnedKeyType(serverId: string): ConnectConfig['algorithms'] | undefined {
+  try {
+    const row = getDb()
+      .select({ fingerprint: servers.hostKeyFingerprint, type: servers.hostKeyType })
+      .from(servers)
+      .where(eq(servers.id, serverId))
+      .get();
+    // Only types ssh2 can negotiate; anything else would make connect() throw
+    if (!row?.fingerprint || !row.type || !PREFERABLE_KEY_TYPES.has(row.type)) return undefined;
+    const algorithms = algorithmsForKeyType(row.type);
+    // Remove, then prepend: ssh2 skips a prepend already present in the list
+    return { serverHostKey: { remove: algorithms, prepend: algorithms } } as ConnectConfig['algorithms'];
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -266,11 +337,16 @@ export function sshConnectConfig(
   purpose: HostKeyPurpose,
   extra: Omit<ConnectConfig, 'host' | 'port' | 'username' | 'hostVerifier' | 'hostHash'> = {},
 ): { config: ConnectConfig; guard: HostKeyGuard } {
-  const guard = hostKeyGuard(target.id, purpose);
+  const guard = hostKeyGuard(target.id, purpose, { host: target.host, port: target.port });
+  // The verifier must see the raw key blob: a caller-supplied hostHash would
+  // make ssh2 hand it a hex digest instead, which never equals a fingerprint.
+  const { hostHash: _ignored, ...rest } = extra as ConnectConfig;
+  const algorithms = rest.algorithms ?? preferPinnedKeyType(target.id);
   return {
     guard,
     config: {
-      ...extra,
+      ...rest,
+      ...(algorithms && { algorithms }),
       host: target.host,
       port: target.port,
       username: target.username,

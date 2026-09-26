@@ -11,7 +11,8 @@ import { seedOrg, seedUser } from './test-utils.js';
 
 const { utils } = ssh2;
 
-describe('ssh key routes', () => {
+// RSA key generation is CPU-bound and can pass the 5s default when the whole suite runs in parallel
+describe('ssh key routes', { timeout: 30_000 }, () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
   let orgId: string;
   let admin: ReturnType<typeof seedUser>;
