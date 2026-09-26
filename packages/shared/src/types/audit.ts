@@ -43,6 +43,8 @@ export type AuditAction =
   | 'user.passkey_added'
   | 'user.passkey_removed'
   | 'member.passkeys_reset'
+  | 'user.backup_codes_generated'
+  | 'user.login_backup_code'
   | 'org.passkey_policy'
   | 'api_token.create'
   | 'api_token.revoke'

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { browserSupportsWebAuthn } from '@simplewebauthn/browser';
 import { api } from '@/lib/api.js';
@@ -13,8 +13,9 @@ import {
   withStepUp,
 } from '@/lib/passkeys.js';
 import { useAuthStore } from '@/store/auth.js';
-import type { PasskeyInfo } from '@smt/shared';
-import { Fingerprint, Pencil, Plus, Trash2, Check, X } from 'lucide-react';
+import type { BackupCodeStatus, PasskeyInfo } from '@smt/shared';
+import { Fingerprint, Pencil, Plus, Trash2, Check, X, TriangleAlert, LifeBuoy } from 'lucide-react';
+import BackupCodes, { backupCodesNeedAttention } from '@/components/settings/BackupCodes.js';
 import { toast } from 'sonner';
 
 /** Toast a failed passkey action, unless the user simply dismissed the prompt. */
@@ -25,6 +26,12 @@ function reportError(err: Error) {
 export default function Passkeys() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Just signed in with a backup code: most likely a passkey was lost
+  const recovered = (location.state as { backupCodeSignIn?: boolean } | null)?.backupCodeSignIn === true;
+  const sectionRef = useRef<HTMLElement>(null);
+  // A first passkey was just added; point at backup codes next
+  const [suggestCodes, setSuggestCodes] = useState(false);
   const clearUser = useAuthStore((s) => s.clearUser);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
@@ -37,9 +44,23 @@ export default function Passkeys() {
     queryFn: () => api.get('/auth/passkeys'),
   });
 
+  // Backup codes only exist alongside a passkey
+  const { data: codeStatus } = useQuery<BackupCodeStatus>({
+    queryKey: ['backup-codes'],
+    queryFn: () => api.get('/auth/backup-codes'),
+    enabled: !!passkeys?.length,
+  });
+  const codesNeedAttention = !!passkeys?.length && backupCodesNeedAttention(codeStatus);
+
+  useEffect(() => {
+    if (recovered) sectionRef.current?.scrollIntoView({ block: 'start' });
+  }, [recovered]);
+
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['passkeys'] });
     qc.invalidateQueries({ queryKey: ['auth-me'] });
+    // Removing the last passkey clears the codes
+    qc.invalidateQueries({ queryKey: ['backup-codes'] });
   };
 
   // A first passkey needs the password and a recent sign-in; later ones need
@@ -54,6 +75,10 @@ export default function Passkeys() {
       setNewName('');
       setPassword('');
       toast.success('Passkey added');
+      if (first) {
+        setSuggestCodes(true);
+        toast.message('Next, generate backup codes in case you lose this passkey.');
+      }
     },
     onError: async (err: Error) => {
       if (!isReauthRequired(err)) return reportError(err);
@@ -78,9 +103,20 @@ export default function Passkeys() {
   });
 
   return (
-    <section className="mt-10">
+    <section id="passkeys" ref={sectionRef} className="mt-10 scroll-mt-6">
       <div className="flex items-center justify-between mb-1">
-        <h2 className="text-lg font-semibold">Passkeys</h2>
+        <h2 className="flex items-center gap-2 text-lg font-semibold">
+          Passkeys
+          {codesNeedAttention && (
+            <span
+              className="flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400"
+              title="Generate backup codes so a lost passkey cannot lock you out"
+            >
+              <TriangleAlert size={11} />
+              {codeStatus?.total ? `${codeStatus.remaining} backup codes left` : 'No backup codes'}
+            </span>
+          )}
+        </h2>
         {supported && !adding && (
           <button
             onClick={() => setAdding(true)}
@@ -94,6 +130,16 @@ export default function Passkeys() {
         Sign in with your fingerprint, face or device PIN instead of a password. Once you have a passkey,
         signing in with your password also asks for it.
       </p>
+
+      {recovered && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+          <LifeBuoy size={15} className="mt-0.5 shrink-0" />
+          <p>
+            You signed in with a backup code. If you lost a passkey, add a new one on this device and remove the lost
+            one below{codeStatus && codeStatus.remaining <= 2 ? ', then generate new backup codes' : ''}.
+          </p>
+        </div>
+      )}
 
       {!supported && (
         <p className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
@@ -205,6 +251,8 @@ export default function Passkeys() {
           ))
         )}
       </div>
+
+      {!!passkeys?.length && <BackupCodes status={codeStatus} suggest={suggestCodes} />}
     </section>
   );
 }

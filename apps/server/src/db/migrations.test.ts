@@ -163,3 +163,47 @@ describe('migration 0008 (passkeys)', () => {
     expect(db.prepare('SELECT id FROM webauthn_challenges ORDER BY id').all()).toEqual([{ id: 'c2' }, { id: 'c3' }]);
   });
 });
+
+const BACKUP_CODES_TAG = '0009_backup_codes';
+
+describe('migration 0009 (backup codes)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(BACKUP_CODES_TAG);
+  });
+
+  it('upgrades existing data: passkeys and pending sign-ins survive, tickets start with no attempts', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < BACKUP_CODES_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO passkeys (id, user_id, credential_id, public_key, device_type, name, created_at)
+        VALUES ('p1', 'u1', 'cred', x'0102', 'multiDevice', 'Laptop', 'now');
+      INSERT INTO webauthn_challenges (id, challenge, purpose, user_id, ticket_hash, expires_at, created_at)
+        VALUES ('c1', 'ch', 'second_factor', 'u1', 'hash', '2999-01-01', 'now');
+    `);
+
+    apply(db, [BACKUP_CODES_TAG]);
+
+    expect(db.prepare('SELECT id, attempts FROM webauthn_challenges').get()).toEqual({ id: 'c1', attempts: 0 });
+    expect(db.prepare('SELECT id FROM passkeys').get()).toEqual({ id: 'p1' });
+    expect(db.prepare('SELECT count(*) AS n FROM backup_codes').get()).toEqual({ n: 0 });
+  });
+
+  it('keeps code hashes unique and drops codes with their user', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u2', 'b@x.test', 'B', 'now', 'now');
+      INSERT INTO backup_codes (id, user_id, code_hash, created_at) VALUES ('b1', 'u1', 'h1', 'now');
+      INSERT INTO backup_codes (id, user_id, code_hash, created_at) VALUES ('b2', 'u2', 'h2', 'now');
+    `);
+    expect(db.prepare("SELECT used_at FROM backup_codes WHERE id = 'b1'").get()).toEqual({ used_at: null });
+    expect(() =>
+      db.exec("INSERT INTO backup_codes (id, user_id, code_hash, created_at) VALUES ('b3', 'u2', 'h1', 'now')"),
+    ).toThrow(/UNIQUE/);
+
+    db.exec("DELETE FROM users WHERE id = 'u1'");
+    expect(db.prepare('SELECT id FROM backup_codes').all()).toEqual([{ id: 'b2' }]);
+  });
+});

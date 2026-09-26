@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { browserSupportsWebAuthn } from '@simplewebauthn/browser';
 import type { Me, OrgSummary, Role, User } from '@smt/shared';
-import { Fingerprint, LogOut, ShieldCheck } from 'lucide-react';
+import { Fingerprint, KeyRound, LogOut, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import {
@@ -15,6 +15,7 @@ import {
   stepUp,
 } from '@/lib/passkeys.js';
 import { useAuthStore } from '@/store/auth.js';
+import { BackupCodesDialog, useGenerateBackupCodes } from '@/components/settings/BackupCodes.js';
 
 /**
  * Where a session lands when its org requires passkeys and it has not used
@@ -28,6 +29,10 @@ export default function PasskeySetupPage() {
   const [busy, setBusy] = useState(false);
   // A first passkey needs the password again, so a stolen session alone cannot add one
   const [password, setPassword] = useState('');
+  // The first passkey is in: offer backup codes before moving on
+  const [offerCodes, setOfferCodes] = useState(false);
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const generate = useGenerateBackupCodes(setCodes);
 
   const { data: me, refetch } = useQuery<Me>({ queryKey: ['auth-me'], queryFn: () => api.get('/auth/me') });
   const { data: orgs } = useQuery<OrgSummary[]>({ queryKey: ['auth-orgs'], queryFn: () => api.get('/auth/orgs') });
@@ -43,17 +48,21 @@ export default function PasskeySetupPage() {
 
   // Nothing to do here: the session is verified, or this org does not ask
   useEffect(() => {
-    if (me && (me.passkeyVerified || !me.requirePasskey)) done();
+    if (me && !offerCodes && (me.passkeyVerified || !me.requirePasskey)) done();
     // done() only navigates; re-run when the answer changes
   }, [me]);
 
-  async function run(action: () => Promise<unknown>, success: string) {
+  async function finish() {
+    const { data } = await refetch();
+    if (data?.passkeyVerified || !data?.requirePasskey) done();
+  }
+
+  async function run(action: () => Promise<unknown>, success: string, then: () => unknown = finish) {
     setBusy(true);
     try {
       await action();
       toast.success(success);
-      const { data } = await refetch();
-      if (data?.passkeyVerified || !data?.requirePasskey) done();
+      await then();
     } catch (err) {
       if (isReauthRequired(err)) {
         toast.message('Sign in again, then create your passkey within 15 minutes.');
@@ -91,14 +100,43 @@ export default function PasskeySetupPage() {
         <div className="mb-4 flex size-10 items-center justify-center rounded-full bg-primary/10">
           <ShieldCheck size={20} className="text-primary" />
         </div>
-        <h1 className="text-xl font-bold mb-1">{enrolling ? 'Create a passkey' : 'Verify with your passkey'}</h1>
+        <h1 className="text-xl font-bold mb-1">
+          {offerCodes ? 'Save backup codes' : enrolling ? 'Create a passkey' : 'Verify with your passkey'}
+        </h1>
         <p className="text-sm text-muted-foreground mb-6">
-          {enrolling
+          {offerCodes
+            ? 'A way back in if your passkey is ever lost, without waiting for an admin.'
+            : enrolling
             ? 'This organization requires passkeys. Create one now — it signs you in with your fingerprint, face or device PIN instead of a password, and cannot be phished.'
             : 'This organization requires signing in with a passkey. Confirm with one of your passkeys to continue.'}
         </p>
 
-        {!me ? (
+        {offerCodes ? (
+          <div className="space-y-3">
+            <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 px-3 py-3 text-sm">
+              <KeyRound size={18} className="mt-0.5 shrink-0 text-primary" />
+              <p>
+                Your passkey is ready. Generate backup codes too: each one signs you in once, after your password, if
+                you ever lose this device.
+              </p>
+            </div>
+            <button
+              onClick={() => generate.mutate()}
+              disabled={generate.isPending}
+              className="w-full flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              <KeyRound size={15} /> {generate.isPending ? 'Generating…' : 'Generate backup codes'}
+            </button>
+            <button
+              onClick={() => void finish()}
+              disabled={generate.isPending}
+              className="w-full rounded-md border border-border px-4 py-2 text-sm hover:bg-muted disabled:opacity-50"
+            >
+              Skip for now
+            </button>
+            {codes && <BackupCodesDialog codes={codes} onClose={() => { setCodes(null); void finish(); }} />}
+          </div>
+        ) : !me ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : !supported ? (
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
@@ -108,7 +146,7 @@ export default function PasskeySetupPage() {
           </div>
         ) : enrolling ? (
           <form
-            onSubmit={(e) => { e.preventDefault(); void run(() => registerPasskey(undefined, password), 'Passkey created'); }}
+            onSubmit={(e) => { e.preventDefault(); void run(() => registerPasskey(undefined, password), 'Passkey created', () => setOfferCodes(true)); }}
             className="space-y-3"
           >
             <div>
@@ -141,9 +179,9 @@ export default function PasskeySetupPage() {
           </button>
         )}
 
-        {me && !enrolling && (
+        {me && !enrolling && !offerCodes && (
           <p className="mt-3 text-xs text-muted-foreground">
-            Lost access to your passkey? An admin of this organization can reset it; you then create a new one after signing in with your password.
+            Lost access to your passkey? Sign out and sign in again with your password and one of your backup codes, or ask an admin of this organization to reset your passkeys.
           </p>
         )}
 

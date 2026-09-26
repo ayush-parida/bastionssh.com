@@ -5,7 +5,7 @@ import {
   type PublicKeyCredentialCreationOptionsJSON,
   type PublicKeyCredentialRequestOptionsJSON,
 } from '@simplewebauthn/browser';
-import type { PasskeyInfo, SignedIn } from '@smt/shared';
+import type { BackupCodeSignedIn, PasskeyInfo, SignedIn } from '@smt/shared';
 import { api, ApiError } from '@/lib/api.js';
 
 interface Ceremony<T> {
@@ -49,6 +49,20 @@ export function passkeyErrorMessage(err: unknown, fallback = 'Passkey failed'): 
 export async function finishPasswordLogin(ticket: string, options: object): Promise<SignedIn> {
   const response = await startAuthentication({ optionsJSON: options as PublicKeyCredentialRequestOptionsJSON });
   return api.post<SignedIn>('/auth/login/passkey', { ticket, response });
+}
+
+/**
+ * Second step of a password login without the passkey: spend one of the
+ * account's backup codes on the same ticket. A wrong code leaves the ticket
+ * usable for a few more tries; SIGN_IN_EXPIRED means start over.
+ */
+export function finishWithBackupCode(ticket: string, code: string): Promise<BackupCodeSignedIn> {
+  return api.post<BackupCodeSignedIn>('/auth/login/backup-code', { ticket, code });
+}
+
+/** The pending sign-in is gone (expired, or too many wrong codes): back to the password. */
+export function isSignInExpired(err: unknown): boolean {
+  return err instanceof ApiError && err.code === 'SIGN_IN_EXPIRED';
 }
 
 /**

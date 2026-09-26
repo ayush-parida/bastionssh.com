@@ -262,22 +262,48 @@ function escapeHtml(s: string): string {
 }
 
 /**
- * Tell the account owner a passkey was added, when the operator configured
- * SMTP. Best-effort and never awaited by the request: if it was not them,
- * this is how they find out.
+ * Email the account owner about a change to how they sign in, when the
+ * operator configured SMTP. Best-effort and never awaited by the request: if
+ * it was not them, this is how they find out.
  */
-export function notifyPasskeyAdded(user: { email: string; displayName: string }, passkeyName: string, ip: string) {
+function notifyAccountOwner(user: { email: string; displayName: string }, subject: string, what: string, notice: string) {
   if (!emailAvailable()) return;
-  const when = new Date().toUTCString();
   const lines = [
     `Hi ${user.displayName},`,
-    `A passkey named "${passkeyName}" was added to your ${config.webauthn.rpName} account on ${when} from ${ip}.`,
+    what,
     'If this was not you, ask an organization admin to reset your passkeys and your password right away.',
   ];
   sendEmail({
     to: [user.email],
-    subject: `A passkey was added to your ${config.webauthn.rpName} account`,
+    subject,
     text: lines.join('\n\n'),
     html: lines.map((l) => `<p>${escapeHtml(l)}</p>`).join(''),
-  }).catch((err) => logger.warn({ err }, 'Could not send the passkey-added notice'));
+  }).catch((err) => logger.warn({ err }, `Could not send the ${notice} notice`));
+}
+
+export function notifyPasskeyAdded(user: { email: string; displayName: string }, passkeyName: string, ip: string) {
+  notifyAccountOwner(
+    user,
+    `A passkey was added to your ${config.webauthn.rpName} account`,
+    `A passkey named "${passkeyName}" was added to your ${config.webauthn.rpName} account on ${new Date().toUTCString()} from ${ip}.`,
+    'passkey-added',
+  );
+}
+
+export function notifyBackupCodesGenerated(user: { email: string; displayName: string }, ip: string) {
+  notifyAccountOwner(
+    user,
+    `New backup codes for your ${config.webauthn.rpName} account`,
+    `A new set of backup codes was generated for your ${config.webauthn.rpName} account on ${new Date().toUTCString()} from ${ip}. Any earlier codes no longer work.`,
+    'backup-codes-generated',
+  );
+}
+
+export function notifyBackupCodeUsed(user: { email: string; displayName: string }, remaining: number, ip: string) {
+  notifyAccountOwner(
+    user,
+    `A backup code was used to sign in to your ${config.webauthn.rpName} account`,
+    `A backup code was used instead of a passkey to sign in to your ${config.webauthn.rpName} account on ${new Date().toUTCString()} from ${ip}. ${remaining} unused ${remaining === 1 ? 'code is' : 'codes are'} left.`,
+    'backup-code-used',
+  );
 }

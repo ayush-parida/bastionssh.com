@@ -28,6 +28,8 @@ import {
   MAX_PASSKEYS_PER_USER,
   orgRequiresPasskey,
   FIRST_ENROLLMENT_MAX_SESSION_AGE_MS,
+  notifyBackupCodeUsed,
+  notifyBackupCodesGenerated,
   notifyPasskeyAdded,
   parseTransports,
   passkeyCount,
@@ -38,11 +40,28 @@ import {
   userPasskeys,
   verifyAssertion,
 } from '../../auth/passkey.js';
+import {
+  backupCodeStatus,
+  deleteBackupCodes,
+  generateBackupCodes,
+  redeemBackupCode,
+  remainingBackupCodes,
+} from '../../auth/backup-codes.js';
 import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { config } from '../../config/index.js';
 import { and, asc, desc, eq, gt, ne, sql } from 'drizzle-orm';
-import type { Me, OrgSummary, PasskeyInfo, PasskeyLoginStep, SessionInfo, SignedIn } from '@smt/shared';
+import type {
+  BackupCodeSignedIn,
+  BackupCodeStatus,
+  GeneratedBackupCodes,
+  Me,
+  OrgSummary,
+  PasskeyInfo,
+  PasskeyLoginStep,
+  SessionInfo,
+  SignedIn,
+} from '@smt/shared';
 
 const loginSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
@@ -69,6 +88,12 @@ const credentialSchema = z.object({ id: z.string().min(1).max(1024) }).passthrou
 const ticketLoginSchema = z.object({
   ticket: z.string().min(1).max(200),
   response: credentialSchema,
+});
+
+/** Accepts the code however it was typed; normalizeBackupCode sorts out case, dashes and spaces. */
+const backupCodeLoginSchema = z.object({
+  ticket: z.string().min(1).max(200),
+  code: z.string().min(1).max(64),
 });
 
 const challengeResponseSchema = z.object({
@@ -98,7 +123,7 @@ function asRole(role: string): Role {
 }
 
 type Account = typeof users.$inferSelect;
-type LoginMethod = 'password' | 'password+passkey' | 'passkey';
+type LoginMethod = 'password' | 'password+passkey' | 'password+backup_code' | 'passkey';
 
 /**
  * The membership a new sign-in lands in, or a 403 already sent when every one
@@ -120,7 +145,9 @@ async function startSession(
   user: Account,
   membership: typeof memberships.$inferSelect | undefined,
   method: LoginMethod,
+  auditDetails: Record<string, unknown> = {},
 ): Promise<SignedIn> {
+  // A backup code is the recovery path for the passkey factor, so it counts as one
   const passkeyVerified = method !== 'password';
   const session = await createSession(user.id, {
     ipAddress: req.ip,
@@ -135,7 +162,9 @@ async function startSession(
     req.user = { id: user.id, email: user.email, displayName: user.displayName };
     req.orgId = membership.orgId;
     if (method === 'password') await audit(req, 'user.login', 'user', user.id, user.email);
-    else await audit(req, 'user.login_passkey', 'user', user.id, user.email, { method });
+    else if (method === 'password+backup_code') {
+      await audit(req, 'user.login_backup_code', 'user', user.id, user.email, { method, ...auditDetails });
+    } else await audit(req, 'user.login_passkey', 'user', user.id, user.email, { method });
   }
   return {
     user: { id: user.id, email: user.email, displayName: user.displayName },
@@ -204,6 +233,51 @@ export async function authRoutes(app: FastifyInstance) {
     const landing = signInMembership(user.id, reply);
     if (!landing) return reply;
     return startSession(req, reply, user, landing.membership, 'password+passkey');
+  });
+
+  /**
+   * Second half of a password login without the passkey: the same ticket plus
+   * one of the account's backup codes. It stands in for the passkey, so the
+   * session is passkey-verified. Never accepted where a passkey alone would
+   * do (passwordless sign-in) or to re-confirm one (step-up). A wrong code
+   * counts against the ticket rather than spending it, up to a limit.
+   */
+  app.post('/login/backup-code', { config: SIGN_IN_RATE_LIMIT }, async (req, reply) => {
+    const body = backupCodeLoginSchema.parse(req.body);
+    // Membership is checked before the code is spent: a suspension that landed
+    // while the ticket was out must not also burn one of the user's codes
+    const result = redeemBackupCode(
+      body.ticket,
+      body.code,
+      (userId) => resolveMembership(userId).status !== 'suspended',
+    );
+    if (result.status === 'refused') return reply.status(403).send({ error: SUSPENDED_MESSAGE });
+    if (result.status === 'expired') {
+      return reply
+        .status(401)
+        .send({ error: 'This sign-in has expired. Enter your password again.', code: 'SIGN_IN_EXPIRED' });
+    }
+    if (result.status === 'wrong') {
+      return reply.status(401).send(
+        result.attemptsLeft
+          ? {
+              error: `That backup code is not valid or has already been used (${result.attemptsLeft} ${result.attemptsLeft === 1 ? 'try' : 'tries'} left).`,
+              attemptsLeft: result.attemptsLeft,
+            }
+          : { error: 'Too many wrong backup codes. Enter your password again.', code: 'SIGN_IN_EXPIRED', attemptsLeft: 0 },
+      );
+    }
+
+    const user = getDb().select().from(users).where(eq(users.id, result.userId)).get();
+    if (!user) return reply.status(401).send({ error: 'Invalid credentials' });
+    // Synchronous since the redemption above, so this sees the membership it admitted
+    const landing = signInMembership(user.id, reply);
+    if (!landing) return reply;
+
+    const remaining = remainingBackupCodes(user.id);
+    const signedIn = await startSession(req, reply, user, landing.membership, 'password+backup_code', { remaining });
+    notifyBackupCodeUsed(user, remaining, req.ip);
+    return { ...signedIn, backupCodesRemaining: remaining } satisfies BackupCodeSignedIn;
   });
 
   /** Passwordless sign-in, step one: a challenge any of the user's discoverable passkeys can answer. */
@@ -346,6 +420,7 @@ export async function authRoutes(app: FastifyInstance) {
       passkeyVerified: req.passkeyVerified,
       requirePasskey: orgRequiresPasskey(req.orgId),
       passkeyCount: passkeyCount(req.user.id),
+      backupCodesRemaining: remainingBackupCodes(req.user.id),
     };
   });
 
@@ -403,6 +478,49 @@ export async function authRoutes(app: FastifyInstance) {
 
     await audit(req, 'user.password_change', 'user', user.id, user.email);
     return { ok: true };
+  });
+
+  // ── Backup codes ────────────────────────────────────────────────────────────
+
+  /** How many of the current set are left. Never the codes themselves. */
+  app.get('/backup-codes', { preHandler: requireAuth }, async (req): Promise<BackupCodeStatus> => {
+    return backupCodeStatus(req.user.id);
+  });
+
+  /**
+   * A new set of backup codes, replacing any earlier one. Only for accounts
+   * with a passkey — a password-only sign-in has no second step to recover —
+   * and only from a session that has used a passkey (or a backup code), so a
+   * password alone cannot mint a way around the passkey.
+   */
+  app.post('/backup-codes', { preHandler: requireAuth }, async (req, reply): Promise<GeneratedBackupCodes | undefined> => {
+    if (!requireBrowserSession(req, reply, 'Backup codes are managed from a signed-in browser, not with an API token')) {
+      return reply;
+    }
+    if (passkeyCount(req.user.id) === 0) {
+      return reply.status(400).send({ error: 'Add a passkey before generating backup codes' });
+    }
+    if (!req.passkeyVerified) {
+      return reply.status(403).send({ error: STEP_UP_MESSAGE, code: 'PASSKEY_STEP_UP_REQUIRED' });
+    }
+
+    const generated = generateBackupCodes(req.user.id);
+    // The last passkey went while this request was on its way
+    if (!generated) return reply.status(400).send({ error: 'Add a passkey before generating backup codes' });
+
+    await audit(req, 'user.backup_codes_generated', 'user', req.user.id, req.user.email, {
+      count: generated.codes.length,
+      replaced: generated.replaced,
+    });
+    notifyBackupCodesGenerated(req.user, req.ip);
+    // Plaintext codes: keep them out of every browser and proxy cache
+    reply.header('Cache-Control', 'no-store');
+    return reply.status(201).send({
+      codes: generated.codes,
+      total: generated.codes.length,
+      remaining: generated.codes.length,
+      createdAt: generated.createdAt,
+    } satisfies GeneratedBackupCodes);
   });
 
   // ── Passkeys ────────────────────────────────────────────────────────────────
@@ -670,8 +788,12 @@ export async function authRoutes(app: FastifyInstance) {
 
     // Count and delete together, so two concurrent deletes cannot both see "not the last one"
     const removed = db.transaction(() => {
-      if (passkeyCount(req.user.id) === 1 && anyActiveOrgRequiresPasskey(req.user.id)) return false;
+      const count = passkeyCount(req.user.id);
+      if (count === 1 && anyActiveOrgRequiresPasskey(req.user.id)) return false;
       db.delete(passkeys).where(eq(passkeys.id, id)).run();
+      // Backup codes stand in for a passkey; with none left they would only be
+      // waiting to come back to life with the next one
+      if (count === 1) deleteBackupCodes(req.user.id);
       return true;
     });
     if (!removed) {

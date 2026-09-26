@@ -111,6 +111,26 @@ export interface PasskeyLoginStep {
 
 export type LoginResponse = SignedIn | PasskeyLoginStep;
 
+/** POST /auth/login/backup-code: a sign-in that spent one of the account's backup codes. */
+export interface BackupCodeSignedIn extends SignedIn {
+  /** Unused codes left after this one. */
+  backupCodesRemaining: number;
+}
+
+/** GET /auth/backup-codes. The codes themselves are only ever returned when generated. */
+export interface BackupCodeStatus {
+  /** Codes in the current set; 0 when none were ever generated (or they were cleared). */
+  total: number;
+  remaining: number;
+  createdAt: string | null;
+}
+
+/** POST /auth/backup-codes: a new set, replacing any earlier one. Shown once. */
+export interface GeneratedBackupCodes extends BackupCodeStatus {
+  /** Formatted XXXXX-XXXXX. */
+  codes: string[];
+}
+
 /** GET /auth/me */
 export interface Me {
   id: string;
@@ -123,6 +143,8 @@ export interface Me {
   /** The current org requires passkeys. */
   requirePasskey: boolean;
   passkeyCount: number;
+  /** Unused backup codes, so the app can warn when they run low. */
+  backupCodesRemaining: number;
 }
 
 export interface LoginRequest {

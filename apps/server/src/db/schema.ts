@@ -78,6 +78,8 @@ export const webauthnChallenges = sqliteTable(
     // publicSessionId() of the session that asked, for register and step_up
     sessionHash: text('session_hash'),
     ticketHash: text('ticket_hash').unique(),
+    // Wrong backup codes tried against a `second_factor` ticket; it is dropped at the limit
+    attempts: integer('attempts').notNull().default(0),
     expiresAt: text('expires_at').notNull(),
     createdAt: text('created_at')
       .notNull()
@@ -85,6 +87,28 @@ export const webauthnChallenges = sqliteTable(
   },
   (t) => ({
     expiresIdx: index('webauthn_challenges_expires_idx').on(t.expiresAt),
+  }),
+);
+
+/**
+ * One-time recovery codes that stand in for a passkey after a correct
+ * password. Only an HMAC of each code is stored; a set is replaced whole.
+ */
+export const backupCodes = sqliteTable(
+  'backup_codes',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    codeHash: text('code_hash').notNull().unique(),
+    usedAt: text('used_at'),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    userIdx: index('backup_codes_user_idx').on(t.userId),
   }),
 );
 

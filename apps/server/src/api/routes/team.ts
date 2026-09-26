@@ -42,6 +42,7 @@ import {
 import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { passkeyCount, requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
+import { deleteBackupCodes } from '../../auth/backup-codes.js';
 import { config } from '../../config/index.js';
 
 const roleSchema = z.enum(ROLES);
@@ -595,19 +596,22 @@ export async function teamRoutes(app: FastifyInstance) {
 
     const removed = db.transaction(() => {
       const n = db.delete(passkeys).where(eq(passkeys.userId, userId)).run().changes;
+      // Backup codes stand in for the passkeys, so they go with them
+      const codes = deleteBackupCodes(userId);
       // A pending sign-in ticket or ceremony must not complete against the old state
       db.delete(webauthnChallenges).where(eq(webauthnChallenges.userId, userId)).run();
-      return n;
+      return { n, codes };
     });
     const revoked = invalidateUserSessions(userId);
     const live = revokeLiveAccess(userId);
 
     await audit(req, 'member.passkeys_reset', 'member', userId, userEmail(userId), {
-      removed,
+      removed: removed.n,
+      backupCodesRemoved: removed.codes,
       sessionsRevoked: revoked,
       live,
     });
-    return { removed, revoked };
+    return { removed: removed.n, revoked };
   });
 
   /** Sign a member out of every browser. */
