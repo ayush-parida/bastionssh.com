@@ -1,32 +1,39 @@
 import { and, eq } from 'drizzle-orm';
-import type { Client } from 'basic-ftp';
-import type { FtpProtocol } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { ftpConnections } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import logger from '../logger.js';
-import { openClient, type FtpTarget } from './client.js';
-import { FtpError, isReplyError, toFtpError } from './errors.js';
+import { FtpError, toFtpError } from './errors.js';
+import type { FileBackend, FileSession, FtpConnectionRow } from './backend.js';
+import { ftpBackend } from './ftp-backend.js';
+import { sftpBackend } from './sftp-backend.js';
 
 export * from './errors.js';
 export * from './paths.js';
 export * as ops from './ops.js';
+export { toTarget } from './ftp-backend.js';
+export type { FileBackend, FileSession, FtpConnectionRow } from './backend.js';
 
-export type FtpConnectionRow = typeof ftpConnections.$inferSelect;
+/** SFTP goes through ssh2; every other protocol is basic-ftp. */
+export function backendFor(protocol: string): FileBackend {
+  return protocol === 'sftp' ? sftpBackend : ftpBackend;
+}
 
 /** Close a pooled connection after this long with nothing in flight. */
 const IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 
 /**
- * An FTP control connection runs one command at a time, so each pooled client
+ * An FTP control connection runs one command at a time, so each pooled session
  * carries a promise chain that serializes the operations queued against it.
+ * SFTP sessions go through the same queue: one user rarely has two requests in
+ * flight, and it keeps the lifecycle identical for both backends.
  * Pools are keyed per user so a channel is never shared across people, and
  * `updatedAt` is part of the check so editing a connection reconnects.
  */
 interface Slot {
   updatedAt: string;
   queue: Promise<unknown>;
-  client?: Client;
+  session?: FileSession;
   idleTimer?: NodeJS.Timeout;
 }
 
@@ -38,8 +45,8 @@ export function poolKey(orgId: string, connectionId: string, userId: string): st
 
 function closeSlot(slot: Slot): void {
   clearTimeout(slot.idleTimer);
-  slot.client?.close();
-  slot.client = undefined;
+  slot.session?.close();
+  slot.session = undefined;
 }
 
 function scheduleIdleClose(key: string, slot: Slot): void {
@@ -60,16 +67,6 @@ export function evictConnection(connectionId: string): void {
   }
 }
 
-export function toTarget(connection: FtpConnectionRow): FtpTarget {
-  return {
-    host: connection.host,
-    port: connection.port,
-    protocol: connection.protocol as FtpProtocol,
-    username: connection.username,
-    verifyTls: connection.verifyTls,
-  };
-}
-
 /** Load a connection scoped to the caller's org. */
 export function loadConnection(orgId: string, id: string): FtpConnectionRow {
   const connection = getDb()
@@ -86,17 +83,17 @@ export async function decryptPassword(connection: FtpConnectionRow): Promise<str
 }
 
 /**
- * Run `fn` against a logged-in client for this user and connection, opening
+ * Run `fn` against a logged-in session for this user and connection, opening
  * one if needed and waiting for any operation already queued on it. A failure
- * that is not a plain FTP reply (a dropped socket, a timeout, an aborted
- * transfer) leaves the control connection in an unknown state, so the client
- * is closed and the next call reconnects.
+ * that is not a plain server refusal (a dropped socket, a timeout, an aborted
+ * transfer) leaves the connection in an unknown state, so the session is
+ * closed and the next call reconnects.
  */
-export async function withClient<T>(
+export async function withSession<T>(
   orgId: string,
   connectionId: string,
   userId: string,
-  fn: (client: Client, connection: FtpConnectionRow) => Promise<T>,
+  fn: (session: FileSession, connection: FtpConnectionRow) => Promise<T>,
 ): Promise<T> {
   const connection = loadConnection(orgId, connectionId);
   const key = poolKey(orgId, connectionId, userId);
@@ -116,15 +113,22 @@ export async function withClient<T>(
   const task = async (): Promise<T> => {
     clearTimeout(current.idleTimer);
     try {
-      if (!current.client || current.client.closed) {
-        current.client = await openClient(toTarget(connection), await decryptPassword(connection));
+      if (!current.session || current.session.closed) {
+        // Release whatever is left of a session the server dropped
+        current.session?.close();
+        current.session = undefined;
+        current.session = await backendFor(connection.protocol).open(
+          connection,
+          await decryptPassword(connection),
+        );
       }
+      const session = current.session;
       try {
-        return await fn(current.client, connection);
+        return await fn(session, connection);
       } catch (err) {
-        if (!isReplyError(err)) {
+        if (!session.survives(err)) {
           logger.warn(
-            { err, host: connection.host },
+            { err, host: connection.host, protocol: connection.protocol },
             'FTP session dropped; reconnecting next time',
           );
           closeSlot(current);
@@ -132,7 +136,10 @@ export async function withClient<T>(
         throw toFtpError(err);
       }
     } finally {
+      // An edit or delete may have evicted this slot while the session was
+      // still opening; nothing would ever close it after that.
       if (pool.get(key) === current) scheduleIdleClose(key, current);
+      else closeSlot(current);
     }
   };
 

@@ -32,6 +32,8 @@ export interface HostKeyMismatchErrorBody {
   error: string;
   code: 'HOST_KEY_MISMATCH';
   serverId?: string;
+  /** Set instead of serverId when an SFTP file connection was refused. */
+  ftpConnectionId?: string;
   expected: string;
   presented: string;
 }

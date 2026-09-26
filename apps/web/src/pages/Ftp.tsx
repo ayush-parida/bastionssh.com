@@ -23,6 +23,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { FtpHostKeySection } from '@/components/ftp/FtpHostKey.js';
 
 interface ConnectionForm {
   name: string;
@@ -53,6 +54,11 @@ const inputClass =
 
 function describeTarget(c: FtpConnection): string {
   return `${c.username}@${c.host}:${c.port}`;
+}
+
+function protocolBadge(protocol: FtpProtocol): string {
+  if (protocol === 'ftp') return 'FTP · no TLS';
+  return protocol === 'sftp' ? 'SFTP' : 'FTPS';
 }
 
 export default function FtpPage() {
@@ -144,7 +150,8 @@ export default function FtpPage() {
   }
 
   const option = ftpProtocolOption(form.protocol);
-  const usesTls = form.protocol !== 'ftp';
+  // SFTP authenticates the host by its SSH key, not a certificate
+  const usesTls = form.protocol !== 'ftp' && form.protocol !== 'sftp';
 
   function setProtocol(protocol: FtpProtocol) {
     setForm((p) => {
@@ -198,7 +205,8 @@ export default function FtpPage() {
         <div>
           <h1 className="text-2xl font-bold">FTP</h1>
           <p className="text-muted-foreground text-sm">
-            Browse and manage files on FTP and FTPS servers — shared hosting, cPanel, legacy boxes
+            Browse and manage files on FTP, FTPS and SFTP servers — shared hosting, cPanel,
+            SFTP-only accounts, legacy boxes
           </p>
         </div>
         {canManage && (
@@ -254,7 +262,7 @@ export default function FtpPage() {
                 required
                 value={form.host}
                 onChange={(e) => setForm((p) => ({ ...p, host: e.target.value }))}
-                placeholder="ftp.example.com"
+                placeholder={form.protocol === 'sftp' ? 'sftp.example.com' : 'ftp.example.com'}
                 className={`${inputClass} font-mono`}
               />
             </div>
@@ -351,7 +359,7 @@ export default function FtpPage() {
           <FolderSync size={40} className="mb-3 opacity-30" />
           <p>
             No FTP connections yet.
-            {canManage ? ' Click "Add connection" to register an FTP or FTPS server.' : ''}
+            {canManage ? ' Click "Add connection" to register an FTP, FTPS or SFTP server.' : ''}
           </p>
         </div>
       ) : (
@@ -379,9 +387,10 @@ export default function FtpPage() {
                   }`}
                   title={ftpProtocolOption(c.protocol).label}
                 >
-                  {c.protocol === 'ftp' ? 'FTP · no TLS' : 'FTPS'}
+                  {protocolBadge(c.protocol)}
                 </span>
               </div>
+              {c.protocol === 'sftp' && <FtpHostKeySection connection={c} />}
               {c.lastStatus && (
                 <p
                   className={`flex items-center gap-1 text-xs ${

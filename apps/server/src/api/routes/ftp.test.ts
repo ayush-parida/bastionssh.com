@@ -153,7 +153,8 @@ describe('ftp routes', () => {
       });
     expect((await post({ host: 'ftp://ftp.example.com' })).statusCode).toBe(400);
     expect((await post({ host: '169.254.169.254' })).statusCode).toBe(400);
-    expect((await post({ protocol: 'sftp' })).statusCode).toBe(400);
+    // sftp is a real protocol now; anything outside the enum is still refused
+    expect((await post({ protocol: 'scp' })).statusCode).toBe(400);
     expect((await post({ rootPath: 'public_html' })).statusCode).toBe(400);
   });
 

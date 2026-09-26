@@ -615,11 +615,18 @@ export const ftpConnections = sqliteTable(
     name: text('name').notNull(),
     host: text('host').notNull(),
     port: integer('port').notNull().default(21),
-    protocol: text('protocol').notNull().default('ftps'), // ftp | ftps | ftps-implicit
+    protocol: text('protocol').notNull().default('ftps'), // ftp | ftps | ftps-implicit | sftp
     username: text('username').notNull(),
     encryptedPassword: text('encrypted_password').notNull(),
     verifyTls: integer('verify_tls', { mode: 'boolean' }).notNull().default(true),
     rootPath: text('root_path'), // null = the account's login directory
+    // SFTP only — pinned SSH host key; null = trust on first use (see ssh/host-keys.ts)
+    hostKeyFingerprint: text('host_key_fingerprint'), // SHA256:<base64, no padding>
+    hostKeyType: text('host_key_type'),
+    hostKeyTrustedAt: text('host_key_trusted_at'),
+    // A different key the host presented; connections are refused while set
+    hostKeyMismatchFingerprint: text('host_key_mismatch_fingerprint'),
+    hostKeyMismatchAt: text('host_key_mismatch_at'),
     lastStatus: text('last_status'), // ok | failed
     lastError: text('last_error'),
     lastTestedAt: text('last_tested_at'),

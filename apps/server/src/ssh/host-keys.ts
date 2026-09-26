@@ -26,6 +26,9 @@ import logger from '../logger.js';
  *
  * Fingerprints use the OpenSSH format, `SHA256:<base64 without padding>` of the
  * raw key blob, so they compare directly with `ssh-keygen -lf`.
+ *
+ * The same checks guard SFTP file connections (ftp/host-keys.ts); a
+ * {@link HostKeyStore} says which table holds the pinned key.
  */
 
 /** Why a connection was opened — recorded with TOFU and mismatch audit rows. */
@@ -64,17 +67,22 @@ export function isValidFingerprint(value: string): boolean {
   return HOST_KEY_FINGERPRINT_PATTERN.test(value);
 }
 
+/** What kind of row a pinned key belongs to; also the audit resource type. */
+export type HostKeySubjectKind = 'server' | 'ftp_connection';
+
 /** The host presented a different key than the pinned one; the handshake was refused. */
 export class HostKeyMismatchError extends Error {
   readonly statusCode = 409;
   readonly code = 'HOST_KEY_MISMATCH';
 
   constructor(
+    /** The row id — a server, or an FTP connection when `subject` says so. */
     readonly serverId: string,
     readonly expected: string,
     readonly presented: string,
     readonly presentedType: string | null,
     serverLabel = 'this server',
+    readonly subject: HostKeySubjectKind = 'server',
   ) {
     super(
       `SSH host key for ${serverLabel} has changed: expected ${expected}, but the host presented ${presented}. ` +
@@ -87,7 +95,9 @@ export class HostKeyMismatchError extends Error {
     return {
       error: this.message,
       code: this.code,
-      serverId: this.serverId,
+      ...(this.subject === 'server'
+        ? { serverId: this.serverId }
+        : { ftpConnectionId: this.serverId }),
       expected: this.expected,
       presented: this.presented,
     };
@@ -119,9 +129,87 @@ export function hostKeyView(row: ServerRow): ServerHostKey {
   };
 }
 
+/** The columns the verifier reads, whichever table they come from. */
+export interface HostKeySubject {
+  id: string;
+  orgId: string;
+  name: string;
+  host: string;
+  port: number;
+  hostKeyFingerprint: string | null;
+  hostKeyType: string | null;
+}
+
+/**
+ * Where pinned keys are kept. The decision logic is shared; each kind of SSH
+ * endpoint supplies its own table. Every write is conditional so concurrent
+ * handshakes cannot overwrite each other.
+ */
+export interface HostKeyStore {
+  kind: HostKeySubjectKind;
+  load(id: string): HostKeySubject | undefined;
+  /** Pin a first-use key only while nothing is pinned. False when another connection won. */
+  trustOnFirstUse(id: string, fingerprint: string, type: string | null, at: string): boolean;
+  /** Record the key type of a pinned fingerprint that was entered without one. */
+  fillType(id: string, fingerprint: string, type: string): void;
+  /** Record a presented key unless it is the mismatch already on file. False when unchanged. */
+  recordMismatch(id: string, fingerprint: string, type: string | null, at: string): boolean;
+  /** Raise an alert for a newly recorded mismatch, where this kind of endpoint has alerts. */
+  alert?(subject: HostKeySubject, message: string): void;
+}
+
 function loadServer(serverId: string): ServerRow | undefined {
   return getDb().select().from(servers).where(eq(servers.id, serverId)).get();
 }
+
+/** Pinned keys of managed servers, on the servers table. */
+export const serverHostKeyStore: HostKeyStore = {
+  kind: 'server',
+  load: loadServer,
+  trustOnFirstUse(id, fingerprint, type, at) {
+    const result = getDb()
+      .update(servers)
+      .set({
+        hostKeyFingerprint: fingerprint,
+        hostKeyType: type,
+        hostKeyTrustedAt: at,
+        hostKeyTrustedBy: null,
+      })
+      .where(and(eq(servers.id, id), isNull(servers.hostKeyFingerprint)))
+      .run();
+    return result.changes > 0;
+  },
+  fillType(id, fingerprint, type) {
+    getDb()
+      .update(servers)
+      .set({ hostKeyType: type })
+      .where(and(eq(servers.id, id), eq(servers.hostKeyFingerprint, fingerprint)))
+      .run();
+  },
+  recordMismatch(id, fingerprint, type, at) {
+    const result = getDb()
+      .update(servers)
+      .set({
+        hostKeyMismatchFingerprint: fingerprint,
+        hostKeyMismatchType: type,
+        hostKeyMismatchAt: at,
+      })
+      .where(
+        and(
+          eq(servers.id, id),
+          or(
+            isNull(servers.hostKeyMismatchFingerprint),
+            ne(servers.hostKeyMismatchFingerprint, fingerprint),
+          ),
+        ),
+      )
+      .run();
+    return result.changes > 0;
+  },
+  alert(subject, message) {
+    openHostKeyAlert(subject.orgId, subject.id, message);
+  },
+};
 
 function mismatchMessage(expected: string, presented: string) {
   return `SSH host key changed: expected ${expected}, host presented ${presented}. Connections are refused until an admin reviews it.`;
@@ -151,19 +239,25 @@ export function checkHostKey(
   blob: Buffer,
   purpose: HostKeyPurpose,
   endpoint?: HostKeyEndpoint,
+  store: HostKeyStore = serverHostKeyStore,
 ): HostKeyCheck {
   const presented = hostKeyFingerprint(blob);
   const type = hostKeyType(blob);
-  const db = getDb();
+  const kind = store.kind;
 
   // Two attempts: the second only runs when a concurrent connection pinned a
   // key between our read and our TOFU write.
   for (let attempt = 0; attempt < 2; attempt++) {
-    const row = loadServer(serverId);
-    if (!row) return { ok: false, error: new Error('Host key could not be verified: server not found') };
+    const row = store.load(serverId);
+    if (!row) {
+      return {
+        ok: false,
+        error: new Error(`Host key could not be verified: ${kind === 'server' ? 'server' : 'connection'} not found`),
+      };
+    }
     if (endpoint && (row.host !== endpoint.host || row.port !== endpoint.port)) {
       logger.warn(
-        { serverId, connectedTo: endpoint, current: { host: row.host, port: row.port }, purpose },
+        { serverId, kind, connectedTo: endpoint, current: { host: row.host, port: row.port }, purpose },
         'Server address changed while connecting — host key not checked, connection refused',
       );
       return {
@@ -173,21 +267,10 @@ export function checkHostKey(
     }
 
     if (!row.hostKeyFingerprint) {
-      const now = new Date().toISOString();
-      const result = db
-        .update(servers)
-        .set({
-          hostKeyFingerprint: presented,
-          hostKeyType: type,
-          hostKeyTrustedAt: now,
-          hostKeyTrustedBy: null,
-        })
-        .where(and(eq(servers.id, serverId), isNull(servers.hostKeyFingerprint)))
-        .run();
-      if (result.changes === 0) continue;
+      if (!store.trustOnFirstUse(serverId, presented, type, new Date().toISOString())) continue;
 
-      logger.info({ serverId, fingerprint: presented, type, purpose }, 'Trusted SSH host key on first use');
-      auditSystem(row.orgId, 'server.host_key_trusted', 'server', row.id, row.name, {
+      logger.info({ serverId, kind, fingerprint: presented, type, purpose }, 'Trusted SSH host key on first use');
+      auditSystem(row.orgId, `${kind}.host_key_trusted`, kind, row.id, row.name, {
         method: 'tofu',
         fingerprint: presented,
         type,
@@ -198,49 +281,27 @@ export function checkHostKey(
 
     if (row.hostKeyFingerprint === presented) {
       // A pre-pinned fingerprint carries no type; fill it in from the real key
-      if (!row.hostKeyType && type) {
-        db.update(servers)
-          .set({ hostKeyType: type })
-          .where(and(eq(servers.id, serverId), eq(servers.hostKeyFingerprint, presented)))
-          .run();
-      }
+      if (!row.hostKeyType && type) store.fillType(serverId, presented, type);
       return { ok: true };
     }
 
     const expected = row.hostKeyFingerprint;
     logger.warn(
-      { serverId, host: row.host, port: row.port, expected, presented, type, purpose },
+      { serverId, kind, host: row.host, port: row.port, expected, presented, type, purpose },
       'SSH host key mismatch — connection refused',
     );
 
     // Only a new distinct key is recorded, audited and alerted; a host that
     // keeps presenting the same wrong key does not flood the log.
-    const recorded = db
-      .update(servers)
-      .set({
-        hostKeyMismatchFingerprint: presented,
-        hostKeyMismatchType: type,
-        hostKeyMismatchAt: new Date().toISOString(),
-      })
-      .where(
-        and(
-          eq(servers.id, serverId),
-          or(
-            isNull(servers.hostKeyMismatchFingerprint),
-            ne(servers.hostKeyMismatchFingerprint, presented),
-          ),
-        ),
-      )
-      .run();
-    if (recorded.changes > 0) {
-      auditSystem(row.orgId, 'server.host_key_mismatch', 'server', row.id, row.name, {
+    if (store.recordMismatch(serverId, presented, type, new Date().toISOString())) {
+      auditSystem(row.orgId, `${kind}.host_key_mismatch`, kind, row.id, row.name, {
         expected,
         presented,
         type,
         via: purpose,
       });
       try {
-        openHostKeyAlert(row.orgId, row.id, mismatchMessage(expected, presented));
+        store.alert?.(row, mismatchMessage(expected, presented));
       } catch (err) {
         logger.error({ err, serverId }, 'Failed to raise host key alert');
       }
@@ -248,7 +309,14 @@ export function checkHostKey(
 
     return {
       ok: false,
-      error: new HostKeyMismatchError(row.id, expected, presented, type, `${row.name} (${row.host}:${row.port})`),
+      error: new HostKeyMismatchError(
+        row.id,
+        expected,
+        presented,
+        type,
+        `${row.name} (${row.host}:${row.port})`,
+        kind,
+      ),
     };
   }
 
@@ -269,13 +337,14 @@ export function hostKeyGuard(
   serverId: string,
   purpose: HostKeyPurpose,
   endpoint?: HostKeyEndpoint,
+  store: HostKeyStore = serverHostKeyStore,
 ): HostKeyGuard {
   let refusal: Error | undefined;
   return {
     hostVerifier: (key: Buffer) => {
       let check: HostKeyCheck;
       try {
-        check = checkHostKey(serverId, key, purpose, endpoint);
+        check = checkHostKey(serverId, key, purpose, endpoint, store);
       } catch (err) {
         // Fail closed: a key we could not check is a key we do not trust
         logger.error({ err, serverId }, 'Host key verification failed unexpectedly');
@@ -308,16 +377,17 @@ function algorithmsForKeyType(type: string): string[] {
  * would be refused as a "changed" key. Other types stay offered afterwards, so
  * an impostor with a different key still shows up as a mismatch.
  */
-function preferPinnedKeyType(serverId: string): ConnectConfig['algorithms'] | undefined {
+function preferPinnedKeyType(
+  serverId: string,
+  store: HostKeyStore,
+): ConnectConfig['algorithms'] | undefined {
   try {
-    const row = getDb()
-      .select({ fingerprint: servers.hostKeyFingerprint, type: servers.hostKeyType })
-      .from(servers)
-      .where(eq(servers.id, serverId))
-      .get();
+    const row = store.load(serverId);
     // Only types ssh2 can negotiate; anything else would make connect() throw
-    if (!row?.fingerprint || !row.type || !PREFERABLE_KEY_TYPES.has(row.type)) return undefined;
-    const algorithms = algorithmsForKeyType(row.type);
+    if (!row?.hostKeyFingerprint || !row.hostKeyType || !PREFERABLE_KEY_TYPES.has(row.hostKeyType)) {
+      return undefined;
+    }
+    const algorithms = algorithmsForKeyType(row.hostKeyType);
     // Remove, then prepend: ssh2 skips a prepend already present in the list
     return { serverHostKey: { remove: algorithms, prepend: algorithms } } as ConnectConfig['algorithms'];
   } catch {
@@ -336,12 +406,13 @@ export function sshConnectConfig(
   auth: SshAuth,
   purpose: HostKeyPurpose,
   extra: Omit<ConnectConfig, 'host' | 'port' | 'username' | 'hostVerifier' | 'hostHash'> = {},
+  store: HostKeyStore = serverHostKeyStore,
 ): { config: ConnectConfig; guard: HostKeyGuard } {
-  const guard = hostKeyGuard(target.id, purpose, { host: target.host, port: target.port });
+  const guard = hostKeyGuard(target.id, purpose, { host: target.host, port: target.port }, store);
   // The verifier must see the raw key blob: a caller-supplied hostHash would
   // make ssh2 hand it a hex digest instead, which never equals a fingerprint.
   const { hostHash: _ignored, ...rest } = extra as ConnectConfig;
-  const algorithms = rest.algorithms ?? preferPinnedKeyType(target.id);
+  const algorithms = rest.algorithms ?? preferPinnedKeyType(target.id, store);
   return {
     guard,
     config: {

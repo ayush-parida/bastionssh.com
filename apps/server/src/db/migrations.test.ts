@@ -262,3 +262,63 @@ describe('migration 0010 (host keys)', () => {
     });
   });
 });
+
+const FTP_HOST_KEYS_TAG = '0011_ftp_host_keys';
+
+describe('migration 0011 (ftp connection host keys)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(FTP_HOST_KEYS_TAG);
+  });
+
+  it('keeps existing connections and starts them with nothing pinned', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < FTP_HOST_KEYS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO ftp_connections (id, org_id, name, host, port, protocol, username, encrypted_password, verify_tls, root_path, last_status, created_by, created_at, updated_at)
+        VALUES ('f1', 'o1', 'site', 'ftp.example.com', 21, 'ftps', 'deploy', 'enc', 1, '/public_html', 'ok', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [FTP_HOST_KEYS_TAG]);
+
+    expect(
+      db
+        .prepare(
+          `SELECT id, host, protocol, encrypted_password, root_path, last_status, host_key_fingerprint,
+             host_key_type, host_key_trusted_at, host_key_mismatch_fingerprint, host_key_mismatch_at
+           FROM ftp_connections`,
+        )
+        .get(),
+    ).toEqual({
+      id: 'f1',
+      host: 'ftp.example.com',
+      protocol: 'ftps',
+      encrypted_password: 'enc',
+      root_path: '/public_html',
+      last_status: 'ok',
+      host_key_fingerprint: null,
+      host_key_type: null,
+      host_key_trusted_at: null,
+      host_key_mismatch_fingerprint: null,
+      host_key_mismatch_at: null,
+    });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (
+      sqlite.prepare('PRAGMA table_info(ftp_connections)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(columns).toEqual(
+      expect.arrayContaining([
+        'host_key_fingerprint',
+        'host_key_type',
+        'host_key_trusted_at',
+        'host_key_mismatch_fingerprint',
+        'host_key_mismatch_at',
+      ]),
+    );
+  });
+});

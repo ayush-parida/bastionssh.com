@@ -1,8 +1,11 @@
+import type { HostKeyMismatch, HostKeyStatus } from './host-key.js';
+
 /**
- * Plain FTP, explicit FTPS (AUTH TLS on the standard port) or implicit FTPS
- * (TLS from the first byte, conventionally port 990).
+ * Plain FTP, explicit FTPS (AUTH TLS on the standard port), implicit FTPS
+ * (TLS from the first byte, conventionally port 990), or SFTP — the SSH file
+ * transfer subsystem, for accounts that only allow file access over SSH.
  */
-export type FtpProtocol = 'ftp' | 'ftps' | 'ftps-implicit';
+export type FtpProtocol = 'ftp' | 'ftps' | 'ftps-implicit' | 'sftp';
 
 export interface FtpProtocolOption {
   protocol: FtpProtocol;
@@ -24,6 +27,12 @@ export const FTP_PROTOCOL_OPTIONS: readonly FtpProtocolOption[] = [
     label: 'FTPS (implicit TLS)',
     defaultPort: 990,
     hint: 'TLS from the first byte on a dedicated port, usually 990. Older FileZilla Server and IIS setups use this.',
+  },
+  {
+    protocol: 'sftp',
+    label: 'SFTP (SSH File Transfer)',
+    defaultPort: 22,
+    hint: 'File transfer over SSH with a password. Works with SFTP-only (chrooted, no shell) accounts. The host key is trusted on first connect and checked on every connect after.',
   },
   {
     protocol: 'ftp',
@@ -57,6 +66,10 @@ export interface FtpConnection {
   verifyTls: boolean;
   /** Directory the browser opens at; null means the account's login directory. */
   rootPath: string | null;
+  /** Pinned SSH host key (SFTP only); null until the first connection or for FTP/FTPS. */
+  hostKeyFingerprint: string | null;
+  /** Always `unknown` for FTP/FTPS, which have no host key. */
+  hostKeyStatus: HostKeyStatus;
   /** Result of the last "Test connection", if any. */
   lastStatus: FtpTestStatus | null;
   lastError: string | null;
@@ -90,6 +103,14 @@ export interface UpdateFtpConnectionRequest {
   password?: string;
   verifyTls?: boolean;
   rootPath?: string | null;
+}
+
+/** GET /api/ftp/connections/:id/host-key — SFTP connections only. */
+export interface FtpHostKey {
+  fingerprint: string | null;
+  type: string | null;
+  trustedAt: string | null;
+  mismatch?: HostKeyMismatch;
 }
 
 export interface FtpTestResult {

@@ -8,6 +8,7 @@ import {
   ftpProtocolOption,
   type FtpConnection,
   type FtpProtocol,
+  type FtpTestResult,
 } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { boolQuery } from '../query.js';
@@ -19,16 +20,25 @@ import { vault } from '../../vault/index.js';
 import {
   FtpError,
   assertSafeHost,
+  backendFor,
   baseName,
   decryptPassword,
   evictConnection,
   loadConnection,
   normalizeRemotePath,
-  ops,
   parentOf,
-  toTarget,
-  withClient,
+  withSession,
+  type FtpConnectionRow,
 } from '../../ftp/index.js';
+import {
+  clearedFtpHostKeyColumns,
+  forgetFtpHostKey,
+  ftpHostKeyStatus,
+  ftpHostKeyView,
+  pinFtpHostKey,
+} from '../../ftp/host-keys.js';
+import { HostKeyMismatchError } from '../../ssh/host-keys.js';
+import { fingerprintSchema } from './server-host-keys.js';
 
 const protocolSchema = z.enum(FTP_PROTOCOLS);
 const portSchema = z.number().int().min(1).max(65535);
@@ -61,6 +71,7 @@ const pathQuery = z.object({ path: pathSchema });
 const deleteQuery = z.object({ path: pathSchema, recursive: boolQuery });
 const mkdirSchema = z.object({ path: pathSchema });
 const renameSchema = z.object({ from: pathSchema, to: pathSchema });
+const fingerprintBody = z.object({ fingerprint: fingerprintSchema });
 
 /** Everything but the password. */
 const publicColumns = {
@@ -73,6 +84,8 @@ const publicColumns = {
   username: ftpConnections.username,
   verifyTls: ftpConnections.verifyTls,
   rootPath: ftpConnections.rootPath,
+  hostKeyFingerprint: ftpConnections.hostKeyFingerprint,
+  hostKeyMismatchFingerprint: ftpConnections.hostKeyMismatchFingerprint,
   lastStatus: ftpConnections.lastStatus,
   lastError: ftpConnections.lastError,
   lastTestedAt: ftpConnections.lastTestedAt,
@@ -94,12 +107,35 @@ function resolveRootPath(rootPath: string | null | undefined): string | null {
   return normalizeRemotePath(rootPath.trim());
 }
 
+type PublicRow = { [K in keyof typeof publicColumns]: FtpConnectionRow[K] };
+
+/** The mismatch fingerprint is admin-only evidence; everyone else gets the status. */
+function toPublic({ hostKeyMismatchFingerprint, ...row }: PublicRow): FtpConnection {
+  return {
+    ...(row as Omit<FtpConnection, 'hostKeyStatus'>),
+    hostKeyStatus: ftpHostKeyStatus({
+      hostKeyFingerprint: row.hostKeyFingerprint,
+      hostKeyMismatchFingerprint,
+    }),
+  };
+}
+
 function publicConnection(orgId: string, id: string): FtpConnection | undefined {
-  return getDb()
+  const row = getDb()
     .select(publicColumns)
     .from(ftpConnections)
     .where(and(eq(ftpConnections.id, id), eq(ftpConnections.orgId, orgId)))
-    .get() as FtpConnection | undefined;
+    .get();
+  return row ? toPublic(row) : undefined;
+}
+
+/** An SFTP connection in the caller's org; host keys mean nothing for FTP/FTPS. */
+function loadSftpConnection(orgId: string, id: string): FtpConnectionRow {
+  const connection = loadConnection(orgId, id);
+  if (connection.protocol !== 'sftp') {
+    throw new FtpError('Only SFTP connections have an SSH host key', 400);
+  }
+  return connection;
 }
 
 export async function ftpRoutes(app: FastifyInstance) {
@@ -118,7 +154,8 @@ export async function ftpRoutes(app: FastifyInstance) {
       .from(ftpConnections)
       .where(eq(ftpConnections.orgId, req.orgId))
       .orderBy(desc(ftpConnections.createdAt))
-      .all();
+      .all()
+      .map(toPublic);
   });
 
   app.get('/connections/:id', async (req, reply) => {
@@ -180,10 +217,12 @@ export async function ftpRoutes(app: FastifyInstance) {
       const protocol = (body.protocol ?? existing.protocol) as FtpProtocol;
       const rootPath =
         body.rootPath !== undefined ? resolveRootPath(body.rootPath) : existing.rootPath;
-      const targetChanged =
+      const endpointChanged =
         host !== existing.host ||
         (body.port !== undefined && body.port !== existing.port) ||
-        protocol !== existing.protocol ||
+        protocol !== existing.protocol;
+      const targetChanged =
+        endpointChanged ||
         (body.username !== undefined && body.username !== existing.username) ||
         (body.verifyTls !== undefined && body.verifyTls !== existing.verifyTls) ||
         body.password !== undefined;
@@ -203,6 +242,8 @@ export async function ftpRoutes(app: FastifyInstance) {
           // A new target or credential invalidates whatever the last test reported;
           // a rename does not.
           ...(targetChanged && { lastStatus: null, lastError: null, lastTestedAt: null }),
+          // A pinned host key belongs to the endpoint it was seen on
+          ...(endpointChanged && clearedFtpHostKeyColumns()),
           updatedAt: new Date().toISOString(),
         })
         .where(eq(ftpConnections.id, id))
@@ -236,27 +277,137 @@ export async function ftpRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     try {
       const connection = loadConnection(req.orgId, id);
-      const result = await ops.testConnection(
-        toTarget(connection),
-        await decryptPassword(connection),
-      );
-      getDb()
-        .update(ftpConnections)
-        .set({
-          lastStatus: result.ok ? 'ok' : 'failed',
-          lastError: result.ok ? null : (result.error ?? 'Unknown error'),
-          lastTestedAt: new Date().toISOString(),
-        })
-        .where(eq(ftpConnections.id, id))
-        .run();
-      await audit(req, 'ftp_connection.test', 'ftp_connection', id, connection.name, {
-        ok: result.ok,
-      });
+      const record = async (result: FtpTestResult) => {
+        getDb()
+          .update(ftpConnections)
+          .set({
+            lastStatus: result.ok ? 'ok' : 'failed',
+            lastError: result.ok ? null : (result.error ?? 'Unknown error'),
+            lastTestedAt: new Date().toISOString(),
+          })
+          .where(eq(ftpConnections.id, id))
+          .run();
+        await audit(req, 'ftp_connection.test', 'ftp_connection', id, connection.name, {
+          ok: result.ok,
+        });
+      };
+      let result: FtpTestResult;
+      try {
+        result = await backendFor(connection.protocol).testConnection(
+          connection,
+          await decryptPassword(connection),
+        );
+      } catch (err) {
+        // A changed SFTP host key answers 409 like any other request, but the
+        // failed test is still recorded on the card.
+        if (err instanceof HostKeyMismatchError) await record({ ok: false, error: err.message });
+        throw err;
+      }
+      await record(result);
       return result;
     } catch (err) {
       return sendError(reply, err);
     }
   });
+
+  // ── Host key (SFTP) ──────────────────────────────────────────────────────
+  // Same model as a server's host key: trusted on first use, refused on change
+  // until an admin pins, accepts or forgets. Admin-only — whoever picks the
+  // trusted key picks who receives the password.
+
+  /** GET …/host-key */
+  app.get(
+    '/connections/:id/host-key',
+    { preHandler: requireRole('admin') },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      try {
+        return ftpHostKeyView(loadSftpConnection(req.orgId, id));
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  /** PUT …/host-key {fingerprint} — pin a known-good fingerprint */
+  app.put(
+    '/connections/:id/host-key',
+    { preHandler: requireRole('admin') },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { fingerprint } = fingerprintBody.parse(req.body);
+      try {
+        const connection = loadSftpConnection(req.orgId, id);
+        // Keep the key type when this is the key already pinned
+        const type = fingerprint === connection.hostKeyFingerprint ? connection.hostKeyType : null;
+        pinFtpHostKey(id, fingerprint, type);
+        evictConnection(id);
+        await audit(req, 'ftp_connection.host_key_pinned', 'ftp_connection', id, connection.name, {
+          fingerprint,
+          previous: connection.hostKeyFingerprint,
+        });
+        return ftpHostKeyView(loadConnection(req.orgId, id));
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  /**
+   * POST …/host-key/accept {fingerprint} — trust the key recorded in the
+   * mismatch. The caller must echo that exact fingerprint.
+   */
+  app.post(
+    '/connections/:id/host-key/accept',
+    { preHandler: requireRole('admin') },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const { fingerprint } = fingerprintBody.parse(req.body);
+      try {
+        const connection = loadSftpConnection(req.orgId, id);
+        if (!connection.hostKeyMismatchFingerprint) {
+          return reply.status(409).send({ error: 'There is no host key mismatch to accept' });
+        }
+        if (fingerprint !== connection.hostKeyMismatchFingerprint) {
+          return reply.status(409).send({
+            error: 'Fingerprint does not match the key the host presented',
+            code: 'HOST_KEY_FINGERPRINT_DIFFERS',
+          });
+        }
+        // The type is filled in from the real key on the next connection
+        pinFtpHostKey(id, fingerprint, null);
+        evictConnection(id);
+        await audit(req, 'ftp_connection.host_key_accepted', 'ftp_connection', id, connection.name, {
+          fingerprint,
+          previous: connection.hostKeyFingerprint,
+        });
+        return ftpHostKeyView(loadConnection(req.orgId, id));
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  /** DELETE …/host-key — forget it; the next connection trusts on first use */
+  app.delete(
+    '/connections/:id/host-key',
+    { preHandler: requireRole('admin') },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      try {
+        const connection = loadSftpConnection(req.orgId, id);
+        forgetFtpHostKey(id);
+        evictConnection(id);
+        await audit(req, 'ftp_connection.host_key_forgotten', 'ftp_connection', id, connection.name, {
+          previous: connection.hostKeyFingerprint,
+          mismatch: connection.hostKeyMismatchFingerprint,
+        });
+        return reply.status(204).send();
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
 
   // ── Files ────────────────────────────────────────────────────────────────
 
@@ -265,12 +416,12 @@ export async function ftpRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const query = pathQuery.parse(req.query);
     try {
-      const listing = await withClient(req.orgId, id, req.user.id, async (client, connection) => {
+      const listing = await withSession(req.orgId, id, req.user.id, async (session, connection) => {
         const path =
           query.path === '.'
-            ? await ops.home(client, connection.rootPath)
+            ? await session.home(connection.rootPath)
             : normalizeRemotePath(query.path);
-        const entries = await ops.list(client, path);
+        const entries = await session.list(path);
         await audit(req, 'ftp.list', 'ftp_connection', id, connection.name, { path });
         return { path, parent: parentOf(path), entries };
       });
@@ -286,13 +437,12 @@ export async function ftpRoutes(app: FastifyInstance) {
     const query = pathQuery.parse(req.query);
     const path = normalizeRemotePath(query.path);
     try {
-      await withClient(req.orgId, id, req.user.id, async (client, connection) => {
+      await withSession(req.orgId, id, req.user.id, async (session, connection) => {
         // Listing the parent first turns a missing file into a clean 404 instead
         // of an error after the response headers have already gone out.
-        const entry = await ops.stat(client, path);
+        const entry = await session.stat(path);
         if (entry.type === 'directory') throw new FtpError('Cannot download a directory', 400);
-        const size =
-          entry.type === 'symlink' ? await ops.linkTargetSize(client, path) : entry.size;
+        const size = entry.type === 'symlink' ? await session.linkTargetSize(path) : entry.size;
         await audit(req, 'ftp.download', 'ftp_connection', id, connection.name, { path, size });
 
         const body = new PassThrough();
@@ -305,7 +455,7 @@ export async function ftpRoutes(app: FastifyInstance) {
         if (size > 0) void reply.header('Content-Length', String(size));
         void reply.send(body);
         try {
-          await ops.download(client, path, body);
+          await session.download(path, body);
         } catch (err) {
           // Headers are gone; the only honest signal left is a broken stream.
           body.destroy(err instanceof Error ? err : new Error(String(err)));
@@ -360,20 +510,20 @@ export async function ftpRoutes(app: FastifyInstance) {
           }
         },
       });
-      // Errors surface through `counter`, which ops.upload consumes. Plain pipe
+      // Errors surface through `counter`, which session.upload consumes. Plain pipe
       // (not pipeline) so an over-cap body is left for Node to drain and the
       // client still gets its 413 rather than a reset socket.
       source.on('error', (err) => counter.destroy(err));
       // `counter` has no listener of its own until basic-ftp pipes it, which
       // may be never (a failed login) or only after several round trips. A
       // client abort in that window would otherwise be an unhandled 'error'
-      // that takes the process down. ops.upload still sees the error: a
+      // that takes the process down. session.upload still sees the error: a
       // destroyed stream fails the pipeline it is handed to.
       counter.on('error', () => {});
       source.pipe(counter);
 
-      await withClient(req.orgId, id, req.user.id, async (client, connection) => {
-        await ops.upload(client, counter, path);
+      await withSession(req.orgId, id, req.user.id, async (session, connection) => {
+        await session.upload(counter, path);
         await audit(req, 'ftp.upload', 'ftp_connection', id, connection.name, {
           path,
           size: bytes,
@@ -395,8 +545,8 @@ export async function ftpRoutes(app: FastifyInstance) {
       try {
         const path = normalizeRemotePath(body.path);
         if (path === '/') return reply.status(400).send({ error: 'Folder name is required' });
-        await withClient(req.orgId, id, req.user.id, async (client, connection) => {
-          await ops.mkdir(client, path);
+        await withSession(req.orgId, id, req.user.id, async (session, connection) => {
+          await session.mkdir(path);
           await audit(req, 'ftp.mkdir', 'ftp_connection', id, connection.name, { path });
         });
         return reply.status(201).send({ path });
@@ -420,8 +570,8 @@ export async function ftpRoutes(app: FastifyInstance) {
           return reply.status(400).send({ error: 'Cannot rename the root directory' });
         }
         if (from !== to) {
-          await withClient(req.orgId, id, req.user.id, async (client, connection) => {
-            await ops.rename(client, from, to);
+          await withSession(req.orgId, id, req.user.id, async (session, connection) => {
+            await session.rename(from, to);
             await audit(req, 'ftp.rename', 'ftp_connection', id, connection.name, { from, to });
           });
         }
@@ -442,13 +592,14 @@ export async function ftpRoutes(app: FastifyInstance) {
       try {
         const path = normalizeRemotePath(query.path);
         if (path === '/') return reply.status(400).send({ error: 'Refusing to delete the root' });
-        await withClient(req.orgId, id, req.user.id, async (client, connection) => {
-          const entry = await ops.stat(client, path);
+        await withSession(req.orgId, id, req.user.id, async (session, connection) => {
+          // stat describes a symlink itself, so a link is unlinked, never followed
+          const entry = await session.stat(path);
           if (entry.type === 'directory') {
-            if (query.recursive) await ops.removeDirRecursive(client, path);
-            else await ops.removeEmptyDir(client, path);
+            if (query.recursive) await session.removeDirRecursive(path);
+            else await session.removeEmptyDir(path);
           } else {
-            await ops.removeFile(client, path);
+            await session.removeFile(path);
           }
           await audit(req, 'ftp.delete', 'ftp_connection', id, connection.name, {
             path,
