@@ -195,6 +195,14 @@ describe('ftp routes with an SFTP connection', () => {
     expect((await as(viewer, 'GET', '/download?path=/var/www/html/missing')).statusCode).toBe(404);
   });
 
+  it('refuses to download a device or FIFO, which would never end', async () => {
+    state.fs.set('/var/www/html/zero', { type: 'device' });
+    const res = await as(viewer, 'GET', '/download?path=/var/www/html/zero');
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/regular files/);
+    expect(state.calls.some(([op]) => op === 'createReadStream' || op === 'open')).toBe(false);
+  });
+
   it('uploads under the cap and refuses one over it', async () => {
     const put = (path: string, payload: Buffer, headers: Record<string, string> = {}) =>
       app.inject({

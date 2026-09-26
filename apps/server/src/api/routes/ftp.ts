@@ -442,6 +442,11 @@ export async function ftpRoutes(app: FastifyInstance) {
         // of an error after the response headers have already gone out.
         const entry = await session.stat(path);
         if (entry.type === 'directory') throw new FtpError('Cannot download a directory', 400);
+        // Over SFTP 'other' is reliably a device, FIFO or socket: /dev/zero would
+        // stream forever and a FIFO would hang this user's session.
+        if (entry.type === 'other' && connection.protocol === 'sftp') {
+          throw new FtpError('Only regular files can be downloaded', 400);
+        }
         const size = entry.type === 'symlink' ? await session.linkTargetSize(path) : entry.size;
         await audit(req, 'ftp.download', 'ftp_connection', id, connection.name, { path, size });
 

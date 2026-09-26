@@ -398,6 +398,30 @@ describe('connecting', () => {
     (await open()).close();
     expect(state.keyboardAnswers).toEqual(['shh']);
   });
+
+  it('never types the password into an OTP, visible or multi-prompt round', async () => {
+    state.keyboardPrompts = [{ prompt: 'Verification code: ', echo: false }];
+    (await open()).close();
+    expect(state.keyboardAnswers).toEqual(['']);
+
+    state.keyboardPrompts = [{ prompt: 'Username: ', echo: true }];
+    (await open()).close();
+    expect(state.keyboardAnswers).toEqual(['']);
+
+    state.keyboardPrompts = [
+      { prompt: 'Password: ', echo: false },
+      { prompt: 'Passcode: ', echo: false },
+    ];
+    (await open()).close();
+    expect(state.keyboardAnswers).toEqual(['', '']);
+  });
+
+  it('answers the password at most once per connection', () => {
+    const prompt = [{ prompt: 'Password: ', echo: false }];
+    expect(backend.keyboardAnswers(prompt, 'shh', false)).toEqual(['shh']);
+    expect(backend.keyboardAnswers(prompt, 'shh', true)).toEqual(['']);
+    expect(backend.keyboardAnswers([], 'shh', false)).toEqual([]);
+  });
 });
 
 describe('testConnection', () => {

@@ -15,7 +15,8 @@ import type { FileBackend, FileSession, FtpConnectionRow } from './backend.js';
  * SFTP file connections over ssh2. Only the `sftp` subsystem is ever opened —
  * never exec or a shell — so SFTP-only accounts (ForceCommand internal-sftp,
  * chrooted) work. Password auth, answered over keyboard-interactive too, since
- * some servers only offer that. The host key is checked against the one pinned
+ * some servers only offer that (one hidden password prompt only; see
+ * keyboardAnswers). The host key is checked against the one pinned
  * on the connection row (trust on first use, refuse on mismatch).
  */
 
@@ -346,6 +347,28 @@ export function sftpSession(client: Client, sftp: SFTPWrapper): SftpFileSession 
 
 // ── Connecting ───────────────────────────────────────────────────────────────
 
+/** Prompts that ask for a second factor, never the account password. */
+const SECOND_FACTOR_PROMPT = /code|otp|token|verification|one[- ]?time|2fa|authenticator/i;
+
+/**
+ * Answers for one keyboard-interactive round. The password only goes to a
+ * single hidden prompt that is not asking for a one-time code, and only once
+ * per connection: a server that asks again, asks several questions, or wants
+ * an OTP gets blank answers (which fail the login) rather than the password
+ * typed into the wrong field.
+ */
+export function keyboardAnswers(
+  prompts: readonly { prompt: string; echo?: boolean }[],
+  password: string,
+  passwordSent: boolean,
+): string[] {
+  const decline = prompts.map(() => '');
+  const only = prompts.length === 1 ? prompts[0] : undefined;
+  if (!only || passwordSent) return decline;
+  if (only.echo || SECOND_FACTOR_PROMPT.test(only.prompt)) return decline;
+  return [password];
+}
+
 export interface SftpOpenOptions {
   readyTimeoutMs?: number;
 }
@@ -378,6 +401,8 @@ export function openSftp(
     );
 
     let settled = false;
+    // keyboard-interactive gets the password at most once
+    let passwordSent = false;
     const fail = (err: Error) => {
       if (settled) return;
       settled = true;
@@ -394,8 +419,9 @@ export function openSftp(
 
     client
       .on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
-        // Password-only accounts that are configured for keyboard-interactive ask once
-        finish(prompts.map(() => password));
+        const answers = keyboardAnswers(prompts, password, passwordSent);
+        if (answers.includes(password)) passwordSent = true;
+        finish(answers);
       })
       .on('ready', () => {
         client.sftp((err, sftp) => {

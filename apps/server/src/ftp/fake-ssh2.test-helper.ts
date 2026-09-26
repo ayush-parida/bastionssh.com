@@ -17,7 +17,8 @@ import { Readable, Writable } from 'node:stream';
  */
 
 export interface FakeNode {
-  type: 'file' | 'dir' | 'link';
+  /** 'device' stands for any special file (character device, FIFO, socket). */
+  type: 'file' | 'dir' | 'link' | 'device';
   data?: Buffer;
   target?: string;
   mode?: number;
@@ -116,7 +117,14 @@ function makeSftp(state: FakeSsh2State) {
   };
 
   const attrs = (node: FakeNode) => {
-    const kind = node.type === 'dir' ? 0o040000 : node.type === 'link' ? 0o120000 : 0o100000;
+    const kind =
+      node.type === 'dir'
+        ? 0o040000
+        : node.type === 'link'
+          ? 0o120000
+          : node.type === 'device'
+            ? 0o020000
+            : 0o100000;
     const perm = node.mode ?? (node.type === 'dir' ? 0o755 : node.type === 'link' ? 0o777 : 0o644);
     return {
       mode: kind | perm,
