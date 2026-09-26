@@ -11,6 +11,7 @@ import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { authRoutes } from './routes/auth.js';
 import { serverRoutes } from './routes/servers.js';
+import { hostKeyRoutes } from './routes/server-host-keys.js';
 import { sshKeyRoutes } from './routes/ssh-keys.js';
 import { savedCommandRoutes } from './routes/saved-commands.js';
 import { cronJobRoutes } from './routes/cron-jobs.js';
@@ -29,6 +30,7 @@ import { publicPasswordResetRoutes } from './routes/password-reset.js';
 import { apiTokenRoutes } from './routes/tokens.js';
 import { healthRoutes } from './routes/health.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
+import { HostKeyMismatchError } from '../ssh/host-keys.js';
 
 export async function buildApp() {
   const app = Fastify({
@@ -58,6 +60,10 @@ export async function buildApp() {
         error: field ? `${field}: ${issue?.message}` : (issue?.message ?? 'Invalid request'),
       });
     }
+    // Any route whose SSH connection was refused over a changed host key
+    if (err instanceof HostKeyMismatchError) {
+      return reply.status(409).send(err.toJSON());
+    }
     const statusCode = (err as { statusCode?: number }).statusCode;
     if (statusCode && statusCode < 500) {
       return reply.status(statusCode).send({ error: (err as Error).message });
@@ -70,6 +76,7 @@ export async function buildApp() {
   await app.register(healthRoutes);
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(serverRoutes, { prefix: '/api/servers' });
+  await app.register(hostKeyRoutes, { prefix: '/api/servers' });
   await app.register(sshKeyRoutes, { prefix: '/api/keys' });
   await app.register(savedCommandRoutes, { prefix: '/api/commands' });
   await app.register(cronJobRoutes, { prefix: '/api/cron-jobs' });

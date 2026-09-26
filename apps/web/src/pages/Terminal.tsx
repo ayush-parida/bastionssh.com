@@ -10,6 +10,7 @@ import XTerminal, {
 import AISidebar from '@/components/ai/AISidebar.js';
 import { ArrowLeft, Bot, FolderOpen, Unplug } from 'lucide-react';
 import { api } from '@/lib/api.js';
+import { HostKeyMismatchNotice } from '@/components/servers/HostKey.js';
 
 /** Rolling buffer size for terminal output captured for AI context (bytes) */
 const OUTPUT_BUFFER_SIZE = 8_000;
@@ -36,6 +37,7 @@ export default function TerminalPage() {
   const [aiOpen, setAiOpen] = useState(false);
   const [status, setStatus] = useState<TerminalConnectionStatus>('connecting');
   const [disconnecting, setDisconnecting] = useState(false);
+  const [hostKeyMismatch, setHostKeyMismatch] = useState(false);
   const terminalRef = useRef<XTerminalHandle>(null);
   const terminalOutputRef = useRef<string>('');
   /** Set once the server-side session has been torn down, so we only DELETE it once */
@@ -182,14 +184,22 @@ export default function TerminalPage() {
 
       {/* Main area: terminal + optional sidebar */}
       <div className="flex flex-1 overflow-hidden">
-        <div className={aiOpen ? 'w-[58%] shrink-0' : 'flex-1'}>
+        <div className={`relative ${aiOpen ? 'w-[58%] shrink-0' : 'flex-1'}`}>
           <XTerminal
             ref={terminalRef}
             sessionId={sessionId}
             onClose={handleWsClose}
             onOutput={handleOutput}
             onStatusChange={setStatus}
+            onHostKeyMismatch={() => setHostKeyMismatch(true)}
           />
+          {hostKeyMismatch && id && (
+            <HostKeyMismatchNotice
+              serverId={id}
+              expected={server?.hostKeyFingerprint ?? undefined}
+              className="absolute inset-x-4 bottom-4 bg-card"
+            />
+          )}
         </div>
 
         {aiOpen && (

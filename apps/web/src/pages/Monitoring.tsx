@@ -5,6 +5,7 @@ import type { MonitoringOverview, ServerAlert, ServerHealthWithServer } from '@s
 import { useHasRole } from '@/store/auth.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { formatUptime, statusMeta, usageTone } from '@/lib/monitoring.js';
+import { hostKeyPanelPath } from '@/lib/host-keys.js';
 import StatusBadge, { UsageBar } from '@/components/monitoring/StatusBadge.js';
 import Sparkline from '@/components/charts/Sparkline.js';
 import {
@@ -25,6 +26,7 @@ const ALERT_LABEL: Record<ServerAlert['type'], string> = {
   memory_high: 'High memory',
   disk_high: 'Disk filling up',
   load_high: 'High load',
+  host_key_mismatch: 'SSH host key changed',
 };
 
 function SummaryTile({
@@ -110,6 +112,11 @@ function ServerCard({
             <p className="mt-1 text-muted-foreground">
               Last seen online {relativeTime(health.lastOnlineAt)}
             </p>
+          )}
+          {health.status === 'host_key_mismatch' && (
+            <Link to={hostKeyPanelPath(health.serverId)} className="mt-1 inline-block text-primary hover:underline">
+              Review the host key →
+            </Link>
           )}
         </div>
       ) : (

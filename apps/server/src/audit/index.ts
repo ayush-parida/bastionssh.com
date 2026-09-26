@@ -33,3 +33,38 @@ export async function audit(
     // Audit failures must never break the primary request
   }
 }
+
+/** Actor recorded for events the server raises on its own (health checks, cron, TOFU). */
+export const SYSTEM_ACTOR = { id: 'system', email: 'system' } as const;
+
+/**
+ * Audit an event with no request behind it — a background health check or a
+ * scheduled job noticing something. Recorded under {@link SYSTEM_ACTOR}.
+ */
+export function auditSystem(
+  orgId: string,
+  action: AuditAction,
+  resourceType: string,
+  resourceId?: string,
+  resourceName?: string,
+  metadata?: Record<string, unknown>,
+) {
+  try {
+    getDb()
+      .insert(auditLog)
+      .values({
+        id: nanoid(),
+        orgId,
+        actorId: SYSTEM_ACTOR.id,
+        actorEmail: SYSTEM_ACTOR.email,
+        action,
+        resourceType,
+        resourceId,
+        resourceName,
+        metadata: metadata ? JSON.stringify(metadata) : undefined,
+      })
+      .run();
+  } catch {
+    // Same rule as audit(): never break the caller
+  }
+}

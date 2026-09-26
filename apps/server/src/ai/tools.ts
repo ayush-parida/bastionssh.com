@@ -144,7 +144,7 @@ export class ToolExecutor {
     const { server, auth } = await resolveServerAuth(this.orgId, serverId);
 
     const result = await execOnServer(
-      { host: server.host, port: server.port, username: server.username },
+      { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       command,
     );

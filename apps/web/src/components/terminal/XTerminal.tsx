@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
+import { WS_CLOSE_HOST_KEY_MISMATCH } from '@/lib/host-keys.js';
 
 export interface XTerminalHandle {
   /** Send raw bytes to the SSH stdin (e.g. to inject a command) */
@@ -20,10 +21,12 @@ interface XTerminalProps {
   onOutput?: (text: string) => void;
   /** Reports connection state changes so the host page can display them */
   onStatusChange?: (status: TerminalConnectionStatus) => void;
+  /** The server refused the connection because the SSH host key changed */
+  onHostKeyMismatch?: () => void;
 }
 
 const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
-  ({ sessionId, onClose, onOutput, onStatusChange }, ref) => {
+  ({ sessionId, onClose, onOutput, onStatusChange, onHostKeyMismatch }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const termRef = useRef<Terminal | null>(null);
     const wsRef = useRef<WebSocket | null>(null);
@@ -35,10 +38,12 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
     const onCloseRef = useRef(onClose);
     const onOutputRef = useRef(onOutput);
     const onStatusChangeRef = useRef(onStatusChange);
+    const onHostKeyMismatchRef = useRef(onHostKeyMismatch);
     useLayoutEffect(() => {
       onCloseRef.current = onClose;
       onOutputRef.current = onOutput;
       onStatusChangeRef.current = onStatusChange;
+      onHostKeyMismatchRef.current = onHostKeyMismatch;
     });
 
     useImperativeHandle(ref, () => ({
@@ -123,8 +128,9 @@ const XTerminal = forwardRef<XTerminalHandle, XTerminalProps>(
         onOutputRef.current?.(text);
       };
 
-      ws.onclose = () => {
+      ws.onclose = (e) => {
         if (cancelled) return;
+        if (e.code === WS_CLOSE_HOST_KEY_MISMATCH) onHostKeyMismatchRef.current?.();
         term.writeln('\r\n\x1b[33m[Session closed]\x1b[0m');
         onStatusChangeRef.current?.('disconnected');
         onCloseRef.current?.();

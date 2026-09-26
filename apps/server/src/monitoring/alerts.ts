@@ -22,6 +22,8 @@ interface EvaluateInput {
   lastError?: string | null;
   cpuPercent?: number;
   sample?: ProbeSample;
+  /** Set while the server has an unresolved host key mismatch; the alert message. */
+  hostKeyMismatch?: string | null;
 }
 
 /**
@@ -44,6 +46,19 @@ function severityFor(value: number, threshold: number, ceiling?: number): AlertS
 export function evaluateConditions(input: EvaluateInput): AlertCondition[] {
   const t = config.monitoring.thresholds;
   const conditions: AlertCondition[] = [];
+
+  // Stays open until an admin accepts, pins or forgets the key — even if the
+  // host has since gone back to the pinned key, someone should look.
+  if (input.hostKeyMismatch) {
+    conditions.push({
+      type: 'host_key_mismatch',
+      severity: 'critical',
+      message: input.hostKeyMismatch,
+    });
+  }
+
+  // Refused on purpose, not unreachable: the mismatch alert above says why.
+  if (input.status === 'host_key_mismatch') return conditions;
 
   if (input.status !== 'online') {
     if (input.consecutiveFailures >= t.offlineFailures) {
@@ -229,6 +244,75 @@ export function reconcileAlerts(
   }
 
   return { opened, resolved };
+}
+
+/**
+ * Raise the host key alert from a connection path (terminal, SFTP, cron…)
+ * without waiting for the next health sweep. Idempotent: an open alert is kept.
+ */
+export function openHostKeyAlert(orgId: string, serverId: string, message: string) {
+  const db = getDb();
+  const existing = db
+    .select({ id: serverAlerts.id })
+    .from(serverAlerts)
+    .where(
+      and(
+        eq(serverAlerts.serverId, serverId),
+        eq(serverAlerts.type, 'host_key_mismatch'),
+        isNull(serverAlerts.resolvedAt),
+      ),
+    )
+    .get();
+  if (existing) {
+    db.update(serverAlerts).set({ message }).where(eq(serverAlerts.id, existing.id)).run();
+    return;
+  }
+  db.insert(serverAlerts)
+    .values({
+      id: nanoid(),
+      orgId,
+      serverId,
+      type: 'host_key_mismatch',
+      severity: 'critical',
+      message,
+      openedAt: new Date().toISOString(),
+    })
+    .run();
+  notifyAlertsChanged([
+    { kind: 'opened', orgId, serverId, type: 'host_key_mismatch', severity: 'critical', message },
+  ]);
+}
+
+/** Close the host key alert once an admin has dealt with the mismatch. */
+export function resolveHostKeyAlert(orgId: string, serverId: string) {
+  const db = getDb();
+  const open = db
+    .select()
+    .from(serverAlerts)
+    .where(
+      and(
+        eq(serverAlerts.serverId, serverId),
+        eq(serverAlerts.type, 'host_key_mismatch'),
+        isNull(serverAlerts.resolvedAt),
+      ),
+    )
+    .all();
+  if (open.length === 0) return;
+  const now = new Date().toISOString();
+  for (const alert of open) {
+    db.update(serverAlerts).set({ resolvedAt: now }).where(eq(serverAlerts.id, alert.id)).run();
+  }
+  notifyAlertsChanged(
+    open.map((a) => ({
+      kind: 'resolved' as const,
+      orgId,
+      serverId,
+      type: 'host_key_mismatch' as const,
+      severity: a.severity as AlertSeverity,
+      message: a.message,
+      openedAt: a.openedAt,
+    })),
+  );
 }
 
 /** Open alerts for an org, newest first. */

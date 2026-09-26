@@ -44,7 +44,7 @@ export default function DashboardPage() {
   const summary = overview?.summary;
   const alerts = overview?.alerts ?? [];
   const attention = (overview?.servers ?? [])
-    .filter((h) => h.status === 'offline' || h.status === 'error')
+    .filter((h) => h.status === 'offline' || h.status === 'error' || h.status === 'host_key_mismatch')
     .slice(0, 5);
   const busiest = [...(overview?.servers ?? [])]
     .filter((h) => h.status === 'online')

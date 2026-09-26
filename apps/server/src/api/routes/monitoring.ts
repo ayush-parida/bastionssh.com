@@ -269,7 +269,8 @@ export async function monitoringRoutes(app: FastifyInstance) {
         total: list.length,
         online: count('online'),
         offline: count('offline'),
-        error: count('error'),
+        // A refused host key is a failing check the tiles count with errors
+        error: count('error') + count('host_key_mismatch'),
         unknown: count('unknown'),
         paused: count('paused'),
         activeAlerts: openAlerts.length,

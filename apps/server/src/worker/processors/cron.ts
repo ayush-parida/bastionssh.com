@@ -72,7 +72,7 @@ export async function runCronJob(data: CronJobData) {
     // server runs its schedule instead of silently doing nothing.
     const { server, auth } = await resolveServerAuth(job.orgId, job.serverId);
     const result = await execOnServer(
-      { host: server.host, port: server.port, username: server.username },
+      { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       interpolate(cmd),
       COMMAND_TIMEOUT_MS,

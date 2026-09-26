@@ -40,6 +40,7 @@ export function alertLabel(type: AlertType | 'test'): string {
     memory_high: 'Memory high',
     disk_high: 'Disk high',
     load_high: 'Load high',
+    host_key_mismatch: 'SSH host key changed',
     test: 'Test notification',
   };
   return labels[type] ?? type;

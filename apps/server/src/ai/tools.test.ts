@@ -79,7 +79,7 @@ describe('ToolExecutor run_command', () => {
     expect(broker.exec).not.toHaveBeenCalled();
     expect(credentials.resolveServerAuth).toHaveBeenCalledWith('org-1', 'prod');
     expect(broker.execOnServer).toHaveBeenCalledWith(
-      { host: 'prod.example', port: 22, username: 'root' },
+      { id: 'prod', host: 'prod.example', port: 22, username: 'root' },
       { privateKey: 'k' },
       'systemctl restart pg',
     );

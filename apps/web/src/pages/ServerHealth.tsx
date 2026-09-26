@@ -14,6 +14,7 @@ import { cn, relativeTime } from '@/lib/utils.js';
 import { CHART_COLORS, formatKb, formatUptime, usageTone } from '@/lib/monitoring.js';
 import StatusBadge, { UsageBar } from '@/components/monitoring/StatusBadge.js';
 import MetricChart, { type ChartPoint } from '@/components/charts/MetricChart.js';
+import { HostKeyPanel } from '@/components/servers/HostKey.js';
 import {
   ArrowLeft,
   FolderOpen,
@@ -196,6 +197,8 @@ export default function ServerHealthPage() {
           ))}
         </div>
       )}
+
+      {serverId && <HostKeyPanel serverId={serverId} />}
 
       <div className="mb-6 grid grid-cols-2 gap-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-3 lg:grid-cols-6">
         <Fact label="Uptime" value={formatUptime(health.uptimeSeconds)} />

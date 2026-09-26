@@ -5,6 +5,7 @@ import type { WebSocket } from 'ws';
 import type { FastifyRequest } from 'fastify';
 import { nanoid } from 'nanoid';
 import logger from '../logger.js';
+import { HostKeyMismatchError, sshConnectConfig, type SshAuth, type SshTarget } from './host-keys.js';
 
 export interface ExecResult {
   stdout: string;
@@ -13,7 +14,7 @@ export interface ExecResult {
 }
 
 interface SessionMeta {
-  server: { id?: string; host: string; port: number; username: string };
+  server: { id: string; host: string; port: number; username: string };
   key?: { id: string; encryptedPrivateKey: string };
   password?: string; // plaintext, decrypted by caller
   userId: string;
@@ -128,6 +129,12 @@ async function createSession(meta: SessionMeta): Promise<string> {
     throw new Error('No authentication method available');
   }
 
+  const { config: connectConfig, guard } = sshConnectConfig(
+    meta.server,
+    privateKey ? { privateKey } : { password },
+    'terminal',
+  );
+
   const streamPromise = new Promise<ClientChannel>((resolve, reject) => {
     client
       .on('ready', () => {
@@ -144,17 +151,15 @@ async function createSession(meta: SessionMeta): Promise<string> {
         );
       })
       .on('error', (err) => {
-        logger.error({ err, sessionId: id }, 'SSH connection error');
-        reject(err);
+        const cause = guard.error(err);
+        if (!(cause instanceof HostKeyMismatchError)) {
+          logger.error({ err, sessionId: id }, 'SSH connection error');
+        }
+        reject(cause);
         clearTimeout(session.reapTimer);
         sessions.delete(id);
       })
-      .connect({
-        host: meta.server.host,
-        port: meta.server.port,
-        username: meta.server.username,
-        ...(privateKey ? { privateKey } : { password }),
-      });
+      .connect(connectConfig);
   });
 
   const session: ActiveSession = { meta, client, streamPromise, outputBuffer: [] };
@@ -221,6 +226,13 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
   try {
     stream = await session.streamPromise;
   } catch (err: unknown) {
+    if (err instanceof HostKeyMismatchError) {
+      // A close reason is capped at 123 bytes — the full explanation goes as a
+      // message first, then a dedicated close code the browser can recognise.
+      sendHostKeyMismatch(socket, err);
+      sessions.delete(sessionId);
+      return;
+    }
     const msg = err instanceof Error ? err.message : 'SSH connection failed';
     socket.close(4500, msg);
     sessions.delete(sessionId);
@@ -284,6 +296,21 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
       scheduleReap(sessionId, session);
     }
   });
+}
+
+/** WebSocket close code for a connection refused because the host key changed. */
+export const WS_CLOSE_HOST_KEY_MISMATCH = 4409;
+
+function sendHostKeyMismatch(socket: WebSocket, err: HostKeyMismatchError) {
+  if (socket.readyState === socket.OPEN) {
+    socket.send(
+      `\r\n\x1b[31m[Host key verification failed]\x1b[0m\r\n` +
+        `The SSH host key changed. Expected ${err.expected}\r\n` +
+        `but the host presented ${err.presented}.\r\n` +
+        `The connection was refused before any credentials were sent.\r\n`,
+    );
+  }
+  socket.close(WS_CLOSE_HOST_KEY_MISMATCH, 'HOST_KEY_MISMATCH');
 }
 
 /** Close a session the caller owns; unknown or foreign ids are a no-op. */
@@ -384,13 +411,14 @@ async function exec(
  * Used by the AI agent when there is no active interactive session.
  */
 export async function execOnServer(
-  server: { host: string; port: number; username: string },
-  authOptions: { privateKey?: string; password?: string },
+  server: SshTarget,
+  authOptions: SshAuth,
   command: string,
   timeoutMs = 30_000,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     const client = new Client();
+    const { config: connectConfig, guard } = sshConnectConfig(server, authOptions, 'exec');
     const timer = setTimeout(() => {
       client.end();
       reject(new Error('Command timed out'));
@@ -424,16 +452,9 @@ export async function execOnServer(
       })
       .on('error', (err) => {
         clearTimeout(timer);
-        reject(err);
+        reject(guard.error(err));
       })
-      .connect({
-        host: server.host,
-        port: server.port,
-        username: server.username,
-        ...(authOptions.privateKey
-          ? { privateKey: authOptions.privateKey }
-          : { password: authOptions.password }),
-      });
+      .connect(connectConfig);
   });
 }
 

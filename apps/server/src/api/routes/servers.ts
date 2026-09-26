@@ -10,6 +10,9 @@ import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
 import { evictServer } from '../../ssh/sftp.js';
+import { clearedColumns, hostKeyStatus, pinnedColumns } from '../../ssh/host-keys.js';
+import { resolveHostKeyAlert } from '../../monitoring/alerts.js';
+import { fingerprintSchema } from './server-host-keys.js';
 
 const createServerSchema = z.object({
   name: z.string().min(1).max(100),
@@ -21,6 +24,8 @@ const createServerSchema = z.object({
   password: z.string().optional(),
   tags: z.array(z.string()).default([]),
   notes: z.string().optional(),
+  /** Pre-pin the host key; otherwise the first connection trusts what it sees. */
+  hostKeyFingerprint: fingerprintSchema.optional(),
 });
 
 /** Strip encryptedPassword and return safe server object */
@@ -45,10 +50,17 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
     cloudRegion,
     cloudState,
     cloudSyncedAt,
+    hostKeyType,
+    hostKeyTrustedAt,
+    hostKeyTrustedBy,
+    hostKeyMismatchFingerprint,
+    hostKeyMismatchType,
+    hostKeyMismatchAt,
     ...safe
   } = row;
   return {
     ...safe,
+    hostKeyStatus: hostKeyStatus(row),
     defaultKeyId: safe.defaultKeyId ?? undefined,
     notes: safe.notes ?? undefined,
     tags: parseTags(row.tags),
@@ -121,10 +133,16 @@ export async function serverRoutes(app: FastifyInstance) {
         encryptedPassword: encryptedPassword ?? null,
         tags: JSON.stringify(body.tags),
         notes: body.notes,
+        ...(body.hostKeyFingerprint && pinnedColumns(body.hostKeyFingerprint, null, req.user.id)),
       })
       .run();
 
     await audit(req, 'server.create', 'server', id, body.name);
+    if (body.hostKeyFingerprint) {
+      await audit(req, 'server.host_key_pinned', 'server', id, body.name, {
+        fingerprint: body.hostKeyFingerprint,
+      });
+    }
     const row = db.select().from(servers).where(eq(servers.id, id)).get()!;
     return reply.status(201).send(sanitize(row));
   });
@@ -172,6 +190,18 @@ export async function serverRoutes(app: FastifyInstance) {
       updatedAt: new Date().toISOString(),
     };
 
+    // A new host or port is a different endpoint: the old key says nothing about it
+    const endpointChanged =
+      (body.host !== undefined && body.host !== existing.host) ||
+      (body.port !== undefined && body.port !== existing.port);
+    if (body.hostKeyFingerprint) {
+      if (body.hostKeyFingerprint !== existing.hostKeyFingerprint || endpointChanged) {
+        Object.assign(updateData, pinnedColumns(body.hostKeyFingerprint, null, req.user.id));
+      }
+    } else if (endpointChanged && (existing.hostKeyFingerprint || existing.hostKeyMismatchFingerprint)) {
+      Object.assign(updateData, clearedColumns());
+    }
+
     if (body.authType === 'password' && body.password) {
       updateData.encryptedPassword = await vault.encrypt(body.password, id);
       updateData.defaultKeyId = null; // clear key when switching to password
@@ -184,6 +214,22 @@ export async function serverRoutes(app: FastifyInstance) {
     // Pooled SFTP channels hold the old host/credentials — force a reconnect
     evictServer(req.orgId, id);
     await audit(req, 'server.update', 'server', id, existing.name);
+    if (updateData.hostKeyFingerprint !== undefined) {
+      if (existing.hostKeyMismatchFingerprint) resolveHostKeyAlert(req.orgId, id);
+      if (updateData.hostKeyFingerprint) {
+        await audit(req, 'server.host_key_pinned', 'server', id, existing.name, {
+          fingerprint: updateData.hostKeyFingerprint,
+          previous: existing.hostKeyFingerprint,
+        });
+      } else {
+        await audit(req, 'server.host_key_cleared', 'server', id, existing.name, {
+          reason: 'endpoint_changed',
+          previous: existing.hostKeyFingerprint,
+          from: `${existing.host}:${existing.port}`,
+          to: `${updateData.host ?? existing.host}:${updateData.port ?? existing.port}`,
+        });
+      }
+    }
     const row = db.select().from(servers).where(eq(servers.id, id)).get()!;
     return sanitize(row);
   });

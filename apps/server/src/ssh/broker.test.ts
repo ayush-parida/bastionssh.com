@@ -77,7 +77,7 @@ function makeSocket() {
 
 async function newSession() {
   const id = await SSHBroker.createSession({
-    server: { host: 'h', port: 22, username: 'root' },
+    server: { id: 's1', host: 'h', port: 22, username: 'root' },
     password: 'pw',
     ...OWNER,
     cols: 80,

@@ -1,7 +1,20 @@
 /** Health states a server can be in, worst-to-best ordering handled in the UI. */
-export type ServerStatus = 'unknown' | 'online' | 'offline' | 'error' | 'paused';
+export type ServerStatus =
+  | 'unknown'
+  | 'online'
+  | 'offline'
+  | 'error'
+  | 'paused'
+  /** The host presented a different SSH host key than the one pinned — see the host key panel. */
+  | 'host_key_mismatch';
 
-export type AlertType = 'offline' | 'cpu_high' | 'memory_high' | 'disk_high' | 'load_high';
+export type AlertType =
+  | 'offline'
+  | 'cpu_high'
+  | 'memory_high'
+  | 'disk_high'
+  | 'load_high'
+  | 'host_key_mismatch';
 
 export type AlertSeverity = 'warning' | 'critical';
 

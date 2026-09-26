@@ -4,6 +4,7 @@ import type { ServerStatus } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { serverHealth, serverMetrics, servers } from '../db/schema.js';
 import { CredentialError, resolveServerAuth } from '../ssh/credentials.js';
+import { HostKeyMismatchError } from '../ssh/host-keys.js';
 import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { cpuPercentBetween, ProbeError, round2, runProbe, type ProbeSample } from './probe.js';
@@ -19,6 +20,23 @@ export interface CheckOutcome {
 function percent(used?: number, total?: number): number | undefined {
   if (!total || used === undefined) return undefined;
   return round2((used / total) * 100);
+}
+
+/**
+ * Alert message while the server has an unresolved host key mismatch. Read
+ * fresh — the probe that just ran may have recorded one.
+ */
+function hostKeyMismatchMessage(serverId: string): string | null {
+  const row = getDb()
+    .select({
+      expected: servers.hostKeyFingerprint,
+      presented: servers.hostKeyMismatchFingerprint,
+    })
+    .from(servers)
+    .where(eq(servers.id, serverId))
+    .get();
+  if (!row?.presented) return null;
+  return `SSH host key changed: expected ${row.expected ?? 'none'}, host presented ${row.presented}. Connections are refused until an admin reviews it.`;
 }
 
 /** Most recent sample for a server, used for the CPU jiffy delta. */
@@ -115,7 +133,13 @@ function recordSuccess(
   reconcileAlerts(
     server.orgId,
     server.id,
-    evaluateConditions({ status: 'online', consecutiveFailures: 0, cpuPercent, sample }),
+    evaluateConditions({
+      status: 'online',
+      consecutiveFailures: 0,
+      cpuPercent,
+      sample,
+      hostKeyMismatch: hostKeyMismatchMessage(server.id),
+    }),
   );
 
   return { serverId: server.id, status: 'online', latencyMs };
@@ -172,7 +196,12 @@ function recordFailure(
   reconcileAlerts(
     server.orgId,
     server.id,
-    evaluateConditions({ status, consecutiveFailures, lastError: message }),
+    evaluateConditions({
+      status,
+      consecutiveFailures,
+      lastError: message,
+      hostKeyMismatch: hostKeyMismatchMessage(server.id),
+    }),
   );
 
   return { serverId: server.id, status, error: message };
@@ -186,12 +215,15 @@ export async function checkServer(server: typeof servers.$inferSelect): Promise<
   try {
     const { auth } = await resolveServerAuth(server.orgId, server.id);
     const { sample, latencyMs } = await runProbe(
-      { host: server.host, port: server.port, username: server.username },
+      { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       config.monitoring.timeoutMs,
     );
     return recordSuccess(server, sample, latencyMs);
   } catch (err) {
+    if (err instanceof HostKeyMismatchError) {
+      return recordFailure(server, 'host_key_mismatch', err.message);
+    }
     if (err instanceof ProbeError) {
       return recordFailure(server, err.kind, err.message);
     }

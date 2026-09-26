@@ -84,7 +84,7 @@ export async function executeSavedCommand(input: ExecuteInput): Promise<void> {
     const cmd = interpolate(command.command, input.variables);
 
     const result = await execOnServer(
-      { host: server.host, port: server.port, username: server.username },
+      { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       cmd,
       COMMAND_TIMEOUT_MS,

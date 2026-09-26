@@ -25,7 +25,7 @@ vi.mock('ssh2', async () => {
 const { acquire, evictUser, poolKey } = await import('./sftp.js');
 const { __clients: clients } = (await import('ssh2')) as any;
 
-const target = { host: 'h', port: 22, username: 'root' };
+const target = { id: 's1', host: 'h', port: 22, username: 'root' };
 const auth = { password: 'pw' };
 const flush = () => new Promise((r) => setImmediate(r));
 

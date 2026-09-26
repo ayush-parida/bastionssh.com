@@ -9,12 +9,15 @@ export class ApiError extends Error {
   readonly status: number;
   /** Machine-readable reason, when the server gives one (e.g. PASSKEY_REQUIRED). */
   readonly code?: string;
+  /** The parsed JSON error body, for codes that carry more (e.g. HOST_KEY_MISMATCH). */
+  readonly details?: Record<string, unknown>;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(message: string, status: number, code?: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -32,17 +35,19 @@ async function fail(res: Response, path: string): Promise<never> {
   const text = await res.text().catch(() => '');
   let message = text || res.statusText;
   let code: string | undefined;
+  let details: Record<string, unknown> | undefined;
   try {
     const body = JSON.parse(text) as { message?: string; error?: string; code?: string };
     message = body.message ?? body.error ?? message;
     code = body.code;
+    details = body as Record<string, unknown>;
   } catch {
     // Not JSON — the raw body is the best message we have.
   }
   if (res.status === 403 && code === 'PASSKEY_REQUIRED') {
     useAuthStore.getState().setPasskeyGate(true);
   }
-  throw new ApiError(message, res.status, code);
+  throw new ApiError(message, res.status, code, details);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

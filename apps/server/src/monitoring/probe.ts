@@ -1,5 +1,6 @@
 import { Client } from 'ssh2';
 import type { DiskUsage } from '@smt/shared';
+import { HostKeyMismatchError, sshConnectConfig, type SshTarget } from '../ssh/host-keys.js';
 
 /**
  * A single read-only vitals probe.
@@ -243,11 +244,7 @@ export function cpuPercentBetween(
   return round2(Math.min(Math.max(percent, 0), 100));
 }
 
-export interface ProbeTarget {
-  host: string;
-  port: number;
-  username: string;
-}
+export type ProbeTarget = SshTarget;
 
 export interface ProbeAuth {
   privateKey?: string;
@@ -291,6 +288,9 @@ export function runProbe(
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const ssh = new Client();
+    const { config: connectConfig, guard } = sshConnectConfig(target, auth, 'health_check', {
+      readyTimeout: Math.min(timeoutMs, 15_000),
+    });
     let settled = false;
 
     const finish = (fn: () => void) => {
@@ -340,16 +340,12 @@ export function runProbe(
     });
 
     ssh.on('error', (err: NodeJS.ErrnoException) => {
-      finish(() => reject(new ProbeError(err.message, classify(err))));
+      const cause = guard.error(err);
+      // Refused on purpose, not unreachable — the collector records it as such
+      if (cause instanceof HostKeyMismatchError) return finish(() => reject(cause));
+      finish(() => reject(new ProbeError(cause.message, classify(err))));
     });
 
-    ssh.connect({
-      host: target.host,
-      port: target.port,
-      username: target.username,
-      readyTimeout: Math.min(timeoutMs, 15_000),
-      ...(auth.privateKey ? { privateKey: auth.privateKey } : {}),
-      ...(auth.password ? { password: auth.password } : {}),
-    });
+    ssh.connect(connectConfig);
   });
 }

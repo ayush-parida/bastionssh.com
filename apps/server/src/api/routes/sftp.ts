@@ -57,7 +57,7 @@ export async function sftpRoutes(app: FastifyInstance) {
     const { server, auth } = await resolveServerAuth(orgId, serverId, keyId);
     const held = await sftp.acquire(
       sftp.poolKey(orgId, serverId, userId),
-      { host: server.host, port: server.port, username: server.username },
+      { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
     );
     return { server, held };

@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import {
   CLOUD_PROVIDER_LABEL,
+  HOST_KEY_FINGERPRINT_PATTERN,
   type CreateServerRequest,
   type MonitoringOverview,
   type Server,
@@ -15,6 +16,8 @@ import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerI
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
+import { hostKeyPanelPath } from '@/lib/host-keys.js';
+import { HostKeyBadge } from '@/components/servers/HostKey.js';
 
 interface ServerFormState {
   name: string;
@@ -25,9 +28,11 @@ interface ServerFormState {
   defaultKeyId: string;
   password: string;
   tags: string;
+  /** Optional pinned host key; blank leaves it alone (trust on first use for a new server). */
+  hostKeyFingerprint: string;
 }
 
-const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '' };
+const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '' };
 
 /** Tags are entered as a comma-separated list and stored as an array. */
 function splitTags(input: string): string[] {
@@ -114,6 +119,7 @@ export default function ServersPage() {
       defaultKeyId: s.defaultKeyId ?? '',
       password: '',
       tags: (s.tags ?? []).join(', '),
+      hostKeyFingerprint: s.hostKeyFingerprint ?? '',
     });
     setShowForm(true);
   }
@@ -127,8 +133,22 @@ export default function ServersPage() {
     }
   }
 
+  // The server being edited, to tell a changed endpoint or fingerprint from a no-op
+  const editing = editId ? servers?.find((s) => s.id === editId) : undefined;
+  const endpointChanged =
+    !!editing && (form.host !== editing.host || form.port !== String(editing.port));
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    const fingerprint = form.hostKeyFingerprint.trim();
+    if (fingerprint && !HOST_KEY_FINGERPRINT_PATTERN.test(fingerprint)) {
+      toast.error('Host key fingerprint must look like SHA256: followed by 43 base64 characters');
+      return;
+    }
+    // Send a fingerprint only when it was typed or changed — re-sending the old one
+    // with a new host would re-pin it to an endpoint it says nothing about
+    const sendFingerprint =
+      !!fingerprint && (!editing || (fingerprint !== editing.hostKeyFingerprint));
     const body: CreateServerRequest = {
       name: form.name,
       host: form.host,
@@ -138,6 +158,7 @@ export default function ServersPage() {
       ...(form.authType === 'key' && form.defaultKeyId ? { defaultKeyId: form.defaultKeyId } : {}),
       ...(form.authType === 'password' && form.password ? { password: form.password } : {}),
       tags: splitTags(form.tags),
+      ...(sendFingerprint ? { hostKeyFingerprint: fingerprint } : {}),
     };
     if (editId) updateMutation.mutate({ id: editId, body });
     else createMutation.mutate(body);
@@ -248,6 +269,27 @@ export default function ServersPage() {
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               />
             </div>
+            <div className="col-span-2">
+              <label className="block text-sm font-medium mb-1">
+                Host key fingerprint{' '}
+                <span className="text-muted-foreground text-xs">
+                  (optional — <code className="font-mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on the server; blank trusts the key seen on first connect)
+                </span>
+              </label>
+              <input
+                type="text"
+                placeholder="SHA256:…"
+                spellCheck={false}
+                value={form.hostKeyFingerprint}
+                onChange={(e) => setForm((prev) => ({ ...prev, hostKeyFingerprint: e.target.value }))}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              />
+              {endpointChanged && editing?.hostKeyFingerprint && form.hostKeyFingerprint.trim() === editing.hostKeyFingerprint && (
+                <p className="mt-1 text-xs text-amber-600">
+                  Changing the host or port forgets the pinned key — the next connection trusts the new endpoint's key unless you enter its fingerprint here.
+                </p>
+              )}
+            </div>
             <div className="col-span-2 flex gap-2">
               <button type="submit" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
                 {editId ? 'Update' : 'Add'}
@@ -297,24 +339,29 @@ export default function ServersPage() {
                   );
                 })()}
               </div>
-              {(s.cloud || s.tags?.length > 0) && (
-                <div className="flex flex-wrap gap-1">
-                  {s.cloud && <CloudBadge cloud={s.cloud} />}
-                  {s.tags.map((tag) => (
-                    <button
-                      key={tag}
-                      onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
-                      className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
-                        tagFilter === tag
-                          ? 'bg-primary text-primary-foreground'
-                          : 'bg-muted text-muted-foreground hover:bg-muted/70'
-                      }`}
-                    >
-                      {tag}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <div className="flex flex-wrap gap-1">
+                <button
+                  onClick={() => navigate(hostKeyPanelPath(s.id))}
+                  title="Host key details"
+                  className="rounded transition-opacity hover:opacity-80"
+                >
+                  <HostKeyBadge status={s.hostKeyStatus} />
+                </button>
+                {s.cloud && <CloudBadge cloud={s.cloud} />}
+                {s.tags.map((tag) => (
+                  <button
+                    key={tag}
+                    onClick={() => setTagFilter(tagFilter === tag ? null : tag)}
+                    className={`rounded px-1.5 py-0.5 text-xs transition-colors ${
+                      tagFilter === tag
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-muted-foreground hover:bg-muted/70'
+                    }`}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
               <div className="flex gap-2 mt-auto">
                 <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
                   <Terminal size={12} /> Connect

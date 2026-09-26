@@ -4,16 +4,13 @@ import posix from 'node:path/posix';
 import type { Readable, Writable } from 'node:stream';
 import type { SftpEntry, SftpEntryType } from '@smt/shared';
 import logger from '../logger.js';
+import { HostKeyMismatchError, sshConnectConfig, type SshTarget } from './host-keys.js';
 
 /** Close a pooled connection after this long with no in-flight operations. */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 20_000;
 
-export interface SftpTarget {
-  host: string;
-  port: number;
-  username: string;
-}
+export type SftpTarget = SshTarget;
 
 export interface SftpAuth {
   privateKey?: string;
@@ -111,6 +108,7 @@ function openConnection(
 ): Promise<PooledConnection> {
   return new Promise<PooledConnection>((resolve, reject) => {
     const client = new Client();
+    const { config: connectConfig, guard } = sshConnectConfig(target, auth, 'sftp');
     const timer = setTimeout(() => {
       client.end();
       reject(new SftpError('SFTP connection timed out', 504));
@@ -135,19 +133,19 @@ function openConnection(
         clearTimeout(timer);
         // Drop the cached promise so the next request retries a fresh connection
         pool.delete(key);
+        const cause = guard.error(err);
+        if (cause instanceof HostKeyMismatchError) {
+          reject(cause);
+          return;
+        }
         logger.error({ err, host: target.host }, 'SFTP connection error');
-        reject(new SftpError(`SFTP connection failed: ${err.message}`, 502));
+        reject(new SftpError(`SFTP connection failed: ${cause.message}`, 502));
       })
       .on('close', () => {
         clearTimeout(timer);
         pool.delete(key);
       })
-      .connect({
-        host: target.host,
-        port: target.port,
-        username: target.username,
-        ...(auth.privateKey ? { privateKey: auth.privateKey } : { password: auth.password }),
-      });
+      .connect(connectConfig);
   });
 }
 

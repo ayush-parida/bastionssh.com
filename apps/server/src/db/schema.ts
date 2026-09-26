@@ -304,6 +304,16 @@ export const servers = sqliteTable(
     cloudRegion: text('cloud_region'),
     cloudState: text('cloud_state'), // running | stopped | other | missing
     cloudSyncedAt: text('cloud_synced_at'),
+    // Pinned SSH host key. All null = nothing pinned, so the next connection
+    // trusts what it sees (TOFU). See ssh/host-keys.ts.
+    hostKeyFingerprint: text('host_key_fingerprint'), // SHA256:<base64, no padding>
+    hostKeyType: text('host_key_type'), // ssh-ed25519 | ssh-rsa | ecdsa-sha2-nistp256 …
+    hostKeyTrustedAt: text('host_key_trusted_at'),
+    hostKeyTrustedBy: text('host_key_trusted_by'), // user id; null = trust on first use
+    // Last different key the host presented; kept until an admin accepts, pins or forgets.
+    hostKeyMismatchFingerprint: text('host_key_mismatch_fingerprint'),
+    hostKeyMismatchType: text('host_key_mismatch_type'),
+    hostKeyMismatchAt: text('host_key_mismatch_at'),
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at')
       .notNull()
@@ -496,7 +506,7 @@ export const serverAlerts = sqliteTable(
     serverId: text('server_id')
       .notNull()
       .references(() => servers.id, { onDelete: 'cascade' }),
-    type: text('type').notNull(), // offline | cpu_high | memory_high | disk_high | load_high
+    type: text('type').notNull(), // offline | cpu_high | memory_high | disk_high | load_high | host_key_mismatch
     severity: text('severity').notNull().default('warning'), // warning | critical
     message: text('message').notNull(),
     value: real('value'),

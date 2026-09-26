@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
+import { drizzle } from 'drizzle-orm/better-sqlite3';
+import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -205,5 +207,58 @@ describe('migration 0009 (backup codes)', () => {
 
     db.exec("DELETE FROM users WHERE id = 'u1'");
     expect(db.prepare('SELECT id FROM backup_codes').all()).toEqual([{ id: 'b2' }]);
+  });
+});
+
+const HOST_KEYS_TAG = '0010_host_keys';
+
+describe('migration 0010 (host keys)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(HOST_KEYS_TAG);
+  });
+
+  it('upgrades existing servers to "nothing pinned", so the next connect is TOFU', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < HOST_KEYS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 'root', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [HOST_KEYS_TAG]);
+
+    expect(
+      db
+        .prepare(
+          `SELECT id, host_key_fingerprint, host_key_type, host_key_trusted_at, host_key_trusted_by,
+             host_key_mismatch_fingerprint, host_key_mismatch_type, host_key_mismatch_at FROM servers`,
+        )
+        .get(),
+    ).toEqual({
+      id: 'srv',
+      host_key_fingerprint: null,
+      host_key_type: null,
+      host_key_trusted_at: null,
+      host_key_trusted_by: null,
+      host_key_mismatch_fingerprint: null,
+      host_key_mismatch_type: null,
+      host_key_mismatch_at: null,
+    });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (sqlite.prepare('PRAGMA table_info(servers)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    expect(columns).toEqual(
+      expect.arrayContaining(['host_key_fingerprint', 'host_key_trusted_by', 'host_key_mismatch_at']),
+    );
+    expect(sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get()).toEqual({
+      n: journal.entries.length,
+    });
   });
 });

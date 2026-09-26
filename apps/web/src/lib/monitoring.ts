@@ -38,6 +38,12 @@ export const STATUS_META: Record<ServerStatus, StatusMeta> = {
     text: 'text-muted-foreground',
     badge: 'bg-muted text-muted-foreground',
   },
+  host_key_mismatch: {
+    label: 'Host key changed',
+    dot: 'bg-red-600',
+    text: 'text-red-600',
+    badge: 'bg-red-500/10 text-red-600',
+  },
 };
 
 export function statusMeta(status: ServerStatus): StatusMeta {

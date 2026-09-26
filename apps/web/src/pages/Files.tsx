@@ -21,6 +21,8 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { hostKeyMismatchOf } from '@/lib/host-keys.js';
+import { HostKeyMismatchNotice } from '@/components/servers/HostKey.js';
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -85,6 +87,8 @@ export default function FilesPage() {
   });
 
   const cwd = listQuery.data?.path ?? path;
+  // A refused host key gets its own explanation and a way to fix it
+  const hostKeyError = hostKeyMismatchOf(listQuery.error);
 
   function refresh() {
     void qc.invalidateQueries({ queryKey: ['sftp', serverId] });
@@ -299,9 +303,17 @@ export default function FilesPage() {
       {listQuery.isLoading ? (
         <p className="text-muted-foreground">Loading…</p>
       ) : listQuery.isError ? (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-500">
-          {(listQuery.error as Error).message}
-        </div>
+        hostKeyError && serverId ? (
+          <HostKeyMismatchNotice
+            serverId={serverId}
+            expected={hostKeyError.expected}
+            presented={hostKeyError.presented}
+          />
+        ) : (
+          <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-500">
+            {(listQuery.error as Error).message}
+          </div>
+        )
       ) : listQuery.data?.entries.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
           <Folder size={40} className="mb-3 opacity-30" />
