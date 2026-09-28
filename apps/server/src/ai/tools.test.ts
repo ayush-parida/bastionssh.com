@@ -12,6 +12,11 @@ vi.mock('../ssh/broker.js', () => ({
   SSHBroker: { getSessionForUser: broker.getSessionForUser, exec: broker.exec },
   execOnServer: broker.execOnServer,
 }));
+// Recording is covered in recordings/; here it is off, so exec runs as-is
+vi.mock('../recordings/index.js', () => ({
+  startExecRecording: () => null,
+  withExecRecording: (_recording: unknown, exec: () => unknown) => exec(),
+}));
 vi.mock('../ssh/credentials.js', () => ({ resolveServerAuth: credentials.resolveServerAuth }));
 vi.mock('../db/index.js', () => ({ getDb: vi.fn() }));
 vi.mock('../auth/server-access.js', () => ({
@@ -62,10 +67,13 @@ describe('ToolExecutor run_command', () => {
     const out = await tools.execute('run_command', { command: 'uptime' });
 
     expect(out).toContain('via-session');
-    expect(broker.exec).toHaveBeenCalledWith('sess-1', 'uptime', undefined, {
-      userId: 'user-1',
-      orgId: 'org-1',
-    });
+    expect(broker.exec).toHaveBeenCalledWith(
+      'sess-1',
+      'uptime',
+      undefined,
+      { userId: 'user-1', orgId: 'org-1' },
+      'ai',
+    );
     expect(broker.execOnServer).not.toHaveBeenCalled();
   });
 
@@ -82,6 +90,8 @@ describe('ToolExecutor run_command', () => {
       { id: 'prod', host: 'prod.example', port: 22, username: 'root' },
       { privateKey: 'k' },
       'systemctl restart pg',
+      undefined, // default timeout
+      undefined, // no recording tap while recording is off
     );
   });
 

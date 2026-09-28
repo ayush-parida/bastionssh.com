@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
@@ -11,6 +13,8 @@ export default defineConfig({
       SMT_ENCRYPTION_KEY: 'dGVzdC1vbmx5LWtleS0zMi1ieXRlcy1sb25nLWJhc2U2NC0x',
       SMT_SESSION_SECRET: 'test-only-session-secret-at-least-32-chars',
       SMT_DB_URL: ':memory:',
+      // Never /data: suites that record point this at their own temp dir
+      SMT_RECORDINGS_DIR: path.join(os.tmpdir(), 'smt-test-recordings'),
     },
   },
 });

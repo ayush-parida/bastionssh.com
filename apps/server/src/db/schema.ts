@@ -169,6 +169,11 @@ export const organizations = sqliteTable('organizations', {
   slug: text('slug').notNull().unique(),
   // Members must sign in with a passkey before their session may act here
   requirePasskey: integer('require_passkey', { mode: 'boolean' }).notNull().default(false),
+  // Session recording policy: terminals and one-shot command runs are recorded
+  // unless switched off; keystrokes only when opted in, since they include passwords.
+  recordingEnabled: integer('recording_enabled', { mode: 'boolean' }).notNull().default(true),
+  recordingInput: integer('recording_input', { mode: 'boolean' }).notNull().default(false),
+  recordingRetentionDays: integer('recording_retention_days').notNull().default(90),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -640,6 +645,66 @@ export const ftpConnections = sqliteTable(
   },
   (t) => ({
     orgIdx: index('ftp_connections_org_idx').on(t.orgId),
+  }),
+);
+
+// ── Session Recordings ────────────────────────────────────────────────────────
+
+/**
+ * A recorded terminal session or one-shot command run. The cast (asciicast v2)
+ * lives on disk under SMT_RECORDINGS_DIR at `file_path`, relative to it; it is
+ * gzipped once the session ends. Pruned after the org's retention period.
+ */
+export const sessionRecordings = sqliteTable(
+  'session_recordings',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    // Kept when the server is deleted — the recording is the record of what happened
+    serverId: text('server_id').references(() => servers.id, { onDelete: 'set null' }),
+    serverName: text('server_name'),
+    userId: text('user_id').notNull(),
+    kind: text('kind').notNull().default('terminal'), // terminal | exec
+    source: text('source'), // exec only: ai | saved_command
+    command: text('command'), // exec only; a saved command's template, never its variables
+    startedAt: text('started_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    endedAt: text('ended_at'), // null while live
+    bytes: integer('bytes').notNull().default(0), // uncompressed cast size
+    filePath: text('file_path').notNull(),
+    inputRecorded: integer('input_recorded', { mode: 'boolean' }).notNull().default(false),
+    truncated: integer('truncated', { mode: 'boolean' }).notNull().default(false),
+    cols: integer('cols').notNull().default(80),
+    rows: integer('rows').notNull().default(24),
+  },
+  (t) => ({
+    orgStartedIdx: index('session_recordings_org_started_idx').on(t.orgId, t.startedAt),
+    serverIdx: index('session_recordings_server_idx').on(t.serverId),
+    userIdx: index('session_recordings_user_idx').on(t.userId),
+  }),
+);
+
+/** Commands run over a live terminal's SSH connection (the AI agent), logged against its recording. */
+export const sessionRecordingCommands = sqliteTable(
+  'session_recording_commands',
+  {
+    id: text('id').primaryKey(),
+    recordingId: text('recording_id')
+      .notNull()
+      .references(() => sessionRecordings.id, { onDelete: 'cascade' }),
+    at: real('at').notNull(), // seconds from the start of the recording
+    source: text('source').notNull(), // ai | saved_command
+    command: text('command').notNull(),
+    exitCode: integer('exit_code'),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    recordingIdx: index('session_recording_commands_recording_idx').on(t.recordingId),
   }),
 );
 

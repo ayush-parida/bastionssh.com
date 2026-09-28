@@ -265,3 +265,99 @@ describe('closeForUser', () => {
     expect(getSessionForUser(kept.id, 'rv3', 'oa')).toBeDefined();
   });
 });
+
+describe('session recording', () => {
+  function fakeRecording() {
+    return {
+      id: 'rec-1',
+      inputRecorded: true,
+      output: vi.fn(),
+      input: vi.fn(),
+      resize: vi.fn(),
+      command: vi.fn(),
+      finish: vi.fn(async () => {}),
+      discard: vi.fn(async () => {}),
+    };
+  }
+
+  async function recordedSession(recording: ReturnType<typeof fakeRecording>) {
+    const id = await SSHBroker.createSession({
+      server: { id: 's1', host: 'h', port: 22, username: 'root' },
+      password: 'pw',
+      ...OWNER,
+      cols: 80,
+      rows: 24,
+      recording,
+    });
+    await flush();
+    await flush();
+    return { id, client: state.clients.at(-1), shell: state.shells.at(-1) };
+  }
+
+  it('records output whether or not a socket is attached, plus input and resizes', async () => {
+    const recording = fakeRecording();
+    const { id, shell } = await recordedSession(recording);
+
+    shell.emit('data', Buffer.from('motd'));
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq(OWNER));
+    shell.emit('data', Buffer.from('$ '));
+    shell.stderr.emit('data', Buffer.from('warn'));
+    sock.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 120, rows: 40 })));
+    sock.emit('message', Buffer.from('ls\r'));
+
+    expect(recording.output.mock.calls.map(([d]) => String(d))).toEqual(['motd', '$ ', 'warn']);
+    expect(recording.resize).toHaveBeenCalledWith(120, 40);
+    expect(recording.input.mock.calls.map(([d]) => String(d))).toEqual(['ls\r']);
+    expect(shell.write).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes the recording when the session closes, however it closes', async () => {
+    const closed = fakeRecording();
+    const a = await recordedSession(closed);
+    await SSHBroker.close(a.id, OWNER);
+    expect(closed.finish).toHaveBeenCalled();
+    expect(closed.discard).not.toHaveBeenCalled();
+
+    const exited = fakeRecording();
+    const b = await recordedSession(exited);
+    b.shell.emit('close');
+    expect(exited.finish).toHaveBeenCalled();
+
+    const reaped = fakeRecording();
+    await recordedSession(reaped);
+    vi.advanceTimersByTime(DETACHED_GRACE_MS);
+    expect(reaped.finish).toHaveBeenCalled();
+  });
+
+  it('discards the recording when the connection fails before a shell opens', async () => {
+    const recording = fakeRecording();
+    await SSHBroker.createSession({
+      server: { id: 's1', host: 'h', port: 22, username: 'root' },
+      password: 'pw',
+      ...OWNER,
+      cols: 80,
+      rows: 24,
+      recording,
+    });
+    state.clients.at(-1).emit('error', new Error('ECONNREFUSED'));
+    await flush();
+    await flush();
+    expect(recording.discard).toHaveBeenCalled();
+    expect(recording.finish).not.toHaveBeenCalled();
+  });
+
+  it('logs commands run over the session on its recording', async () => {
+    const recording = fakeRecording();
+    const { id } = await recordedSession(recording);
+    const pending = SSHBroker.exec(id, 'df -h', 30_000, OWNER, 'ai');
+    const ch = state.execs.at(-1);
+    ch.emit('data', Buffer.from('/dev/sda1'));
+    ch.emit('exit', 0);
+    ch.emit('close');
+
+    const result = await pending;
+    expect(result.recordingId).toBe('rec-1');
+    expect(recording.command).toHaveBeenCalledWith({ source: 'ai', command: 'df -h', exitCode: 0 });
+  });
+});

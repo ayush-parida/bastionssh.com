@@ -322,3 +322,70 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const RECORDINGS_TAG = '0012_session_recordings';
+
+describe('migration 0012 (session recordings)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(RECORDINGS_TAG);
+  });
+
+  it('upgrades existing orgs to recording on, keystrokes off, 90-day retention', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < RECORDINGS_TAG));
+    db.exec(`
+      INSERT INTO organizations (id, name, slug, require_passkey, created_at, updated_at) VALUES ('o1', 'Org', 'org', 1, 'now', 'now');
+    `);
+
+    apply(db, [RECORDINGS_TAG]);
+
+    expect(
+      db
+        .prepare('SELECT id, require_passkey, recording_enabled, recording_input, recording_retention_days FROM organizations')
+        .get(),
+    ).toEqual({ id: 'o1', require_passkey: 1, recording_enabled: 1, recording_input: 0, recording_retention_days: 90 });
+    expect(db.prepare('SELECT count(*) AS n FROM session_recordings').get()).toEqual({ n: 0 });
+  });
+
+  it('keeps recordings when their server goes, and drops them and their command log with the org', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 'root', 'u1', 'now', 'now');
+      INSERT INTO session_recordings (id, org_id, server_id, server_name, user_id, started_at, file_path)
+        VALUES ('r1', 'o1', 'srv', 's', 'u1', 'now', 'o1/r1.cast');
+      INSERT INTO session_recording_commands (id, recording_id, at, source, command, created_at)
+        VALUES ('c1', 'r1', 1.5, 'ai', 'df -h', 'now');
+    `);
+    expect(
+      db.prepare('SELECT kind, bytes, input_recorded, truncated, cols, rows, ended_at FROM session_recordings').get(),
+    ).toEqual({ kind: 'terminal', bytes: 0, input_recorded: 0, truncated: 0, cols: 80, rows: 24, ended_at: null });
+
+    db.exec("DELETE FROM servers WHERE id = 'srv'");
+    expect(db.prepare('SELECT server_id, server_name FROM session_recordings').get()).toEqual({
+      server_id: null,
+      server_name: 's',
+    });
+
+    db.exec("DELETE FROM organizations WHERE id = 'o1'");
+    expect(db.prepare('SELECT count(*) AS n FROM session_recordings').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM session_recording_commands').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (sqlite.prepare('PRAGMA table_info(organizations)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    expect(columns).toEqual(
+      expect.arrayContaining(['recording_enabled', 'recording_input', 'recording_retention_days']),
+    );
+    expect(sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get()).toEqual({
+      n: journal.entries.length,
+    });
+  });
+});

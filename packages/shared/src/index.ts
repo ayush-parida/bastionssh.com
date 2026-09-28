@@ -15,4 +15,5 @@ export * from './types/notification.js';
 export * from './types/team.js';
 export * from './types/api-token.js';
 export * from './types/audit.js';
+export * from './types/recording.js';
 export * from './types/pagination.js';

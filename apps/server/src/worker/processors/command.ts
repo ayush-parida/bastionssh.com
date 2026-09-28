@@ -10,6 +10,7 @@ interface CommandJobData {
   variables?: Record<string, string>;
   /** Older queued jobs predate org scoping; look it up when absent. */
   orgId?: string;
+  recordingId?: string;
 }
 
 export async function runCommandJob(data: CommandJobData) {
@@ -40,5 +41,6 @@ export async function runCommandJob(data: CommandJobData) {
     commandId: data.commandId,
     serverId: data.serverId,
     variables: data.variables,
+    recordingId: data.recordingId,
   });
 }

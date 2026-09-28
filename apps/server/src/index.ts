@@ -2,6 +2,7 @@ import { buildApp } from './api/app.js';
 import { startWorker } from './worker/index.js';
 import { startHealthMonitor } from './monitoring/scheduler.js';
 import { startCloudSync } from './cloud/scheduler.js';
+import { startRecordingMaintenance } from './recordings/scheduler.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -14,6 +15,8 @@ async function main() {
   logger.info('Database migrations complete');
 
   await seedDefaultAdmin();
+  // Before the API listens, so no live terminal's recording is mistaken for an orphan
+  await startRecordingMaintenance();
 
   const app = await buildApp();
 

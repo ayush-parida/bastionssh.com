@@ -3,6 +3,7 @@ import { servers, savedCommands, cronJobs, auditLog, memberships } from '../db/s
 import { eq, and, desc } from 'drizzle-orm';
 import { SSHBroker, execOnServer } from '../ssh/broker.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
+import { startExecRecording, withExecRecording } from '../recordings/index.js';
 import {
   accessibleSavedCommandFilter,
   accessibleServerFilter,
@@ -115,10 +116,13 @@ export class ToolExecutor {
     return { serverId, serverName: row?.name };
   }
 
-  /** Run a command and keep the exit code, which the formatted output only mentions. */
+  /**
+   * Run a command and keep the exit code, which the formatted output only
+   * mentions, and the recording it was logged on (for the audit entry).
+   */
   async runCommand(
     input: Record<string, unknown>,
-  ): Promise<{ output: string; exitCode: number; serverId: string | undefined }> {
+  ): Promise<{ output: string; exitCode: number; serverId: string | undefined; recordingId?: string }> {
     const command = (input.command as string | undefined)?.trim();
     if (!command) throw new Error('"command" is required');
 
@@ -129,8 +133,13 @@ export class ToolExecutor {
 
     if (session && sessionServerId && serverId === sessionServerId) {
       try {
-        const result = await SSHBroker.exec(session.id, command, undefined, owner);
-        return { output: formatExecResult(result), exitCode: result.exitCode, serverId };
+        const result = await SSHBroker.exec(session.id, command, undefined, owner, 'ai');
+        return {
+          output: formatExecResult(result),
+          exitCode: result.exitCode,
+          serverId,
+          recordingId: result.recordingId,
+        };
       } catch {
         // Session may have expired — fall through to direct exec
       }
@@ -143,13 +152,30 @@ export class ToolExecutor {
     // Org-scoped server and key lookup, same as the terminal and saved commands
     const { server, auth } = await resolveServerAuth(this.orgId, serverId);
 
-    const result = await execOnServer(
-      { id: server.id, host: server.host, port: server.port, username: server.username },
-      auth,
+    const recording = startExecRecording({
+      orgId: this.orgId,
+      serverId: server.id,
+      serverName: server.name,
+      userId: this.userId,
+      source: 'ai',
       command,
+    });
+    const result = await withExecRecording(recording, (tap) =>
+      execOnServer(
+        { id: server.id, host: server.host, port: server.port, username: server.username },
+        auth,
+        command,
+        undefined,
+        tap,
+      ),
     );
 
-    return { output: formatExecResult(result), exitCode: result.exitCode, serverId };
+    return {
+      output: formatExecResult(result),
+      exitCode: result.exitCode,
+      serverId,
+      recordingId: result.recordingId,
+    };
   }
 
   private canUse(serverId: string): boolean {

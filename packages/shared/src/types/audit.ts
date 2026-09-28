@@ -93,7 +93,12 @@ export type AuditAction =
   | 'cloud_account.delete'
   | 'cloud_account.test'
   | 'cloud_account.sync'
-  | 'dns.lookup';
+  | 'dns.lookup'
+  | 'recording.view'
+  | 'recording.download'
+  | 'recording.delete'
+  | 'recording.pruned'
+  | 'org.recording_settings';
 
 export interface AuditLogEntry {
   id: string;

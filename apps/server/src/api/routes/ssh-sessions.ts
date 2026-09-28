@@ -9,6 +9,7 @@ import { eq, and } from 'drizzle-orm';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { vault } from '../../vault/index.js';
+import { startTerminalRecording } from '../../recordings/index.js';
 
 const createSessionSchema = z.object({
   serverId: z.string(),
@@ -62,19 +63,36 @@ export async function sshSessionRoutes(app: FastifyInstance) {
       password = await vault.decrypt(server.encryptedPassword, server.id);
     }
 
-    const sessionId = await SSHBroker.createSession({
-      server,
-      key,
-      password,
-      userId: req.user.id,
+    const recording = startTerminalRecording({
       orgId: req.orgId,
-      ...body,
+      serverId: server.id,
+      serverName: server.name,
+      userId: req.user.id,
+      cols: body.cols,
+      rows: body.rows,
     });
-    await audit(req, 'server.connect', 'server', server.id, server.name);
+
+    let sessionId: string;
+    try {
+      sessionId = await SSHBroker.createSession({
+        server,
+        key,
+        password,
+        userId: req.user.id,
+        orgId: req.orgId,
+        recording,
+        ...body,
+      });
+    } catch (err) {
+      await recording?.discard();
+      throw err;
+    }
+    await audit(req, 'server.connect', 'server', server.id, server.name, recording ? { recordingId: recording.id } : undefined);
 
     return reply.status(201).send({
       sessionId,
       wsUrl: `${config.baseUrl.replace(/^http/, 'ws')}/api/ssh-sessions/${sessionId}/ws`,
+      recording: recording ? { id: recording.id, inputRecorded: recording.inputRecorded } : null,
     });
   });
 
