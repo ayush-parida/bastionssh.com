@@ -641,7 +641,6 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_DB_URL`             | no       | Postgres URL. Defaults to SQLite at `/data/smt.db`            |
 | `SMT_REDIS_URL`          | no       | Redis URL. Defaults to in-memory queue (single-node only)     |
 | `SMT_SESSION_SECRET`     | yes      | Cookie signing secret                                         |
-| `SMT_OAUTH_*`            | no       | Per-provider OAuth client configuration                       |
 | `SMT_LOG_LEVEL`          | no       | `info` (default), `debug`, `warn`, `error`                    |
 | `SMT_MAX_SSH_SESSIONS`   | no       | Per-user concurrent SSH session cap                           |
 | `SMT_AI_REQUEST_TIMEOUT` | no       | Timeout for outbound AI calls (ms)                            |

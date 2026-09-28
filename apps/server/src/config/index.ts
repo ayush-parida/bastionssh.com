@@ -75,11 +75,6 @@ const envSchema = z.object({
     .transform((v) => v === 'true')
     .default('true'),
 
-  SMT_OAUTH_GOOGLE_CLIENT_ID: z.string().optional(),
-  SMT_OAUTH_GOOGLE_CLIENT_SECRET: z.string().optional(),
-  SMT_OAUTH_GITHUB_CLIENT_ID: z.string().optional(),
-  SMT_OAUTH_GITHUB_CLIENT_SECRET: z.string().optional(),
-
   SMT_ADMIN_EMAIL: z.string().email().default('ayush.parida@fgshq.com'),
   /** Unset (outside NODE_ENV=development/test) means a random password is generated on first seed. */
   SMT_ADMIN_PASSWORD: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(8).optional()),
@@ -363,22 +358,6 @@ export const config = {
   trustProxy: parseTrustProxy(env.SMT_TRUST_PROXY),
   webauthn,
   egressIp,
-  oauth: {
-    google:
-      env.SMT_OAUTH_GOOGLE_CLIENT_ID && env.SMT_OAUTH_GOOGLE_CLIENT_SECRET
-        ? {
-            clientId: env.SMT_OAUTH_GOOGLE_CLIENT_ID,
-            clientSecret: env.SMT_OAUTH_GOOGLE_CLIENT_SECRET,
-          }
-        : null,
-    github:
-      env.SMT_OAUTH_GITHUB_CLIENT_ID && env.SMT_OAUTH_GITHUB_CLIENT_SECRET
-        ? {
-            clientId: env.SMT_OAUTH_GITHUB_CLIENT_ID,
-            clientSecret: env.SMT_OAUTH_GITHUB_CLIENT_SECRET,
-          }
-        : null,
-  },
 } as const;
 
 export type Config = typeof config;

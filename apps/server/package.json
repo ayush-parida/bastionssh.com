@@ -34,7 +34,6 @@
     "@smt/agent": "workspace:*",
     "@smt/cron-parser": "workspace:*",
     "@smt/shared": "workspace:*",
-    "arctic": "^2.0.0",
     "argon2": "^0.41.0",
     "basic-ftp": "^6.2.1",
     "better-sqlite3": "^11.0.0",
