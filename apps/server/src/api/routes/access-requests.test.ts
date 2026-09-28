@@ -182,6 +182,31 @@ describe('time-limited access', () => {
       expect(row?.action).toBe('access_request.create');
     });
 
+    it('keeps member-typed text from pinging or linking in chat channels', async () => {
+      const member = await restrictedMember();
+      const res = await request(member, { reason: '@everyone <!channel> <https://evil.test|jira>' });
+      expect(res.statusCode).toBe(201);
+      // Stored as typed; only the notice is defused
+      expect(res.json().reason).toBe('@everyone <!channel> <https://evil.test|jira>');
+      const [, notice] = spies.notify.mock.calls[0] as unknown as [string, { message: string; details: [string, string][] }];
+      for (const text of [notice.message, Object.fromEntries(notice.details).Reason!]) {
+        expect(text).not.toMatch(/@everyone|[<>]/);
+        expect(text).toContain('@​everyone');
+      }
+    });
+
+    it('caps how many requests a member creates in an hour, cancelled ones included', async () => {
+      const member = await restrictedMember();
+      for (let i = 0; i < 20; i++) {
+        const id = (await request(member)).json().id;
+        expect((await as(member).post(`/api/access-requests/${id}/cancel`)).statusCode).toBe(200);
+      }
+      vi.clearAllMocks();
+      const res = await request(member);
+      expect(res.statusCode).toBe(429);
+      expect(spies.notify).not.toHaveBeenCalled();
+    });
+
     it('refuses more than the org maximum', async () => {
       const member = await restrictedMember();
       const res = await request(member, { durationMinutes: 481 });

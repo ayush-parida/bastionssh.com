@@ -16,7 +16,7 @@ import { rank } from './middleware.js';
  * found, never as forbidden, so its existence does not leak.
  *
  * A grant may carry an expiry. Once past it the grant stops counting here at
- * once; the expiry sweep (auth/access-expiry.ts) later deletes the row and
+ * once; the expiry sweep (auth/access-grants.ts) later deletes the row and
  * closes whatever is still open on the server.
  */
 

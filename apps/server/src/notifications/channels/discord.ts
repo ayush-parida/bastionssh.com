@@ -19,6 +19,8 @@ export const discord: ChannelAdapter = {
       url: target,
       body: {
         content: summarize(event, server),
+        // Never ping: notices carry member-typed text
+        allowed_mentions: { parse: [] },
         embeds: [{ title: embedTitle, description, color: COLOR[tone(event)] }],
       },
     };

@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { and, asc, count, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type {
   AccessRequest,
@@ -33,6 +33,12 @@ import { config } from '../../config/index.js';
 const MAX_POLICY_MINUTES = 7 * 24 * 60;
 /** Unanswered requests one member may have open at once. */
 const MAX_PENDING_PER_MEMBER = 10;
+/**
+ * Requests one member may create in an hour, cancelled ones included. Each
+ * one emails every admin and posts to the org's channels, so create-then-
+ * cancel must not become a way to flood them.
+ */
+const MAX_CREATED_PER_HOUR = 20;
 
 const settingsSchema = z.object({
   restrictedSeeServerNames: z.boolean().optional(),
@@ -152,6 +158,16 @@ function adminEmails(orgId: string, exceptUserId: string): string[] {
     .all()
     .filter((m) => rank(m.role) >= rank('admin') && m.userId !== exceptUserId)
     .map((m) => m.email);
+}
+
+/**
+ * Member-typed text headed for shared chat channels. Breaks `@everyone` /
+ * `@channel` style mentions (Discord, Mattermost) and Slack/Google Chat
+ * `<!here>`, `<users/all>` and `<url|label>` markup, so a restricted member
+ * cannot ping a whole channel or dress up a link in the admins' feed.
+ */
+export function chatSafe(text: string): string {
+  return text.replace(/@/g, '@\u200b').replace(/</g, '\u2039').replace(/>/g, '\u203a');
 }
 
 function reviewLink(): string {
@@ -302,6 +318,21 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: `You already have permanent access to ${known.get(permanent)}` });
       }
 
+      const recent = db
+        .select({ n: count() })
+        .from(accessRequests)
+        .where(
+          and(
+            eq(accessRequests.orgId, req.orgId),
+            eq(accessRequests.userId, req.user.id),
+            gt(accessRequests.createdAt, new Date(Date.now() - 60 * 60_000).toISOString()),
+          ),
+        )
+        .get();
+      if ((recent?.n ?? 0) >= MAX_CREATED_PER_HOUR) {
+        return reply.status(429).send({ error: 'Too many access requests in the last hour. Try again later.' });
+      }
+
       const pending = db
         .select({ n: count() })
         .from(accessRequests)
@@ -338,17 +369,18 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       });
 
       const names = serverIds.map((s) => known.get(s)!).join(', ');
+      const reason = chatSafe(body.reason);
       notifyNotice(
         req.orgId,
         {
           event: 'access_request.created',
-          title: `Access request from ${req.user.displayName || req.user.email}`,
-          message: `${req.user.email} asks for ${formatMinutes(body.durationMinutes)} of access to ${names}: ${body.reason}`,
+          title: `Access request from ${chatSafe(req.user.displayName || req.user.email)}`,
+          message: `${req.user.email} asks for ${formatMinutes(body.durationMinutes)} of access to ${names}: ${reason}`,
           details: [
             ['Requested by', req.user.email],
             ['Servers', names],
             ['Duration', formatMinutes(body.durationMinutes)],
-            ['Reason', body.reason],
+            ['Reason', reason],
             ['Review', reviewLink()],
           ],
         },
