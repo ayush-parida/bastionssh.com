@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, or } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { KeyRotation, KeyRotationStatus, KeyRotationStep, KeyType } from '@smt/shared';
 import { getDb } from '../db/index.js';
@@ -357,7 +357,9 @@ function rotatedKeyName(serverName: string): string {
 /**
  * Other servers of the org reaching the same account (host, port and user) on
  * the old key. They share this authorized_keys file, so removing the old key
- * there would lock them out.
+ * there would lock them out. Behind a connectivity agent the host is only a
+ * label (the agent always dials its own loopback), so there the agent stands
+ * in for the host.
  */
 function sharedAccountServers(server: ServerRow, oldKeyId: string): string[] {
   return getDb()
@@ -367,7 +369,7 @@ function sharedAccountServers(server: ServerRow, oldKeyId: string): string[] {
       and(
         eq(servers.orgId, server.orgId),
         ne(servers.id, server.id),
-        eq(servers.host, server.host),
+        server.agentId ? or(eq(servers.host, server.host), eq(servers.agentId, server.agentId)) : eq(servers.host, server.host),
         eq(servers.port, server.port),
         eq(servers.username, server.username),
         eq(servers.defaultKeyId, oldKeyId),

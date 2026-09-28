@@ -46,12 +46,12 @@ vi.mock('../../ssh/broker.js', async (importOriginal) => {
 });
 
 const ssh2 = (await import('ssh2')).default;
-const { eq, and } = await import('drizzle-orm');
+const { eq, and, inArray } = await import('drizzle-orm');
 const { nanoid } = await import('nanoid');
 const { buildApp } = await import('../app.js');
 const { runMigrations } = await import('../../db/migrate.js');
 const { getDb } = await import('../../db/index.js');
-const { auditLog, cloudAccounts, ftpConnections, keyRotations, memberServerAccess, memberships, passkeys, servers, sshKeys } =
+const { agents, auditLog, cloudAccounts, ftpConnections, keyRotations, memberServerAccess, memberships, passkeys, servers, sshKeys } =
   await import('../../db/schema.js');
 const { vault } = await import('../../vault/index.js');
 const { resolveServerAuth } = await import('../../ssh/credentials.js');
@@ -362,6 +362,21 @@ describe('SSH key rotation', { timeout: 30_000 }, () => {
     expect(keyA.id).not.toBe(keyB.id);
     expect(listed(a.home, keyA.publicKey.split(' ')[1]!)).toBe(true);
     expect(listed(a.home, keyB.publicKey.split(' ')[1]!)).toBe(true);
+  });
+
+  it('treats servers behind the same agent and port as one account, whatever their host label', async () => {
+    const old = await seedKey();
+    const agentId = nanoid();
+    db().insert(agents).values({ id: agentId, orgId, name: 'dc-agent', tokenHash: nanoid(), createdBy: owner.userId }).run();
+    const a = seedFleetServer(old.id, [old.line], 'agent-a', 'db-1');
+    const b = seedFleetServer(old.id, [old.line], 'agent-b', 'db-1-admin');
+    db().update(servers).set({ agentId }).where(inArray(servers.id, [a.id, b.id])).run();
+    fake.homes.set(b.id, a.home);
+
+    const first = (await rotate(a.id)).json();
+    expect(first).toMatchObject({ status: 'completed', oldKeyRetired: false });
+    expect(first.warnings.join(' ')).toMatch(/agent-b log in to the same account/);
+    expect(listed(a.home, old.blob)).toBe(true);
   });
 
   it('does not retire a key a cloud account still assigns', async () => {
