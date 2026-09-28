@@ -163,8 +163,13 @@ export interface HostKeyStore {
   fillType(id: string, fingerprint: string, type: string): void;
   /** Record a presented key unless it is the mismatch already on file. False when unchanged. */
   recordMismatch(id: string, fingerprint: string, type: string | null, at: string): boolean;
-  /** Raise an alert for a newly recorded mismatch, where this kind of endpoint has alerts. */
-  alert?(subject: HostKeySubject, message: string): void;
+  /**
+   * Raise an alert for a newly recorded mismatch, where this kind of endpoint
+   * has alerts. `notify` is false while the same presented key was already
+   * notified for this endpoint within {@link MISMATCH_NOTIFY_COOLDOWN_MS}: the
+   * alert is still recorded, but the channels do not hear about it again.
+   */
+  alert?(subject: HostKeySubject, message: string, notify: boolean): void;
 }
 
 function loadServer(serverId: string): ServerRow | undefined {
@@ -215,8 +220,8 @@ export const serverHostKeyStore: HostKeyStore = {
       .run();
     return result.changes > 0;
   },
-  alert(subject, message) {
-    openHostKeyAlert(subject.orgId, subject.id, message);
+  alert(subject, message, notify) {
+    openHostKeyAlert(subject.orgId, subject.id, message, { notify });
   },
 };
 
@@ -268,6 +273,40 @@ export function mismatchAuditAllowance(
   mismatchAudits.delete(key);
   mismatchAudits.set(key, { at: now, suppressed: 0 });
   return { suppressed: seen?.suppressed ?? 0 };
+}
+
+/**
+ * Notifications for a host flapping between keys: at most one per endpoint and
+ * presented key per hour, whatever the pinned key. Like the audit cap, per
+ * process and bounded; the alert row and the mismatch on file are always kept
+ * current — only the message to the channels is held back.
+ */
+export const MISMATCH_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
+
+const mismatchNotifications = new Map<string, number>();
+
+/** Whether a mismatch notification for this endpoint and presented key may go out now. */
+export function mismatchNotifyAllowed(
+  kind: HostKeySubjectKind,
+  id: string,
+  presented: string,
+  now = Date.now(),
+): boolean {
+  const key = `${kind}:${id}:${presented}`;
+  const last = mismatchNotifications.get(key);
+  if (last !== undefined && now - last < MISMATCH_NOTIFY_COOLDOWN_MS) return false;
+
+  if (last === undefined && mismatchNotifications.size >= MAX_TRACKED_MISMATCHES) {
+    for (const [k, at] of mismatchNotifications) {
+      if (now - at >= MISMATCH_NOTIFY_COOLDOWN_MS) mismatchNotifications.delete(k);
+    }
+    if (mismatchNotifications.size >= MAX_TRACKED_MISMATCHES) {
+      mismatchNotifications.delete(mismatchNotifications.keys().next().value!);
+    }
+  }
+  mismatchNotifications.delete(key);
+  mismatchNotifications.set(key, now);
+  return true;
 }
 
 export type HostKeyCheck = { ok: true } | { ok: false; error: Error };
@@ -368,7 +407,7 @@ export function checkHostKey(
         });
       }
       try {
-        store.alert?.(row, mismatchMessage(expected, presented));
+        store.alert?.(row, mismatchMessage(expected, presented), mismatchNotifyAllowed(kind, row.id, presented));
       } catch (err) {
         logger.error({ err, serverId }, 'Failed to raise host key alert');
       }

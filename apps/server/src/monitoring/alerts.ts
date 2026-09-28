@@ -249,8 +249,15 @@ export function reconcileAlerts(
 /**
  * Raise the host key alert from a connection path (terminal, SFTP, cron…)
  * without waiting for the next health sweep. Idempotent: an open alert is kept.
+ * `notify: false` records the alert without telling the channels (the same
+ * presented key was notified recently — see mismatchNotifyAllowed).
  */
-export function openHostKeyAlert(orgId: string, serverId: string, message: string) {
+export function openHostKeyAlert(
+  orgId: string,
+  serverId: string,
+  message: string,
+  options: { notify?: boolean } = {},
+) {
   const db = getDb();
   const existing = db
     .select({ id: serverAlerts.id })
@@ -278,6 +285,7 @@ export function openHostKeyAlert(orgId: string, serverId: string, message: strin
       openedAt: new Date().toISOString(),
     })
     .run();
+  if (options.notify === false) return;
   notifyAlertsChanged([
     { kind: 'opened', orgId, serverId, type: 'host_key_mismatch', severity: 'critical', message },
   ]);

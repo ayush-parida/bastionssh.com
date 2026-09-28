@@ -61,7 +61,9 @@ export const ftpHostKeyStore: HostKeyStore = {
       .run();
     return result.changes > 0;
   },
-  alert(subject, message) {
+  alert(subject, message, notify) {
+    // The mismatch columns are the alert; only the channels are rate-limited
+    if (!notify) return;
     notifyAlertsChanged([
       {
         kind: 'opened',

@@ -185,6 +185,8 @@ SMT_ALERT_OFFLINE_FAILURES=2         # failed checks before a host is alerted as
 
 Under **Settings → Alert notifications**, add one or more channels. Each channel can be limited to critical alerts and can opt out of "resolved" notices.
 
+A changed SSH host key (a server's or an SFTP connection's) is notified at most once an hour per server and presented key, so a host flapping between keys does not flood the channels; the alert itself, the mismatch shown in the UI and the audit log still follow every change (audit rows are capped per key every 10 minutes).
+
 | Channel | What you need |
 | ------- | ------------- |
 | Slack / Mattermost | An incoming-webhook URL |

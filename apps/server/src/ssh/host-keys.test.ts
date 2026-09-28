@@ -30,6 +30,15 @@ vi.mock('ssh2', async (importOriginal) => {
   return { ...actual, utils, Client, __state: state };
 });
 
+// Record what reaches the notification channels
+const notified = vi.hoisted(() => [] as { kind: string; serverId: string; type: string }[]);
+vi.mock('../notifications/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../notifications/index.js')>()),
+  notifyAlertsChanged: (events: { kind: string; serverId: string; type: string }[]) => {
+    notified.push(...events);
+  },
+}));
+
 const ssh2 = (await import('ssh2')) as any;
 const state = ssh2.__state as { presented: Buffer; configs: any[] };
 const { runMigrations } = await import('../db/migrate.js');
@@ -237,6 +246,50 @@ describe('checkHostKey', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('notifies a host flapping between keys once per presented key per hour', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const id = seedServer(orgId, userId);
+      hk.checkHostKey(id, blobOf(ED25519_LINE), 'terminal');
+      const flags: boolean[] = [];
+      const store = { ...hk.serverHostKeyStore, alert: (_s: unknown, _m: string, notify: boolean) => flags.push(notify) };
+      const other = ed25519Blob();
+
+      for (const blob of [blobOf(RSA_LINE), other, blobOf(RSA_LINE), other]) {
+        hk.checkHostKey(id, blob, 'exec', undefined, store);
+      }
+      // Each flap is new evidence on file, but each key is notified once
+      expect(flags).toEqual([true, true, false, false]);
+
+      vi.setSystemTime(Date.now() + hk.MISMATCH_NOTIFY_COOLDOWN_MS);
+      hk.checkHostKey(id, blobOf(RSA_LINE), 'exec', undefined, store);
+      expect(flags.at(-1)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the alert row current but does not re-notify a key already notified within the hour', async () => {
+    const { resolveHostKeyAlert } = await import('../monitoring/alerts.js');
+    const id = seedServer(orgId, userId);
+    hk.checkHostKey(id, blobOf(ED25519_LINE), 'terminal');
+    const opened = () => notified.filter((e) => e.serverId === id && e.kind === 'opened');
+
+    hk.checkHostKey(id, blobOf(RSA_LINE), 'exec');
+    expect(opened()).toHaveLength(1);
+
+    // The alert gets closed, then the host comes back with the same wrong key
+    // after presenting another one in between
+    resolveHostKeyAlert(orgId, id);
+    hk.checkHostKey(id, ed25519Blob(), 'exec');
+    resolveHostKeyAlert(orgId, id);
+    hk.checkHostKey(id, blobOf(RSA_LINE), 'exec');
+
+    // The new key was notified; the repeat of the first one was not, yet its alert is open
+    expect(opened()).toHaveLength(2);
+    expect(alertsFor(id).filter((a) => a.resolvedAt === null)).toHaveLength(1);
   });
 
   it('limits per server: the same keys on another server are audited independently', () => {
