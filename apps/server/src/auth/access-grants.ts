@@ -72,6 +72,31 @@ export function extendGrants(
   return changed;
 }
 
+/**
+ * Cancel a member's pending access requests in an org, when they are suspended
+ * or removed: nobody should approve access for someone who can no longer use
+ * it (and a reactivated member can simply ask again). Returns how many.
+ */
+export function cancelPendingAccessRequests(
+  orgId: string,
+  userId: string,
+  decidedBy: string,
+  why: 'suspended' | 'removed',
+): number {
+  return getDb()
+    .update(accessRequests)
+    .set({
+      status: 'cancelled',
+      decidedBy,
+      decidedAt: new Date().toISOString(),
+      decisionNote: `Cancelled automatically: the member was ${why}`,
+    })
+    .where(
+      and(eq(accessRequests.orgId, orgId), eq(accessRequests.userId, userId), eq(accessRequests.status, 'pending')),
+    )
+    .run().changes;
+}
+
 export interface ExpirySweepResult {
   /** Grants removed because their time was up. */
   grants: number;

@@ -33,7 +33,7 @@ import { and, eq } from 'drizzle-orm';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { accessRequests, auditLog, memberServerAccess, users } from '../../db/schema.js';
+import { accessRequests, auditLog, memberServerAccess, memberships, users } from '../../db/schema.js';
 import { canAccessServer } from '../../auth/server-access.js';
 import { extendGrants, sweepExpiredAccess } from '../../auth/access-grants.js';
 import { seedOrg, seedServer, seedUser } from './test-utils.js';
@@ -322,6 +322,63 @@ describe('time-limited access', () => {
       expect((await as(admin).post(`/api/access-requests/${id}/approve`)).statusCode).toBe(409);
       sweepExpiredAccess();
       expect(getDb().select().from(accessRequests).where(eq(accessRequests.id, id)).get()?.status).toBe('expired');
+    });
+
+    it('refuses to approve for a suspended member, even if the request was left pending', async () => {
+      const member = await restrictedMember();
+      const id = (await request(member)).json().id;
+      // Suspended behind the API's back, so the request is still pending
+      getDb()
+        .update(memberships)
+        .set({ status: 'suspended' })
+        .where(and(eq(memberships.userId, member.userId), eq(memberships.orgId, orgId)))
+        .run();
+      const res = await as(admin).post(`/api/access-requests/${id}/approve`);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/suspended/);
+      expect(grantRow(member.userId, serverB)).toBeUndefined();
+      expect(getDb().select().from(accessRequests).where(eq(accessRequests.id, id)).get()?.status).toBe('pending');
+    });
+
+    it('cancels pending requests when the member is suspended or removed', async () => {
+      const requestsOf = (userId: string) =>
+        getDb().select().from(accessRequests).where(eq(accessRequests.userId, userId)).all();
+
+      const suspended = await restrictedMember();
+      const first = (await request(suspended)).json().id;
+      expect((await as(admin).post(`/api/team/members/${suspended.userId}/suspend`)).statusCode).toBe(200);
+      expect(requestsOf(suspended.userId)).toEqual([
+        expect.objectContaining({
+          id: first,
+          status: 'cancelled',
+          decidedBy: admin.userId,
+          decisionNote: 'Cancelled automatically: the member was suspended',
+        }),
+      ]);
+      expect((await as(admin).post(`/api/access-requests/${first}/approve`)).statusCode).toBe(409);
+      // Reactivating does not bring the request back
+      expect((await as(admin).post(`/api/team/members/${suspended.userId}/reactivate`)).statusCode).toBe(200);
+      expect(requestsOf(suspended.userId)[0]!.status).toBe('cancelled');
+      expect(grantRow(suspended.userId, serverB)).toBeUndefined();
+
+      const removed = await restrictedMember();
+      const second = (await request(removed)).json().id;
+      const res = await app.inject({
+        method: 'DELETE',
+        url: `/api/team/members/${removed.userId}`,
+        headers: admin.headers,
+        remoteAddress: remoteAddress(),
+      });
+      expect(res.statusCode).toBe(204);
+      expect(requestsOf(removed.userId)).toEqual([
+        expect.objectContaining({ id: second, status: 'cancelled', decisionNote: 'Cancelled automatically: the member was removed' }),
+      ]);
+      const audit = getDb()
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.resourceId, removed.userId), eq(auditLog.action, 'member.remove')))
+        .get();
+      expect(JSON.parse(audit!.metadata!)).toMatchObject({ accessRequestsCancelled: 1 });
     });
 
     it('never shortens access the member already has', async () => {

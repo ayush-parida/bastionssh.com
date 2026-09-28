@@ -423,6 +423,9 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       .where(and(eq(memberships.userId, request.userId), eq(memberships.orgId, req.orgId)))
       .get();
     if (!member) return reply.status(409).send({ error: 'The requester is no longer a member of this organization' });
+    if (member.status !== 'active') {
+      return reply.status(409).send({ error: 'The requester is suspended in this organization' });
+    }
 
     // Servers deleted since the request was made are simply skipped
     const requested = parseServerIds(request.serverIds);
@@ -442,6 +445,14 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     const expiresAt = minutesFromNow(minutes, now.getTime());
     let extended: string[] = [];
     const won = db.transaction(() => {
+      // Suspending or removing the member cancels the request; this closes
+      // the gap between the check above and the decision
+      const stillActive = db
+        .select({ status: memberships.status })
+        .from(memberships)
+        .where(and(eq(memberships.userId, request.userId), eq(memberships.orgId, req.orgId)))
+        .get();
+      if (stillActive?.status !== 'active') return false;
       if (!decide(request.id, {
         status: 'approved',
         approvedMinutes: minutes,

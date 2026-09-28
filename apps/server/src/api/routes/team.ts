@@ -56,7 +56,7 @@ import {
 } from '../../auth/login-security.js';
 import { config } from '../../config/index.js';
 import { activeGrantFilter } from '../../auth/server-access.js';
-import { activeGrants, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
+import { activeGrants, cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 
 const roleSchema = z.enum(ROLES);
 
@@ -435,7 +435,9 @@ export async function teamRoutes(app: FastifyInstance) {
     }
 
     const target = db.select().from(users).where(eq(users.id, userId)).get();
+    let requestsCancelled = 0;
     db.transaction(() => {
+      requestsCancelled = cancelPendingAccessRequests(req.orgId, userId, req.user.id, 'removed');
       db.delete(memberships)
         .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
         .run();
@@ -451,7 +453,10 @@ export async function teamRoutes(app: FastifyInstance) {
     // Terminals, file sessions and agent chats already open in this org end now
     const live = revokeLiveAccess(userId, { orgId: req.orgId });
 
-    await audit(req, 'member.remove', 'member', userId, target?.email, { live });
+    await audit(req, 'member.remove', 'member', userId, target?.email, {
+      live,
+      ...(requestsCancelled > 0 && { accessRequestsCancelled: requestsCancelled }),
+    });
     return reply.status(204).send();
   });
 
@@ -467,11 +472,14 @@ export async function teamRoutes(app: FastifyInstance) {
           .status(400)
           .send({ error: 'The organization must keep at least one active owner' });
       }
-      getDb()
-        .update(memberships)
-        .set({ status: 'suspended', suspendedAt: new Date().toISOString(), suspendedBy: req.user.id })
-        .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
-        .run();
+      let requestsCancelled = 0;
+      getDb().transaction((tx) => {
+        tx.update(memberships)
+          .set({ status: 'suspended', suspendedAt: new Date().toISOString(), suspendedBy: req.user.id })
+          .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
+          .run();
+        requestsCancelled = cancelPendingAccessRequests(req.orgId, userId, req.user.id, 'suspended');
+      });
       // Sessions are per user, not per org — a live cookie would keep working
       // until expiry if left, so every one goes.
       const revoked = invalidateUserSessions(userId);
@@ -480,6 +488,7 @@ export async function teamRoutes(app: FastifyInstance) {
       await audit(req, 'member.suspend', 'member', userId, userEmail(userId), {
         sessionsRevoked: revoked,
         live,
+        ...(requestsCancelled > 0 && { accessRequestsCancelled: requestsCancelled }),
       });
     }
     return { userId, status: 'suspended' as const };
