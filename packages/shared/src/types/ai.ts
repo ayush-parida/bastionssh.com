@@ -1,3 +1,5 @@
+import type { HostKeyStatus } from './host-key.js';
+
 export type AIProviderType = 'openai' | 'anthropic' | 'openai_compatible';
 
 export interface AIProviderConfig {
@@ -56,6 +58,10 @@ export type AIAgentEvent =
       reason: string;
       serverId?: string;
       serverName?: string;
+      /** The SSH login the command will run as */
+      sshUser?: string;
+      /** The target's host key state; a mismatch means the command will be refused */
+      hostKeyStatus?: HostKeyStatus;
     }
   /** The pending approval settled; `expired` is set when it timed out undecided */
   | { type: 'approval_resolved'; id: string; approved: boolean; expired?: boolean }

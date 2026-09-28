@@ -9,7 +9,8 @@ import {
   canAccessServer,
 } from '../auth/server-access.js';
 import { rank } from '../auth/middleware.js';
-import type { AITool } from '@smt/shared';
+import { hostKeyStatus } from '../ssh/host-keys.js';
+import type { AITool, HostKeyStatus } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -102,17 +103,36 @@ export class ToolExecutor {
   /**
    * Work out which server `run_command` would target for this input, without
    * running anything — used to show the target on an approval card and in the
-   * audit log. The name is looked up within the org only.
+   * audit log. The name is looked up within the org only. `sshUser` is the
+   * account the command runs as: the open session's login when it will reuse
+   * that session, else the server's configured user.
    */
-  resolveTarget(input: Record<string, unknown>): { serverId?: string; serverName?: string } {
-    const { serverId } = this.target(input);
+  resolveTarget(input: Record<string, unknown>): {
+    serverId?: string;
+    serverName?: string;
+    sshUser?: string;
+    hostKeyStatus?: HostKeyStatus;
+  } {
+    const { session, sessionServerId, serverId } = this.target(input);
     if (!serverId || !this.canUse(serverId)) return {};
     const row = getDb()
-      .select({ name: servers.name })
+      .select({
+        name: servers.name,
+        username: servers.username,
+        hostKeyFingerprint: servers.hostKeyFingerprint,
+        hostKeyMismatchFingerprint: servers.hostKeyMismatchFingerprint,
+      })
       .from(servers)
       .where(and(eq(servers.id, serverId), eq(servers.orgId, this.orgId)))
       .get();
-    return { serverId, serverName: row?.name };
+    if (!row) return { serverId };
+    const viaSession = session && sessionServerId === serverId;
+    return {
+      serverId,
+      serverName: row.name,
+      sshUser: (viaSession && (session.server as { username?: string }).username) || row.username,
+      hostKeyStatus: hostKeyStatus(row),
+    };
   }
 
   /** Run a command and keep the exit code, which the formatted output only mentions. */

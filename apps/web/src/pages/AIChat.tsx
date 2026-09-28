@@ -138,6 +138,8 @@ export default function AIChatPage() {
                       reason: event.reason,
                       serverId: event.serverId,
                       serverName: event.serverName,
+                      sshUser: event.sshUser,
+                      hostKeyStatus: event.hostKeyStatus,
                     },
                   }
                 : tc,
