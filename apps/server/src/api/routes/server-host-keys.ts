@@ -60,6 +60,7 @@ export async function hostKeyRoutes(app: FastifyInstance) {
   app.post('/:id/host-key/scan', async (req, reply) => {
     const server = findServer(req);
     if (!server) return reply.status(404).send({ error: 'Not found' });
+    // Through the server's jump hosts or agent, when it has one — the same route a connection takes
     return scanServerHostKey(
       { id: server.id, host: server.host, port: server.port, username: server.username },
       { actorUserId: req.user.id },

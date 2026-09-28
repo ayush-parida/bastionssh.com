@@ -51,8 +51,12 @@ vi.mock('ssh2', async () => {
   return { Client, __state: state };
 });
 
-// Connecting looks up the server's jump hosts; none of these servers exist, so all connect directly
-await (await import('../db/migrate.js')).runMigrations();
+// Connecting reads the server row and its jump hosts (they decide whether the
+// connection goes through an agent or a jump host); an empty schema means every
+// server connects directly.
+const { runMigrations } = await import('../db/migrate.js');
+await runMigrations();
+
 const { SSHBroker, getSessionForUser, DETACHED_GRACE_MS } = await import('./broker.js');
 const { __state: state } = (await import('ssh2')) as any;
 

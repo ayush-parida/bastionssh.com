@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import {
   CLOUD_PROVIDER_LABEL,
+  type Agent,
   HOST_KEY_FINGERPRINT_PATTERN,
   type ActiveRecording,
   type CreateServerRequest,
@@ -13,7 +14,7 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon, Waypoints } from 'lucide-react';
+import { Activity, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, Server as ServerIcon, Waypoints } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -23,6 +24,7 @@ import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/comp
 import type { DiagnoseTarget } from '@/lib/diagnostics.js';
 import { ExpiryBadge } from '@/components/access/ExpiryBadge.js';
 import { RequestAccessDialog, useRequestableServers } from '@/components/access/RequestAccessDialog.js';
+import { useHasRole } from '@/store/auth.js';
 
 interface ServerFormState {
   name: string;
@@ -37,9 +39,11 @@ interface ServerFormState {
   hostKeyFingerprint: string;
   /** Server to connect through (ssh -J); blank connects directly. */
   jumpServerId: string;
+  /** Connectivity agent to go through; blank connects directly. */
+  agentId: string;
 }
 
-const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '', jumpServerId: '' };
+const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '', jumpServerId: '', agentId: '' };
 
 /** Tags are entered as a comma-separated list and stored as an array. */
 function splitTags(input: string): string[] {
@@ -100,6 +104,7 @@ export default function ServersPage() {
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
   const [requesting, setRequesting] = useState(false);
+  const isAdmin = useHasRole('admin');
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -110,6 +115,14 @@ export default function ServersPage() {
     queryKey: ['ssh-keys'],
     queryFn: () => api.get('/keys'),
   });
+
+  // Agents are admin-only, as is editing servers
+  const { data: agents } = useQuery<Agent[]>({
+    queryKey: ['agents'],
+    queryFn: () => api.get('/agents'),
+    enabled: isAdmin,
+  });
+  const agentById = new Map((agents ?? []).map((a) => [a.id, a]));
 
   // Live health for the status dot on each card; the Monitoring page owns the detail.
   const { data: overview } = useQuery<MonitoringOverview>({
@@ -163,6 +176,7 @@ export default function ServersPage() {
       tags: (s.tags ?? []).join(', '),
       hostKeyFingerprint: s.hostKeyFingerprint ?? '',
       jumpServerId: s.jumpServerId ?? '',
+      agentId: s.agentId ?? '',
     });
     setShowForm(true);
   }
@@ -188,7 +202,8 @@ export default function ServersPage() {
   // The server being edited, to tell a changed endpoint or fingerprint from a no-op
   const editing = editId ? servers?.find((s) => s.id === editId) : undefined;
   const endpointChanged =
-    !!editing && (form.host !== editing.host || form.port !== String(editing.port));
+    !!editing &&
+    (form.host !== editing.host || form.port !== String(editing.port));
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -213,6 +228,8 @@ export default function ServersPage() {
       ...(sendFingerprint ? { hostKeyFingerprint: fingerprint } : {}),
       // null clears it on an edit; a new server simply omits it
       ...(form.jumpServerId || editId ? { jumpServerId: form.jumpServerId || null } : {}),
+      // Only when changed: a server keeps a revoked agent until an admin picks another
+      ...(!editing || form.agentId !== (editing.agentId ?? '') ? { agentId: form.agentId || null } : {}),
     };
     if (editId) updateMutation.mutate({ id: editId, body });
     else createMutation.mutate(body);
@@ -324,6 +341,34 @@ export default function ServersPage() {
               )}
             </div>
             <div className="col-span-2">
+              <label className="block text-sm font-medium mb-1">Connect via</label>
+              <select
+                value={form.agentId}
+                onChange={(e) => setForm((prev) => ({ ...prev, agentId: e.target.value }))}
+                // One route per server: a jump host or an agent
+                disabled={!!form.jumpServerId && !form.agentId}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <option value="">Direct connection</option>
+                {agents
+                  ?.filter((a) => a.status !== 'revoked' || a.id === form.agentId)
+                  .map((a) => (
+                    <option key={a.id} value={a.id} disabled={a.status === 'revoked'}>
+                      Agent: {a.name} ({a.status})
+                    </option>
+                  ))}
+              </select>
+              {form.agentId && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The agent connects to 127.0.0.1 on the port above, from the host it runs on — the host field
+                  is only a label. The port must be on the agent's allowlist.
+                </p>
+              )}
+              {form.jumpServerId && !form.agentId && (
+                <p className="mt-1 text-xs text-muted-foreground">Goes through the jump host below; clear it to use an agent.</p>
+              )}
+            </div>
+            <div className="col-span-2">
               <label className="block text-sm font-medium mb-1">
                 Tags <span className="text-muted-foreground text-xs">(comma separated — target these with saved commands)</span>
               </label>
@@ -345,6 +390,7 @@ export default function ServersPage() {
               <select
                 value={form.jumpServerId}
                 onChange={(e) => setForm((prev) => ({ ...prev, jumpServerId: e.target.value }))}
+                disabled={!!form.agentId && !form.jumpServerId}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               >
                 <option value="">— direct connection —</option>
@@ -358,6 +404,9 @@ export default function ServersPage() {
                 <p className="mt-1 text-xs text-muted-foreground">
                   The jump host connects with its own credentials and host key; this server's key is still verified end to end.
                 </p>
+              )}
+              {form.agentId && !form.jumpServerId && (
+                <p className="mt-1 text-xs text-muted-foreground">Goes through the agent above; set it to a direct connection to use a jump host.</p>
               )}
             </div>
             <div className="col-span-2">
@@ -439,6 +488,16 @@ export default function ServersPage() {
                   <HostKeyBadge status={s.hostKeyStatus} />
                 </button>
                 {s.jumpServerId && <JumpBadge jump={serverById.get(s.jumpServerId)} />}
+                {s.agentId && (
+                  <span
+                    title={agentById.get(s.agentId) ? `Through agent ${agentById.get(s.agentId)!.name} (${agentById.get(s.agentId)!.status})` : 'Through a connectivity agent'}
+                    className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
+                      agentById.get(s.agentId)?.status === 'revoked' ? 'bg-red-500/10 text-red-500' : 'bg-muted text-muted-foreground'
+                    }`}
+                  >
+                    <RadioTower size={11} /> {agentById.get(s.agentId)?.name ?? 'agent'}
+                  </span>
+                )}
                 {s.cloud && <CloudBadge cloud={s.cloud} />}
                 {grantExpiry.has(s.id) && <ExpiryBadge expiresAt={grantExpiry.get(s.id)!} />}
                 {s.tags.map((tag) => (

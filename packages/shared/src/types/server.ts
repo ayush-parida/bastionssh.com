@@ -19,6 +19,8 @@ export interface Server {
   hostKeyStatus: HostKeyStatus;
   /** Managed server this one is reached through (like `ssh -J`); null for a direct connection. */
   jumpServerId: string | null;
+  /** Reached through this connectivity agent instead of directly; null = direct. */
+  agentId: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -38,6 +40,8 @@ export interface CreateServerRequest {
   hostKeyFingerprint?: string;
   /** Reach this server through another server in the org; null or omitted connects directly. */
   jumpServerId?: string | null;
+  /** Connect through this agent (to its loopback, on `port`); null or absent = directly to `host`. */
+  agentId?: string | null;
 }
 
 export interface UpdateServerRequest {
@@ -53,6 +57,7 @@ export interface UpdateServerRequest {
   hostKeyFingerprint?: string;
   /** null removes the jump host. */
   jumpServerId?: string | null;
+  agentId?: string | null;
 }
 
 export interface ServerGroup {

@@ -12,6 +12,7 @@ import logger from '../logger.js';
 import { authRoutes } from './routes/auth.js';
 import { serverRoutes } from './routes/servers.js';
 import { hostKeyRoutes } from './routes/server-host-keys.js';
+import { agentRoutes, agentConnectRoutes } from './routes/agents.js';
 import { sshKeyRoutes } from './routes/ssh-keys.js';
 import { savedCommandRoutes } from './routes/saved-commands.js';
 import { cronJobRoutes } from './routes/cron-jobs.js';
@@ -81,6 +82,9 @@ export async function buildApp() {
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(serverRoutes, { prefix: '/api/servers' });
   await app.register(hostKeyRoutes, { prefix: '/api/servers' });
+  await app.register(agentRoutes, { prefix: '/api/agents' });
+  // Authenticated by the agent's own token, not a user session
+  await app.register(agentConnectRoutes, { prefix: '/api/agents' });
   await app.register(sshKeyRoutes, { prefix: '/api/keys' });
   await app.register(savedCommandRoutes, { prefix: '/api/commands' });
   await app.register(cronJobRoutes, { prefix: '/api/cron-jobs' });

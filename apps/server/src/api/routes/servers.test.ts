@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { auditLog, servers } from '../../db/schema.js';
+import { agents, auditLog, servers } from '../../db/schema.js';
 import { and, eq } from 'drizzle-orm';
 import { seedOrg, seedUser } from './test-utils.js';
 
@@ -203,5 +203,28 @@ describe('server routes: jump hosts', () => {
     const res = await app.inject({ method: 'DELETE', url: `/api/servers/${j}`, headers: admin.headers });
     expect(res.statusCode).toBe(204);
     expect(jumpOf(id)).toBeNull();
+  });
+
+  it('refuses a jump host and a connectivity agent on the same server', async () => {
+    const edge = (await create({ name: 'edge-host' })).json();
+    const j = edge.id as string;
+    const agentId = 'agent-jump-a';
+    getDb()
+      .insert(agents)
+      .values({ id: agentId, orgId: edge.orgId, name: 'a', tokenHash: 'hash-jump-a', createdBy: admin.userId })
+      .run();
+    expect((await create({ name: 'both', jumpServerId: j, agentId })).statusCode).toBe(400);
+
+    const viaAgent = (await create({ name: 'via-agent', agentId })).json().id;
+    expect((await patch(viaAgent, { jumpServerId: j })).statusCode).toBe(400);
+    expect(jumpOf(viaAgent)).toBeNull();
+    // Swapping the route in one request is fine
+    const swapped = await patch(viaAgent, { jumpServerId: j, agentId: null });
+    expect(swapped.statusCode).toBe(200);
+    expect(swapped.json()).toMatchObject({ jumpServerId: j, agentId: null });
+    expect((await patch(viaAgent, { agentId })).statusCode).toBe(400);
+
+    // A jump host may itself sit behind an agent: it is the hop this app reaches first
+    expect((await patch(j, { agentId })).statusCode).toBe(200);
   });
 });

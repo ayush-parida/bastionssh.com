@@ -27,6 +27,7 @@ import FtpPage from '@/pages/Ftp.js';
 import FtpFilesPage from '@/pages/FtpFiles.js';
 import CloudAccountsPage from '@/pages/CloudAccounts.js';
 import DnsLookupPage from '@/pages/DnsLookup.js';
+import AgentsPage from '@/pages/Agents.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="servers/:id/terminal" element={<TerminalPage />} />
           <Route path="servers/:id/files" element={<FilesPage />} />
           <Route path="servers/:id/health" element={<ServerHealthPage />} />
+          <Route path="agents" element={<AgentsPage />} />
           <Route path="storage" element={<StoragePage />} />
           <Route path="storage/:id" element={<StorageBucketsPage />} />
           <Route path="storage/:id/buckets/:bucket" element={<StorageObjectsPage />} />

@@ -4,8 +4,8 @@ import type { CloudProvider, CloudServerState, Server } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
-import { servers, sshKeys } from '../../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { agents, servers, sshKeys } from '../../db/schema.js';
+import { eq, and, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
@@ -29,6 +29,8 @@ const createServerSchema = z.object({
   hostKeyFingerprint: fingerprintSchema.optional(),
   /** Reach the server through another one in the org (ssh -J); null connects directly. */
   jumpServerId: z.string().min(1).nullable().optional(),
+  /** Reach the server through this connectivity agent (to its loopback, on `port`); null = directly. */
+  agentId: z.string().min(1).nullable().optional(),
 });
 
 /** Strip encryptedPassword and return safe server object */
@@ -101,6 +103,20 @@ function keyBelongsToOrg(orgId: string, keyId: string): boolean {
   );
 }
 
+/** One route per server: its jump host or its agent carries the connection, not both. */
+const ROUTE_CONFLICT = 'A server connects through a jump host or a connectivity agent, not both';
+
+/** A server may only route through a live (unrevoked) agent of its own org. */
+function agentUsableByOrg(orgId: string, agentId: string): boolean {
+  return (
+    getDb()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.orgId, orgId), isNull(agents.revokedAt)))
+      .get() !== undefined
+  );
+}
+
 export async function serverRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
@@ -123,9 +139,15 @@ export async function serverRoutes(app: FastifyInstance) {
     ) {
       return reply.status(400).send({ error: 'Unknown SSH key' });
     }
+    if (body.jumpServerId && body.agentId) {
+      return reply.status(400).send({ error: ROUTE_CONFLICT });
+    }
     if (body.jumpServerId) {
       const problem = jumpHostProblem(req.orgId, undefined, body.jumpServerId);
       if (problem) return reply.status(400).send({ error: problem });
+    }
+    if (body.agentId && !agentUsableByOrg(req.orgId, body.agentId)) {
+      return reply.status(400).send({ error: 'Unknown or revoked agent' });
     }
     const db = getDb();
     const id = nanoid();
@@ -149,6 +171,7 @@ export async function serverRoutes(app: FastifyInstance) {
         tags: JSON.stringify(body.tags),
         notes: body.notes,
         jumpServerId: body.jumpServerId ?? null,
+        agentId: body.agentId ?? null,
         ...(body.hostKeyFingerprint && pinnedColumns(body.hostKeyFingerprint, null, req.user.id)),
       })
       .run();
@@ -159,7 +182,12 @@ export async function serverRoutes(app: FastifyInstance) {
       'server',
       id,
       body.name,
-      body.jumpServerId ? { jumpServerId: body.jumpServerId } : undefined,
+      body.jumpServerId || body.agentId
+        ? {
+            ...(body.jumpServerId && { jumpServerId: body.jumpServerId }),
+            ...(body.agentId && { agentId: body.agentId }),
+          }
+        : undefined,
     );
     if (body.hostKeyFingerprint) {
       await audit(req, 'server.host_key_pinned', 'server', id, body.name, {
@@ -202,6 +230,10 @@ export async function serverRoutes(app: FastifyInstance) {
       .where(and(eq(servers.id, id), eq(servers.orgId, req.orgId)))
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
+    // Re-sending the agent a server already has is a no-op, even once it is revoked
+    if (body.agentId && body.agentId !== existing.agentId && !agentUsableByOrg(req.orgId, body.agentId)) {
+      return reply.status(400).send({ error: 'Unknown or revoked agent' });
+    }
 
     const jumpChanged =
       body.jumpServerId !== undefined && (body.jumpServerId ?? null) !== existing.jumpServerId;
@@ -209,6 +241,9 @@ export async function serverRoutes(app: FastifyInstance) {
       const problem = jumpHostProblem(req.orgId, id, body.jumpServerId);
       if (problem) return reply.status(400).send({ error: problem });
     }
+    const nextJump = jumpChanged ? (body.jumpServerId ?? null) : existing.jumpServerId;
+    const nextAgent = body.agentId !== undefined ? body.agentId : existing.agentId;
+    if (nextJump && nextAgent) return reply.status(400).send({ error: ROUTE_CONFLICT });
 
     const updateData: Partial<typeof servers.$inferInsert> = {
       ...(body.name !== undefined && { name: body.name }),
@@ -218,10 +253,15 @@ export async function serverRoutes(app: FastifyInstance) {
       ...(body.tags !== undefined && { tags: JSON.stringify(body.tags) }),
       ...(body.notes !== undefined && { notes: body.notes }),
       ...(jumpChanged && { jumpServerId: body.jumpServerId ?? null }),
+      ...(body.agentId !== undefined && { agentId: body.agentId }),
       updatedAt: new Date().toISOString(),
     };
 
-    // A new host or port is a different endpoint: the old key says nothing about it
+    // A new host or port is a different endpoint: the old key says nothing about
+    // it. A new route is not: the agent is untrusted transport, so the pinned
+    // key stays and must still match through it — forgetting it here would let
+    // whoever holds the agent's token answer the next connection with any key.
+    const agentChanged = body.agentId !== undefined && body.agentId !== existing.agentId;
     const endpointChanged =
       (body.host !== undefined && body.host !== existing.host) ||
       (body.port !== undefined && body.port !== existing.port);
@@ -250,7 +290,12 @@ export async function serverRoutes(app: FastifyInstance) {
       'server',
       id,
       existing.name,
-      jumpChanged ? { jumpServerId: { from: existing.jumpServerId, to: body.jumpServerId ?? null } } : undefined,
+      jumpChanged || agentChanged
+        ? {
+            ...(jumpChanged && { jumpServerId: { from: existing.jumpServerId, to: body.jumpServerId ?? null } }),
+            ...(agentChanged && { agentId: { from: existing.agentId, to: body.agentId } }),
+          }
+        : undefined,
     );
     if (updateData.hostKeyFingerprint !== undefined) {
       if (existing.hostKeyMismatchFingerprint) resolveHostKeyAlert(req.orgId, id);

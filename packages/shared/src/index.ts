@@ -1,5 +1,6 @@
 export * from './types/auth.js';
 export * from './types/server.js';
+export * from './types/agent.js';
 export * from './types/host-key.js';
 export * from './types/diagnostics.js';
 export * from './types/ssh-key.js';

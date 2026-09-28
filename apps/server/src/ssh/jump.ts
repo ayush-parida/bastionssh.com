@@ -10,6 +10,7 @@ import { resolveServerAuth } from './credentials.js';
 import {
   HostKeyMismatchError,
   SCAN_TIMEOUT_MS,
+  agentSocketFor,
   scanHostKey,
   sshConnectConfig,
   type HostKeyPurpose,
@@ -387,7 +388,7 @@ export function connectSsh(
 /**
  * {@link scanHostKey} for a managed server, reaching it through its jump hosts
  * when it has any — the key we want is the one the target presents, as seen
- * from the last hop.
+ * from the last hop — or else through its connectivity agent.
  */
 export async function scanServerHostKey(
   target: SshTarget,
@@ -395,7 +396,8 @@ export async function scanServerHostKey(
 ): Promise<HostKeyScanResult> {
   const tunnel = await openJumpTunnel(target, 'host_key_scan', options);
   try {
-    return await scanHostKey(target.host, target.port, SCAN_TIMEOUT_MS, null, tunnel?.sock);
+    const sock = tunnel?.sock ?? agentSocketFor(loadServer(undefined, target.id), target.port);
+    return await scanHostKey(target.host, target.port, SCAN_TIMEOUT_MS, null, sock);
   } finally {
     tunnel?.close();
   }

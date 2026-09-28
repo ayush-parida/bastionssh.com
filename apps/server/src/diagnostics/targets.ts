@@ -1,7 +1,16 @@
+import type { Socket } from 'node:net';
 import { Client } from 'ssh2';
 import type { DiagnosticsResult, FtpProtocol } from '@smt/shared';
 import type { ftpConnections, servers, storageConnections } from '../db/schema.js';
-import { HostKeyMismatchError, scanHostKey, sshConnectConfig, type SshAuth, type SshTarget } from '../ssh/host-keys.js';
+import {
+  HostKeyMismatchError,
+  agentSocketFor,
+  scanHostKey,
+  sshConnectConfig,
+  type SshAuth,
+  type SshTarget,
+} from '../ssh/host-keys.js';
+import { openAgentTunnel } from '../agents/hub.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
 import { connectSsh, jumpChain, openJumpTunnel, type JumpOptions } from '../ssh/jump.js';
 import { assertSafeHost, backendFor, decryptPassword } from '../ftp/index.js';
@@ -94,6 +103,20 @@ export function sshAuthCheck(
 }
 
 /**
+ * The network steps for a host reached through a connectivity agent: the agent
+ * connects to its own loopback, so they run over its tunnel rather than from here.
+ */
+function agentDeps(base: DiagnosticsDeps, row: ServerRow & { agentId: string }): DiagnosticsDeps {
+  return {
+    ...base,
+    // A TunnelSocket stands in for a net.Socket (connect, data, end, close, error)
+    connect: (_address, port) => openAgentTunnel({ orgId: row.orgId, agentId: row.agentId }, port) as unknown as Socket,
+    scanHostKey: (_host, port, timeoutMs, preferType) =>
+      scanHostKey(row.host, port, timeoutMs, preferType, agentSocketFor(row, port)),
+  };
+}
+
+/**
  * Host key scans for a server behind jump hosts: the target's key as presented
  * through the chain (each hop verified against its own pinned key).
  */
@@ -101,13 +124,16 @@ function jumpedDeps(base: DiagnosticsDeps, target: SshTarget, options: JumpOptio
   return {
     ...base,
     scanHostKey: async (_host, _port, timeoutMs, preferType) => {
-      const tunnel = await openJumpTunnel(target, 'diagnostics', options).catch((err: unknown) => {
+      // The step's budget covers opening the chain too
+      const tunnel = await openJumpTunnel(target, 'diagnostics', options, AbortSignal.timeout(timeoutMs)).catch(
+        (err: unknown) => {
         // The mismatch message carries the presented key: admin-only evidence
-        if (err instanceof HostKeyMismatchError) {
-          throw new Error('A jump host presented a different host key than the one pinned; an admin must review it.');
-        }
-        throw err;
-      });
+          if (err instanceof HostKeyMismatchError) {
+            throw new Error('A jump host presented a different host key than the one pinned; an admin must review it.');
+          }
+          throw err;
+        },
+      );
       try {
         return await scanHostKey(target.host, target.port, timeoutMs, preferType, tunnel?.sock);
       } finally {
@@ -122,10 +148,15 @@ export async function diagnoseServer(server: ServerRow, orgId: string, opts: Dia
   const jumpOptions: JumpOptions = { actorUserId: opts.actorUserId };
   // Behind jump hosts only the outermost hop is reachable from here: the network
   // steps probe the path to it, and the host key and login go through the chain.
+  // The host this app connects to itself may in turn sit behind an agent.
   const entry = jumpChain(server.id).at(-1);
-  const host = assertSafeHost(entry ? entry.host : server.host);
-  const port = entry ? entry.port : server.port;
-  const runOpts: RunOptions = entry ? { ...opts, deps: jumpedDeps(opts.deps ?? defaultDeps, target, jumpOptions) } : opts;
+  const first = entry ?? server;
+  let deps = opts.deps ?? defaultDeps;
+  if (first.agentId) deps = agentDeps(deps, { ...first, agentId: first.agentId });
+  if (entry) deps = jumpedDeps(deps, target, jumpOptions);
+  const host = first.agentId ? '127.0.0.1' : assertSafeHost(first.host);
+  const port = first.port;
+  const runOpts: RunOptions = { ...opts, deps };
   return diagnose(
     { kind: 'server', id: server.id, name: server.name, host: assertSafeHost(server.host), port: server.port, protocol: 'ssh' },
     {

@@ -20,7 +20,7 @@ import type { DiagnosticsResult } from '@smt/shared';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { auditLog, ftpConnections, storageConnections } from '../../db/schema.js';
+import { auditLog, ftpConnections, servers, storageConnections } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
 import { seedOrg, seedServer, seedUser } from './test-utils.js';
 
@@ -134,6 +134,26 @@ describe('diagnostics routes', () => {
 
   it('never reaches another org’s server', async () => {
     expect((await post(admin, `/api/diagnostics/servers/${otherOrgServer}`)).statusCode).toBe(404);
+  });
+
+  it('probes the jump host a server is reached through, and reads the key through the chain', async () => {
+    const who = seedUser(orgId, 'admin');
+    const bastion = seedServer(orgId, admin.userId, 'bastion');
+    const behind = seedServer(orgId, admin.userId, 'behind');
+    const db = getDb();
+    db.update(servers).set({ host: '10.9.9.9', port: 2222 }).where(eq(servers.id, bastion)).run();
+    db.update(servers).set({ host: '192.168.7.7', jumpServerId: bastion }).where(eq(servers.id, behind)).run();
+
+    const res = await post(who, `/api/diagnostics/servers/${behind}`);
+    expect(res.statusCode).toBe(200);
+    const result = res.json() as DiagnosticsResult;
+    expect(result.target).toMatchObject({ id: behind, host: '192.168.7.7', port: 22 });
+    // The network path from here ends at the jump host
+    expect(result.steps.find((s) => s.id === 'tcp')!.data).toMatchObject({ address: '10.9.9.9', port: 2222 });
+    // The target's key is read through the jump host, which has no credentials here
+    const hostKey = result.steps.find((s) => s.id === 'host_key')!;
+    expect(hostKey.status).toBe('fail');
+    expect(hostKey.detail).toContain('Jump host bastion');
   });
 
   it('diagnoses an SFTP connection including its host key', async () => {

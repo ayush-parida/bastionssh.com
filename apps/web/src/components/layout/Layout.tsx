@@ -27,12 +27,14 @@ import {
   ChevronRight,
   Sun,
   Moon,
+  RadioTower,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme.js';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/servers', label: 'Servers', icon: Server },
+  { to: '/agents', label: 'Agents', icon: RadioTower },
   { to: '/storage', label: 'Object Storage', icon: HardDrive },
   { to: '/ftp', label: 'FTP', icon: FolderSync },
   { to: '/cloud', label: 'Cloud Accounts', icon: Cloud },

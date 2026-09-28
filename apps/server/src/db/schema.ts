@@ -294,6 +294,35 @@ export const cloudAccounts = sqliteTable(
   }),
 );
 
+// ── Connectivity agents ───────────────────────────────────────────────────────
+
+/**
+ * Outbound agents installed on hosts the app cannot reach directly. An agent
+ * dials in over a WebSocket and tunnels SSH to its own loopback (agents/).
+ * Only the token's hash is stored; a revoked agent is kept for the record.
+ */
+export const agents = sqliteTable(
+  'agents',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    tokenHash: text('token_hash').notNull().unique(),
+    lastSeenAt: text('last_seen_at'),
+    version: text('version'), // reported by the agent when it connects
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    revokedAt: text('revoked_at'),
+  },
+  (t) => ({
+    orgIdx: index('agents_org_idx').on(t.orgId),
+  }),
+);
+
 // ── Servers ───────────────────────────────────────────────────────────────────
 
 export const servers = sqliteTable(
@@ -338,6 +367,9 @@ export const servers = sqliteTable(
     jumpServerId: text('jump_server_id').references((): AnySQLiteColumn => servers.id, {
       onDelete: 'set null',
     }),
+    // Reached through this agent's tunnel (to its loopback, on `port`) instead
+    // of a direct TCP connection to `host`.
+    agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at')
       .notNull()
