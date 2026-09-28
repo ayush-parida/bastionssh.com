@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
-import { PassThrough, Readable, Transform } from 'node:stream';
+import { PassThrough, Readable, Transform, Writable } from 'node:stream';
 import { eq } from 'drizzle-orm';
 
 vi.mock('ssh2', async (importOriginal) => ({
@@ -367,6 +367,26 @@ describe('operation timeout', () => {
     await expect(session.download('/var/www/html/index.html', new PassThrough())).rejects.toMatchObject({
       statusCode: 504,
       message: expect.stringMatching(/transfer timed out/),
+    });
+    expect(session.closed).toBe(true);
+  });
+
+  it('fails a small upload whose write handle never opens', async () => {
+    const session = await openWithTimeout();
+    state.stalled.add('open');
+    // Smaller than any stream buffer: every chunk has passed before the stall
+    await expect(
+      session.upload(Readable.from([Buffer.from('tiny')]), '/var/www/html/tiny.txt'),
+    ).rejects.toMatchObject({ statusCode: 504, message: expect.stringMatching(/transfer timed out/) });
+    expect(session.closed).toBe(true);
+  });
+
+  it('fails a download the reader stops taking after the last chunk', async () => {
+    const session = await openWithTimeout();
+    // Never read: the whole small file sits in the buffer, the source has ended
+    const destination = new Writable({ highWaterMark: 1, write() {} });
+    await expect(session.download('/var/www/html/index.html', destination)).rejects.toMatchObject({
+      statusCode: 504,
     });
     expect(session.closed).toBe(true);
   });

@@ -112,7 +112,7 @@ export function toSftpConnectError(err: unknown): Error {
   const message = e.message?.trim() || 'unknown error';
   // 403, not 401: a 401 from the API means the app session is gone
   if (e.level === 'client-authentication') {
-    return new FtpError('Authentication failed: the server rejected the username or password', 403);
+    return new FtpError('Authentication failed: the server rejected the username, password or key', 403);
   }
   if (e.level === 'client-timeout' || e.code === 'ETIMEDOUT' || /timed out/i.test(message)) {
     return new FtpError(`SFTP connection timed out: ${message}`, 504);
@@ -244,33 +244,40 @@ export function sftpSession(
   }
 
   /**
-   * Pass-through that fails a transfer once no chunk has moved for the
-   * operation timeout — whichever side stalled: a server that stops sending,
-   * or a browser that stops reading or uploading.
+   * Run a transfer, failing it once no chunk has moved for the operation
+   * timeout — whichever side stalled: a server that stops sending, or a
+   * browser that stops reading or uploading. The clock keeps running after the
+   * last chunk until the far side has taken it all, so a small upload whose
+   * open never returns, or a download the browser stops reading near its end,
+   * still times out. The race does not rely on the streams noticing: an ssh2
+   * stream waiting on an unanswered open never finishes being destroyed.
    */
-  function watchdog(): Transform {
+  async function transfer(source: Readable, destination: Writable): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
+    let fail!: (err: FtpError) => void;
+    const stalled = new Promise<never>((_resolve, reject) => (fail = reject));
     const arm = () => {
       clearTimeout(timer);
-      timer = setTimeout(() => stream.destroy(timedOut('transfer')), opTimeoutMs);
+      timer = setTimeout(() => {
+        const err = timedOut('transfer');
+        fail(err);
+        source.destroy(err);
+        destination.destroy(err);
+      }, opTimeoutMs);
       timer.unref?.();
     };
-    const stream: Transform = new Transform({
+    const meter = new Transform({
       transform(chunk, _encoding, callback) {
         arm();
         callback(null, chunk);
       },
-      flush(callback) {
-        clearTimeout(timer);
-        callback();
-      },
-      destroy(err, callback) {
-        clearTimeout(timer);
-        callback(err);
-      },
     });
     arm();
-    return stream;
+    try {
+      await Promise.race([pipeline(source, meter, destination), stalled]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
   client.on('close', markClosed);
   client.on('end', markClosed);
@@ -427,7 +434,7 @@ export function sftpSession(
 
     async download(path, destination: Writable) {
       try {
-        await pipeline(sftp.createReadStream(checked(path)), watchdog(), destination);
+        await transfer(sftp.createReadStream(checked(path)), destination);
       } catch (err) {
         throw toSftpError(err, 'Could not download file');
       }
@@ -435,7 +442,7 @@ export function sftpSession(
 
     async upload(source: Readable, path) {
       try {
-        await pipeline(source, watchdog(), sftp.createWriteStream(checked(path)));
+        await transfer(source, sftp.createWriteStream(checked(path)));
       } catch (err) {
         throw toSftpError(err, 'Could not upload file');
       }

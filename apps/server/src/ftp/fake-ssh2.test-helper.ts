@@ -54,7 +54,10 @@ export interface FakeSsh2State {
   calls: unknown[][];
   /** Paths whose write stream was destroyed before finishing. */
   abortedWrites: string[];
-  /** SFTP ops (e.g. 'readdir', or 'read' for a download) the server never answers. */
+  /**
+   * SFTP ops (e.g. 'readdir', 'read' for a download, 'open' for an upload's
+   * write handle) the server never answers.
+   */
   stalled: Set<string>;
   reset(): void;
 }
@@ -288,6 +291,7 @@ function makeSftp(state: FakeSsh2State) {
     let finished = false;
     return new Writable({
       construct(cb) {
+        if (state.stalled.has('open')) return;
         if (isDenied(p)) return cb(denied());
         if (!state.fs.has(posix.dirname(p))) return cb(noSuchFile());
         // Opening for write creates (or truncates) the file, like SSH_FXF_TRUNC
