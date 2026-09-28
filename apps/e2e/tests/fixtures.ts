@@ -70,6 +70,10 @@ export async function createMember(
 
 /** Sign in through the login form with just a password (no passkey on the account). */
 export async function signInWithPassword(page: Page, email: string, password: string): Promise<void> {
+  // Headless Chromium has no passkey support of its own, so the login page's
+  // autofill request fails with an error toast that sits over the top of the
+  // next pages and swallows clicks there until it fades
+  await disablePasskeyAutofill(page);
   await page.goto('/login');
   await fillPasswordForm(page, email, password);
   await expect(page).not.toHaveURL(/\/login$/);
