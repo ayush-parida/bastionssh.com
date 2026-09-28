@@ -346,6 +346,14 @@ export interface SsoAccount {
   roleChange?: { from: string; to: SsoRole };
 }
 
+function isGoogleIssuer(issuer: string): boolean {
+  try {
+    return new URL(issuer).host === 'accounts.google.com';
+  } catch {
+    return false;
+  }
+}
+
 function displayNameFrom(claims: IdTokenClaims, email: string): string {
   const name = typeof claims.name === 'string' ? claims.name.trim() : '';
   return (name || email.split('@')[0] || email).slice(0, 100);
@@ -363,8 +371,18 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
   const email = rawEmail;
   if (!emailVerified(claims)) throw new SsoError('email_unverified', 'email_verified is not true', provider, email);
   const domain = email.slice(email.lastIndexOf('@') + 1);
-  if (!parseDomains(provider.allowedDomains).includes(domain)) {
+  const allowedDomains = parseDomains(provider.allowedDomains);
+  if (!allowedDomains.includes(domain)) {
     throw new SsoError('domain', `${domain} is not an allowed domain`, provider, email);
+  }
+  // Google signs in any Google account, including a personal one registered
+  // with a work address (which can outlive the Workspace mailbox). Only `hd`
+  // says the account is managed by a Workspace org, so it must name an allowed domain.
+  if (isGoogleIssuer(provider.issuer)) {
+    const hd = typeof claims['hd'] === 'string' ? claims['hd'].toLowerCase() : '';
+    if (!allowedDomains.includes(hd)) {
+      throw new SsoError('domain', `Not a Google Workspace account of an allowed domain (hd=${hd.slice(0, 64) || 'none'})`, provider, email);
+    }
   }
 
   const db = getDb();

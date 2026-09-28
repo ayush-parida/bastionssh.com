@@ -260,7 +260,10 @@ export default function LoginPage() {
             role="alert"
             className="mb-6 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400"
           >
-            {SSO_ERRORS[ssoError] ?? 'Single sign-on failed. Try again.'}
+            {/* Own keys only: ?sso_error=__proto__ must not index into Object.prototype */}
+            {Object.prototype.hasOwnProperty.call(SSO_ERRORS, ssoError)
+              ? SSO_ERRORS[ssoError]
+              : 'Single sign-on failed. Try again.'}
           </div>
         )}
         {returningFromSso ? (

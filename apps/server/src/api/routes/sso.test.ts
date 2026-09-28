@@ -19,6 +19,7 @@ import {
 import { hashPassword } from '../../auth/password.js';
 import { vault } from '../../vault/index.js';
 import { addMembership, seedOrg, seedSession, seedUser } from './test-utils.js';
+import { resolveSsoAccount, type IdTokenClaims } from '../../auth/sso.js';
 
 /**
  * A mocked identity provider behind a stubbed global fetch: a discovery
@@ -410,6 +411,18 @@ describe('single sign-on (OIDC)', () => {
       // A subdomain is not the domain
       expect((await ssoSignIn(slug, 'sub-d2', 'pat@evil.corp.test')).error).toBe('domain');
       expect(userByEmail('pat@elsewhere.test')).toBeUndefined();
+    });
+
+    it('takes a Google sign-in only from a Workspace account of an allowed domain (hd)', async () => {
+      const { providerId } = await orgWithSso('google', { issuer: 'https://accounts.google.com' });
+      const provider = getDb().select().from(ssoProviders).where(eq(ssoProviders.id, providerId)).get()!;
+      const claims = (extra: Record<string, unknown>) =>
+        ({ iss: 'https://accounts.google.com', aud: CLIENT_ID, sub: nanoid(), email: email(), email_verified: true, iat: now(), exp: now() + 300, ...extra }) as IdTokenClaims;
+      // A personal Google account registered with a work address has no hd
+      expect(() => resolveSsoAccount(provider, claims({}))).toThrow(expect.objectContaining({ code: 'domain' }));
+      expect(() => resolveSsoAccount(provider, claims({ hd: 'elsewhere.test' }))).toThrow(expect.objectContaining({ code: 'domain' }));
+      const ok = resolveSsoAccount(provider, claims({ hd: 'corp.test' }));
+      expect(ok.provisioned).toBe(true);
     });
 
     it('refuses a suspended member', async () => {
