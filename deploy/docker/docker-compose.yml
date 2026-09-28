@@ -34,6 +34,18 @@ services:
       SMT_WEBAUTHN_RP_ID: ${SMT_WEBAUTHN_RP_ID:-}
       SMT_WEBAUTHN_RP_NAME: ${SMT_WEBAUTHN_RP_NAME:-BastionSSH}
       SMT_WEBAUTHN_ORIGINS: ${SMT_WEBAUTHN_ORIGINS:-}
+      # Backups of the app database (smt.db), taken online and kept in the same
+      # volume under /data/backups — mount another volume there to keep them
+      # off the data disk. Restore: see "Backups & restore" in the README.
+      SMT_BACKUP_DIR: ${SMT_BACKUP_DIR:-/data/backups}
+      SMT_BACKUP_INTERVAL_HOURS: ${SMT_BACKUP_INTERVAL_HOURS:-24} # 0 = no scheduled backups
+      SMT_BACKUP_KEEP: ${SMT_BACKUP_KEEP:-14} # newest kept of each kind
+      SMT_BACKUP_GZIP: ${SMT_BACKUP_GZIP:-false}
+      # Optional off-site copy (encrypted with SMT_ENCRYPTION_KEY) to an
+      # object-storage connection added in the app
+      SMT_BACKUP_STORAGE_CONNECTION_ID: ${SMT_BACKUP_STORAGE_CONNECTION_ID:-}
+      SMT_BACKUP_STORAGE_BUCKET: ${SMT_BACKUP_STORAGE_BUCKET:-}
+      SMT_BACKUP_STORAGE_PREFIX: ${SMT_BACKUP_STORAGE_PREFIX:-bastionssh-backups/}
     volumes:
       - smt-data:/data
     depends_on:

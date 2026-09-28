@@ -96,7 +96,12 @@ export type AuditAction =
   | 'dns.lookup'
   | 'server.diagnose'
   | 'ftp_connection.diagnose'
-  | 'storage_connection.diagnose';
+  | 'storage_connection.diagnose'
+  | 'backup.list'
+  | 'backup.create'
+  | 'backup.download'
+  | 'backup.failed'
+  | 'backup.upload_failed';
 
 export interface AuditLogEntry {
   id: string;

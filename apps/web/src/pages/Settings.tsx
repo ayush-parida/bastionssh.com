@@ -10,6 +10,7 @@ import Sessions from '@/components/settings/Sessions.js';
 import Passkeys from '@/components/settings/Passkeys.js';
 import ApiTokens from '@/components/settings/ApiTokens.js';
 import { EgressIpSection } from '@/components/diagnostics/Diagnostics.js';
+import DatabaseBackups from '@/components/settings/DatabaseBackups.js';
 
 interface ProviderForm {
   name: string;
@@ -177,6 +178,7 @@ export default function SettingsPage() {
       <Sessions />
       <ApiTokens />
       <EgressIpSection />
+      <DatabaseBackups />
     </div>
   );
 }

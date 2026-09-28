@@ -29,6 +29,7 @@
   - Explain command output and logs
   - Diagnose errors
   - Generate scripts on the fly
+- 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
 - 🔒 **Secure by Default** — All keys and credentials encrypted at rest. Self-hosted, no telemetry, no cloud lock-in.
 - 📦 **Easy to Distribute** — Single Docker image, `docker compose` one-liner, or prebuilt binaries.
 
@@ -377,6 +378,32 @@ SMT_WEBAUTHN_ORIGINS=https://bastionssh.yourcompany.com  # comma list; default: 
 ```
 
 With `NODE_ENV=development` the Vite dev server (`http://localhost:5173`) is allowed too, unless `SMT_WEBAUTHN_ORIGINS` is set. Changing the RP ID later makes every existing passkey unusable.
+
+### Backups & restore
+
+The app keeps everything — accounts, servers, keys, encrypted credentials, audit log — in one SQLite file, `/data/smt.db`. It backs that file up itself, using SQLite's online backup API, so a backup is consistent even while the app is writing:
+
+- **Scheduled** every `SMT_BACKUP_INTERVAL_HOURS` (default `24`; `0` turns it off). The timer checks the age of the newest scheduled backup, so restarts neither skip nor add one.
+- **Before every upgrade**: when a new version is about to migrate an existing database, it backs it up first and refuses to migrate if it cannot (`SMT_BACKUP_PRE_MIGRATION=false` skips this).
+- **Manual**: **Settings → Database backups → Back up now**, or `pnpm --filter @smt/server run db:backup` (`node apps/server/dist/cli/backup.js` in the Docker image).
+
+Backups land in `SMT_BACKUP_DIR` (default `/data/backups`, i.e. inside the data volume) as `smt-<UTC time>-<scheduled|pre-migration|manual|pre-restore>.db`, or `.db.gz` with `SMT_BACKUP_GZIP=true`. The newest `SMT_BACKUP_KEEP` (default `14`) of each kind are kept. Files are owner-readable only (`0600`). Live sign-in sessions and pending passkey challenges are stripped from every backup, and invite tokens are replaced, so a restored instance has everyone sign in again and pending invites must be sent again. The vault key (`SMT_ENCRYPTION_KEY`) is **not** in the backup — keep it somewhere safe too, or the credentials in a backup cannot be decrypted.
+
+A backup in the data volume does not survive losing that volume. Either mount a different volume at `/data/backups`, or copy each new backup to object storage: add the bucket's provider under **Storage**, then set `SMT_BACKUP_STORAGE_CONNECTION_ID` (the id in that connection's URL), `SMT_BACKUP_STORAGE_BUCKET` and optionally `SMT_BACKUP_STORAGE_PREFIX` (default `bastionssh-backups/`). Scheduled and manual backups are uploaded after they are written, **encrypted** with a key derived from `SMT_ENCRYPTION_KEY` (as `<name>.enc`) — anyone in that connection's organization can browse the bucket in the app, so the upload is sealed. A failed upload is logged and audited but keeps the local copy. Old copies in the bucket are not pruned — use a lifecycle rule there. To restore one, copy the `.enc` file into the data volume and pass its path to the restore command; it decrypts with `SMT_ENCRYPTION_KEY` from the environment (already set in the compose file).
+
+Owners of the instance's organization (the one created on first start) see **Settings → Database backups**, can take one and download any. Downloading needs a signed-in browser (not an API token) and, when the owner has a passkey, a passkey confirmation. Listing, creating and downloading are recorded in the audit log.
+
+**Restoring** replaces the database, so the server must be stopped; the tool refuses while one is running (it keeps `smt.db.lock` fresh next to the database and checks the port). It checks the backup with `PRAGMA integrity_check` first, saves the current database as a `pre-restore` backup, then swaps the file in. With Docker Compose (from `deploy/docker`):
+
+```bash
+docker compose exec smt ls -l /data/backups                 # pick a backup
+docker compose stop smt
+docker compose run --rm --no-deps smt \
+  node apps/server/dist/cli/restore.js smt-20260928T031500Z-scheduled.db
+docker compose start smt
+```
+
+A bare name is looked up in `SMT_BACKUP_DIR`; a path works too (e.g. a backup you downloaded and copied into the volume). From source: `pnpm --filter @smt/server run db:restore -- <backup name or path>`. After a restore the server applies any newer migrations on start (taking a pre-migration backup of the restored database first).
 
 ---
 
