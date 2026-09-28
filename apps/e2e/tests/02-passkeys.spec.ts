@@ -125,7 +125,10 @@ test('signs in with a backup code when the passkey is lost', async ({ page }) =>
   // Lands on the passkey settings to replace the lost device
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByText('You signed in with a backup code.')).toBeVisible();
-  await expect(page.locator('section#passkeys').getByText(/9 of 10 left/)).toBeVisible();
+  // The org holds a backup-code session to adding a passkey (the default), so
+  // the rest of the account, backup codes included, waits until one verifies
+  await expect(page.getByText(/This organization only lets that add a new passkey/)).toBeVisible();
+  await expect(page.locator('section#passkeys').getByText(/of 10 left/)).toHaveCount(0);
 
   // Each code works once
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();

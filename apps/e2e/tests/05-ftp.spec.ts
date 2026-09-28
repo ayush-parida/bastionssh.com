@@ -8,7 +8,8 @@ test('the FTP connection form offers SFTP', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'New connection' })).toBeVisible();
 
   const form = page.locator('form', { has: page.locator('option[value="sftp"]') });
-  const protocol = form.locator('select');
+  // SFTP adds an authentication select next to it
+  const protocol = form.locator('select', { has: page.locator('option[value="sftp"]') });
   await expect(protocol.locator('option[value="sftp"]')).toHaveText('SFTP (SSH File Transfer)');
   await expect(form.locator('input[type="number"]')).toHaveValue('21');
 

@@ -35,6 +35,8 @@ const child = spawn(process.execPath, [path.join(serverDist, 'index.js')], {
   env: {
     ...process.env,
     SMT_DB_URL: path.join(tmp, 'smt.db'),
+    // Terminal recordings default to /data/recordings; keep them with the throwaway database
+    SMT_RECORDINGS_DIR: path.join(tmp, 'recordings'),
     SMT_STATIC_DIR: webDist,
   },
   stdio: 'inherit',
