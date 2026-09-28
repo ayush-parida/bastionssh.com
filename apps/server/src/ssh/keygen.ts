@@ -33,14 +33,21 @@ export async function generateKeyPair(type: KeyType): Promise<{
   publicKey: string;
   fingerprint: string;
 }> {
-  const pair =
+  const generate = () =>
     type === 'rsa'
       ? utils.generateKeyPairSync('rsa', { bits: 4096 })
       : type === 'ecdsa'
         ? utils.generateKeyPairSync('ecdsa', { bits: 256 })
         : utils.generateKeyPairSync('ed25519');
 
-  const parsed = utils.parseKey(pair.private);
+  // ssh2 now and then (about 1 in 300 ed25519 keys) writes a private key its
+  // own parser rejects as malformed; such a key could never be used, so draw again
+  let pair = generate();
+  let parsed = utils.parseKey(pair.private);
+  for (let attempt = 1; parsed instanceof Error && attempt < 5; attempt++) {
+    pair = generate();
+    parsed = utils.parseKey(pair.private);
+  }
   if (parsed instanceof Error) throw parsed;
 
   return {
