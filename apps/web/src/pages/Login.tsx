@@ -103,6 +103,7 @@ export default function LoginPage() {
       WebAuthnAbortService.cancelCeremony();
     };
     // Once per visit to the page
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function completeWithPasskey(step: PasskeyLoginStep) {

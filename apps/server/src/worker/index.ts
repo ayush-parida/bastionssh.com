@@ -29,6 +29,7 @@ export async function startWorker() {
       logger.info({ jobId: job.id, name: job.name }, 'Processing command job');
       await runCommandJob(job.data);
     },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see queues.ts
     { connection: connection as any, concurrency: 5 },
   );
 
@@ -38,6 +39,7 @@ export async function startWorker() {
       logger.info({ jobId: job.id, name: job.name }, 'Processing cron job');
       await processCronQueueJob(job.data);
     },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see queues.ts
     { connection: connection as any, concurrency: 10 },
   );
 

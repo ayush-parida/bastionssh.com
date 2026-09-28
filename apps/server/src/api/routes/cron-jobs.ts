@@ -160,6 +160,7 @@ export async function cronJobRoutes(app: FastifyInstance) {
         ...commandSource,
         notify: body.notify ? JSON.stringify(body.notify) : undefined,
         updatedAt: new Date().toISOString(),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- partial body spread over typed columns
       } as any)
       .where(eq(cronJobs.id, id))
       .run();

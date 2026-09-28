@@ -271,7 +271,7 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
   stream.stderr.on('data', onData);
 
   // Wire: WebSocket → SSH stream
-  socket.on('message', (msg: any) => {
+  socket.on('message', (msg: unknown) => {
     // The remote may already have closed the channel; writing then would error
     if (!stream.writable) return;
     const data = msg instanceof Buffer ? msg : Buffer.from(msg as string);

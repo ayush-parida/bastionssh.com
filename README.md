@@ -459,6 +459,29 @@ Contributions are welcome! This is an open-source project and we'd love your hel
 
 See `CONTRIBUTING.md` for development setup and guidelines.
 
+### Checks
+
+CI (`.github/workflows/ci.yml`) runs these on every push and pull request; run them locally before opening one:
+
+```bash
+pnpm install
+pnpm --filter @smt/shared --filter @smt/cron-parser run build   # the server imports their dist/
+pnpm typecheck
+pnpm lint          # ESLint flat config in eslint.config.js
+pnpm test          # vitest: server routes and cron-parser
+pnpm test:e2e      # Playwright browser tests (below)
+```
+
+### Browser tests
+
+`pnpm test:e2e` builds the server and web app, starts the built server on `http://localhost:18473` against a throwaway SQLite database (`NODE_ENV=test`, a fixed `SMT_ADMIN_PASSWORD`, monitoring and cloud sync off), serves the web build from it, and runs the Playwright suite in `apps/e2e` with Chromium. It covers password sign-in, passkey registration and sign-in (through Chrome's virtual WebAuthn authenticator), backup codes, the team invite flow, the AI command-approval card (against a stub OpenAI-compatible provider the test starts), and the FTP form's SFTP option.
+
+- First time only: `pnpm --filter @smt/e2e exec playwright install chromium`
+- Another port: `E2E_PORT=19000 pnpm test:e2e`
+- Just the tests, against existing builds: `pnpm --filter @smt/e2e run test:e2e`, with any Playwright flags after it (e.g. `--headed`, `tests/02-passkeys.spec.ts`)
+- Without `SMT_REDIS_URL` the server logs Redis connection errors from its idle queues; they are harmless here. Set `SMT_REDIS_URL` to a Redis you can throw away to silence them, as CI does.
+- Reports and traces of failures land in `apps/e2e/playwright-report` and `apps/e2e/test-results`.
+
 ---
 
 ## 📄 License

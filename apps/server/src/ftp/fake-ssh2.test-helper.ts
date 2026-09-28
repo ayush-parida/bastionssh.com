@@ -292,6 +292,8 @@ export function fakeSsh2(): { Client: unknown; __state: FakeSsh2State } {
 
   class Client extends EventEmitter {
     connect(config: any) {
+      // The record's callbacks run detached from this method, so capture the instance
+      // eslint-disable-next-line @typescript-eslint/no-this-alias
       const self = this;
       const record: FakeClientRecord = {
         config,
