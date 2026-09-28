@@ -5,6 +5,7 @@ import type { HostKeyScanResult } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { servers } from '../db/schema.js';
 import { auditUser } from '../audit/index.js';
+import { canAccessServer } from '../auth/server-access.js';
 import logger from '../logger.js';
 import { resolveServerAuth } from './credentials.js';
 import {
@@ -39,6 +40,13 @@ import {
  * — and the user only ever gets a channel to the target, never a shell or
  * files on the jump host. Only admins can set or change a jump host. The hop
  * is audited so it remains visible who went through which bastion.
+ *
+ * Errors: a failure at a hop (unreachable, refused login, changed host key)
+ * names the jump host. Only someone who may access that jump server (admins,
+ * or members granted it) gets those details back; anyone else — and
+ * background work with no user, whose errors are stored where members read
+ * them — gets "The route to this server failed at hop N" instead, hops counted
+ * from this app outwards. The full error is always logged.
  */
 
 /** Most jump hosts between us and a server. */
@@ -51,10 +59,29 @@ export class JumpHostError extends Error {
   constructor(
     message: string,
     readonly statusCode = 502,
+    /** For a failure at a hop: which one, counted from this app (1 = the host we connect to first). */
+    readonly hop?: number,
   ) {
     super(message);
     this.name = 'JumpHostError';
   }
+}
+
+/**
+ * The error to hand back for a failure at `hop` (the `hopNumber`-th from this
+ * app): as-is for someone who may access the jump server, otherwise a generic
+ * one that does not name it. The original is logged either way.
+ */
+function hopFailure(err: unknown, hop: ServerRow, hopNumber: number, target: SshTarget, options: JumpOptions): unknown {
+  const reveal = options.actorUserId
+    ? canAccessServer({ orgId: hop.orgId, userId: options.actorUserId }, hop.id)
+    : false;
+  logger.warn(
+    { err, jumpServerId: hop.id, targetId: target.id, hop: hopNumber, actorUserId: options.actorUserId },
+    'Jump host hop failed',
+  );
+  if (reveal) return err;
+  return new JumpHostError(`The route to this server failed at hop ${hopNumber}`, 502, hopNumber);
 }
 
 type ServerRow = typeof servers.$inferSelect;
@@ -291,14 +318,17 @@ export async function openJumpTunnel(
     for (let i = 0; i < hops.length; i++) {
       const hop = hops[i]!;
       const next = i + 1 < hops.length ? hops[i + 1]! : target;
+      const atHop = (err: unknown) => {
+        throw hopFailure(err, hop, i + 1, target, options);
+      };
       const { auth } = await resolveServerAuth(hop.orgId, hop.id).catch((err: unknown) => {
         const reason = err instanceof Error ? err.message : String(err);
-        throw new JumpHostError(`Jump host ${hop.name}: ${reason}`);
+        return atHop(new JumpHostError(`Jump host ${hop.name}: ${reason}`, 502, i + 1));
       });
       checkAborted();
-      const client = await connectHop(hop, auth, purpose, sock, (c) => clients.push(c));
+      const client = await connectHop(hop, auth, purpose, sock, (c) => clients.push(c)).catch(atHop);
       checkAborted();
-      sock = await forward(client, hop, next.host, next.port);
+      sock = await forward(client, hop, next.host, next.port).catch(atHop);
       checkAborted();
 
       const detail = { targetId: target.id, to: `${next.host}:${next.port}`, hop: hops.length - i, via: purpose };

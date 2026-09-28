@@ -80,7 +80,7 @@ vi.mock('ssh2', async () => {
 const { __state: state } = (await import('ssh2')) as any;
 const { runMigrations } = await import('../db/migrate.js');
 const { getDb } = await import('../db/index.js');
-const { auditLog, servers } = await import('../db/schema.js');
+const { auditLog, memberServerAccess, memberships, servers } = await import('../db/schema.js');
 const { seedOrg, seedUser, seedServer } = await import('../api/routes/test-utils.js');
 const { HostKeyMismatchError, pinnedColumns } = await import('./host-keys.js');
 const { SSHBroker, execOnServer } = await import('./broker.js');
@@ -196,7 +196,9 @@ describe('connecting through a jump host', () => {
   it('refuses a changed jump host key before tunnelling anywhere', async () => {
     getDb().update(servers).set(pinnedColumns(TARGET_FP, 'ssh-rsa', userId)).where(eq(servers.id, jumpId)).run();
 
-    const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000).catch((e) => e);
+    const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000, undefined, {
+      actorUserId: userId,
+    }).catch((e) => e);
     expect(err).toBeInstanceOf(HostKeyMismatchError);
     expect(err).toMatchObject({ serverId: jumpId, expected: TARGET_FP, presented: JUMP_FP });
     // Only the jump host was contacted, and nothing was forwarded
@@ -221,7 +223,9 @@ describe('connecting through a jump host', () => {
   it('closes the jump connection when the jump host cannot reach the target', async () => {
     state.forwardError = 'Connection refused';
 
-    const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000).catch((e) => e);
+    const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000, undefined, {
+      actorUserId: userId,
+    }).catch((e) => e);
     expect(err).toBeInstanceOf(JumpHostError);
     expect(err.message).toContain('could not reach 10.0.0.5:22');
     expect(state.connects).toHaveLength(1);
@@ -231,7 +235,9 @@ describe('connecting through a jump host', () => {
   it('reports a jump host with no credentials without contacting anything', async () => {
     getDb().update(servers).set({ encryptedPassword: null }).where(eq(servers.id, jumpId)).run();
 
-    const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000).catch((e) => e);
+    const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000, undefined, {
+      actorUserId: userId,
+    }).catch((e) => e);
     expect(err).toBeInstanceOf(JumpHostError);
     expect(err.message).toContain('Jump host bastion');
     expect(state.connects).toHaveLength(0);
@@ -366,7 +372,9 @@ describe('connecting through a jump host', () => {
 
     const outcome = await checkServerById(orgId, targetId);
     expect(outcome).toMatchObject({ serverId: targetId, status: 'error' });
-    expect(outcome?.error).toContain('bastion');
+    // A background sweep has no user to show details to: its error is stored
+    // where every member who can see the target reads it
+    expect(outcome?.error).toBe('The route to this server failed at hop 1');
     // The mismatch is recorded on the jump host only
     expect(row(jumpId).hostKeyMismatchFingerprint).toBe(JUMP_FP);
     expect(row(targetId).hostKeyMismatchFingerprint).toBeNull();
@@ -393,6 +401,67 @@ describe('connecting through a jump host', () => {
     expect(state.connects).toHaveLength(1);
     expect(state.connects[0].cfg.sock).toBeUndefined();
     expect(state.forwards).toHaveLength(0);
+  });
+});
+
+describe('jump host errors shown to users', () => {
+  /** A restricted member granted the target only (plus `extra`). */
+  function restrictedMember(extra: string[] = []) {
+    const member = seedUser(orgId, 'member').userId;
+    getDb()
+      .update(memberships)
+      .set({ serverAccess: 'restricted' })
+      .where(and(eq(memberships.userId, member), eq(memberships.orgId, orgId)))
+      .run();
+    for (const serverId of [targetId, ...extra]) {
+      getDb().insert(memberServerAccess).values({ orgId, userId: member, serverId }).run();
+    }
+    return member;
+  }
+
+  const run = (actorUserId?: string) =>
+    execOnServer(target(), { password: 'pw-db' }, 'uptime', 5_000, undefined, { actorUserId }).catch((e) => e);
+
+  it('hides the jump host from a member who cannot access it', async () => {
+    state.forwardError = 'Connection refused';
+    const err = await run(restrictedMember());
+    expect(err).toBeInstanceOf(JumpHostError);
+    expect(err.message).toBe('The route to this server failed at hop 1');
+    expect(err.hop).toBe(1);
+    expect(err.message).not.toMatch(/bastion|10\.0\.0\.5/);
+  });
+
+  it("hides a jump host's changed key (and its fingerprints) from such a member", async () => {
+    getDb().update(servers).set(pinnedColumns(TARGET_FP, 'ssh-rsa', userId)).where(eq(servers.id, jumpId)).run();
+    const err = await run(restrictedMember());
+    expect(err).toBeInstanceOf(JumpHostError);
+    expect(err).not.toBeInstanceOf(HostKeyMismatchError);
+    expect(err.message).toBe('The route to this server failed at hop 1');
+  });
+
+  it('counts the failing hop from this app outwards', async () => {
+    const outer = await server('outer', 'outer.example');
+    state.keys['outer.example'] = JUMP_KEY;
+    getDb().update(servers).set({ jumpServerId: outer }).where(eq(servers.id, jumpId)).run();
+    getDb().update(servers).set({ encryptedPassword: null }).where(eq(servers.id, jumpId)).run();
+
+    const err = await run(restrictedMember([outer]));
+    expect(err.message).toBe('The route to this server failed at hop 2');
+  });
+
+  it('shows the details to a member granted the jump server, and to admins', async () => {
+    state.forwardError = 'Connection refused';
+    const granted = await run(restrictedMember([jumpId]));
+    expect(granted.message).toContain('Jump host bastion could not reach 10.0.0.5:22');
+
+    const admin = await run(userId);
+    expect(admin.message).toContain('Jump host bastion could not reach 10.0.0.5:22');
+  });
+
+  it('keeps the details out of work that has no user', async () => {
+    state.forwardError = 'Connection refused';
+    const err = await run(undefined);
+    expect(err.message).toBe('The route to this server failed at hop 1');
   });
 });
 
