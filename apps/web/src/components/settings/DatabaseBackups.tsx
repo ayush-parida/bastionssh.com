@@ -83,10 +83,10 @@ function BackupsSection() {
         <code className="font-mono text-xs">{settings.directory}</code>
         {settings.upload && (
           <>
-            {' '}and copied to <code className="font-mono text-xs">{settings.upload.bucket}/{settings.upload.prefix}</code>
+            {' '}and copied, encrypted, to <code className="font-mono text-xs">{settings.upload.bucket}/{settings.upload.prefix}</code>
           </>
         )}
-        . Backups hold every account and encrypted credential on this instance; sign-in sessions are left out.
+        . Backups hold every account and encrypted credential on this instance; sign-in sessions and invite links are left out.
       </p>
 
       <div className="rounded-lg border border-border bg-card overflow-hidden">

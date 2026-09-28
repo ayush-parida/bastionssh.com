@@ -5,7 +5,9 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import { gunzipSync } from 'zlib';
-import { checkDatabaseFile, createBackup, listBackups, pruneBackups } from './core.js';
+import { pipeline } from 'stream/promises';
+import { checkDatabaseFile, createBackup, isGzipFile, listBackups, pruneBackups } from './core.js';
+import { backupKey, encryptedStream, isEncryptedFile } from './crypt.js';
 import { backupFileName, defaultBackupDir, isValidBackupName, parseBackupName, resolveBackupPath } from './files.js';
 import { holdServerLock, lockHeldReason, lockPath, LOCK_STALE_MS } from './lock.js';
 import {
@@ -18,6 +20,7 @@ import {
 } from './restore.js';
 
 let tmp: string;
+const KEY = Buffer.alloc(32, 3).toString('base64');
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'smt-backup-'));
@@ -39,6 +42,8 @@ function makeDb(file: string, rows = 0): Database.Database {
     CREATE TABLE webauthn_challenges (id TEXT PRIMARY KEY, challenge TEXT);
     INSERT INTO sessions VALUES ('live-session-secret', 'u1');
     INSERT INTO webauthn_challenges VALUES ('c1', 'pending-challenge');
+    CREATE TABLE invites (id TEXT PRIMARY KEY, email TEXT NOT NULL, token TEXT NOT NULL UNIQUE);
+    INSERT INTO invites VALUES ('i1', 'new@example.com', 'pending-invite-token');
   `);
   const insert = db.prepare('INSERT INTO items (body) VALUES (?)');
   db.transaction(() => {
@@ -152,8 +157,13 @@ describe('createBackup', () => {
     expect(count(backup.path, 'sessions')).toBe(0);
     expect(count(backup.path, 'webauthn_challenges')).toBe(0);
     expect(fs.readFileSync(backup.path).includes('live-session-secret')).toBe(false);
+    // Invites stay, but their tokens (enough to join, with the email beside them) do not
+    expect(count(backup.path, 'invites')).toBe(1);
+    expect(fs.readFileSync(backup.path).includes('pending-invite-token')).toBe(false);
     // The live database is untouched
     expect(count(src, 'sessions')).toBe(1);
+    const liveToken = db.prepare('SELECT token FROM invites').get() as { token: string };
+    expect(liveToken.token).toBe('pending-invite-token');
     db.close();
   });
 
@@ -368,6 +378,40 @@ describe('restore CLI', () => {
     expect(fs.readFileSync(dbPath).equals(before)).toBe(true);
     expect(fs.existsSync(path.join(tmp, 'b'))).toBe(false);
     expect(fs.existsSync(`${dbPath}.restore-tmp`)).toBe(false);
+  });
+
+  it('restores an encrypted copy from object storage, given the key', async () => {
+    const src = path.join(tmp, 'src.db');
+    makeDb(src, 4).close();
+    const backup = await createBackup({ source: src, dir: tmp, reason: 'scheduled', gzip: true });
+    const sealed = path.join(tmp, `${backup.name}.enc`);
+    await pipeline(encryptedStream(backup.path, backupKey(KEY)), fs.createWriteStream(sealed));
+    expect(isEncryptedFile(sealed)).toBe(true);
+    // Neither the database nor its gzip is readable as-is
+    expect(fs.readFileSync(sealed).includes('SQLite format 3')).toBe(false);
+    expect(isGzipFile(sealed)).toBe(false);
+
+    const dbPath = path.join(tmp, 'new', 'smt.db');
+    await expect(restoreDatabase({ source: sealed, dbPath, backupDir: tmp })).rejects.toThrow(/SMT_ENCRYPTION_KEY/);
+    const otherKey = Buffer.alloc(32, 7).toString('base64');
+    await expect(restoreDatabase({ source: sealed, dbPath, backupDir: tmp, encryptionKey: otherKey })).rejects.toThrow(
+      /wrong SMT_ENCRYPTION_KEY/,
+    );
+    expect(fs.existsSync(dbPath)).toBe(false);
+
+    // A flipped byte is caught by the GCM tag
+    const tampered = path.join(tmp, 'tampered.enc');
+    const bytes = fs.readFileSync(sealed);
+    bytes[40] = bytes[40]! ^ 1;
+    fs.writeFileSync(tampered, bytes);
+    await expect(restoreDatabase({ source: tampered, dbPath, backupDir: tmp, encryptionKey: KEY })).rejects.toThrow(
+      RestoreError,
+    );
+    expect(fs.existsSync(dbPath)).toBe(false);
+
+    await restoreDatabase({ source: sealed, dbPath, backupDir: tmp, encryptionKey: KEY });
+    expect(count(dbPath, 'items')).toBe(4);
+    expect(fs.readdirSync(path.dirname(dbPath)).filter((f) => f.includes('restore-tmp'))).toEqual([]);
   });
 
   it('restores into a location with no database yet', async () => {

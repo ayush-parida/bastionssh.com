@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { checkDatabaseFile, createBackup, expandBackup } from './core.js';
+import { backupKey, decryptFile, isEncryptedFile } from './crypt.js';
 import { compactTimestamp, resolveBackupPath } from './files.js';
 import { lockHeldReason, portInUse } from './lock.js';
 
@@ -20,6 +21,8 @@ export interface CliSettings {
   port: number;
   keep: number;
   gzip: boolean;
+  /** SMT_ENCRYPTION_KEY, for a backup copied back from object storage (encrypted). */
+  encryptionKey?: string;
 }
 
 export function cliSettings(env: NodeJS.ProcessEnv, defaultBackupDir: (dbPath: string) => string): CliSettings {
@@ -32,6 +35,7 @@ export function cliSettings(env: NodeJS.ProcessEnv, defaultBackupDir: (dbPath: s
     port: Number.isInteger(port) && port > 0 ? port : 8080,
     keep: Number.isInteger(keep) && keep >= 1 ? keep : 14,
     gzip: env.SMT_BACKUP_GZIP === 'true',
+    encryptionKey: env.SMT_ENCRYPTION_KEY || undefined,
   };
 }
 
@@ -129,16 +133,28 @@ export async function restoreDatabase(opts: {
   dbPath: string;
   backupDir: string;
   now?: Date;
+  /** Needed only for an encrypted backup (one uploaded to object storage). */
+  encryptionKey?: string;
 }): Promise<RestoreResult> {
   const now = opts.now ?? new Date();
   const dbPath = path.resolve(opts.dbPath);
   const staging = `${dbPath}.restore-tmp`;
+  const decrypted = `${staging}.dec`;
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   fs.rmSync(staging, { force: true });
+  fs.rmSync(decrypted, { force: true });
 
   try {
     try {
-      await expandBackup(opts.source, staging);
+      let source = opts.source;
+      if (isEncryptedFile(source)) {
+        if (!opts.encryptionKey) {
+          throw new Error('it is encrypted (copied from object storage); set SMT_ENCRYPTION_KEY to the server\'s key');
+        }
+        await decryptFile(source, decrypted, backupKey(opts.encryptionKey));
+        source = decrypted;
+      }
+      await expandBackup(source, staging);
     } catch (err) {
       throw new RestoreError(`Could not read the backup: ${(err as Error).message}`);
     }
@@ -165,5 +181,6 @@ export async function restoreDatabase(opts: {
     return { restoredFrom: opts.source, safetyCopy, migrations: check.migrations ?? 0 };
   } finally {
     fs.rmSync(staging, { force: true });
+    fs.rmSync(decrypted, { force: true });
   }
 }

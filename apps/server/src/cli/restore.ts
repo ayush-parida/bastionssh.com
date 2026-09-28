@@ -14,7 +14,8 @@ import {
  *   pnpm --filter @smt/server run db:restore -- smt-20260928T031500Z-scheduled.db.gz
  *   node apps/server/dist/cli/restore.js /data/backups/smt-…-scheduled.db   (Docker image)
  *
- * Reads SMT_DB_URL, SMT_BACKUP_DIR and SMT_PORT like the server does. Kept
+ * Reads SMT_DB_URL, SMT_BACKUP_DIR and SMT_PORT like the server does, and
+ * SMT_ENCRYPTION_KEY for a backup copied back from object storage. Kept
  * clear of src/config, which exits on an incomplete environment.
  */
 
@@ -36,7 +37,12 @@ async function main(): Promise<number> {
   await assertServerStopped(settings.dbPath, { port: settings.port, skipPortCheck: args.skipPortCheck });
 
   console.log(`Restoring ${source}\n     into ${settings.dbPath}`);
-  const result = await restoreDatabase({ source, dbPath: settings.dbPath, backupDir: settings.backupDir });
+  const result = await restoreDatabase({
+    source,
+    dbPath: settings.dbPath,
+    backupDir: settings.backupDir,
+    encryptionKey: settings.encryptionKey,
+  });
   console.log(`Backup passed integrity_check (${result.migrations} migrations recorded).`);
   if (result.safetyCopy) console.log(`The previous database was kept at ${result.safetyCopy}`);
   console.log('Restored. Start the server; it applies any newer migrations on startup. Everyone signs in again.');

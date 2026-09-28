@@ -344,11 +344,11 @@ REST surface, all under `/api/ftp`:
 
 ### 4.8 App Database Backups (`/server/backup`)
 
-- `core.ts` — online backups with better-sqlite3's `db.backup()` (SQLite backup API, consistent under WAL and concurrent writes), written as `.partial` then renamed; `sessions` and `webauthn_challenges` are emptied with `secure_delete` in the copy; optional gzip; per-reason retention (`SMT_BACKUP_KEEP`). No config/logger imports, so the CLIs can use it with a bare environment.
+- `core.ts` — online backups with better-sqlite3's `db.backup()` (SQLite backup API, consistent under WAL and concurrent writes), written as `.partial` then renamed; `sessions` and `webauthn_challenges` are emptied and invite tokens replaced with `secure_delete` in the copy; optional gzip; per-reason retention (`SMT_BACKUP_KEEP`). No config/logger imports, so the CLIs can use it with a bare environment.
 - `scheduler.ts` — in-process interval (like health checks and cloud sync); a backup is due when the newest `scheduled` one is older than `SMT_BACKUP_INTERVAL_HOURS`.
 - `db/migrate.ts` — before drizzle applies a pending migration to a non-empty database, a `pre-migration` backup is taken; failure aborts startup.
 - `lock.ts` — the server writes `<db>.lock` and touches it every 30 s; `cli/restore.ts` refuses while it is fresh (works across Docker pid namespaces), while its pid is alive on this host, or while the port answers.
-- `upload.ts` — optional copy to a registered object-storage connection via `storage/ops.putObject`.
+- `upload.ts` — optional copy to a registered object-storage connection via `storage/ops.putObject`, encrypted (AES-256-GCM, key derived from `SMT_ENCRYPTION_KEY`, `crypt.ts`) since the bucket is browsable by the connection's org members.
 - API: `GET/POST /api/admin/backups`, `GET /api/admin/backups/:name/download` — owner of the instance's first organization only; download needs a browser session plus passkey step-up; names must match the generated pattern exactly.
 
 ---

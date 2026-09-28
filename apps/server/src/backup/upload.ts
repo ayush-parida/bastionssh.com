@@ -1,8 +1,9 @@
-import fs from 'fs';
 import { eq } from 'drizzle-orm';
+import { config } from '../config/index.js';
 import { getDb } from '../db/index.js';
 import { storageConnections } from '../db/schema.js';
 import { assertBucketParam, normalizeKey, normalizePrefix, ops, resolveConnection, StorageError } from '../storage/index.js';
+import { backupKey, encryptedStream } from './crypt.js';
 
 export interface BackupUploadTarget {
   connectionId: string;
@@ -10,9 +11,9 @@ export interface BackupUploadTarget {
   prefix: string;
 }
 
-/** The object key a backup is stored under. */
+/** The object key a backup is stored under (encrypted, hence `.enc`). */
 export function backupObjectKey(prefix: string, name: string): string {
-  return normalizeKey(`${normalizePrefix(prefix)}${name}`);
+  return normalizeKey(`${normalizePrefix(prefix)}${name}.enc`);
 }
 
 /**
@@ -20,6 +21,10 @@ export function backupObjectKey(prefix: string, name: string): string {
  * app. The connection id comes from the operator's environment, not from a
  * request, so it is looked up in whichever org registered it. Only uploads —
  * pruning what is already in the bucket is left to a lifecycle rule there.
+ *
+ * Encrypted with the backup key (crypt.ts): members of that org, viewers
+ * included, can read the bucket through the Storage browser, and must not
+ * get the whole instance's database that way.
  */
 export async function uploadBackup(file: string, name: string, target: BackupUploadTarget): Promise<void> {
   const row = getDb()
@@ -32,11 +37,5 @@ export async function uploadBackup(file: string, name: string, target: BackupUpl
   const { client } = await resolveConnection(row.orgId, target.connectionId);
   const bucket = assertBucketParam(target.bucket);
   const key = backupObjectKey(target.prefix, name);
-  await ops.putObject(
-    client,
-    bucket,
-    key,
-    fs.createReadStream(file),
-    name.endsWith('.gz') ? 'application/gzip' : 'application/vnd.sqlite3',
-  );
+  await ops.putObject(client, bucket, key, encryptedStream(file, backupKey(config.encryptionKey)), 'application/octet-stream');
 }

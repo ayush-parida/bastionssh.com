@@ -27,6 +27,13 @@ const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
  */
 const SCRUBBED_TABLES = ['sessions', 'webauthn_challenges'];
 
+/**
+ * Invite tokens are stored as-is too, and a token plus the invite's email (in
+ * the same row) is enough to join an org at the invited role. Each is replaced
+ * with a random value nobody knows, so a restored invite has to be sent again.
+ */
+const SCRUB_INVITE_TOKENS = 'UPDATE "invites" SET "token" = lower(hex(randomblob(32)))';
+
 export interface CreateBackupOptions {
   /** An open connection (the running app's) or the path of a database file. */
   source: Database.Database | string;
@@ -71,6 +78,7 @@ function finalizeCopy(file: string) {
     for (const table of SCRUBBED_TABLES) {
       if (existing.has(table)) db.exec(`DELETE FROM "${table}"`);
     }
+    if (existing.has('invites')) db.exec(SCRUB_INVITE_TOKENS);
     db.pragma('journal_mode = DELETE');
   } finally {
     db.close();
