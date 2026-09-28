@@ -1,9 +1,12 @@
 import { useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
-import type { SSHKey, CreateSSHKeyRequest, GenerateSSHKeyResponse } from '@smt/shared';
-import { Plus, Copy, Trash2, Key as KeyIcon, RefreshCw, Upload, FileCheck } from 'lucide-react';
+import type { SSHKey, CreateSSHKeyRequest, GenerateSSHKeyResponse, Server } from '@smt/shared';
+import { Plus, Copy, Trash2, Key as KeyIcon, RefreshCw, Upload, FileCheck, RotateCw, History } from 'lucide-react';
 import { toast } from 'sonner';
+import { useHasRole } from '@/store/auth.js';
+import { KeyAgeBadge, RotationHistory, rotationRequestError } from '@/components/keys/KeyRotation.js';
+import { ROTATION_CONFIRM, rotateServerKeys } from '@/lib/key-rotation.js';
 
 /** A private key is a few KB; this only catches an obviously wrong file. */
 const MAX_PEM_BYTES = 64 * 1024;
@@ -20,6 +23,9 @@ export default function KeysPage() {
   const [generatedKey, setGeneratedKey] = useState<GenerateSSHKeyResponse | null>(null);
   const [pemFileName, setPemFileName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isAdmin = useHasRole('admin');
+  // Rotation history below the table: every rotation, or one key's
+  const [historyKeyId, setHistoryKeyId] = useState<string | null>(null);
 
   const { data: keys, isLoading } = useQuery<SSHKey[]>({
     queryKey: ['ssh-keys'],
@@ -37,6 +43,36 @@ export default function KeysPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['ssh-keys'] }); setShowForm(false); resetForm(); toast.success('Key imported'); },
     onError: (err: Error) => toast.error(err.message),
   });
+
+  // Which (visible) key-authenticated servers log in with each key
+  const { data: servers } = useQuery<Server[]>({
+    queryKey: ['servers'],
+    queryFn: () => api.get('/servers'),
+  });
+  const serversByKey = new Map<string, Server[]>();
+  for (const s of servers ?? []) {
+    if (s.authType !== 'key' || !s.defaultKeyId) continue;
+    serversByKey.set(s.defaultKeyId, [...(serversByKey.get(s.defaultKeyId) ?? []), s]);
+  }
+
+  const rotateMutation = useMutation({
+    mutationFn: (serverIds: string[]) => rotateServerKeys(serverIds),
+    onSuccess: (res) => {
+      setHistoryKeyId(null);
+      qc.invalidateQueries({ queryKey: ['key-rotations'] });
+      toast.success(`Rotating ${res.rotations.length} server key(s) — see the rotation history`);
+    },
+    onError: rotationRequestError,
+  });
+
+  function handleRotate(k: SSHKey) {
+    const using = serversByKey.get(k.id) ?? [];
+    const ok = confirm(
+      `Rotate "${k.name}" on ${using.length} server(s): ${using.map((s) => s.name).join(', ')}?\n\n` +
+        `Each server gets its own new key, one after another; "${k.name}" is retired once no server uses it.\n\n${ROTATION_CONFIRM}`,
+    );
+    if (ok) rotateMutation.mutate(using.map((s) => s.id));
+  }
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/keys/${id}`),
@@ -207,22 +243,50 @@ export default function KeysPage() {
             <table className="w-full text-sm">
               <thead className="border-b border-border bg-muted/50">
                 <tr>
-                  {['Name', 'Type', 'Fingerprint', 'Created', ''].map((h) => (
+                  {['Name', 'Type', 'Fingerprint', 'Created', 'Used by', ''].map((h) => (
                     <th key={h} className="px-4 py-3 text-left text-xs font-medium text-muted-foreground">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
                 {keys?.map((k) => (
-                  <tr key={k.id} className="hover:bg-muted/30">
-                    <td className="px-4 py-3 font-medium">{k.name}</td>
+                  <tr key={k.id} className={k.retiredAt ? 'opacity-60 hover:bg-muted/30' : 'hover:bg-muted/30'}>
+                    <td className="px-4 py-3 font-medium">
+                      {k.name}
+                      {k.retiredAt && (
+                        <span title={`Retired ${new Date(k.retiredAt).toLocaleString()} by a key rotation`} className="ml-2 rounded bg-muted px-1.5 py-0.5 text-xs font-normal text-muted-foreground">
+                          Retired
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-muted-foreground">{k.type}</td>
                     <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{k.fingerprint}</td>
-                    <td className="px-4 py-3 text-muted-foreground">{new Date(k.createdAt).toLocaleDateString()}</td>
-                    <td className="px-4 py-3 text-right">
-                      <button onClick={() => { if (confirm('Delete key?')) deleteMutation.mutate(k.id); }} className="text-red-500 hover:text-red-600">
-                        <Trash2 size={14} />
-                      </button>
+                    <td className="px-4 py-3 text-muted-foreground">
+                      {new Date(k.createdAt).toLocaleDateString()}
+                      <KeyAgeBadge sshKey={k} className="ml-2" />
+                    </td>
+                    <td className="px-4 py-3 text-muted-foreground" title={(serversByKey.get(k.id) ?? []).map((s) => s.name).join(', ')}>
+                      {serversByKey.get(k.id)?.length ?? 0} server(s)
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-end gap-3">
+                        <button onClick={() => setHistoryKeyId(k.id)} title="Rotation history of this key" className="text-muted-foreground hover:text-foreground">
+                          <History size={14} />
+                        </button>
+                        {isAdmin && !k.retiredAt && (serversByKey.get(k.id)?.length ?? 0) > 0 && (
+                          <button
+                            onClick={() => handleRotate(k)}
+                            disabled={rotateMutation.isPending}
+                            title="Replace this key on every server that uses it"
+                            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground disabled:opacity-50"
+                          >
+                            <RotateCw size={14} /> Rotate
+                          </button>
+                        )}
+                        <button onClick={() => { if (confirm('Delete key?')) deleteMutation.mutate(k.id); }} className="text-red-500 hover:text-red-600">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -231,6 +295,24 @@ export default function KeysPage() {
           )}
         </div>
       )}
+
+      <div className="mt-8">
+        <div className="mb-3 flex items-center gap-2">
+          <History size={16} className="text-muted-foreground" />
+          <h2 className="font-semibold">Rotation history</h2>
+          {historyKeyId && (
+            <>
+              <span className="text-sm text-muted-foreground">
+                for {keys?.find((k) => k.id === historyKeyId)?.name ?? 'one key'}
+              </span>
+              <button onClick={() => setHistoryKeyId(null)} className="text-xs text-primary hover:underline">Show all</button>
+            </>
+          )}
+        </div>
+        <div className="rounded-lg border border-border bg-card p-2">
+          <RotationHistory keyId={historyKeyId ?? undefined} />
+        </div>
+      </div>
     </div>
   );
 }
