@@ -87,6 +87,7 @@ const { HostKeyMismatchError, pinnedColumns } = await import('./host-keys.js');
 const { SSHBroker, execOnServer } = await import('./broker.js');
 const sftp = await import('./sftp.js');
 const { runProbe } = await import('../monitoring/probe.js');
+const { checkServerById } = await import('../monitoring/collector.js');
 const { JumpHostError, MAX_JUMP_DEPTH, jumpChain, jumpHostProblem, scanServerHostKey, serversBehind } =
   await import('./jump.js');
 const { vault } = await import('../vault/index.js');
@@ -242,8 +243,11 @@ describe('connecting through a jump host', () => {
 
     const err = await execOnServer(target(), { password: 'pw-db' }, 'uptime', 20).catch((e) => e);
     expect(err.message).toBe('Command timed out');
-    // The target was never contacted; the jump hop's own ready timeout would end it
+    // The target was never contacted, and the hop still handshaking is hung up on
     expect(state.connects).toHaveLength(1);
+    expect(state.ended.has(state.connects[0].client)).toBe(true);
+    await flush();
+    expect(jumpAudits(jumpId)).toHaveLength(0);
   });
 
   it('closes a jump chain that finishes after the caller gave up', async () => {
@@ -348,6 +352,25 @@ describe('connecting through a jump host', () => {
     expect(result.sample.hostname).toBe('fake');
     expectBothHopsVerified();
     expect(jumpAudits(jumpId)).toHaveLength(0);
+  });
+
+  it('a health check a user asked for audits the jump hop under them', async () => {
+    const outcome = await checkServerById(orgId, targetId, userId);
+    expect(outcome?.status).toBe('online');
+    const [entry] = jumpAudits(jumpId);
+    expect(entry).toMatchObject({ actorId: userId });
+    expect(JSON.parse(entry!.metadata!)).toMatchObject({ targetId, via: 'health_check' });
+  });
+
+  it("a changed jump host key leaves the target unreachable, not with a host key mismatch of its own", async () => {
+    getDb().update(servers).set(pinnedColumns(TARGET_FP, 'ssh-rsa', userId)).where(eq(servers.id, jumpId)).run();
+
+    const outcome = await checkServerById(orgId, targetId);
+    expect(outcome).toMatchObject({ serverId: targetId, status: 'error' });
+    expect(outcome?.error).toContain('bastion');
+    // The mismatch is recorded on the jump host only
+    expect(row(jumpId).hostKeyMismatchFingerprint).toBe(JUMP_FP);
+    expect(row(targetId).hostKeyMismatchFingerprint).toBeNull();
   });
 
   it('a host key scan reads the target key through the jump host, verifying the jump host', async () => {

@@ -191,15 +191,20 @@ function endQuietly(client: Client) {
   }
 }
 
-/** Connect one hop, optionally over the previous hop's channel. */
+/**
+ * Connect one hop, optionally over the previous hop's channel. `track` gets the
+ * client before it connects, so an abort can end a hop still handshaking.
+ */
 function connectHop(
   hop: ServerRow,
   auth: { privateKey?: string; password?: string },
   purpose: HostKeyPurpose,
   sock: ClientChannel | undefined,
+  track: (client: Client) => void,
 ): Promise<Client> {
   return new Promise((resolve, reject) => {
     const client = new Client();
+    track(client);
     const { config, guard } = sshConnectConfig(
       { id: hop.id, host: hop.host, port: hop.port, username: hop.username },
       auth,
@@ -262,6 +267,8 @@ export async function openJumpTunnel(
   target: SshTarget,
   purpose: HostKeyPurpose,
   options: JumpOptions = {},
+  /** Aborting ends every hop at once, including one still connecting. */
+  signal?: AbortSignal,
 ): Promise<JumpTunnel | null> {
   const chain = jumpChain(target.id);
   if (chain.length === 0) return null;
@@ -273,6 +280,11 @@ export async function openJumpTunnel(
     for (const client of clients.splice(0).reverse()) endQuietly(client);
   };
 
+  const checkAborted = () => {
+    if (signal?.aborted) throw new JumpHostError(`Connection to ${target.host}:${target.port} was abandoned`);
+  };
+  signal?.addEventListener('abort', close, { once: true });
+
   let sock: ClientChannel | undefined;
   try {
     for (let i = 0; i < hops.length; i++) {
@@ -282,9 +294,11 @@ export async function openJumpTunnel(
         const reason = err instanceof Error ? err.message : String(err);
         throw new JumpHostError(`Jump host ${hop.name}: ${reason}`);
       });
-      const client = await connectHop(hop, auth, purpose, sock);
-      clients.push(client);
+      checkAborted();
+      const client = await connectHop(hop, auth, purpose, sock, (c) => clients.push(c));
+      checkAborted();
       sock = await forward(client, hop, next.host, next.port);
+      checkAborted();
 
       const detail = { targetId: target.id, to: `${next.host}:${next.port}`, hop: hops.length - i, via: purpose };
       if (purpose === 'health_check' && !options.actorUserId) {
@@ -298,6 +312,8 @@ export async function openJumpTunnel(
   } catch (err) {
     close();
     throw err;
+  } finally {
+    signal?.removeEventListener('abort', close);
   }
 
   // Any hop going away takes the tunnel (and so the target) with it
@@ -342,15 +358,17 @@ export function connectSsh(
 
   let aborted = false;
   let tunnel: JumpTunnel | null = null;
+  const abort = new AbortController();
   const end = client.end.bind(client);
   client.end = () => {
     aborted = true;
+    abort.abort();
     tunnel?.close();
     return end();
   };
   client.once('close', () => tunnel?.close());
 
-  openJumpTunnel(target, purpose, options).then(
+  openJumpTunnel(target, purpose, options, abort.signal).then(
     (opened) => {
       if (aborted || !opened) {
         opened?.close();
