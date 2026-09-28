@@ -360,4 +360,14 @@ describe('session recording', () => {
     expect(result.recordingId).toBe('rec-1');
     expect(recording.command).toHaveBeenCalledWith({ source: 'ai', command: 'df -h', exitCode: 0 });
   });
+
+  it('logs a command that timed out, without an exit code', async () => {
+    const recording = fakeRecording();
+    const { id } = await recordedSession(recording);
+    const pending = SSHBroker.exec(id, 'sleep 999', 1000, OWNER, 'ai');
+    const assertion = expect(pending).rejects.toThrow('Command timed out');
+    vi.advanceTimersByTime(1000);
+    await assertion;
+    expect(recording.command).toHaveBeenCalledWith({ source: 'ai', command: 'sleep 999', exitCode: null });
+  });
 });

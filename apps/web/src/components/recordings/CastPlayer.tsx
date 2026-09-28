@@ -21,6 +21,8 @@ export interface ParsedCast {
   /** Markers (commands run over the session, the truncation point). */
   markers: { time: number; label: string }[];
   duration: number;
+  /** Where idle time was cut: from raw time `at` on, playback runs `shift` seconds behind. */
+  cuts: { at: number; shift: number }[];
 }
 
 /** Pauses longer than this play back as this long. */
@@ -35,6 +37,7 @@ export function parseCast(text: string): ParsedCast {
 
   const events: CastEvent[] = [];
   const markers: ParsedCast['markers'] = [];
+  const cuts: ParsedCast['cuts'] = [];
   let last = 0;
   let shift = 0;
   for (const line of lines.slice(1)) {
@@ -46,14 +49,28 @@ export function parseCast(text: string): ParsedCast {
     }
     const [time, code, data] = event;
     const gap = time - last;
-    if (gap > IDLE_LIMIT_S) shift += gap - IDLE_LIMIT_S;
+    if (gap > IDLE_LIMIT_S) {
+      shift += gap - IDLE_LIMIT_S;
+      cuts.push({ at: time, shift });
+    }
     last = time;
     const t = time - shift;
     if (code === 'o' || code === 'r') events.push([t, code, data]);
     else if (code === 'm') markers.push({ time: t, label: data });
   }
   const end = Math.max(events.at(-1)?.[0] ?? 0, markers.at(-1)?.time ?? 0);
-  return { width: header.width ?? 80, height: header.height ?? 24, events, markers, duration: end };
+  return { width: header.width ?? 80, height: header.height ?? 24, events, markers, duration: end, cuts };
+}
+
+/** A time from the recording (e.g. a command log entry) on the idle-compressed playback timeline. */
+export function playbackTime(cast: ParsedCast, raw: number): number {
+  let shift = 0;
+  for (const cut of cast.cuts) {
+    // Inside a cut gap (a command log time sits a hair before its marker): the gap's end
+    if (cut.at > raw) return Math.max(0, Math.min(raw - shift, cut.at - cut.shift));
+    shift = cut.shift;
+  }
+  return Math.max(0, raw - shift);
 }
 
 function formatTime(s: number) {

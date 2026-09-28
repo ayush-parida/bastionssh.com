@@ -8,7 +8,7 @@ import { api } from '@/lib/api.js';
 import { formatBytes } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { useHasRole } from '@/store/auth.js';
-import CastPlayer, { parseCast, type CastPlayerHandle } from '@/components/recordings/CastPlayer.js';
+import CastPlayer, { parseCast, playbackTime, type CastPlayerHandle } from '@/components/recordings/CastPlayer.js';
 import { recordingDuration } from '@/pages/Recordings.js';
 
 export default function RecordingPlayerPage() {
@@ -151,7 +151,7 @@ export default function RecordingPlayerPage() {
             {rec.commands.map((c) => (
               <button
                 key={c.id}
-                onClick={() => playerRef.current?.seek(c.at)}
+                onClick={() => cast && playerRef.current?.seek(playbackTime(cast, c.at))}
                 title="Jump to this point"
                 className="flex w-full items-center gap-3 px-4 py-2 text-left text-xs hover:bg-muted/40"
               >

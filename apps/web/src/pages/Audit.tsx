@@ -10,6 +10,9 @@ import { relativeTime } from '@/lib/utils.js';
 function recordingOf(e: AuditLogEntry): string | undefined {
   const fromMeta = e.metadata?.recordingId;
   if (typeof fromMeta === 'string') return fromMeta;
+  // A saved command run on one server; a run on several links from the Recordings page instead
+  const many = e.metadata?.recordingIds;
+  if (Array.isArray(many) && many.length === 1 && typeof many[0] === 'string') return many[0];
   if (e.resourceType === 'recording' && e.action !== 'recording.delete') return e.resourceId;
   return undefined;
 }

@@ -394,9 +394,16 @@ async function exec(
   const session = owner ? ownedSession(sessionId, owner) : sessions.get(sessionId);
   if (!session) throw new Error('Session not found');
 
-  const result = await execOnClient(session.client, command, timeoutMs);
   // Logged on the terminal's recording, so playback shows what ran behind the shell
   const recording = session.meta.recording;
+  let result: ExecResult;
+  try {
+    result = await execOnClient(session.client, command, timeoutMs);
+  } catch (err) {
+    // A timed-out or refused command still ran (or tried to) on this connection
+    recording?.command({ source, command, exitCode: null });
+    throw err;
+  }
   if (!recording) return result;
   recording.command({ source, command, exitCode: result.exitCode });
   return { ...result, recordingId: recording.id };
