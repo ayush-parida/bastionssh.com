@@ -27,8 +27,8 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # The server resolves @smt/shared and @smt/cron-parser from their dist/
-      - run: pnpm --filter @smt/shared --filter @smt/cron-parser run build
+      # The server resolves @smt/shared, @smt/cron-parser and @smt/agent from their dist/
+      - run: pnpm --filter @smt/shared --filter @smt/cron-parser --filter @smt/agent run build
       - run: pnpm typecheck
       - run: pnpm lint
 
@@ -56,7 +56,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @smt/shared --filter @smt/cron-parser run build
+      - run: pnpm --filter @smt/shared --filter @smt/cron-parser --filter @smt/agent run build
       - run: pnpm test
 
   build:

@@ -7,7 +7,10 @@ import Database from 'better-sqlite3';
 
 // A real file database and backup directory: backups of :memory: are refused
 const env = vi.hoisted(() => {
+  // Hoisted above the imports, so plain require
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { mkdtempSync } = require('fs') as typeof import('fs');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { tmpdir } = require('os') as typeof import('os');
   const dir = mkdtempSync(`${tmpdir()}/smt-backup-routes-`);
   process.env.SMT_DB_URL = `${dir}/smt.db`;

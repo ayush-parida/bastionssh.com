@@ -7,7 +7,6 @@ import logger from '../logger.js';
 import {
   emailBody,
   emailSubject,
-  maskUrl,
   NOTICE_SERVER,
   noticeEvent,
   parseRecipients,

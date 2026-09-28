@@ -182,7 +182,7 @@ export function formatSyslog(entry: AuditLogEntry, facility: number, hostname = 
     '-',
     headerToken(entry.action, 32),
   ].join(' ');
-  return `${header} ${sd} ﻿${JSON.stringify(entry)}`;
+  return `${header} ${sd} \uFEFF${JSON.stringify(entry)}`;
 }
 
 /** RFC 6587 octet counting: the byte length, a space, then the message. */

@@ -378,6 +378,8 @@ export function guessProtocol(text: string): string | null {
   if (/^SSH-/.test(text)) return 'an SSH server';
   if (/^\d{3}[ -]/.test(text)) return 'an FTP (or mail) server';
   if (/^HTTP\/\d/i.test(text)) return 'a web server';
+  // A TLS record header: alert (0x15) or handshake (0x16), then version 3.x
+  // eslint-disable-next-line no-control-regex
   if (/^\x15\x03/.test(text) || /^\x16\x03/.test(text)) return 'a TLS service';
   return null;
 }

@@ -8,6 +8,8 @@ export default tseslint.config(
   {
     ignores: [
       '**/node_modules/**',
+      // Local agent worktrees (other checkouts of this repo)
+      '.claude/**',
       '**/dist/**',
       '**/coverage/**',
       '**/*.tsbuildinfo',

@@ -42,6 +42,8 @@ function makeDb(file: string, rows = 0): Database.Database {
     CREATE TABLE webauthn_challenges (id TEXT PRIMARY KEY, challenge TEXT);
     INSERT INTO sessions VALUES ('live-session-secret', 'u1');
     INSERT INTO webauthn_challenges VALUES ('c1', 'pending-challenge');
+    CREATE TABLE sso_login_states (state_hash TEXT PRIMARY KEY, nonce TEXT);
+    INSERT INTO sso_login_states VALUES ('state-hash', 'pending-sso-nonce');
     CREATE TABLE invites (id TEXT PRIMARY KEY, email TEXT NOT NULL, token TEXT NOT NULL UNIQUE);
     INSERT INTO invites VALUES ('i1', 'new@example.com', 'pending-invite-token');
   `);
@@ -156,6 +158,7 @@ describe('createBackup', () => {
     const backup = await createBackup({ source: db, dir: tmp, reason: 'manual' });
     expect(count(backup.path, 'sessions')).toBe(0);
     expect(count(backup.path, 'webauthn_challenges')).toBe(0);
+    expect(count(backup.path, 'sso_login_states')).toBe(0);
     expect(fs.readFileSync(backup.path).includes('live-session-secret')).toBe(false);
     // Invites stay, but their tokens (enough to join, with the email beside them) do not
     expect(count(backup.path, 'invites')).toBe(1);

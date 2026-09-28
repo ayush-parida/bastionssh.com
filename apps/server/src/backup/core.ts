@@ -22,10 +22,11 @@ const SQLITE_MAGIC = Buffer.from('SQLite format 3\0', 'latin1');
 
 /**
  * Bearer secrets that must not leave the instance in a file someone can
- * download: session ids are stored as-is, and a pending passkey challenge is
- * half a sign-in. A restored database simply has everyone sign in again.
+ * download: session ids are stored as-is, and a pending passkey challenge or
+ * single sign-on round trip is half a sign-in. A restored database simply has
+ * everyone sign in again.
  */
-const SCRUBBED_TABLES = ['sessions', 'webauthn_challenges'];
+const SCRUBBED_TABLES = ['sessions', 'webauthn_challenges', 'sso_login_states'];
 
 /**
  * Invite tokens are stored as-is too, and a token plus the invite's email (in

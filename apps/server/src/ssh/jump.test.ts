@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { and, eq } from 'drizzle-orm';
 
 // Fake ssh2 that runs the host key handshake per host: connect() hands the key
