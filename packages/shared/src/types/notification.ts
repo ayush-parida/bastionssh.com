@@ -225,3 +225,15 @@ export interface AlertWebhookPayload {
   };
   sentAt: string;
 }
+
+/** Events that are not server alerts, sent to the same channels. */
+export type NoticeEvent = 'access_request.created' | 'access_request.approved' | 'access_request.denied';
+
+/** JSON body POSTed to a `webhook` channel for a {@link NoticeEvent}. */
+export interface NoticeWebhookPayload {
+  event: NoticeEvent;
+  title: string;
+  message: string;
+  details: Record<string, string>;
+  sentAt: string;
+}

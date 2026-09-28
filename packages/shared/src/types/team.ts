@@ -31,7 +31,85 @@ export interface OrgSecuritySettings {
 
 export interface MemberServerAccess {
   serverAccess: ServerAccessMode;
+  /** Every server currently granted (expired grants never appear). */
   serverIds: string[];
+  /** The same grants with their details; `expiresAt` null means permanent. */
+  grants?: ServerGrant[];
+}
+
+export interface ServerGrant {
+  serverId: string;
+  expiresAt: string | null;
+  grantedBy: string | null;
+  reason: string | null;
+}
+
+/**
+ * Body of `PUT /team/members/:id/access`. `expiresInMinutes` makes grants
+ * time-bound: a number is minutes from now, null makes the grant permanent,
+ * and a server left out keeps whatever expiry it already has (new ones are permanent).
+ */
+export interface UpdateMemberServerAccess {
+  serverAccess: ServerAccessMode;
+  serverIds: string[];
+  expiresInMinutes?: Record<string, number | null>;
+}
+
+export type AccessRequestStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';
+
+export interface AccessRequest {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userDisplayName: string;
+  servers: { id: string; name: string | null }[];
+  reason: string;
+  durationMinutes: number;
+  status: AccessRequestStatus;
+  /** Set on approval; may be shorter than requested. */
+  approvedMinutes: number | null;
+  decidedBy: string | null;
+  decidedByEmail: string | null;
+  decidedAt: string | null;
+  decisionNote: string | null;
+  createdAt: string;
+  /** Pending: when the request lapses undecided. Approved: when the granted access ends. */
+  expiresAt: string;
+}
+
+export interface CreateAccessRequest {
+  serverIds: string[];
+  reason: string;
+  durationMinutes: number;
+}
+
+export interface DecideAccessRequest {
+  /** Approve only: grant for less time than was asked. */
+  durationMinutes?: number;
+  note?: string;
+}
+
+/** Org-wide access request policy. Every member may read it; admins change it. */
+export interface AccessRequestSettings {
+  /** Restricted members see the names (only) of servers they cannot use, so they can ask for them. */
+  restrictedSeeServerNames: boolean;
+  /** Longest access a member may request, in minutes. */
+  maxRequestMinutes: number;
+}
+
+/** A server a restricted member may ask for, or already has. Names only — never hosts. */
+export interface RequestableServer {
+  id: string;
+  name: string;
+  /** Present when the member has access now; null expiry means permanent. */
+  granted: { expiresAt: string | null } | null;
+}
+
+export interface RequestableServers {
+  /** False for members who already see every server — they have nothing to request. */
+  restricted: boolean;
+  settings: AccessRequestSettings;
+  servers: RequestableServer[];
 }
 
 /** Returned once when an admin issues a reset — the link is never readable again. */

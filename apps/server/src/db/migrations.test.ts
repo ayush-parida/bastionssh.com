@@ -322,3 +322,68 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const ACCESS_REQUESTS_TAG = '0013_access_requests';
+
+describe('migration 0013 (access requests)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(ACCESS_REQUESTS_TAG);
+  });
+
+  it('keeps existing grants permanent and gives orgs the default request policy', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < ACCESS_REQUESTS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, joined_at, server_access) VALUES ('u1', 'o1', 'operator', 'now', 'restricted');
+      INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 'root', 'u1', 'now', 'now');
+      INSERT INTO member_server_access (org_id, user_id, server_id, created_at) VALUES ('o1', 'u1', 'srv', '2024-01-01');
+    `);
+
+    apply(db, [ACCESS_REQUESTS_TAG]);
+
+    expect(db.prepare('SELECT * FROM member_server_access').get()).toEqual({
+      org_id: 'o1',
+      user_id: 'u1',
+      server_id: 'srv',
+      created_at: '2024-01-01',
+      expires_at: null,
+      granted_by: null,
+      reason: null,
+    });
+    expect(
+      db.prepare('SELECT restricted_see_server_names, access_request_max_minutes FROM organizations').get(),
+    ).toEqual({ restricted_see_server_names: 1, access_request_max_minutes: 480 });
+    expect(db.prepare('SELECT count(*) AS n FROM access_requests').get()).toEqual({ n: 0 });
+  });
+
+  it('starts requests pending and drops them with their requester', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO access_requests (id, org_id, user_id, server_ids, reason, duration_minutes, created_at, expires_at)
+        VALUES ('r1', 'o1', 'u1', '["srv"]', 'why', 60, 'now', '2999-01-01');
+    `);
+    expect(db.prepare('SELECT status, decided_by, approved_minutes FROM access_requests').get()).toEqual({
+      status: 'pending',
+      decided_by: null,
+      approved_minutes: null,
+    });
+    db.exec("DELETE FROM users WHERE id = 'u1'");
+    expect(db.prepare('SELECT count(*) AS n FROM access_requests').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (
+      sqlite.prepare('PRAGMA table_info(member_server_access)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(columns).toEqual(expect.arrayContaining(['expires_at', 'granted_by', 'reason']));
+    expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE name = 'access_requests'").get()).toBeTruthy();
+  });
+});

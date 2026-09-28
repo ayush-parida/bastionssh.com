@@ -2,6 +2,7 @@ import { buildApp } from './api/app.js';
 import { startWorker } from './worker/index.js';
 import { startHealthMonitor } from './monitoring/scheduler.js';
 import { startCloudSync } from './cloud/scheduler.js';
+import { startAccessExpiry } from './auth/access-grants.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -36,6 +37,8 @@ async function main() {
   // Health checks and cloud inventory sync run on plain intervals in-process — no Redis required.
   startHealthMonitor();
   startCloudSync();
+  // Time-bound server grants: removes expired ones and closes what is still open on them
+  startAccessExpiry();
   if (config.smtp) logger.info('Email notifications enabled (SMTP configured)');
 
   try {

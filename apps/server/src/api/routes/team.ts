@@ -44,6 +44,8 @@ import { revokeLiveAccess } from '../../auth/revoke.js';
 import { passkeyCount, requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { deleteBackupCodes } from '../../auth/backup-codes.js';
 import { config } from '../../config/index.js';
+import { activeGrantFilter } from '../../auth/server-access.js';
+import { activeGrants, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 
 const roleSchema = z.enum(ROLES);
 
@@ -73,6 +75,11 @@ const settingsSchema = z.object({ requirePasskey: z.boolean() });
 const serverAccessSchema = z.object({
   serverAccess: z.enum(['all', 'restricted']),
   serverIds: z.array(z.string().min(1)).max(1000).default([]),
+  // Per server: minutes from now for a time-bound grant, null for permanent.
+  // A server left out keeps the expiry it already has; a new one is permanent.
+  expiresInMinutes: z
+    .record(z.string(), z.number().int().min(1).max(MAX_GRANT_MINUTES).nullable())
+    .default({}),
 });
 
 function inviteLink(token: string): string {
@@ -229,7 +236,13 @@ export async function teamRoutes(app: FastifyInstance) {
         ? db
             .select({ userId: memberServerAccess.userId, n: count() })
             .from(memberServerAccess)
-            .where(and(eq(memberServerAccess.orgId, req.orgId), inArray(memberServerAccess.userId, userIds)))
+            .where(
+              and(
+                eq(memberServerAccess.orgId, req.orgId),
+                inArray(memberServerAccess.userId, userIds),
+                activeGrantFilter(),
+              ),
+            )
             .groupBy(memberServerAccess.userId)
             .all()
             .map((g) => [g.userId, g.n])
@@ -458,15 +471,12 @@ export async function teamRoutes(app: FastifyInstance) {
       .get();
     if (!member) return reply.status(404).send({ error: 'Not a member of this organization' });
 
-    const serverIds = db
-      .select({ serverId: memberServerAccess.serverId })
-      .from(memberServerAccess)
-      .where(and(eq(memberServerAccess.userId, userId), eq(memberServerAccess.orgId, req.orgId)))
-      .all()
-      .map((g) => g.serverId);
+    // Expired grants are gone as far as anyone is concerned, even before the sweep deletes them
+    const grants = activeGrants(req.orgId, userId);
     return {
       serverAccess: member.serverAccess === 'restricted' ? 'restricted' : 'all',
-      serverIds,
+      serverIds: grants.map((g) => g.serverId),
+      grants,
     } satisfies MemberServerAccess;
   });
 
@@ -496,32 +506,60 @@ export async function teamRoutes(app: FastifyInstance) {
       }
     }
 
+    const memberGrants = and(eq(memberServerAccess.userId, userId), eq(memberServerAccess.orgId, req.orgId));
+    // Existing rows, expired or not: a grant that lapses while the dialog is
+    // open must stay lapsed on save, never turn permanent.
+    const existing = new Map(
+      db.select().from(memberServerAccess).where(memberGrants).all().map((g) => [g.serverId, g]),
+    );
+    const now = Date.now();
+    const rows = serverIds.map((serverId) => {
+      const minutes = body.expiresInMinutes[serverId];
+      const prior = existing.get(serverId);
+      if (minutes === undefined && prior) {
+        return { serverId, expiresAt: prior.expiresAt, grantedBy: prior.grantedBy, reason: prior.reason, createdAt: prior.createdAt };
+      }
+      return {
+        serverId,
+        expiresAt: minutes == null ? null : minutesFromNow(minutes, now),
+        grantedBy: req.user.id,
+        reason: null,
+        createdAt: new Date(now).toISOString(),
+      };
+    });
+
     db.transaction(() => {
       db.update(memberships)
         .set({ serverAccess: body.serverAccess })
         .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
         .run();
-      db.delete(memberServerAccess)
-        .where(and(eq(memberServerAccess.userId, userId), eq(memberServerAccess.orgId, req.orgId)))
-        .run();
-      for (const serverId of serverIds) {
-        db.insert(memberServerAccess).values({ orgId: req.orgId, userId, serverId }).run();
+      db.delete(memberServerAccess).where(memberGrants).run();
+      for (const row of rows) {
+        db.insert(memberServerAccess).values({ orgId: req.orgId, userId, ...row }).run();
       }
     });
 
+    const nowIso = new Date(now).toISOString();
+    const grants = rows.filter((r) => r.expiresAt === null || r.expiresAt > nowIso);
+    const grantedIds = grants.map((g) => g.serverId);
     // Narrowed: anything already open on a server no longer granted closes now
     const live =
       body.serverAccess === 'restricted'
-        ? revokeLiveAccess(userId, { orgId: req.orgId, keepServerIds: serverIds })
+        ? revokeLiveAccess(userId, { orgId: req.orgId, keepServerIds: grantedIds })
         : undefined;
 
     await audit(req, 'member.access_change', 'member', userId, userEmail(userId), {
       from: member.serverAccess,
       to: body.serverAccess,
-      servers: serverIds.length,
+      servers: grantedIds.length,
+      timeBound: grants.filter((g) => g.expiresAt !== null).length,
       ...(live && { live }),
     });
-    return { serverAccess: body.serverAccess, serverIds } satisfies MemberServerAccess;
+    return {
+      serverAccess: body.serverAccess,
+      serverIds: grantedIds,
+      grants: grants.map(({ serverId, expiresAt, grantedBy, reason }) => ({ serverId, expiresAt, grantedBy, reason })),
+    } satisfies MemberServerAccess;
   });
 
   /** Issue a one-time link that lets the member set a new password. Shown once. */
