@@ -27,7 +27,8 @@ export default function KeysPage() {
   });
 
   const generateMutation = useMutation({
-    mutationFn: (body: { name: string; keyType: string }) => api.post<GenerateSSHKeyResponse>('/keys/generate', body),
+    mutationFn: (body: { name: string; type: 'ed25519' | 'rsa' | 'ecdsa' }) =>
+      api.post<GenerateSSHKeyResponse>('/keys/generate', body),
     onSuccess: (data) => { qc.invalidateQueries({ queryKey: ['ssh-keys'] }); setGeneratedKey(data); toast.success('Key generated'); },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -79,9 +80,9 @@ export default function KeysPage() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (mode === 'generate') {
-      generateMutation.mutate({ name, type: keyType as "rsa" | "ed25519" | "ecdsa", generate: true } as any);
+      generateMutation.mutate({ name, type: keyType });
     } else {
-      importMutation.mutate({ name, privateKey } as any);
+      importMutation.mutate({ name, privateKey });
     }
   }
 

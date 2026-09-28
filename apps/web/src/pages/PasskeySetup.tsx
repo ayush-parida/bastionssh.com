@@ -50,6 +50,7 @@ export default function PasskeySetupPage() {
   useEffect(() => {
     if (me && !offerCodes && (me.passkeyVerified || !me.requirePasskey)) done();
     // done() only navigates; re-run when the answer changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [me]);
 
   async function finish() {

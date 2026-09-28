@@ -14,12 +14,14 @@
     "dev": "tsc --project tsconfig.json --watch",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-vm-modules ../../node_modules/.bin/jest"
+    "lint": "eslint .",
+    "test": "vitest run"
   },
   "dependencies": {
     "croner": "^8.0.0"
   },
   "devDependencies": {
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
   }
 }

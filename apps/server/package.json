@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:generate": "dotenv -e ../../.env -- drizzle-kit generate",

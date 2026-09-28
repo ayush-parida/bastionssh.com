@@ -24,7 +24,7 @@ export function getDb() {
   return db;
 }
 
-export function getRawDb(): any {
+export function getRawDb(): Database.Database {
   if (!rawDb) getDb();
   return rawDb!;
 }
