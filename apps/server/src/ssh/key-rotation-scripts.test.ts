@@ -74,6 +74,20 @@ describe('install script', () => {
     expect(install()).toMatchObject({ code: 0, stdout: 'added' });
   });
 
+  it("copies the old key's options onto the new line, so the rotation widens nothing", () => {
+    const before = `  from="10.0.0.0/8",environment="A=b  c",no-pty\tssh-ed25519 ${OLD} old\r\n`;
+    write(before);
+    expect(install()).toMatchObject({ code: 0, stdout: 'added' });
+    expect(read()).toBe(`${before}from="10.0.0.0/8",environment="A=b  c",no-pty ssh-ed25519 ${NEW} bastionssh-key-k2\n`);
+  });
+
+  it('skips a forced-command line of the old key when copying options', () => {
+    const before = `command="/usr/bin/backup",no-pty ssh-ed25519 ${OLD} backup\nfrom="192.0.2.1" ssh-ed25519 ${OLD} login\n`;
+    write(before);
+    expect(install().code).toBe(0);
+    expect(read()).toBe(`${before}from="192.0.2.1" ssh-ed25519 ${NEW} bastionssh-key-k2\n`);
+  });
+
   it('refuses, changing nothing, when the current key is not listed', () => {
     const before = `ssh-ed25519 ${OLD_PREFIXED} lookalike\n# ssh-ed25519 ${OLD} commented out\n`;
     write(before);

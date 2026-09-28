@@ -78,14 +78,21 @@ has() {
 
 /**
  * Args: OLD_BLOB NEW_TYPE NEW_BLOB TAG. Appends `NEW_TYPE NEW_BLOB TAG` unless
- * NEW_BLOB is already listed. Appending keeps the file's inode, owner and mode.
- * Prints `added` or `present`.
+ * NEW_BLOB is already listed. The old key's options (`from="…"`, `no-pty`, …)
+ * are copied onto the new line, so a rotation never widens what the key may
+ * do; a forced-command line is skipped, as our login cannot have used it.
+ * Appending keeps the file's inode, owner and mode. Prints `added` or `present`.
  */
 export const INSTALL_SCRIPT = `${PRELUDE}
 has "$1" "$f" || { echo "the current key is not listed in $f" >&2; exit 4; }
 if has "$3" "$f"; then echo present; exit 0; fi
+opts=$(awk -v k="$1" '$0 !~ /^[ \\t]*#/ { for (i = 2; i <= NF; i++) { v = $i; sub(/\\r$/, "", v); if (v == k) { o = substr($0, 1, index($0, k) - 1); sub(/[ \\t]*[^ \\t]+[ \\t]+$/, "", o); sub(/^[ \\t]+/, "", o); if (tolower(o) !~ /(^|,)command=/) { print o; exit } } } }' "$f")
 if [ -s "$f" ] && [ "$(tail -c 1 "$f" | wc -l | tr -d ' ')" = 0 ]; then printf '\\n' >> "$f" || exit 5; fi
-printf '%s %s %s\\n' "$2" "$3" "$4" >> "$f" || exit 5
+if [ -n "$opts" ]; then
+  printf '%s %s %s %s\\n' "$opts" "$2" "$3" "$4" >> "$f" || exit 5
+else
+  printf '%s %s %s\\n' "$2" "$3" "$4" >> "$f" || exit 5
+fi
 has "$3" "$f" || { echo "the new key could not be written to $f" >&2; exit 5; }
 echo added
 `;
