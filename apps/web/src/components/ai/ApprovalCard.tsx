@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { ShieldAlert, Check, X, Clock, Loader2, Server } from 'lucide-react';
+import { ShieldAlert, ShieldCheck, ShieldQuestion, ShieldX, Check, X, Clock, Loader2, Server } from 'lucide-react';
+import type { HostKeyStatus } from '@smt/shared';
 import { api, ApiError } from '@/lib/api.js';
 
 export type ApprovalStatus = 'waiting' | 'approved' | 'denied' | 'expired';
@@ -10,6 +11,9 @@ export interface ToolApproval {
   reason: string;
   serverId?: string;
   serverName?: string;
+  /** The SSH login the command runs as */
+  sshUser?: string;
+  hostKeyStatus?: HostKeyStatus;
 }
 
 /**
@@ -107,9 +111,13 @@ export function ApprovalCard({
         {command}
       </pre>
 
-      <div className={`flex items-center gap-1 text-[10px] ${s.muted}`}>
-        <Server size={10} />
-        <span>{approval.serverName ?? approval.serverId ?? 'current session server'}</span>
+      <div className={`flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] ${s.muted}`}>
+        <span className="flex items-center gap-1" title={approval.sshUser && 'Runs as this SSH user'}>
+          <Server size={10} />
+          {approval.sshUser && <span className="font-mono">{approval.sshUser}@</span>}
+          <span>{approval.serverName ?? approval.serverId ?? 'current session server'}</span>
+        </span>
+        {approval.hostKeyStatus && <HostKeyBadge status={approval.hostKeyStatus} styles={s} />}
       </div>
       <p className={`text-[10px] ${s.muted}`}>{approval.reason}</p>
 
@@ -144,6 +152,42 @@ export function ApprovalCard({
       {error && <p className={`text-[10px] ${s.error}`}>{error}</p>}
     </div>
   );
+}
+
+/** The target's host key state, so a changed key is visible before approving. */
+function HostKeyBadge({
+  status,
+  styles,
+}: {
+  status: HostKeyStatus;
+  styles: (typeof STYLES)[keyof typeof STYLES];
+}) {
+  switch (status) {
+    case 'trusted':
+      return (
+        <span className={`flex items-center gap-1 ${styles.approved}`} title="The server's SSH host key is pinned">
+          <ShieldCheck size={10} /> host key trusted
+        </span>
+      );
+    case 'unknown':
+      return (
+        <span
+          className="flex items-center gap-1"
+          title="No host key is pinned yet; the key the server presents will be trusted on first use"
+        >
+          <ShieldQuestion size={10} /> host key not yet pinned
+        </span>
+      );
+    case 'mismatch':
+      return (
+        <span
+          className={`flex items-center gap-1 ${styles.error}`}
+          title="The server presented a different host key; the connection will be refused until an admin reviews it"
+        >
+          <ShieldX size={10} /> host key changed
+        </span>
+      );
+  }
 }
 
 function StatusBadge({

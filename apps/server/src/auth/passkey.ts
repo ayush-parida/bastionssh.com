@@ -34,6 +34,9 @@ export const TOKEN_PASSKEY_REQUIRED_MESSAGE =
 
 export const STEP_UP_MESSAGE = 'Confirm with one of your existing passkeys first';
 
+export const RECOVERY_ONLY_MESSAGE =
+  'You signed in with a backup code. Add a new passkey and verify with it before doing anything else.';
+
 /**
  * A first passkey may only be enrolled from a session this young (plus the
  * password again), so a stolen password or an old unattended browser cannot
@@ -212,6 +215,20 @@ export function orgRequiresPasskey(orgId: string): boolean {
   );
 }
 
+/**
+ * Whether a session signed in with a backup code is held to enrolling a
+ * passkey and verifying with it in this org. On unless an owner turned it off.
+ */
+export function orgRestrictsBackupCodeSessions(orgId: string): boolean {
+  return (
+    getDb()
+      .select({ on: organizations.backupCodeRecoveryOnly })
+      .from(organizations)
+      .where(eq(organizations.id, orgId))
+      .get()?.on ?? true
+  );
+}
+
 /** Whether any org the user can currently act in requires passkeys. */
 export function anyActiveOrgRequiresPasskey(userId: string): boolean {
   const orgIds = getDb()
@@ -228,8 +245,13 @@ export function anyActiveOrgRequiresPasskey(userId: string): boolean {
     .get();
 }
 
+/** A passkey was used in this session, which also ends a backup-code recovery. */
 export function markSessionPasskeyVerified(sessionId: string) {
-  getDb().update(sessions).set({ passkeyVerified: true }).where(eq(sessions.id, sessionId)).run();
+  getDb()
+    .update(sessions)
+    .set({ passkeyVerified: true, recoveryOnly: false })
+    .where(eq(sessions.id, sessionId))
+    .run();
 }
 
 /** Actions that need a person at a browser; an API token cannot do them. Sends 403 when not. */

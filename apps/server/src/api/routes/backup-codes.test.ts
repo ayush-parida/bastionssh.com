@@ -16,10 +16,15 @@ const fake = vi.hoisted(() => {
     nextChallenge: () => `challenge-${++n}`,
     smtp: true,
     sendEmail: vi.fn(async (_msg: { to: string[]; subject: string; text: string }) => {}),
+    /** The credential the next registration verifies as; null fails it. */
+    registration: null as { id: string } | null,
+    revokeLiveAccess: vi.fn((_userId: string, _scope?: unknown) => ({ terminals: 1, sftp: 0, agents: 0 })),
   };
 });
 
-vi.mock('../../auth/revoke.js', () => ({ revokeLiveAccess: () => ({ terminals: 0, sftp: 0, agents: 0 }) }));
+vi.mock('../../auth/revoke.js', () => ({
+  revokeLiveAccess: (userId: string, scope?: unknown) => fake.revokeLiveAccess(userId, scope),
+}));
 
 vi.mock('../../notifications/email.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../notifications/email.js')>()),
@@ -42,7 +47,17 @@ vi.mock('@simplewebauthn/server', () => ({
     verified: opts.response.challenge === opts.expectedChallenge && opts.response.id === opts.credential.id,
     authenticationInfo: { newCounter: opts.response.counter, credentialBackedUp: true },
   }),
-  verifyRegistrationResponse: async () => ({ verified: false }),
+  verifyRegistrationResponse: async () =>
+    fake.registration
+      ? {
+          verified: true,
+          registrationInfo: {
+            credential: { id: fake.registration.id, publicKey: new Uint8Array([4, 5, 6]), counter: 0, transports: [] },
+            credentialDeviceType: 'multiDevice',
+            credentialBackedUp: true,
+          },
+        }
+      : { verified: false },
 }));
 
 type Role = 'owner' | 'admin' | 'operator' | 'viewer';
@@ -143,6 +158,8 @@ describe('backup codes', () => {
   beforeEach(() => {
     fake.smtp = true;
     fake.sendEmail.mockClear();
+    fake.registration = null;
+    fake.revokeLiveAccess.mockClear();
   });
 
   describe('codes', () => {
@@ -254,6 +271,7 @@ describe('backup codes', () => {
         passkeyVerified: true,
         passkeyEnrollmentRequired: false,
         backupCodesRemaining: 9,
+        recoveryOnly: true,
       });
       const session = cookieOf(res)!;
       const row = getDb().select().from(sessions).where(eq(sessions.id, session.sessionId)).get();
@@ -276,9 +294,11 @@ describe('backup codes', () => {
       });
 
       const me = await get('/api/auth/me', session.headers);
-      expect(me.json()).toMatchObject({ passkeyVerified: true, passkeyCount: 1, backupCodesRemaining: 9 });
+      expect(me.json()).toMatchObject({ passkeyVerified: true, passkeyCount: 1, backupCodesRemaining: 9, recoveryOnly: true });
+      // Held to enrolling a passkey (the default), so even the codes are out of reach
       const status = await get('/api/auth/backup-codes', session.headers);
-      expect(status.json()).toMatchObject({ total: 10, remaining: 9 });
+      expect(status.statusCode).toBe(403);
+      expect(status.json().code).toBe('RECOVERY_ONLY');
     });
 
     it('accepts a code typed in lower case, without the dash, or with spaces', async () => {
@@ -446,6 +466,184 @@ describe('backup codes', () => {
         false,
       );
       expect(codeRows(person.userId).every((r) => r.usedAt === null)).toBe(true);
+    });
+  });
+
+  describe('recovery-only sessions', () => {
+    /** An org of its own, so switching its setting cannot leak into other tests. */
+    async function recoveryOrg() {
+      const org = seedOrg(`recovery-${nanoid(6)}`);
+      const owner = seedUser(org, 'owner');
+      return { org, owner };
+    }
+
+    async function personWithCodes(org: string, role: Role = 'operator') {
+      const person = await seedPerson(role, org);
+      const passkey = addPasskey(person.userId);
+      const browser = await verifiedSession(person.userId);
+      const codes = (await post('/api/auth/backup-codes', {}, browser.headers)).json().codes as string[];
+      return { ...person, passkey, codes };
+    }
+
+    async function signInWithCode(person: { email: string; password: string; codes: string[] }, i = 0) {
+      const res = await useCode(await ticketFor(person), person.codes[i]!);
+      expect(res.statusCode).toBe(200);
+      return { res, session: cookieOf(res)! };
+    }
+
+    const sessionRow = (id: string) => getDb().select().from(sessions).where(eq(sessions.id, id)).get();
+    const setPolicy = (headers: Headers, backupCodeRecoveryOnly: boolean) =>
+      app.inject({ method: 'PATCH', url: '/api/team/settings', headers, payload: { backupCodeRecoveryOnly } });
+
+    async function stepUpWith(credentialId: string, headers: Headers) {
+      const up = (await post('/api/auth/passkeys/step-up/options', {}, headers)).json();
+      return post(
+        '/api/auth/passkeys/step-up/verify',
+        { challengeId: up.challengeId, response: { id: credentialId, challenge: up.options.challenge, counter: 1 } },
+        headers,
+      );
+    }
+
+    it('is on by default and lets the session do nothing but enroll and verify a passkey', async () => {
+      const { org } = await recoveryOrg();
+      const person = await personWithCodes(org);
+      const { res, session } = await signInWithCode(person);
+      expect(res.json()).toMatchObject({ orgId: org, passkeyVerified: true, recoveryOnly: true });
+      expect(sessionRow(session.sessionId)).toMatchObject({ passkeyVerified: true, recoveryOnly: true });
+
+      for (const [method, url] of [
+        ['GET', '/api/keys'],
+        ['GET', '/api/auth/backup-codes'],
+        ['POST', '/api/auth/backup-codes'],
+        ['GET', '/api/auth/sessions'],
+        ['POST', '/api/tokens'],
+        ['GET', '/api/team/members'],
+        ['DELETE', `/api/auth/passkeys/${person.passkey.id}`],
+      ] as const) {
+        const refused = await app.inject({ method, url, headers: session.headers, payload: method === 'POST' ? {} : undefined });
+        expect(refused.statusCode, `${method} ${url}`).toBe(403);
+        expect(refused.json().code, `${method} ${url}`).toBe('RECOVERY_ONLY');
+      }
+      // Nothing new was minted on the way
+      expect(codeRows(person.userId).filter((r) => r.usedAt === null)).toHaveLength(9);
+
+      expect((await get('/api/auth/me', session.headers)).json()).toMatchObject({ recoveryOnly: true });
+      expect((await get('/api/auth/orgs', session.headers)).statusCode).toBe(200);
+      expect((await get('/api/auth/passkeys', session.headers)).statusCode).toBe(200);
+      expect((await post('/api/auth/logout', {}, session.headers)).statusCode).toBe(200);
+    });
+
+    it('gets full access once it has added a passkey and verified with it', async () => {
+      const { org } = await recoveryOrg();
+      const person = await personWithCodes(org);
+      const { session } = await signInWithCode(person);
+
+      const options = await post('/api/auth/passkeys/register/options', {}, session.headers);
+      expect(options.statusCode).toBe(200);
+      fake.registration = { id: `cred-${nanoid(10)}` };
+      const added = await post(
+        '/api/auth/passkeys/register/verify',
+        { challengeId: options.json().challengeId, response: { id: fake.registration.id }, name: 'New laptop' },
+        session.headers,
+      );
+      expect(added.statusCode).toBe(201);
+      // Adding it is not enough: the session must verify with it
+      expect(sessionRow(session.sessionId)?.recoveryOnly).toBe(true);
+      expect((await get('/api/keys', session.headers)).json().code).toBe('RECOVERY_ONLY');
+
+      const verified = await stepUpWith(fake.registration.id, session.headers);
+      expect(verified.statusCode).toBe(200);
+      expect(sessionRow(session.sessionId)).toMatchObject({ passkeyVerified: true, recoveryOnly: false });
+      expect((await get('/api/keys', session.headers)).statusCode).toBe(200);
+      expect((await get('/api/auth/me', session.headers)).json()).toMatchObject({ recoveryOnly: false });
+      // Now it may remove the lost passkey
+      expect((await del(`/api/auth/passkeys/${person.passkey.id}`, session.headers)).statusCode).toBe(204);
+
+      const stepUpAudit = auditOf(person.userId)
+        .filter((a) => a.action === 'user.login_passkey')
+        .map((a) => JSON.parse(a.metadata!));
+      expect(stepUpAudit).toContainEqual({ method: 'step_up', endedRecovery: true });
+    });
+
+    it('does not end recovery on a failed verification', async () => {
+      const { org } = await recoveryOrg();
+      const person = await personWithCodes(org);
+      const { session } = await signInWithCode(person);
+      const failed = await stepUpWith('cred-not-mine', session.headers);
+      expect(failed.statusCode).toBe(400);
+      expect(sessionRow(session.sessionId)?.recoveryOnly).toBe(true);
+    });
+
+    it('can be turned off by an owner, which gives backup-code sessions full access', async () => {
+      const { org, owner } = await recoveryOrg();
+      const person = await personWithCodes(org);
+      const admin = seedUser(org, 'admin');
+      const { session } = await signInWithCode(person);
+
+      expect((await get('/api/team/settings', person.headers)).json()).toMatchObject({ backupCodeRecoveryOnly: true });
+      expect((await setPolicy(admin.headers, false)).statusCode).toBe(403);
+
+      const off = await setPolicy(owner.headers, false);
+      expect(off.statusCode).toBe(200);
+      expect(off.json()).toMatchObject({ backupCodeRecoveryOnly: false, requirePasskey: false });
+      expect((await get('/api/keys', session.headers)).statusCode).toBe(200);
+      expect((await get('/api/auth/me', session.headers)).json()).toMatchObject({ recoveryOnly: false });
+
+      // A new sign-in with a code is not held back either
+      const second = await signInWithCode(person, 1);
+      expect(second.res.json().recoveryOnly).toBe(false);
+
+      const audits = getDb().select().from(auditLog).where(eq(auditLog.resourceId, org)).all();
+      expect(audits.filter((a) => a.action === 'org.backup_code_policy').map((a) => JSON.parse(a.metadata!))).toEqual([
+        { backupCodeRecoveryOnly: false },
+      ]);
+    });
+
+    it('turned back on, holds existing backup-code sessions again and ends their live access', async () => {
+      const { org, owner } = await recoveryOrg();
+      expect((await setPolicy(owner.headers, false)).statusCode).toBe(200);
+      const person = await personWithCodes(org);
+      // The browser that made the codes is gone; the backup code is all they have
+      getDb().delete(sessions).where(eq(sessions.userId, person.userId)).run();
+      const { session } = await signInWithCode(person);
+      // Someone who verified in another browser keeps their terminals
+      const fine = await personWithCodes(org);
+      await signInWithCode(fine);
+      expect((await get('/api/keys', session.headers)).statusCode).toBe(200);
+
+      fake.revokeLiveAccess.mockClear();
+      const on = await setPolicy(owner.headers, true);
+      expect(on.statusCode).toBe(200);
+      expect((await get('/api/keys', session.headers)).json().code).toBe('RECOVERY_ONLY');
+
+      const revoked = fake.revokeLiveAccess.mock.calls.map((c) => c[0]);
+      expect(revoked).toEqual([person.userId]);
+      const audits = getDb().select().from(auditLog).where(eq(auditLog.resourceId, org)).all();
+      expect(JSON.parse(audits.filter((a) => a.action === 'org.backup_code_policy').at(-1)!.metadata!)).toEqual({
+        backupCodeRecoveryOnly: true,
+        live: { members: 1, terminals: 1, sftp: 0, agents: 0 },
+      });
+    });
+
+    it('applies per org: switching to an org that holds it back refuses the session there', async () => {
+      const { org: lenient, owner } = await recoveryOrg();
+      expect((await setPolicy(owner.headers, false)).statusCode).toBe(200);
+      const person = await personWithCodes(lenient);
+      const { org: strict } = await recoveryOrg();
+      getDb().insert(memberships).values({ userId: person.userId, orgId: strict, role: 'operator' }).run();
+      const { session } = await signInWithCode(person);
+      expect((await get('/api/keys', session.headers)).statusCode).toBe(200);
+
+      expect((await post('/api/auth/switch-org', { orgId: strict }, session.headers)).statusCode).toBe(200);
+      expect((await get('/api/keys', session.headers)).json().code).toBe('RECOVERY_ONLY');
+    });
+
+    it('never touches password or passkey sessions', async () => {
+      const { org } = await recoveryOrg();
+      const person = await personWithCodes(org);
+      const browser = await verifiedSession(person.userId);
+      expect((await get('/api/keys', browser.headers)).statusCode).toBe(200);
+      expect((await get('/api/keys', person.headers)).statusCode).toBe(200);
     });
   });
 

@@ -12,6 +12,7 @@ import Passkeys from '@/components/settings/Passkeys.js';
 import ApiTokens from '@/components/settings/ApiTokens.js';
 import { EgressIpSection } from '@/components/diagnostics/Diagnostics.js';
 import DatabaseBackups from '@/components/settings/DatabaseBackups.js';
+import { useAuthStore } from '@/store/auth.js';
 
 interface ProviderForm {
   name: string;
@@ -28,10 +29,13 @@ export default function SettingsPage() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ProviderForm>(emptyForm);
+  // A backup-code sign-in that must add a passkey first: nothing else here would load
+  const recoveryGate = useAuthStore((s) => s.recoveryGate);
 
   const { data: providers } = useQuery<AIProviderConfig[]>({
     queryKey: ['ai-providers'],
     queryFn: () => api.get('/ai/providers'),
+    enabled: !recoveryGate,
   });
 
   const createMutation = useMutation({
@@ -84,6 +88,15 @@ export default function SettingsPage() {
     } else {
       createMutation.mutate(form);
     }
+  }
+
+  if (recoveryGate) {
+    return (
+      <div className="p-6 max-w-2xl">
+        <h1 className="text-2xl font-bold mb-1">Settings</h1>
+        <Passkeys />
+      </div>
+    );
   }
 
   return (

@@ -74,6 +74,7 @@ export type AuditAction =
   | 'sso.login_failed'
   | 'sso.user_provisioned'
   | 'sso.identity_linked'
+  | 'org.backup_code_policy'
   | 'api_token.create'
   | 'api_token.revoke'
   | 'server.health_check'

@@ -195,6 +195,8 @@ export default function AISidebar({
                         reason: event.reason,
                         serverId: event.serverId,
                         serverName: event.serverName,
+                        sshUser: event.sshUser,
+                        hostKeyStatus: event.hostKeyStatus,
                       },
                     }
                   : tc,

@@ -25,6 +25,7 @@ vi.mock('../auth/server-access.js', () => ({
 }));
 
 import { ToolExecutor } from './tools.js';
+import { getDb } from '../db/index.js';
 
 const ok = (stdout: string) => ({ stdout, stderr: '', exitCode: 0 });
 
@@ -122,5 +123,39 @@ describe('ToolExecutor run_command', () => {
 
     await expect(tools.execute('run_command', { command: 'ls' })).rejects.toThrow('SSH key not found');
     expect(broker.execOnServer).not.toHaveBeenCalled();
+  });
+});
+
+describe('ToolExecutor resolveTarget', () => {
+  /** getDb() whose single-row lookups all return `row`. */
+  function serverRow(row: Record<string, unknown> | undefined) {
+    const chain = { select: () => chain, from: () => chain, where: () => chain, get: () => row };
+    vi.mocked(getDb).mockReturnValue(chain as unknown as ReturnType<typeof getDb>);
+  }
+
+  it('names the login and host key state of the server the command goes to', () => {
+    serverRow({ name: 'prod-db', username: 'deploy', hostKeyFingerprint: 'SHA256:x', hostKeyMismatchFingerprint: null });
+    const tools = new ToolExecutor('org-1', 'user-1', undefined, 'prod');
+    expect(tools.resolveTarget({ command: 'reboot' })).toEqual({
+      serverId: 'prod',
+      serverName: 'prod-db',
+      sshUser: 'deploy',
+      hostKeyStatus: 'trusted',
+    });
+
+    serverRow({ name: 'prod-db', username: 'deploy', hostKeyFingerprint: 'SHA256:x', hostKeyMismatchFingerprint: 'SHA256:y' });
+    expect(tools.resolveTarget({ command: 'reboot' }).hostKeyStatus).toBe('mismatch');
+    serverRow({ name: 'prod-db', username: 'deploy', hostKeyFingerprint: null, hostKeyMismatchFingerprint: null });
+    expect(tools.resolveTarget({ command: 'reboot' }).hostKeyStatus).toBe('unknown');
+  });
+
+  it("uses the open session's login when the command will run through it", () => {
+    sessionOn('staging');
+    serverRow({ name: 'staging', username: 'root', hostKeyFingerprint: 'SHA256:x', hostKeyMismatchFingerprint: null });
+    const tools = new ToolExecutor('org-1', 'user-1', 'sess-1', 'staging');
+    // The session connected as `u` (see sessionOn)
+    expect(tools.resolveTarget({ command: 'reboot' }).sshUser).toBe('u');
+    // Another server: a direct connection with that server's user
+    expect(tools.resolveTarget({ command: 'reboot', server_id: 'prod' }).sshUser).toBe('root');
   });
 });

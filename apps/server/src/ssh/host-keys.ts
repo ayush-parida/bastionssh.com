@@ -224,6 +224,52 @@ function mismatchMessage(expected: string, presented: string) {
   return `SSH host key changed: expected ${expected}, host presented ${presented}. Connections are refused until an admin reviews it.`;
 }
 
+/**
+ * A host that alternates between keys (A, B, A, …) records each one as new
+ * evidence, since it differs from the mismatch on file. Audit rows for the
+ * same pinned key and presented key are capped at one per window; the ones
+ * held back are counted and reported on the next row that is written.
+ */
+export const MISMATCH_AUDIT_WINDOW_MS = 10 * 60 * 1000;
+
+/** A bound on the limiter's memory; old entries go first once it is reached. */
+const MAX_TRACKED_MISMATCHES = 1000;
+
+const mismatchAudits = new Map<string, { at: number; suppressed: number }>();
+
+/**
+ * Whether a mismatch audit row may be written now. Returns how many rows were
+ * held back since the last one for this key, or null to hold this one back.
+ * Per process: the API server and the worker each keep their own window.
+ */
+export function mismatchAuditAllowance(
+  kind: HostKeySubjectKind,
+  id: string,
+  expected: string,
+  presented: string,
+  now = Date.now(),
+): { suppressed: number } | null {
+  const key = `${kind}:${id}:${expected}:${presented}`;
+  const seen = mismatchAudits.get(key);
+  if (seen && now - seen.at < MISMATCH_AUDIT_WINDOW_MS) {
+    seen.suppressed++;
+    return null;
+  }
+
+  if (!seen && mismatchAudits.size >= MAX_TRACKED_MISMATCHES) {
+    for (const [k, v] of mismatchAudits) {
+      if (now - v.at >= MISMATCH_AUDIT_WINDOW_MS) mismatchAudits.delete(k);
+    }
+    // Still full of live entries: drop the oldest-inserted
+    if (mismatchAudits.size >= MAX_TRACKED_MISMATCHES) {
+      mismatchAudits.delete(mismatchAudits.keys().next().value!);
+    }
+  }
+  mismatchAudits.delete(key);
+  mismatchAudits.set(key, { at: now, suppressed: 0 });
+  return { suppressed: seen?.suppressed ?? 0 };
+}
+
 export type HostKeyCheck = { ok: true } | { ok: false; error: Error };
 
 /** The address a connection was actually opened to. */
@@ -308,14 +354,19 @@ export function checkHostKey(
     );
 
     // Only a new distinct key is recorded, audited and alerted; a host that
-    // keeps presenting the same wrong key does not flood the log.
+    // keeps presenting the same wrong key does not flood the log, and one that
+    // alternates between keys is capped per key (see mismatchAuditAllowance).
     if (store.recordMismatch(serverId, presented, type, new Date().toISOString())) {
-      auditSystem(row.orgId, `${kind}.host_key_mismatch`, kind, row.id, row.name, {
-        expected,
-        presented,
-        type,
-        via: purpose,
-      });
+      const allowance = mismatchAuditAllowance(kind, row.id, expected, presented);
+      if (allowance) {
+        auditSystem(row.orgId, `${kind}.host_key_mismatch`, kind, row.id, row.name, {
+          expected,
+          presented,
+          type,
+          via: purpose,
+          ...(allowance.suppressed > 0 && { suppressed: allowance.suppressed }),
+        });
+      }
       try {
         store.alert?.(row, mismatchMessage(expected, presented));
       } catch (err) {

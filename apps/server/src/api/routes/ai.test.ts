@@ -187,6 +187,8 @@ describe('AI chat command approval', () => {
       input: { command: 'systemctl restart nginx' },
       serverId,
       serverName: 'prod-web',
+      sshUser: 'root',
+      hostKeyStatus: 'unknown',
     });
     expect((events[1] as { reason: string }).reason).toBeTruthy();
     expect(events[2]).toEqual({ type: 'approval_resolved', id, approved: true });

@@ -500,8 +500,9 @@ export default function TeamMembers() {
                 // The server refuses actions on anyone ranked above you; don't offer them
                 const manageable = isAdmin && !isSelf && rank(m.role) <= rank(myRole);
                 const privileged = rank(m.role) >= rank('admin');
-                // Suspend / reactivate / sign out need a higher rank, except owner on owner;
-                // a password or passkey reset always needs a strictly higher rank.
+                // Role changes, removal, suspend / reactivate and sign out need a higher
+                // rank, except owner on owner; a password or passkey reset always needs
+                // a strictly higher rank.
                 const canLockOut = rank(m.role) < rank(myRole) || (myRole === 'owner' && m.role === 'owner');
                 const canReset = rank(m.role) < rank(myRole);
                 return (
@@ -521,7 +522,7 @@ export default function TeamMembers() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      {manageable ? (
+                      {manageable && canLockOut ? (
                         <select
                           value={m.role}
                           onChange={(e) => roleMutation.mutate({ userId: m.userId, role: e.target.value as Role })}
@@ -611,13 +612,15 @@ export default function TeamMembers() {
                                 <LogOut size={14} />
                               </button>
                             )}
-                            <button
-                              onClick={() => { if (confirm(`Remove ${m.email} from this organization?`)) removeMutation.mutate(m.userId); }}
-                              className="text-red-500 hover:text-red-600"
-                              title="Remove from organization"
-                            >
-                              <Trash2 size={14} />
-                            </button>
+                            {canLockOut && (
+                              <button
+                                onClick={() => { if (confirm(`Remove ${m.email} from this organization?`)) removeMutation.mutate(m.userId); }}
+                                className="text-red-500 hover:text-red-600"
+                                title="Remove from organization"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            )}
                           </div>
                         )}
                       </td>

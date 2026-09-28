@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth.js';
 import Layout from '@/components/layout/Layout.js';
 import LoginPage from '@/pages/Login.js';
@@ -33,8 +33,14 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   // The org requires a passkey this session has not used: nothing else works until it has
   const passkeyGate = useAuthStore((s) => s.passkeyGate);
+  // Signed in with a backup code: only adding a passkey works until it is verified
+  const recoveryGate = useAuthStore((s) => s.recoveryGate);
+  const { pathname } = useLocation();
   if (!user) return <Navigate to="/login" replace />;
   if (passkeyGate) return <Navigate to="/passkey-setup" replace />;
+  if (recoveryGate && pathname !== '/settings') {
+    return <Navigate to="/settings" replace state={{ backupCodeSignIn: true }} />;
+  }
   return <>{children}</>;
 }
 

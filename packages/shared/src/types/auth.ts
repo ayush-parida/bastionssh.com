@@ -135,6 +135,11 @@ export type LoginResponse = SignedIn | PasskeyLoginStep;
 export interface BackupCodeSignedIn extends SignedIn {
   /** Unused codes left after this one. */
   backupCodesRemaining: number;
+  /**
+   * The org only lets a backup-code sign-in enroll a passkey: add one and
+   * verify with it before anything else works (the API answers RECOVERY_ONLY).
+   */
+  recoveryOnly: boolean;
 }
 
 /** GET /auth/backup-codes. The codes themselves are only ever returned when generated. */
@@ -169,6 +174,8 @@ export interface Me {
   signedInWithSso: boolean;
   /** Accounts created by single sign-on have no password until they set one. */
   hasPassword: boolean;
+  /** Signed in with a backup code in an org that allows only enrolling (and verifying with) a passkey. */
+  recoveryOnly: boolean;
 }
 
 export interface LoginRequest {

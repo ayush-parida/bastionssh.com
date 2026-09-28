@@ -287,7 +287,7 @@ export async function aiRoutes(app: FastifyInstance) {
          */
         const runCommand = async (id: string, input: Record<string, unknown>) => {
           const command = typeof input.command === 'string' ? input.command.trim() : '';
-          const { serverId, serverName } = executor.resolveTarget(input);
+          const { serverId, serverName, sshUser, hostKeyStatus } = executor.resolveTarget(input);
           const { mutating, reason } = classifyCommand(command);
           const details = { command, mutating, toolCallId: id };
 
@@ -300,6 +300,8 @@ export async function aiRoutes(app: FastifyInstance) {
               reason,
               serverId,
               serverName,
+              sshUser,
+              hostKeyStatus,
             });
             const heartbeat = setInterval(() => {
               if (!clientGone) reply.raw.write(': waiting for approval\n\n');

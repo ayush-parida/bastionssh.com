@@ -488,6 +488,66 @@ describe('team & access', () => {
       // b is suspended and cannot act back on the last active owner
       expect((await act('POST', `${a.userId}/suspend`, b.headers)).statusCode).toBe(403);
     });
+
+    const changeRole = (userId: string, role: string, headers: Record<string, string>) =>
+      app.inject({ method: 'PATCH', url: `/api/team/members/${userId}`, headers, payload: { role } });
+    const roleOf = (org: string, userId: string) =>
+      getDb()
+        .select({ role: memberships.role })
+        .from(memberships)
+        .where(and(eq(memberships.userId, userId), eq(memberships.orgId, org)))
+        .get()?.role;
+
+    it('stops an admin demoting or removing another admin', async () => {
+      const org = seedOrg('org-peer-admin-roles');
+      const a = seedUser(org, 'admin');
+      const b = seedUser(org, 'admin');
+      seedUser(org, 'owner');
+
+      const demote = await changeRole(b.userId, 'viewer', a.headers);
+      expect(demote.statusCode).toBe(403);
+      expect(demote.json().error).toMatch(/admin role/);
+      expect((await act('DELETE', b.userId, a.headers)).statusCode).toBe(403);
+      expect(roleOf(org, b.userId)).toBe('admin');
+
+      // Promoting someone below them to their own rank is still fine
+      const op = seedUser(org, 'operator');
+      expect((await changeRole(op.userId, 'admin', a.headers)).statusCode).toBe(200);
+      expect(roleOf(org, op.userId)).toBe('admin');
+      // ...after which they are peers, and the same rule applies
+      expect((await changeRole(op.userId, 'operator', a.headers)).statusCode).toBe(403);
+
+      const viewer = seedUser(org, 'viewer');
+      expect((await changeRole(viewer.userId, 'operator', a.headers)).statusCode).toBe(200);
+      expect((await act('DELETE', viewer.userId, a.headers)).statusCode).toBe(204);
+    });
+
+    it('stops an admin acting on an owner', async () => {
+      const org = seedOrg('org-admin-vs-owner');
+      const a = seedUser(org, 'admin');
+      const o = seedUser(org, 'owner');
+      expect((await changeRole(o.userId, 'admin', a.headers)).statusCode).toBe(403);
+      expect((await act('DELETE', o.userId, a.headers)).statusCode).toBe(403);
+      expect(roleOf(org, o.userId)).toBe('owner');
+    });
+
+    it('lets an owner demote or remove another owner, but never the last one', async () => {
+      const org = seedOrg('org-owner-roles');
+      const a = seedUser(org, 'owner');
+      const b = seedUser(org, 'owner');
+      const c = seedUser(org, 'owner');
+
+      expect((await changeRole(b.userId, 'admin', a.headers)).statusCode).toBe(200);
+      expect(roleOf(org, b.userId)).toBe('admin');
+      expect((await act('DELETE', c.userId, a.headers)).statusCode).toBe(204);
+
+      // a is now the only owner: nobody can remove or demote them, not even themselves
+      expect((await changeRole(a.userId, 'admin', a.headers)).statusCode).toBe(400);
+      expect((await act('DELETE', a.userId, a.headers)).statusCode).toBe(400);
+      expect((await changeRole(a.userId, 'admin', b.headers)).statusCode).toBe(403);
+      expect((await act('DELETE', a.userId, b.headers)).statusCode).toBe(403);
+      expect(roleOf(org, a.userId)).toBe('owner');
+    });
   });
 
   describe('password reset redemption re-checks membership', () => {

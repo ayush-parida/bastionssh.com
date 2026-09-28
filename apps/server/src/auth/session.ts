@@ -17,6 +17,8 @@ export interface SessionContext {
   passkeyVerified?: boolean;
   /** Signed in through this SSO provider; the session then only works in its org. */
   ssoProviderId?: string | null;
+  /** The sign-in used a backup code; see orgRestrictsBackupCodeSessions. */
+  recoveryOnly?: boolean;
 }
 
 export async function createSession(userId: string, context: SessionContext = {}) {
@@ -37,6 +39,7 @@ export async function createSession(userId: string, context: SessionContext = {}
       activeOrgId: context.activeOrgId ?? null,
       passkeyVerified: context.passkeyVerified ?? false,
       ssoProviderId: context.ssoProviderId ?? null,
+      recoveryOnly: context.recoveryOnly ?? false,
     })
     .run();
   return { id, userId, expiresAt };

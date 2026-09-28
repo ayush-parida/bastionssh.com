@@ -27,7 +27,9 @@ export class ApiError extends Error {
  * `RequireAuth` then renders the app back at the login screen. A 403
  * PASSKEY_REQUIRED means the org wants a passkey sign-in this session has not
  * done; `RequireAuth` then sends the user to set one up or verify. A 403
- * SSO_REQUIRED means the org now only takes single sign-on from this member.
+ * SSO_REQUIRED means the org now only takes single sign-on from this member. A
+ * 403 RECOVERY_ONLY means a backup-code sign-in must add a passkey and verify
+ * with it first; `RequireAuth` then holds the user at Settings → Passkeys.
  */
 async function fail(res: Response, path: string): Promise<never> {
   if (res.status === 401 && !CREDENTIAL_PATHS.some((p) => path.startsWith(p))) {
@@ -51,6 +53,9 @@ async function fail(res: Response, path: string): Promise<never> {
   // The org now enforces SSO and this session did not use it: back to the login screen
   if (res.status === 403 && code === 'SSO_REQUIRED' && !CREDENTIAL_PATHS.some((p) => path.startsWith(p))) {
     useAuthStore.getState().requireSso(String(details?.orgSlug ?? ''), message);
+  }
+  if (res.status === 403 && code === 'RECOVERY_ONLY') {
+    useAuthStore.getState().setRecoveryGate(true);
   }
   throw new ApiError(message, res.status, code, details);
 }

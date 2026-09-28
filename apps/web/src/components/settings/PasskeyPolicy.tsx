@@ -4,7 +4,7 @@ import { cn } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { useHasRole } from '@/store/auth.js';
 import type { OrgSecuritySettings } from '@smt/shared';
-import { ShieldCheck, TriangleAlert } from 'lucide-react';
+import { LifeBuoy, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 
 /** The org's "require passkeys" switch. Owners change it; everyone else sees whether it is on. */
@@ -29,6 +29,20 @@ export default function PasskeyPolicy() {
     onError: (err: Error) => {
       if (!isPasskeyCancel(err)) toast.error(passkeyErrorMessage(err));
     },
+  });
+
+  const recoveryMutation = useMutation({
+    mutationFn: (backupCodeRecoveryOnly: boolean) =>
+      api.patch<OrgSecuritySettings>('/team/settings', { backupCodeRecoveryOnly }),
+    onSuccess: (res) => {
+      qc.setQueryData(['team-settings'], res);
+      toast.success(
+        res.backupCodeRecoveryOnly
+          ? 'Backup-code sign-ins can now only add a passkey'
+          : 'Backup-code sign-ins now get full access',
+      );
+    },
+    onError: (err: Error) => toast.error(err.message),
   });
 
   if (!settings) return null;
@@ -97,6 +111,40 @@ export default function PasskeyPolicy() {
             {settings.requirePasskey ? ' and will be asked to create one at their next sign-in.' : '.'}
           </p>
         )}
+        <div className="mt-4 flex items-start gap-3 border-t border-border pt-4">
+          <LifeBuoy size={16} className="mt-0.5 shrink-0 text-muted-foreground" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium">Backup-code sign-ins can only enroll a new passkey</p>
+            <p className="text-xs text-muted-foreground">
+              Someone who signs in with a backup code must add a passkey and confirm with it before they can do
+              anything else. Turn off to give backup-code sign-ins full access straight away.
+            </p>
+          </div>
+          {isOwner ? (
+            <button
+              role="switch"
+              aria-checked={settings.backupCodeRecoveryOnly}
+              onClick={() => recoveryMutation.mutate(!settings.backupCodeRecoveryOnly)}
+              disabled={recoveryMutation.isPending}
+              title={settings.backupCodeRecoveryOnly ? 'Turn off' : 'Turn on'}
+              className={cn(
+                'relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50',
+                settings.backupCodeRecoveryOnly ? 'bg-primary' : 'bg-muted-foreground/30',
+              )}
+            >
+              <span
+                className={cn(
+                  'absolute top-0.5 size-4 rounded-full bg-background shadow transition-transform',
+                  settings.backupCodeRecoveryOnly ? 'translate-x-4' : 'translate-x-0.5',
+                )}
+              />
+            </button>
+          ) : (
+            <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+              {settings.backupCodeRecoveryOnly ? 'On' : 'Off'}
+            </span>
+          )}
+        </div>
       </div>
     </section>
   );

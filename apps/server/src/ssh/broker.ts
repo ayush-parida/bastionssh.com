@@ -50,12 +50,62 @@ interface ActiveSession {
   reapTimer?: ReturnType<typeof setTimeout>;
   /** The shell opened; before that a failure discards the recording instead of keeping it. */
   ready?: boolean;
+  /** An open socket was told why the connection failed; nothing to keep for later */
+  failureReported?: boolean;
 }
 
 const sessions = new Map<string, ActiveSession>();
 
 /** How long a session may sit with no WebSocket attached before it is closed. */
 export const DETACHED_GRACE_MS = 60_000;
+
+/**
+ * A session whose connection failed before any socket attached. The browser
+ * creates the session and then opens the WebSocket; a handshake refused in
+ * between (a changed host key, most of all) would otherwise leave nothing
+ * behind but "Session not found".
+ */
+interface FailedSession {
+  userId: string;
+  orgId: string;
+  error: unknown;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const failedSessions = new Map<string, FailedSession>();
+
+/** How long the reason a session failed is kept for its WebSocket to collect. */
+export const FAILED_SESSION_TTL_MS = 60_000;
+
+/** A bound on remembered failures; the oldest is dropped first. */
+const MAX_FAILED_SESSIONS = 1000;
+
+function rememberFailure(id: string, meta: SessionMeta, error: unknown) {
+  if (failedSessions.has(id)) return;
+  if (failedSessions.size >= MAX_FAILED_SESSIONS) {
+    const [oldest, entry] = failedSessions.entries().next().value!;
+    clearTimeout(entry.timer);
+    failedSessions.delete(oldest);
+  }
+  const timer = setTimeout(() => failedSessions.delete(id), FAILED_SESSION_TTL_MS);
+  timer.unref?.();
+  failedSessions.set(id, { userId: meta.userId, orgId: meta.orgId, error, timer });
+}
+
+function forgetFailure(sessionId: string) {
+  const failed = failedSessions.get(sessionId);
+  if (!failed) return;
+  clearTimeout(failed.timer);
+  failedSessions.delete(sessionId);
+}
+
+/** Take the failure recorded for a session, only for its owner. */
+function takeFailure(sessionId: string, owner: SessionOwner): unknown {
+  const failed = failedSessions.get(sessionId);
+  if (!failed || failed.userId !== owner.userId || failed.orgId !== owner.orgId) return undefined;
+  forgetFailure(sessionId);
+  return failed.error ?? new Error('SSH connection failed');
+}
 
 /** Output cap per exec call; anything beyond is dropped and flagged. */
 const MAX_EXEC_STDOUT = 64_000;
@@ -222,9 +272,12 @@ async function createSession(meta: SessionMeta): Promise<string> {
         sessions.delete(id);
       });
     })
-    .catch(() => {
+    .catch((err: unknown) => {
       clearTimeout(session.reapTimer);
       endRecording(session);
+      // Only when no open socket was told; attach() reports it otherwise. One
+      // that closed while SSH was still connecting heard nothing.
+      if (!session.failureReported) rememberFailure(id, meta, err);
       sessions.delete(id);
     });
 
@@ -232,9 +285,12 @@ async function createSession(meta: SessionMeta): Promise<string> {
 }
 
 async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest) {
-  const session = ownedSession(sessionId, { userId: req.user.id, orgId: req.orgId });
+  const owner = { userId: req.user.id, orgId: req.orgId };
+  const session = ownedSession(sessionId, owner);
   if (!session) {
-    socket.close(4404, 'Session not found');
+    const failure = takeFailure(sessionId, owner);
+    if (failure) reportFailure(socket, failure);
+    else socket.close(4404, 'Session not found');
     return;
   }
   clearTimeout(session.reapTimer);
@@ -253,15 +309,11 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
   try {
     stream = await session.streamPromise;
   } catch (err: unknown) {
-    if (err instanceof HostKeyMismatchError) {
-      // A close reason is capped at 123 bytes — the full explanation goes as a
-      // message first, then a dedicated close code the browser can recognise.
-      sendHostKeyMismatch(socket, err);
-      sessions.delete(sessionId);
-      return;
+    if (socket.readyState === socket.OPEN) {
+      reportFailure(socket, err);
+      session.failureReported = true;
+      forgetFailure(sessionId);
     }
-    const msg = err instanceof Error ? err.message : 'SSH connection failed';
-    socket.close(4500, msg);
     sessions.delete(sessionId);
     return;
   }
@@ -330,6 +382,18 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
 
 /** WebSocket close code for a connection refused because the host key changed. */
 export const WS_CLOSE_HOST_KEY_MISMATCH = 4409;
+
+function reportFailure(socket: WebSocket, err: unknown) {
+  if (err instanceof HostKeyMismatchError) {
+    // A close reason is capped at 123 bytes — the full explanation goes as a
+    // message first, then a dedicated close code the browser can recognise.
+    sendHostKeyMismatch(socket, err);
+    return;
+  }
+  const msg = err instanceof Error ? err.message : 'SSH connection failed';
+  // Close reasons are limited to 123 bytes; a longer one makes close() throw
+  socket.close(4500, Buffer.byteLength(msg) > 123 ? 'SSH connection failed' : msg);
+}
 
 function sendHostKeyMismatch(socket: WebSocket, err: HostKeyMismatchError) {
   if (socket.readyState === socket.OPEN) {
