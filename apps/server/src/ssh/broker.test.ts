@@ -11,6 +11,8 @@ vi.mock('ssh2', async () => {
     clients: [] as any[],
     shells: [] as any[],
     execs: [] as any[],
+    /** When set, the next connect() fails with this error instead of becoming ready. */
+    connectError: null as Error | null,
   };
 
   function makeChannel() {
@@ -33,7 +35,9 @@ vi.mock('ssh2', async () => {
       (this as any).end = vi.fn();
     }
     connect() {
-      setImmediate(() => this.emit('ready'));
+      const err = state.connectError;
+      state.connectError = null;
+      setImmediate(() => (err ? this.emit('error', err) : this.emit('ready')));
       return this;
     }
     shell(_opts: unknown, cb: (err: Error | undefined, ch: any) => void) {
@@ -51,7 +55,9 @@ vi.mock('ssh2', async () => {
   return { Client, __state: state };
 });
 
-const { SSHBroker, getSessionForUser, DETACHED_GRACE_MS } = await import('./broker.js');
+const { SSHBroker, getSessionForUser, DETACHED_GRACE_MS, FAILED_SESSION_TTL_MS, WS_CLOSE_HOST_KEY_MISMATCH } =
+  await import('./broker.js');
+const { HostKeyMismatchError } = await import('./host-keys.js');
 const { __state: state } = (await import('ssh2')) as any;
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -263,5 +269,82 @@ describe('closeForUser', () => {
     expect(kept.client.end).not.toHaveBeenCalled();
     expect(elsewhere.client.end).not.toHaveBeenCalled();
     expect(getSessionForUser(kept.id, 'rv3', 'oa')).toBeDefined();
+  });
+});
+
+describe('connection refused before the socket attaches', () => {
+  const mismatch = () =>
+    new HostKeyMismatchError('s1', 'SHA256:expected', 'SHA256:presented', 'ssh-ed25519', 'web (h:22)');
+
+  it('tells the socket about a changed host key instead of "Session not found"', async () => {
+    state.connectError = mismatch();
+    const { id } = await newSession();
+    expect(getSessionForUser(id, 'u1', 'o1')).toBeUndefined();
+
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq(OWNER));
+    expect(sock.send).toHaveBeenCalledWith(expect.stringContaining('SHA256:presented'));
+    expect(sock.close).toHaveBeenCalledWith(WS_CLOSE_HOST_KEY_MISMATCH, 'HOST_KEY_MISMATCH');
+
+    // Collected once; a later attach finds nothing
+    const again = makeSocket();
+    await SSHBroker.attach(id, again, makeReq(OWNER));
+    expect(again.close).toHaveBeenCalledWith(4404, 'Session not found');
+  });
+
+  it('reports any other connection error with its message', async () => {
+    state.connectError = new Error('All configured authentication methods failed');
+    const { id } = await newSession();
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq(OWNER));
+    expect(sock.close).toHaveBeenCalledWith(4500, 'All configured authentication methods failed');
+  });
+
+  it('keeps the reason only for the owner', async () => {
+    state.connectError = mismatch();
+    const { id } = await newSession();
+    for (const other of [
+      { userId: 'u2', orgId: 'o1' },
+      { userId: 'u1', orgId: 'o2' },
+    ]) {
+      const sock = makeSocket();
+      await SSHBroker.attach(id, sock, makeReq(other));
+      expect(sock.send).not.toHaveBeenCalled();
+      expect(sock.close).toHaveBeenCalledWith(4404, 'Session not found');
+    }
+    // A stranger's attempt does not use it up
+    const mine = makeSocket();
+    await SSHBroker.attach(id, mine, makeReq(OWNER));
+    expect(mine.close).toHaveBeenCalledWith(WS_CLOSE_HOST_KEY_MISMATCH, 'HOST_KEY_MISMATCH');
+  });
+
+  it('forgets the reason after a short while', async () => {
+    state.connectError = mismatch();
+    const { id } = await newSession();
+    vi.advanceTimersByTime(FAILED_SESSION_TTL_MS);
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq(OWNER));
+    expect(sock.close).toHaveBeenCalledWith(4404, 'Session not found');
+  });
+
+  it('still reports straight to a socket that was already waiting', async () => {
+    state.connectError = mismatch();
+    const id = await SSHBroker.createSession({
+      server: { id: 's1', host: 'h', port: 22, username: 'root' },
+      password: 'pw',
+      ...OWNER,
+      cols: 80,
+      rows: 24,
+    });
+    const sock = makeSocket();
+    const attached = SSHBroker.attach(id, sock, makeReq(OWNER));
+    await flush();
+    await attached;
+    expect(sock.close).toHaveBeenCalledWith(WS_CLOSE_HOST_KEY_MISMATCH, 'HOST_KEY_MISMATCH');
+    await flush();
+    // Nothing left behind for a later attach
+    const later = makeSocket();
+    await SSHBroker.attach(id, later, makeReq(OWNER));
+    expect(later.close).toHaveBeenCalledWith(4404, 'Session not found');
   });
 });
