@@ -6,6 +6,7 @@ import type { FastifyRequest } from 'fastify';
 import { nanoid } from 'nanoid';
 import logger from '../logger.js';
 import { HostKeyMismatchError, sshConnectConfig, type SshAuth, type SshTarget } from './host-keys.js';
+import { connectSsh, type JumpOptions } from './jump.js';
 
 export interface ExecResult {
   stdout: string;
@@ -158,8 +159,8 @@ async function createSession(meta: SessionMeta): Promise<string> {
         reject(cause);
         clearTimeout(session.reapTimer);
         sessions.delete(id);
-      })
-      .connect(connectConfig);
+      });
+    connectSsh(client, meta.server, connectConfig, 'terminal', { actorUserId: meta.userId });
   });
 
   const session: ActiveSession = { meta, client, streamPromise, outputBuffer: [] };
@@ -415,6 +416,8 @@ export async function execOnServer(
   authOptions: SshAuth,
   command: string,
   timeoutMs = 30_000,
+  /** Who the command runs for; any jump hop is audited under them. */
+  options: JumpOptions = {},
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     const client = new Client();
@@ -453,8 +456,8 @@ export async function execOnServer(
       .on('error', (err) => {
         clearTimeout(timer);
         reject(guard.error(err));
-      })
-      .connect(connectConfig);
+      });
+    connectSsh(client, server, connectConfig, 'exec', options);
   });
 }
 

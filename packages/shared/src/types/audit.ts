@@ -15,6 +15,7 @@ export type AuditAction =
   | 'server.host_key_accepted'
   | 'server.host_key_forgotten'
   | 'server.host_key_cleared'
+  | 'server.jump'
   | 'sftp.list'
   | 'sftp.download'
   | 'sftp.upload'

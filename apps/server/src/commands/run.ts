@@ -82,12 +82,19 @@ export async function executeSavedCommand(input: ExecuteInput): Promise<void> {
     // password-authenticated server works here exactly as it does there.
     const { server, auth } = await resolveServerAuth(input.orgId, input.serverId);
     const cmd = interpolate(command.command, input.variables);
+    // A jump hop is audited under whoever started the run
+    const run = db
+      .select({ triggeredBy: commandRuns.triggeredBy })
+      .from(commandRuns)
+      .where(eq(commandRuns.id, input.runId))
+      .get();
 
     const result = await execOnServer(
       { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       cmd,
       COMMAND_TIMEOUT_MS,
+      { actorUserId: run?.triggeredBy },
     );
 
     update({

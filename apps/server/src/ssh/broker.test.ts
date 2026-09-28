@@ -51,6 +51,8 @@ vi.mock('ssh2', async () => {
   return { Client, __state: state };
 });
 
+// Connecting looks up the server's jump hosts; none of these servers exist, so all connect directly
+await (await import('../db/migrate.js')).runMigrations();
 const { SSHBroker, getSessionForUser, DETACHED_GRACE_MS } = await import('./broker.js');
 const { __state: state } = (await import('ssh2')) as any;
 

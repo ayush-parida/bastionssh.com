@@ -147,6 +147,8 @@ export class ToolExecutor {
       { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       command,
+      undefined,
+      { actorUserId: this.userId },
     );
 
     return { output: formatExecResult(result), exitCode: result.exitCode, serverId };

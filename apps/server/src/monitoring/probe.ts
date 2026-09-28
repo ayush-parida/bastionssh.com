@@ -1,6 +1,7 @@
 import { Client } from 'ssh2';
 import type { DiskUsage } from '@smt/shared';
 import { HostKeyMismatchError, sshConnectConfig, type SshTarget } from '../ssh/host-keys.js';
+import { connectSsh } from '../ssh/jump.js';
 
 /**
  * A single read-only vitals probe.
@@ -346,6 +347,7 @@ export function runProbe(
       finish(() => reject(new ProbeError(cause.message, classify(err))));
     });
 
-    ssh.connect(connectConfig);
+    // Through the server's jump hosts, if any; the hop is audited as the system
+    connectSsh(ssh, target, connectConfig, 'health_check');
   });
 }

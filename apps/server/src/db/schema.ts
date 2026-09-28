@@ -1,4 +1,13 @@
-import { sqliteTable, text, integer, real, blob, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+  sqliteTable,
+  text,
+  integer,
+  real,
+  blob,
+  index,
+  uniqueIndex,
+  type AnySQLiteColumn,
+} from 'drizzle-orm/sqlite-core';
 
 // ── Users & Auth ─────────────────────────────────────────────────────────────
 
@@ -314,6 +323,12 @@ export const servers = sqliteTable(
     hostKeyMismatchFingerprint: text('host_key_mismatch_fingerprint'),
     hostKeyMismatchType: text('host_key_mismatch_type'),
     hostKeyMismatchAt: text('host_key_mismatch_at'),
+    // Reach this server through another one in the same org (ssh -J). Chains
+    // are limited and cycle-free; see ssh/jump.ts. Deleting the jump host
+    // makes the servers behind it direct again.
+    jumpServerId: text('jump_server_id').references((): AnySQLiteColumn => servers.id, {
+      onDelete: 'set null',
+    }),
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at')
       .notNull()
@@ -324,6 +339,7 @@ export const servers = sqliteTable(
   },
   (t) => ({
     cloudInstanceIdx: uniqueIndex('servers_cloud_instance_idx').on(t.cloudAccountId, t.cloudInstanceId),
+    jumpServerIdx: index('servers_jump_server_idx').on(t.jumpServerId),
   }),
 );
 

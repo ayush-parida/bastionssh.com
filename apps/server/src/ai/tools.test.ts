@@ -82,6 +82,8 @@ describe('ToolExecutor run_command', () => {
       { id: 'prod', host: 'prod.example', port: 22, username: 'root' },
       { privateKey: 'k' },
       'systemctl restart pg',
+      undefined,
+      { actorUserId: expect.any(String) },
     );
   });
 

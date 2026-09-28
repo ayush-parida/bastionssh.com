@@ -8,12 +8,8 @@ import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import { evictServer } from '../../ssh/sftp.js';
-import {
-  forgetHostKey,
-  hostKeyView,
-  pinHostKey,
-  scanHostKey,
-} from '../../ssh/host-keys.js';
+import { forgetHostKey, hostKeyView, pinHostKey } from '../../ssh/host-keys.js';
+import { scanServerHostKey, serversBehind } from '../../ssh/jump.js';
 
 export const fingerprintSchema = z
   .string()
@@ -49,11 +45,25 @@ export async function hostKeyRoutes(app: FastifyInstance) {
     return hostKeyView(server);
   });
 
-  /** POST /api/servers/:id/host-key/scan — read the key the host presents now; stores nothing */
+  /**
+   * Pooled SFTP connections to this server, and to every server that jumps
+   * through it, were verified against the old key.
+   */
+  function evict(orgId: string, serverId: string) {
+    for (const id of [serverId, ...serversBehind(orgId, serverId)]) evictServer(orgId, id);
+  }
+
+  /**
+   * POST /api/servers/:id/host-key/scan — read the key the host presents now;
+   * stores nothing. A server behind jump hosts is scanned through them.
+   */
   app.post('/:id/host-key/scan', async (req, reply) => {
     const server = findServer(req);
     if (!server) return reply.status(404).send({ error: 'Not found' });
-    return scanHostKey(server.host, server.port);
+    return scanServerHostKey(
+      { id: server.id, host: server.host, port: server.port, username: server.username },
+      { actorUserId: req.user.id },
+    );
   });
 
   /** PUT /api/servers/:id/host-key {fingerprint} — pin a known-good fingerprint */
@@ -70,7 +80,7 @@ export async function hostKeyRoutes(app: FastifyInstance) {
           ? server.hostKeyMismatchType
           : null;
     pinHostKey(server, fingerprint, type, req.user.id);
-    evictServer(req.orgId, server.id);
+    evict(req.orgId, server.id);
     await audit(req, 'server.host_key_pinned', 'server', server.id, server.name, {
       fingerprint,
       previous: server.hostKeyFingerprint,
@@ -101,7 +111,7 @@ export async function hostKeyRoutes(app: FastifyInstance) {
     }
 
     pinHostKey(server, fingerprint, server.hostKeyMismatchType, req.user.id);
-    evictServer(req.orgId, server.id);
+    evict(req.orgId, server.id);
     await audit(req, 'server.host_key_accepted', 'server', server.id, server.name, {
       fingerprint,
       previous: server.hostKeyFingerprint,
@@ -117,7 +127,7 @@ export async function hostKeyRoutes(app: FastifyInstance) {
     if (!server) return reply.status(404).send({ error: 'Not found' });
 
     forgetHostKey(server);
-    evictServer(req.orgId, server.id);
+    evict(req.orgId, server.id);
     await audit(req, 'server.host_key_forgotten', 'server', server.id, server.name, {
       previous: server.hostKeyFingerprint,
       mismatch: server.hostKeyMismatchFingerprint,

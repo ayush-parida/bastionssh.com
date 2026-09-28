@@ -5,6 +5,7 @@ import type { Readable, Writable } from 'node:stream';
 import type { SftpEntry, SftpEntryType } from '@smt/shared';
 import logger from '../logger.js';
 import { HostKeyMismatchError, sshConnectConfig, type SshTarget } from './host-keys.js';
+import { connectSsh } from './jump.js';
 
 /** Close a pooled connection after this long with no in-flight operations. */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -105,6 +106,7 @@ function openConnection(
   key: string,
   target: SftpTarget,
   auth: SftpAuth,
+  actorUserId?: string,
 ): Promise<PooledConnection> {
   return new Promise<PooledConnection>((resolve, reject) => {
     const client = new Client();
@@ -144,8 +146,8 @@ function openConnection(
       .on('close', () => {
         clearTimeout(timer);
         pool.delete(key);
-      })
-      .connect(connectConfig);
+      });
+    connectSsh(client, target, connectConfig, 'sftp', { actorUserId });
   });
 }
 
@@ -157,6 +159,8 @@ export async function acquire(
   key: string,
   target: SftpTarget,
   auth: SftpAuth,
+  /** Who the channel is for; a jump hop on a fresh connection is audited under them. */
+  actorUserId?: string,
 ): Promise<SftpLease> {
   if (!auth.privateKey && !auth.password) {
     throw new SftpError('No authentication method available', 400);
@@ -164,7 +168,7 @@ export async function acquire(
 
   let pending = pool.get(key);
   if (!pending) {
-    pending = openConnection(key, target, auth);
+    pending = openConnection(key, target, auth, actorUserId);
     pool.set(key, pending);
   }
 

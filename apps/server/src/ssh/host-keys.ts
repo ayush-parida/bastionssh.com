@@ -32,7 +32,7 @@ import logger from '../logger.js';
  */
 
 /** Why a connection was opened — recorded with TOFU and mismatch audit rows. */
-export type HostKeyPurpose = 'terminal' | 'exec' | 'sftp' | 'health_check';
+export type HostKeyPurpose = 'terminal' | 'exec' | 'sftp' | 'health_check' | 'host_key_scan';
 
 export interface SshTarget {
   /** The servers row id — the pinned key is looked up by it. */
@@ -399,7 +399,9 @@ function preferPinnedKeyType(
  * The one way to build ssh2 connect options for a managed server: target,
  * credentials and a host key verifier bound to that server. Callers wire
  * `guard.error` into their `'error'` handler so a refused key surfaces as a
- * {@link HostKeyMismatchError} rather than ssh2's generic handshake error.
+ * {@link HostKeyMismatchError} rather than ssh2's generic handshake error, and
+ * connect with `connectSsh` (ssh/jump.ts), which routes through the server's
+ * jump hosts when it has any.
  */
 export function sshConnectConfig(
   target: SshTarget,
@@ -433,12 +435,14 @@ export const SCAN_TIMEOUT_MS = 10_000;
 /**
  * Read the key a host presents without authenticating: the verifier captures
  * it and refuses, which ends the connection before any credential is sent.
- * Nothing is stored.
+ * Nothing is stored. `sock` is a channel already opened to host:port through a
+ * jump host (see `scanServerHostKey` in ssh/jump.ts).
  */
 export function scanHostKey(
   host: string,
   port: number,
   timeoutMs = SCAN_TIMEOUT_MS,
+  sock?: ConnectConfig['sock'],
 ): Promise<HostKeyScanResult> {
   return new Promise((resolve, reject) => {
     const client = new Client();
@@ -484,6 +488,7 @@ export function scanHostKey(
       // Never used: the handshake is abandoned before user authentication
       username: 'smt-host-key-scan',
       readyTimeout: timeoutMs,
+      ...(sock && { sock }),
       hostVerifier: (key: Buffer) => {
         captured = key;
         return false;

@@ -59,6 +59,7 @@ export async function sftpRoutes(app: FastifyInstance) {
       sftp.poolKey(orgId, serverId, userId),
       { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
+      userId,
     );
     return { server, held };
   }

@@ -12,7 +12,7 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
+import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon, Waypoints } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -30,13 +30,41 @@ interface ServerFormState {
   tags: string;
   /** Optional pinned host key; blank leaves it alone (trust on first use for a new server). */
   hostKeyFingerprint: string;
+  /** Server to connect through (ssh -J); blank connects directly. */
+  jumpServerId: string;
 }
 
-const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '' };
+const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '', jumpServerId: '' };
 
 /** Tags are entered as a comma-separated list and stored as an array. */
 function splitTags(input: string): string[] {
   return [...new Set(input.split(',').map((t) => t.trim()).filter(Boolean))];
+}
+
+/**
+ * Whether `candidate` connects through `serverId`, directly or further down its
+ * chain — offering it as `serverId`'s jump host would make a loop. The server
+ * enforces this too; this only keeps such choices out of the list.
+ */
+function jumpsThrough(candidate: Server, serverId: string, byId: Map<string, Server>): boolean {
+  const seen = new Set<string>();
+  for (let s: Server | undefined = candidate; s && !seen.has(s.id); s = s.jumpServerId ? byId.get(s.jumpServerId) : undefined) {
+    if (s.id === serverId) return true;
+    seen.add(s.id);
+  }
+  return false;
+}
+
+/** `via bastion` badge for a server reached through a jump host. */
+function JumpBadge({ jump }: { jump: Server | undefined }) {
+  return (
+    <span
+      title={jump ? `Connections go through ${jump.name} (${jump.host}:${jump.port})` : 'Connections go through a jump host'}
+      className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+    >
+      <Waypoints size={11} /> via {jump?.name ?? 'jump host'}
+    </span>
+  );
 }
 
 /** `AWS · running` badge; amber when the provider says stopped, red when it no longer lists it. */
@@ -84,6 +112,7 @@ export default function ServersPage() {
   });
 
   const healthById = new Map((overview?.servers ?? []).map((h) => [h.serverId, h]));
+  const serverById = new Map((servers ?? []).map((s) => [s.id, s]));
 
   const allTags = [...new Set((servers ?? []).flatMap((s) => s.tags ?? []))].sort();
   const visibleServers = tagFilter
@@ -120,6 +149,7 @@ export default function ServersPage() {
       password: '',
       tags: (s.tags ?? []).join(', '),
       hostKeyFingerprint: s.hostKeyFingerprint ?? '',
+      jumpServerId: s.jumpServerId ?? '',
     });
     setShowForm(true);
   }
@@ -159,6 +189,8 @@ export default function ServersPage() {
       ...(form.authType === 'password' && form.password ? { password: form.password } : {}),
       tags: splitTags(form.tags),
       ...(sendFingerprint ? { hostKeyFingerprint: fingerprint } : {}),
+      // null clears it on an edit; a new server simply omits it
+      ...(form.jumpServerId || editId ? { jumpServerId: form.jumpServerId || null } : {}),
     };
     if (editId) updateMutation.mutate({ id: editId, body });
     else createMutation.mutate(body);
@@ -271,6 +303,31 @@ export default function ServersPage() {
             </div>
             <div className="col-span-2">
               <label className="block text-sm font-medium mb-1">
+                Jump host{' '}
+                <span className="text-muted-foreground text-xs">
+                  (optional — reach this server through another one, like <code className="font-mono">ssh -J</code>; up to 3 hops)
+                </span>
+              </label>
+              <select
+                value={form.jumpServerId}
+                onChange={(e) => setForm((prev) => ({ ...prev, jumpServerId: e.target.value }))}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <option value="">— direct connection —</option>
+                {(servers ?? [])
+                  .filter((s) => !editId || !jumpsThrough(s, editId, serverById))
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>{s.name} ({s.username}@{s.host}:{s.port})</option>
+                  ))}
+              </select>
+              {form.jumpServerId && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The jump host connects with its own credentials and host key; this server's key is still verified end to end.
+                </p>
+              )}
+            </div>
+            <div className="col-span-2">
+              <label className="block text-sm font-medium mb-1">
                 Host key fingerprint{' '}
                 <span className="text-muted-foreground text-xs">
                   (optional — <code className="font-mono">ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on the server; blank trusts the key seen on first connect)
@@ -347,6 +404,7 @@ export default function ServersPage() {
                 >
                   <HostKeyBadge status={s.hostKeyStatus} />
                 </button>
+                {s.jumpServerId && <JumpBadge jump={serverById.get(s.jumpServerId)} />}
                 {s.cloud && <CloudBadge cloud={s.cloud} />}
                 {s.tags.map((tag) => (
                   <button
