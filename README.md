@@ -357,7 +357,7 @@ Then put it behind your reverse proxy of choice (Caddy / Nginx / Traefik) with T
 
 - Built-in email/password
 - Passkeys (WebAuthn) — passwordless sign-in, or a second step after the password
-- OAuth / SSO (Google, GitHub, GitLab, generic OIDC)
+- Single sign-on per organization over OpenID Connect (Google Workspace, Microsoft Entra ID, Okta, generic OIDC)
 - Optional 2FA (TOTP)
 
 ### Passkeys
@@ -405,6 +405,21 @@ docker compose start smt
 ```
 
 A bare name is looked up in `SMT_BACKUP_DIR`; a path works too (e.g. a backup you downloaded and copied into the volume). From source: `pnpm --filter @smt/server run db:restore -- <backup name or path>`. After a restore the server applies any newer migrations on start (taking a pre-migration backup of the restored database first).
+
+### Single sign-on (OpenID Connect)
+
+Owners set up SSO under **Team → Single sign-on**: pick Google Workspace, Microsoft Entra ID, Okta or any other OpenID Connect provider, enter its issuer URL (discovery is read from `<issuer>/.well-known/openid-configuration`), a client ID and secret (vault-encrypted, never shown again), and the email domains allowed to sign in. Register the redirect URI shown there — `SMT_BASE_URL` + `/api/auth/sso/callback` — as a web-application client at the provider. **Test discovery** checks that the discovery document and signing keys can be fetched; the client credentials are only proven by a real sign-in. Each org has one provider.
+
+Members use **Sign in with SSO** on the login page and enter the org's slug or their work email. The flow is authorization code + PKCE; the state, nonce and PKCE verifier stay on the server for 10 minutes and the state is also bound to the browser by a cookie. The ID token's signature (against the provider's JWKS), `iss`, `aud`, `exp` and nonce are verified, and every sign-in needs a verified email (`email_verified`, or Entra's `xms_edov` optional claim) in an allowed domain — subdomains must be listed separately. With Google (`https://accounts.google.com`) the token's `hd` claim must also name an allowed domain, so personal Google accounts registered with a work address are refused.
+
+- **Accounts.** An identity is remembered by the provider's `sub`. The first time, it is linked to an existing account with the same verified email only if that account is already a member of the org. Otherwise, with **Create accounts on first sign-in** on, a password-less account is created with the configured role (never owner); with it off, only existing members can use SSO. An account that exists but belongs only to other orgs is never taken over.
+- **Group → role mapping** (optional). Name the ID-token claim that lists groups (Okta is asked for the `groups` scope) and map values to viewer/operator/admin; at each sign-in the highest mapped role replaces the member's role. Owners are never changed.
+- **Require single sign-on.** Password and passkey sign-in stop working for members other than owners, who keep them as a break-glass way in if the IdP is down. Existing non-SSO sessions of those members are refused from their next request, and their open terminals and file sessions end. API tokens keep working.
+- **SSO sessions are tied to the org.** A session that signed in through an org's SSO only works in that org, and — when the account belongs to other orgs too — cannot add passkeys, backup codes or API tokens (those work in every org). Disabling or removing the provider, or pointing it at another issuer or client, signs out every SSO session; a new issuer or client also forgets the old identity links.
+- **Passkey policy still applies.** An SSO sign-in is not passkey-verified, so in an org that requires passkeys the member is asked to create or use one after signing in. If you turn on **Trust phishing-resistant MFA reported by the provider**, a sign-in whose ID token says it used a hardware key (`amr` contains `hwk` or `fido`, or `acr` is `phr`/`phrh`) counts as passkey-verified. Only enable this if your IdP really enforces that; the claim is as trustworthy as the IdP.
+- **Suspension** is checked at every SSO sign-in and request, as for passwords. Every sign-in, refusal, link, provisioned account and configuration change is audited.
+
+Plain-`http` issuers are only accepted with `NODE_ENV=development`. **SAML is not supported**: the Node SAML libraries are either large or have a history of signature-wrapping vulnerabilities, and every provider listed above also speaks OpenID Connect.
 
 ---
 

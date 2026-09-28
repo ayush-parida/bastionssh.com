@@ -562,3 +562,95 @@ describe('migration 0015 (connectivity agents)', () => {
     );
   });
 });
+
+const SSO_TAG = '0016_sso';
+
+describe('migration 0016 (single sign-on)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(SSO_TAG);
+  });
+
+  it('keeps existing sessions, which were not SSO sign-ins', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < SSO_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, joined_at) VALUES ('u1', 'o1', 'owner', 'now');
+      INSERT INTO sessions (id, user_id, expires_at, active_org_id, passkey_verified) VALUES ('s1', 'u1', '2999-01-01', 'o1', 1);
+    `);
+
+    apply(db, [SSO_TAG]);
+
+    expect(db.prepare('SELECT id, user_id, active_org_id, passkey_verified, sso_provider_id FROM sessions').get()).toEqual({
+      id: 's1',
+      user_id: 'u1',
+      active_org_id: 'o1',
+      passkey_verified: 1,
+      sso_provider_id: null,
+    });
+    expect(db.prepare('SELECT count(*) AS n FROM sso_providers').get()).toEqual({ n: 0 });
+  });
+
+  it('allows one provider per org, one link per subject and per user, and cleans up with the provider', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u2', 'b@x.test', 'B', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO sso_providers (id, org_id, issuer, client_id, encrypted_client_secret, created_by, created_at, updated_at)
+        VALUES ('p1', 'o1', 'https://idp.test', 'c', 'enc', 'u1', 'now', 'now');
+      INSERT INTO user_identities (id, provider_id, subject, user_id, email, created_at) VALUES ('i1', 'p1', 'sub', 'u1', 'a@x.test', 'now');
+      INSERT INTO sso_login_states (state_hash, provider_id, encrypted_code_verifier, nonce, expires_at, created_at)
+        VALUES ('h', 'p1', 'enc', 'n', '2999-01-01', 'now');
+      INSERT INTO sessions (id, user_id, expires_at, active_org_id, sso_provider_id) VALUES ('s1', 'u1', '2999-01-01', 'o1', 'p1');
+      INSERT INTO sessions (id, user_id, expires_at, active_org_id) VALUES ('s2', 'u1', '2999-01-01', 'o1');
+    `);
+    expect(
+      db
+        .prepare(
+          'SELECT allowed_domains, default_role, auto_provision, enforce_sso, enabled, trust_idp_mfa, role_mappings FROM sso_providers',
+        )
+        .get(),
+    ).toEqual({
+      allowed_domains: '[]',
+      default_role: 'viewer',
+      auto_provision: 0,
+      enforce_sso: 0,
+      enabled: 1,
+      trust_idp_mfa: 0,
+      role_mappings: '[]',
+    });
+
+    expect(() =>
+      db.exec(`INSERT INTO sso_providers (id, org_id, issuer, client_id, encrypted_client_secret, created_by, created_at, updated_at)
+        VALUES ('p2', 'o1', 'https://other.test', 'c', 'enc', 'u1', 'now', 'now')`),
+    ).toThrow(/UNIQUE/);
+    expect(() =>
+      db.exec(`INSERT INTO user_identities (id, provider_id, subject, user_id, email, created_at)
+        VALUES ('i2', 'p1', 'sub', 'u2', 'b@x.test', 'now')`),
+    ).toThrow(/UNIQUE/);
+    expect(() =>
+      db.exec(`INSERT INTO user_identities (id, provider_id, subject, user_id, email, created_at)
+        VALUES ('i3', 'p1', 'sub2', 'u1', 'a@x.test', 'now')`),
+    ).toThrow(/UNIQUE/);
+
+    db.exec("DELETE FROM sso_providers WHERE id = 'p1'");
+    expect(db.prepare('SELECT count(*) AS n FROM user_identities').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM sso_login_states').get()).toEqual({ n: 0 });
+    // The SSO session goes with its provider; the password session stays
+    expect(db.prepare('SELECT id FROM sessions').all()).toEqual([{ id: 's2' }]);
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const tables = (
+      sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
+    ).map((t) => t.name);
+    expect(tables).toEqual(expect.arrayContaining(['sso_providers', 'user_identities', 'sso_login_states']));
+    const columns = (sqlite.prepare('PRAGMA table_info(sessions)').all() as { name: string }[]).map((c) => c.name);
+    expect(columns).toContain('sso_provider_id');
+  });
+});

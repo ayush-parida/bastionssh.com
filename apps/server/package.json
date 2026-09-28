@@ -52,6 +52,7 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^10.0.9",
     "openai": "^4.0.0",
+    "openid-client": "^6.8.8",
     "pino": "^9.0.0",
     "postgres": "^3.4.0",
     "ssh2": "^1.16.0",

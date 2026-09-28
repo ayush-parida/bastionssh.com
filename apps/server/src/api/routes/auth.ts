@@ -48,6 +48,7 @@ import {
   remainingBackupCodes,
 } from '../../auth/backup-codes.js';
 import { audit } from '../../audit/index.js';
+import { localSignInMembership, ssoRequiredMessage, ssoSessionMayChangeCredentials, SSO_SESSION_ORG_MESSAGE } from '../../auth/sso-policy.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { config } from '../../config/index.js';
 import { and, asc, desc, eq, gt, ne, sql } from 'drizzle-orm';
@@ -127,7 +128,8 @@ type LoginMethod = 'password' | 'password+passkey' | 'password+backup_code' | 'p
 
 /**
  * The membership a new sign-in lands in, or a 403 already sent when every one
- * is suspended. Same rule for password and passkey sign-in.
+ * is suspended, or every active one is in an org that requires this user to
+ * use SSO. Same rule for password and passkey sign-in.
  */
 function signInMembership(userId: string, reply: FastifyReply) {
   const resolved = resolveMembership(userId);
@@ -135,7 +137,14 @@ function signInMembership(userId: string, reply: FastifyReply) {
     reply.status(403).send({ error: SUSPENDED_MESSAGE });
     return null;
   }
-  return { membership: resolved.status === 'ok' ? resolved.membership : undefined };
+  if (resolved.status === 'none') return { membership: undefined };
+  // Land in an org that still takes this kind of sign-in from them
+  const local = localSignInMembership(userId);
+  if (local.status === 'sso_required') {
+    reply.status(403).send({ error: ssoRequiredMessage(local.orgName), code: 'SSO_REQUIRED', orgSlug: local.orgSlug });
+    return null;
+  }
+  return { membership: local.membership };
 }
 
 /** Create the session for a completed sign-in, set its cookie, and audit it. */
@@ -246,12 +255,20 @@ export async function authRoutes(app: FastifyInstance) {
     const body = backupCodeLoginSchema.parse(req.body);
     // Membership is checked before the code is spent: a suspension that landed
     // while the ticket was out must not also burn one of the user's codes
+    let ticketUserId: string | undefined;
     const result = redeemBackupCode(
       body.ticket,
       body.code,
-      (userId) => resolveMembership(userId).status !== 'suspended',
+      (userId) => {
+        ticketUserId = userId;
+        return resolveMembership(userId).status !== 'suspended' && localSignInMembership(userId).status === 'ok';
+      },
     );
-    if (result.status === 'refused') return reply.status(403).send({ error: SUSPENDED_MESSAGE });
+    if (result.status === 'refused') {
+      // Suspended, or SSO became required while the ticket was out: say which, as /login would
+      if (ticketUserId && signInMembership(ticketUserId, reply) === null) return reply;
+      return reply.status(403).send({ error: SUSPENDED_MESSAGE });
+    }
     if (result.status === 'expired') {
       return reply
         .status(401)
@@ -310,7 +327,7 @@ export async function authRoutes(app: FastifyInstance) {
     return startSession(req, reply, user, landing.membership, 'passkey');
   });
 
-  app.post('/logout', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req, reply) => {
+  app.post('/logout', { preHandler: requireAuth, config: { passkeyExempt: true, ssoExempt: true } }, async (req, reply) => {
     const sessionId = req.cookies['smt_session'];
     if (sessionId) await invalidateSession(sessionId);
     reply.clearCookie('smt_session');
@@ -369,7 +386,7 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   /** Organizations the caller belongs to, for the org switcher. */
-  app.get('/orgs', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req): Promise<OrgSummary[]> => {
+  app.get('/orgs', { preHandler: requireAuth, config: { passkeyExempt: true, ssoExempt: true } }, async (req): Promise<OrgSummary[]> => {
     return getDb()
       .select({
         orgId: memberships.orgId,
@@ -392,11 +409,14 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   /** Make another of the caller's orgs the one this browser session works in. */
-  app.post('/switch-org', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req, reply) => {
+  app.post('/switch-org', { preHandler: requireAuth, config: { passkeyExempt: true, ssoExempt: true } }, async (req, reply) => {
     const { orgId } = switchOrgSchema.parse(req.body);
     // An API token has no session to remember the choice on
     if (!req.sessionId) {
       return reply.status(400).send({ error: 'Switching organization requires a signed-in session' });
+    }
+    if (req.ssoOrgId && orgId !== req.ssoOrgId) {
+      return reply.status(403).send({ error: SSO_SESSION_ORG_MESSAGE, code: 'SSO_SESSION_ORG' });
     }
 
     const membership = getDb()
@@ -421,6 +441,12 @@ export async function authRoutes(app: FastifyInstance) {
       requirePasskey: orgRequiresPasskey(req.orgId),
       passkeyCount: passkeyCount(req.user.id),
       backupCodesRemaining: remainingBackupCodes(req.user.id),
+      signedInWithSso: !!req.ssoOrgId,
+      hasPassword: !!getDb()
+        .select({ passwordHash: users.passwordHash })
+        .from(users)
+        .where(eq(users.id, req.user.id))
+        .get()?.passwordHash,
     };
   });
 
@@ -497,8 +523,13 @@ export async function authRoutes(app: FastifyInstance) {
     if (!requireBrowserSession(req, reply, 'Backup codes are managed from a signed-in browser, not with an API token')) {
       return reply;
     }
+    if (!ssoSessionMayChangeCredentials(req, reply)) return reply;
     if (passkeyCount(req.user.id) === 0) {
       return reply.status(400).send({ error: 'Add a passkey before generating backup codes' });
+    }
+    // A code finishes a password sign-in; an account made by SSO has none to finish
+    if (!getDb().select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, req.user.id)).get()?.passwordHash) {
+      return reply.status(400).send({ error: 'Backup codes need a password on the account; this one signs in with single sign-on' });
     }
     if (!req.passkeyVerified) {
       return reply.status(403).send({ error: STEP_UP_MESSAGE, code: 'PASSKEY_STEP_UP_REQUIRED' });
@@ -581,6 +612,7 @@ export async function authRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const body = registerOptionsSchema.parse(req.body ?? {});
       if (!requireBrowserSession(req, reply)) return reply;
+      if (!ssoSessionMayChangeCredentials(req, reply)) return reply;
       const existing = userPasskeys(req.user.id);
       if (existing.length && !req.passkeyVerified) {
         return reply.status(403).send({ error: STEP_UP_MESSAGE, code: 'PASSKEY_STEP_UP_REQUIRED' });
@@ -616,6 +648,7 @@ export async function authRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const body = registerVerifySchema.parse(req.body);
       if (!requireBrowserSession(req, reply)) return reply;
+      if (!ssoSessionMayChangeCredentials(req, reply)) return reply;
       const pending = consumeChallenge(
         'register',
         { id: body.challengeId },
@@ -774,6 +807,7 @@ export async function authRoutes(app: FastifyInstance) {
   app.delete('/passkeys/:id', { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!requireBrowserSession(req, reply)) return reply;
+    if (!ssoSessionMayChangeCredentials(req, reply)) return reply;
     if (!req.passkeyVerified) {
       return reply.status(403).send({ error: STEP_UP_MESSAGE, code: 'PASSKEY_STEP_UP_REQUIRED' });
     }

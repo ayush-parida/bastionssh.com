@@ -1,7 +1,7 @@
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { touchSession, validateSession } from './session.js';
 import { getDb } from '../db/index.js';
-import { users, memberships, apiTokens } from '../db/schema.js';
+import { users, memberships, apiTokens, organizations } from '../db/schema.js';
 import { eq, and, asc } from 'drizzle-orm';
 import {
   bearerFrom,
@@ -12,6 +12,7 @@ import {
   type TokenScope,
 } from './token.js';
 import { orgRequiresPasskey, PASSKEY_REQUIRED_MESSAGE, TOKEN_PASSKEY_REQUIRED_MESSAGE } from './passkey.js';
+import { orgEnforcesSso, ssoProviderOrgId, ssoRequiredMessage, SSO_SESSION_ORG_MESSAGE } from './sso-policy.js';
 
 /** Ordered least- to most-privileged; every role implies the ones before it. */
 export const ROLES = ['viewer', 'operator', 'admin', 'owner'] as const;
@@ -28,6 +29,8 @@ declare module 'fastify' {
     sessionId: string | null;
     /** The session signed in or stepped up with a passkey. Always false for API tokens. */
     passkeyVerified: boolean;
+    /** The org whose single sign-on this session signed in through; null otherwise and for API tokens. */
+    ssoOrgId: string | null;
   }
   interface FastifyContextConfig {
     /**
@@ -36,6 +39,11 @@ declare module 'fastify' {
      * out, or move to another org.
      */
     passkeyExempt?: boolean;
+    /**
+     * Reachable by a non-SSO session in an org that enforces SSO — enough to
+     * sign out or move to another org.
+     */
+    ssoExempt?: boolean;
   }
 }
 
@@ -172,6 +180,11 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     userId = session.userId;
   }
 
+  // An SSO session is pinned to its provider's org. Deleting the provider
+  // deletes its sessions, so a missing one is a race with that.
+  const ssoOrgId = session?.ssoProviderId ? ssoProviderOrgId(session.ssoProviderId) : null;
+  if (session?.ssoProviderId && !ssoOrgId) return reply.status(401).send({ error: 'Session expired' });
+
   const user = db.select().from(users).where(eq(users.id, userId)).get();
   if (!user) return reply.status(401).send({ error: 'Unauthorized' });
 
@@ -187,10 +200,34 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     if (!membership) return reply.status(403).send({ error: 'Forbidden' });
     if (membership.status !== 'active') return reply.status(403).send({ error: SUSPENDED_MESSAGE });
   } else {
-    const resolved = resolveMembership(user.id, session?.activeOrgId);
+    const resolved = resolveMembership(user.id, ssoOrgId ?? session?.activeOrgId);
     if (resolved.status === 'suspended') return reply.status(403).send({ error: SUSPENDED_MESSAGE });
     if (resolved.status === 'none') return reply.status(403).send({ error: 'Forbidden' });
     membership = resolved.membership;
+  }
+
+  if (ssoOrgId && membership.orgId !== ssoOrgId) {
+    return reply.status(403).send({ error: SSO_SESSION_ORG_MESSAGE, code: 'SSO_SESSION_ORG' });
+  }
+  // Only sessions: an API token is a credential its owner set up on purpose,
+  // and suspending or removing the member is what ends it.
+  if (
+    session &&
+    !ssoOrgId &&
+    membership.role !== 'owner' &&
+    !req.routeOptions.config.ssoExempt &&
+    orgEnforcesSso(membership.orgId)
+  ) {
+    const org = db
+      .select({ slug: organizations.slug, name: organizations.name })
+      .from(organizations)
+      .where(eq(organizations.id, membership.orgId))
+      .get();
+    return reply.status(403).send({
+      error: ssoRequiredMessage(org?.name ?? 'This organization'),
+      code: 'SSO_REQUIRED',
+      orgSlug: org?.slug,
+    });
   }
 
   // A session must have signed in or stepped up with a passkey; a token must
@@ -223,6 +260,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   req.viaApiToken = scopes !== null;
   req.sessionId = session?.id ?? null;
   req.passkeyVerified = session?.passkeyVerified ?? false;
+  req.ssoOrgId = ssoOrgId;
 
   if (session) touchSession(session, req.ip);
 }

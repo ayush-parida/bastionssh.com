@@ -15,6 +15,8 @@ export interface SessionContext {
   activeOrgId?: string | null;
   /** The sign-in used a passkey. Password-only sessions start unverified. */
   passkeyVerified?: boolean;
+  /** Signed in through this SSO provider; the session then only works in its org. */
+  ssoProviderId?: string | null;
 }
 
 export async function createSession(userId: string, context: SessionContext = {}) {
@@ -34,6 +36,7 @@ export async function createSession(userId: string, context: SessionContext = {}
       userAgent: context.userAgent?.slice(0, 500) ?? null,
       activeOrgId: context.activeOrgId ?? null,
       passkeyVerified: context.passkeyVerified ?? false,
+      ssoProviderId: context.ssoProviderId ?? null,
     })
     .run();
   return { id, userId, expiresAt };

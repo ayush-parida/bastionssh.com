@@ -16,10 +16,16 @@ interface AuthState {
    * `RequireAuth` holds the app at /passkey-setup until it is cleared.
    */
   passkeyGate: boolean;
+  /**
+   * The org started enforcing single sign-on and this session did not use it.
+   * The login screen says so and offers SSO for this org slug.
+   */
+  ssoRequired: { orgSlug: string; message: string } | null;
   setUser: (user: User, orgId: string | null, role: Role) => void;
   clearUser: () => void;
   expireSession: () => void;
   setPasskeyGate: (on: boolean) => void;
+  requireSso: (orgSlug: string, message: string) => void;
 }
 
 const signedOut = { user: null, orgId: null, role: null } as const;
@@ -30,8 +36,9 @@ export const useAuthStore = create<AuthState>()(
       ...signedOut,
       sessionExpired: false,
       passkeyGate: false,
-      setUser: (user, orgId, role) => set({ user, orgId, role, sessionExpired: false }),
-      clearUser: () => set({ ...signedOut, sessionExpired: false, passkeyGate: false }),
+      ssoRequired: null,
+      setUser: (user, orgId, role) => set({ user, orgId, role, sessionExpired: false, ssoRequired: null }),
+      clearUser: () => set({ ...signedOut, sessionExpired: false, passkeyGate: false, ssoRequired: null }),
       /**
        * Sign out because the server no longer accepts the session. Idempotent, so
        * a burst of concurrent 401s only raises the notice once.
@@ -39,10 +46,15 @@ export const useAuthStore = create<AuthState>()(
       expireSession: () =>
         set((state) => (state.user ? { ...signedOut, sessionExpired: true, passkeyGate: false } : state)),
       setPasskeyGate: (on) => set((state) => (state.passkeyGate === on ? state : { passkeyGate: on })),
+      /** Like expireSession, but the way back in is this org's SSO. */
+      requireSso: (orgSlug, message) =>
+        set((state) =>
+          state.user ? { ...signedOut, sessionExpired: false, passkeyGate: false, ssoRequired: { orgSlug, message } } : state,
+        ),
     }),
     {
       name: 'smt-auth',
-      // `sessionExpired` and `passkeyGate` describe this page load only — never
+      // `sessionExpired`, `passkeyGate` and `ssoRequired` describe this page load only — never
       // restore them. The server re-raises the gate on the next request.
       partialize: ({ user, orgId, role }) => ({ user, orgId, role }),
     },

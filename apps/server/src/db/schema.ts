@@ -44,6 +44,8 @@ export const sessions = sqliteTable('sessions', {
   activeOrgId: text('active_org_id').references(() => organizations.id, { onDelete: 'set null' }),
   // Signed in (or stepped up) with a passkey. Orgs that require passkeys refuse sessions without it.
   passkeyVerified: integer('passkey_verified', { mode: 'boolean' }).notNull().default(false),
+  // Signed in through this org's single sign-on. Such a session only works in that org.
+  ssoProviderId: text('sso_provider_id').references((): AnySQLiteColumn => ssoProviders.id, { onDelete: 'cascade' }),
 });
 
 /** WebAuthn credentials. Discoverable and user-verifying, so one alone is a full sign-in. */
@@ -235,6 +237,86 @@ export const invites = sqliteTable('invites', {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// ── Single sign-on (OpenID Connect) ──────────────────────────────────────────
+
+/** An org's OIDC identity provider. One per org; the client secret is vault-encrypted. */
+export const ssoProviders = sqliteTable('sso_providers', {
+  id: text('id').primaryKey(),
+  orgId: text('org_id')
+    .notNull()
+    .unique()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull().default('generic'), // google | microsoft | okta | generic — a UI preset only
+  issuer: text('issuer').notNull(),
+  clientId: text('client_id').notNull(),
+  encryptedClientSecret: text('encrypted_client_secret').notNull(),
+  allowedDomains: text('allowed_domains').notNull().default('[]'), // JSON array of lower-case domains
+  // Role for accounts created on first sign-in; never owner
+  defaultRole: text('default_role').notNull().default('viewer'),
+  autoProvision: integer('auto_provision', { mode: 'boolean' }).notNull().default(false),
+  // Members other than owners must sign in here; password and passkey sign-in stop working for them
+  enforceSso: integer('enforce_sso', { mode: 'boolean' }).notNull().default(false),
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  // Count phishing-resistant MFA the IdP reports in `amr` as a passkey sign-in
+  trustIdpMfa: integer('trust_idp_mfa', { mode: 'boolean' }).notNull().default(false),
+  groupsClaim: text('groups_claim'),
+  roleMappings: text('role_mappings').notNull().default('[]'), // JSON [{ group, role }]
+  createdBy: text('created_by').notNull(),
+  createdAt: text('created_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  updatedAt: text('updated_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+});
+
+/** A user's identity at a provider, keyed by the IdP's stable subject rather than the email. */
+export const userIdentities = sqliteTable(
+  'user_identities',
+  {
+    id: text('id').primaryKey(),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => ssoProviders.id, { onDelete: 'cascade' }),
+    subject: text('subject').notNull(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // The address it was linked with, for display and audit
+    email: text('email').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    lastLoginAt: text('last_login_at'),
+  },
+  (t) => ({
+    providerSubjectIdx: uniqueIndex('user_identities_provider_subject_unique').on(t.providerId, t.subject),
+    providerUserIdx: uniqueIndex('user_identities_provider_user_unique').on(t.providerId, t.userId),
+    userIdx: index('user_identities_user_idx').on(t.userId),
+  }),
+);
+
+/** Sign-ins handed to a provider and not yet back. Deleted on use; only the state's hash is kept. */
+export const ssoLoginStates = sqliteTable(
+  'sso_login_states',
+  {
+    stateHash: text('state_hash').primaryKey(),
+    providerId: text('provider_id')
+      .notNull()
+      .references(() => ssoProviders.id, { onDelete: 'cascade' }),
+    // PKCE verifier, vault-encrypted with the state hash as its resource id
+    encryptedCodeVerifier: text('encrypted_code_verifier').notNull(),
+    nonce: text('nonce').notNull(),
+    expiresAt: text('expires_at').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    expiresIdx: index('sso_login_states_expires_idx').on(t.expiresAt),
+  }),
+);
 
 // ── SSH Keys ──────────────────────────────────────────────────────────────────
 

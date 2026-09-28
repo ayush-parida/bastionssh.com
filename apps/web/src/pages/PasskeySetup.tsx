@@ -36,7 +36,8 @@ export default function PasskeySetupPage() {
 
   const { data: me, refetch } = useQuery<Me>({ queryKey: ['auth-me'], queryFn: () => api.get('/auth/me') });
   const { data: orgs } = useQuery<OrgSummary[]>({ queryKey: ['auth-orgs'], queryFn: () => api.get('/auth/orgs') });
-  const otherOrgs = orgs?.filter((o) => !o.current && o.status === 'active') ?? [];
+  // A single sign-on session only works in the org it signed in to
+  const otherOrgs = me?.signedInWithSso ? [] : orgs?.filter((o) => !o.current && o.status === 'active') ?? [];
   const supported = !insecureContext && browserSupportsWebAuthn();
 
   function done() {
@@ -147,21 +148,32 @@ export default function PasskeySetupPage() {
           </div>
         ) : enrolling ? (
           <form
-            onSubmit={(e) => { e.preventDefault(); void run(() => registerPasskey(undefined, password), 'Passkey created', () => setOfferCodes(true)); }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              // Backup codes finish a password sign-in, so an account signing in through SSO has no use for them
+              void run(
+                () => registerPasskey(undefined, me.hasPassword ? password : undefined),
+                'Passkey created',
+                me.hasPassword ? () => setOfferCodes(true) : finish,
+              );
+            }}
             className="space-y-3"
           >
-            <div>
-              <label className="block text-sm font-medium mb-1" htmlFor="passkey-password">Confirm your password</label>
-              <input
-                id="passkey-password"
-                type="password"
-                autoComplete="current-password"
-                required
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-            </div>
+            {/* An account made by single sign-on has no password to confirm */}
+            {me.hasPassword && (
+              <div>
+                <label className="block text-sm font-medium mb-1" htmlFor="passkey-password">Confirm your password</label>
+                <input
+                  id="passkey-password"
+                  type="password"
+                  autoComplete="current-password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+              </div>
+            )}
             <button
               type="submit"
               disabled={busy}

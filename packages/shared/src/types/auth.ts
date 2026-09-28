@@ -88,6 +88,15 @@ export interface PasskeyInfo {
  */
 export type PasskeyErrorCode = 'PASSKEY_REQUIRED' | 'PASSKEY_STEP_UP_REQUIRED';
 
+/**
+ * Error codes a 403 may carry about single sign-on. SSO_REQUIRED: the org
+ * only accepts SSO sign-in from this member (the body carries `orgSlug`).
+ * SSO_SESSION_ORG: an SSO session was used outside the org it signed in to.
+ * SSO_SESSION_CREDENTIALS: an SSO session tried to add a credential to an
+ * account that also belongs to other orgs.
+ */
+export type SsoAuthErrorCode = 'SSO_REQUIRED' | 'SSO_SESSION_ORG' | 'SSO_SESSION_CREDENTIALS';
+
 /** A signed-in session, as returned by every sign-in endpoint. */
 export interface SignedIn {
   user: { id: string; email: string; displayName: string };
@@ -145,6 +154,10 @@ export interface Me {
   passkeyCount: number;
   /** Unused backup codes, so the app can warn when they run low. */
   backupCodesRemaining: number;
+  /** This session signed in through the current org's single sign-on. */
+  signedInWithSso: boolean;
+  /** Accounts created by single sign-on have no password until they set one. */
+  hasPassword: boolean;
 }
 
 export interface LoginRequest {

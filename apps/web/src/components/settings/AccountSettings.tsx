@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { useAuthStore } from '@/store/auth.js';
-import type { Role, User } from '@smt/shared';
+import type { Me, Role, User } from '@smt/shared';
 import { KeyRound, UserCog } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -13,6 +13,7 @@ export default function AccountSettings() {
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const { data: me } = useQuery<Me>({ queryKey: ['auth-me'], queryFn: () => api.get('/auth/me') });
 
   const profileMutation = useMutation({
     mutationFn: () => api.patch<User & { orgId: string; role: Role }>('/auth/me', { displayName }),
@@ -90,6 +91,11 @@ export default function AccountSettings() {
         </form>
 
         <div className="border-t border-border pt-5">
+          {me && !me.hasPassword ? (
+            <p className="text-sm text-muted-foreground flex items-center gap-1.5">
+              <KeyRound size={14} /> This account signs in with single sign-on and has no password.
+            </p>
+          ) : (
           <form onSubmit={submitPassword} className="space-y-3">
             <h3 className="text-sm font-semibold flex items-center gap-1.5">
               <KeyRound size={14} /> Change password
@@ -142,6 +148,7 @@ export default function AccountSettings() {
               {passwordMutation.isPending ? 'Changing…' : 'Change password'}
             </button>
           </form>
+          )}
         </div>
       </div>
     </section>

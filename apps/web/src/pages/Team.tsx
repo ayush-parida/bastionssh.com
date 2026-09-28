@@ -1,6 +1,7 @@
 import TeamMembers from '@/components/settings/TeamMembers.js';
 import PasskeyPolicy from '@/components/settings/PasskeyPolicy.js';
 import AccessRequests from '@/components/access/AccessRequests.js';
+import SsoSettingsPanel from '@/components/settings/SsoSettings.js';
 
 export default function TeamPage() {
   return (
@@ -11,6 +12,7 @@ export default function TeamPage() {
       </p>
       <PasskeyPolicy />
       <AccessRequests />
+      <SsoSettingsPanel />
       <TeamMembers />
     </div>
   );
