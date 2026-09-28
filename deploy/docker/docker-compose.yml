@@ -1,12 +1,29 @@
+# Default:      docker compose up -d                  → http://localhost:8080
+# With HTTPS:   docker compose --profile https up -d  → https://$SMT_DOMAIN
+#
+# The https profile adds Caddy, which gets and renews a certificate for
+# SMT_DOMAIN automatically (Let's Encrypt / ZeroSSL) and proxies to smt. Set
+# these in deploy/docker/.env first (docker compose reads it from here):
+#
+#   SMT_DOMAIN=bastion.example.com            # DNS must point here; ports 80+443 reachable
+#   SMT_BASE_URL=https://bastion.example.com  # passkeys are bound to this hostname
+#   SMT_TRUST_PROXY=1                         # believe Caddy's X-Forwarded-For (one hop)
+#   SMT_HTTP_BIND=127.0.0.1:8080              # keep plain HTTP off the network
+#   SMT_ACME_EMAIL=you@example.com            # optional: expiry notices from the CA
+#
+# Caddy refuses to start until SMT_BASE_URL is https://$SMT_DOMAIN and
+# SMT_TRUST_PROXY is set, since either mistake silently breaks passkeys or
+# makes every user share Caddy's IP for rate limits and the audit log.
 services:
   smt:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
-    image: ghcr.io/your-org/server-management-tool:latest
+    image: ghcr.io/ayush-parida/bastionssh:latest
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # 127.0.0.1:8080 with the https profile, so only Caddy (and this host) can reach it
+      - "${SMT_HTTP_BIND:-8080}:8080"
     environment:
       NODE_ENV: production
       SMT_PORT: 8080
@@ -30,6 +47,11 @@ services:
       SMT_WEBAUTHN_RP_ID: ${SMT_WEBAUTHN_RP_ID:-}
       SMT_WEBAUTHN_RP_NAME: ${SMT_WEBAUTHN_RP_NAME:-BastionSSH}
       SMT_WEBAUTHN_ORIGINS: ${SMT_WEBAUTHN_ORIGINS:-}
+      # Email for alerts and account notices (new-device sign-ins, failed sign-ins)
+      SMT_SMTP_URL: ${SMT_SMTP_URL:-}
+      SMT_SMTP_FROM: ${SMT_SMTP_FROM:-}
+      # Private networks audit-log forwarding (syslog/webhook) may reach, e.g. 10.0.0.0/8
+      SMT_AUDIT_FORWARD_ALLOW_NETS: ${SMT_AUDIT_FORWARD_ALLOW_NETS:-}
     volumes:
       - smt-data:/data
     depends_on:
@@ -41,6 +63,31 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # Only with --profile https: TLS termination with automatic certificates
+  caddy:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      SMT_DOMAIN: ${SMT_DOMAIN:-}
+      SMT_BASE_URL: ${SMT_BASE_URL:-http://localhost:8080}
+      SMT_TRUST_PROXY: ${SMT_TRUST_PROXY:-false}
+      SMT_ACME_EMAIL: ${SMT_ACME_EMAIL:-}
+    entrypoint: ["/bin/sh", "/etc/caddy/check-env.sh"]
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/check-env.sh:/etc/caddy/check-env.sh:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      smt:
+        condition: service_started
 
   redis:
     image: redis:7-alpine
@@ -57,3 +104,6 @@ services:
 volumes:
   smt-data:
   redis-data:
+  # Caddy's certificates and ACME account; keep it, or every restart re-issues
+  caddy-data:
+  caddy-config:
