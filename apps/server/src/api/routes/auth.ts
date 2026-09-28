@@ -47,17 +47,16 @@ import {
   redeemBackupCode,
   remainingBackupCodes,
 } from '../../auth/backup-codes.js';
-import { audit, auditForAccount } from '../../audit/index.js';
+import { audit } from '../../audit/index.js';
 import {
   accountKey,
   clearLoginFailures,
-  FAILED_LOGIN_THRESHOLD,
   lockoutStatus,
-  notifyAccountLocked,
   notifyNewDeviceSignIn,
   recordFailedLogin,
   recordSignInDevice,
-  type Lockout,
+  reportFailedPassword,
+  sendLocked,
 } from '../../auth/login-security.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { config } from '../../config/index.js';
@@ -150,28 +149,6 @@ function signInMembership(userId: string, reply: FastifyReply) {
   return { membership: resolved.status === 'ok' ? resolved.membership : undefined };
 }
 
-/** Refuse a password sign-in while the account's password step is paused. */
-function sendLocked(reply: FastifyReply, lock: Lockout) {
-  const minutes = Math.max(1, Math.ceil(lock.retryAfterSeconds / 60));
-  return reply
-    .status(429)
-    .header('Retry-After', String(lock.retryAfterSeconds))
-    .send({
-      error: `Too many failed sign-in attempts. Try your password again in ${minutes} minute${minutes === 1 ? '' : 's'}, or sign in with a passkey.`,
-      code: 'ACCOUNT_LOCKED',
-      retryAfter: lock.retryAfterSeconds,
-    });
-}
-
-function membershipOrgIds(userId: string): string[] {
-  return getDb()
-    .select({ orgId: memberships.orgId })
-    .from(memberships)
-    .where(eq(memberships.userId, userId))
-    .all()
-    .map((m) => m.orgId);
-}
-
 /**
  * Create the session for a completed sign-in, set its cookie, and audit it.
  * Also where every sign-in method checks for a new device.
@@ -249,18 +226,7 @@ export async function authRoutes(app: FastifyInstance) {
       ? await verifyPassword(body.password, user.passwordHash)
       : await verifyAgainstNothing(body.password);
     if (!valid || !user) {
-      if (user) {
-        const orgIds = membershipOrgIds(user.id);
-        auditForAccount(req, user, orgIds, 'user.login_failed', { reason: 'bad_password' });
-        if (attempt.locked) {
-          auditForAccount(req, user, orgIds, 'user.login_locked', {
-            failures: FAILED_LOGIN_THRESHOLD,
-            lockedForSeconds: attempt.locked.retryAfterSeconds,
-            lockouts: attempt.locked.lockouts,
-          });
-          if (attempt.notify) notifyAccountLocked(user, attempt.locked, req.ip);
-        }
-      }
+      if (user) reportFailedPassword(req, user, attempt);
       if (attempt.locked) return sendLocked(reply, attempt.locked);
       return reply.status(401).send({ error: 'Invalid credentials' });
     }

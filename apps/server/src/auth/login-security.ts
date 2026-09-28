@@ -1,10 +1,12 @@
 import { createHash, createHmac } from 'crypto';
 import { isIP } from 'net';
+import type { FastifyReply, FastifyRequest } from 'fastify';
 import { and, count, eq, isNull, lt, ne, or } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { getDb } from '../db/index.js';
-import { loginFailures, sessions, userDevices } from '../db/schema.js';
+import { loginFailures, memberships, sessions, userDevices } from '../db/schema.js';
 import { config } from '../config/index.js';
+import { auditForAccount } from '../audit/index.js';
 import { notifyAccountOwner } from './passkey.js';
 
 // ── Known devices ────────────────────────────────────────────────────────────
@@ -286,4 +288,45 @@ export function notifyAccountLocked(
     'failed sign-in',
     'If this was not you, someone may be guessing your password. Make sure it is long and not used anywhere else, and add a passkey under Settings if you have not.',
   );
+}
+
+/** Refuse a password sign-in while the account's password step is paused. */
+export function sendLocked(reply: FastifyReply, lock: Lockout) {
+  const minutes = Math.max(1, Math.ceil(lock.retryAfterSeconds / 60));
+  return reply
+    .status(429)
+    .header('Retry-After', String(lock.retryAfterSeconds))
+    .send({
+      error: `Too many failed sign-in attempts. Try your password again in ${minutes} minute${minutes === 1 ? '' : 's'}, or sign in with a passkey.`,
+      code: 'ACCOUNT_LOCKED',
+      retryAfter: lock.retryAfterSeconds,
+    });
+}
+
+/**
+ * A wrong password for an existing account: audited into each of its orgs,
+ * and, when this attempt started a pause, that too, with the owner emailed.
+ */
+export function reportFailedPassword(
+  req: FastifyRequest,
+  user: { id: string; email: string; displayName: string },
+  attempt: FailedAttempt,
+  details: Record<string, unknown> = {},
+) {
+  const orgIds = getDb()
+    .select({ orgId: memberships.orgId })
+    .from(memberships)
+    .where(eq(memberships.userId, user.id))
+    .all()
+    .map((m) => m.orgId);
+  auditForAccount(req, user, orgIds, 'user.login_failed', { reason: 'bad_password', ...details });
+  if (attempt.locked) {
+    auditForAccount(req, user, orgIds, 'user.login_locked', {
+      failures: FAILED_LOGIN_THRESHOLD,
+      lockedForSeconds: attempt.locked.retryAfterSeconds,
+      lockouts: attempt.locked.lockouts,
+      ...details,
+    });
+    if (attempt.notify) notifyAccountLocked(user, attempt.locked, req.ip);
+  }
 }

@@ -19,12 +19,15 @@ describe('blockedReason', () => {
     '::1',
     'fd12::1',
     '::ffff:10.0.0.5',
+    '::ffff:a00:5',
+    '::a00:5',
+    '::ffff:0:a00:5',
     '64:ff9b::a00:1',
   ])('refuses private %s by default', (ip) => {
     expect(blockedReason(ip, none)).toMatch(/private or loopback/);
   });
 
-  it.each(['169.254.169.254', '0.0.0.0', '224.0.0.1', '255.255.255.255', 'fe80::1', 'fd00:ec2::254', '::'])(
+  it.each(['169.254.169.254', '0.0.0.0', '224.0.0.1', '255.255.255.255', 'fe80::1', 'fd00:ec2::254', '::', '::ffff:a9fe:a9fe'])(
     'always refuses %s, allow list or not',
     (ip) => {
       expect(blockedReason(ip, parseAllowNets('0.0.0.0/0,::/0'))).toMatch(/reserved/);

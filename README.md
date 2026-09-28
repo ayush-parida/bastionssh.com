@@ -361,7 +361,7 @@ cd deploy/docker
 docker compose --profile https up -d
 ```
 
-Caddy refuses to start (see `docker compose logs caddy`) until `SMT_BASE_URL` is `https://$SMT_DOMAIN` and `SMT_TRUST_PROXY` is set: the first mistake breaks passkeys, the second puts every user behind one rate-limit bucket and one audit-log IP. Passkeys enrolled while the instance ran on `localhost` do not work on the domain (they are bound to the hostname), so enroll them after the switch.
+Caddy refuses to start (see `docker compose logs caddy`) until `SMT_BASE_URL` is `https://$SMT_DOMAIN`, `SMT_TRUST_PROXY` is set and `SMT_HTTP_BIND` is a loopback address: the first mistake breaks passkeys, the second puts every user behind one rate-limit bucket and one audit-log IP, and the third would let anyone reaching port 8080 directly claim any client address in `X-Forwarded-For`. Passkeys enrolled while the instance ran on `localhost` do not work on the domain (they are bound to the hostname), so enroll them after the switch.
 
 **Storage backends:**
 
@@ -408,7 +408,7 @@ With `NODE_ENV=development` the Vite dev server (`http://localhost:5173`) is all
 Owners set, on the same page:
 
 - **Retention** — events older than this many days (default 365, 7–3650) are deleted by a daily job, which records how many it removed (`audit.pruned`).
-- **Forwarding** — every new event is copied, as it happens, to one target per organization:
+- **Forwarding** — every new event is copied, within about half a minute, to one target per organization:
   - **Syslog** (RFC 5424) over UDP, TCP or TLS (RFC 6587 octet-counted framing). The event's key fields are structured data (`[bastionssh@32473 org=… actor=… action=…]`), the full event is JSON in the message. TLS verifies the collector's certificate for the hostname you enter; paste a CA bundle for a private CA.
   - **Webhook** — `POST`s JSON batches `{"source":"bastionssh","events":[…]}`. With a signing secret, each request carries `X-BastionSSH-Timestamp` and `X-BastionSSH-Signature: sha256=<HMAC-SHA256(secret, timestamp + "." + body)>`.
 

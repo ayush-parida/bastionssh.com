@@ -193,6 +193,40 @@ describe('login security', () => {
       }
     });
 
+    it('also pauses the password check on an invite for an existing account', async () => {
+      const person = await seedPerson();
+      // An admin of another org holds an invite link for the account's address
+      const inviterOrg = seedOrg(`inviter-${nanoid(6)}`);
+      const inviter = seedUser(inviterOrg, 'admin');
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/team/invites',
+        headers: inviter.headers,
+        payload: { email: person.email, role: 'viewer' },
+      });
+      expect(created.statusCode).toBe(201);
+      const token = (created.json().link as string).split('/invite/')[1]!;
+      const accept = (password: string) =>
+        app.inject({
+          method: 'POST',
+          url: `/api/invites/${token}/accept`,
+          payload: { email: person.email, password },
+          remoteAddress: spread(),
+        });
+
+      const results = [];
+      for (let i = 0; i < FAILED_LOGIN_THRESHOLD; i++) results.push(await accept('wrong-password'));
+      expect(results.map((r) => r.statusCode)).toEqual([401, 401, 401, 401, 429]);
+      expect(auditOf(person.userId, 'user.login_failed')).toHaveLength(FAILED_LOGIN_THRESHOLD);
+      expect(auditOf(person.userId, 'user.login_locked')).toHaveLength(1);
+
+      // The right password is refused while paused, here and on /login
+      const right = await accept(person.password);
+      expect(right.statusCode).toBe(429);
+      expect(right.cookies.find((c) => c.name === 'smt_session')).toBeUndefined();
+      expect((await login(person.email, person.password)).statusCode).toBe(429);
+    });
+
     it('is ended by a passkey sign-in, which is never paused', async () => {
       const person = await seedPerson();
       const credentialId = `cred-${nanoid(10)}`;
@@ -278,6 +312,32 @@ describe('login security', () => {
       expect(mailsAbout(/New sign-in/)).toHaveLength(0);
       await login(person.email, person.password, '192.0.2.1', 'vitest');
       expect(mailsAbout(/New sign-in/)).toHaveLength(1);
+    });
+
+    it('alerts on a new device when an existing account signs in by accepting an invite', async () => {
+      const person = await seedPerson();
+      await login(person.email, person.password, '198.51.100.7', FIREFOX_LINUX);
+      const inviterOrg = seedOrg(`inviter-${nanoid(6)}`);
+      const inviter = seedUser(inviterOrg, 'admin');
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/team/invites',
+        headers: inviter.headers,
+        payload: { email: person.email, role: 'viewer' },
+      });
+      const token = (created.json().link as string).split('/invite/')[1]!;
+      const joined = await app.inject({
+        method: 'POST',
+        url: `/api/invites/${token}/accept`,
+        payload: { email: person.email, password: person.password },
+        remoteAddress: '203.0.113.5',
+        headers: { 'user-agent': CHROME_MAC },
+      });
+      expect(joined.statusCode).toBe(201);
+      expect(mailsAbout(/New sign-in/)).toHaveLength(1);
+      const rows = auditOf(person.userId, 'user.login_new_device');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.orgId).toBe(inviterOrg);
     });
 
     it('lists the caller’s devices and forgets one on request', async () => {

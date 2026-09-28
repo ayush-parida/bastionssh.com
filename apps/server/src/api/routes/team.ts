@@ -43,6 +43,17 @@ import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { passkeyCount, requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { deleteBackupCodes } from '../../auth/backup-codes.js';
+import {
+  accountKey,
+  clearLoginFailures,
+  lockoutStatus,
+  notifyNewDeviceSignIn,
+  recordFailedLogin,
+  recordSignInDevice,
+  reportFailedPassword,
+  sendLocked,
+  type SignInDevice,
+} from '../../auth/login-security.js';
 import { config } from '../../config/index.js';
 
 const roleSchema = z.enum(ROLES);
@@ -851,12 +862,22 @@ async function joinWithExistingAccount(
     if (!emailsMatch(body.email, invite.email)) {
       return reply.status(403).send({ error: 'That email address does not match this invite' });
     }
+    // A password check like /auth/login, so under the same per-account pause:
+    // otherwise an admin of any org could invite an existing account and guess
+    // its password here without ever being paused
+    const key = accountKey(account.email);
+    const lock = lockoutStatus(key);
+    if (lock) return sendLocked(reply, lock);
+    const attempt = recordFailedLogin(key);
     if (!account.passwordHash || !(await verifyPassword(body.password, account.passwordHash))) {
+      reportFailedPassword(req, account, attempt, { via: 'invite' });
+      if (attempt.locked) return sendLocked(reply, attempt.locked);
       return reply.status(401).send({
         // Only reachable with the invited address, so this reveals nothing new
         error: 'Invalid credentials. This address already has an account — sign in with its password to accept.',
       });
     }
+    clearLoginFailures(key);
     // The password alone is not a sign-in for an account with passkeys
     if (passkeyCount(account.id) > 0) {
       return reply.status(401).send({
@@ -888,6 +909,7 @@ async function joinWithExistingAccount(
   });
 
   // Land in the org just joined
+  let newDevice: SignInDevice | undefined;
   if (session) {
     setActiveOrg(session.id, invite.orgId);
   } else {
@@ -897,6 +919,7 @@ async function joinWithExistingAccount(
       activeOrgId: invite.orgId,
     });
     reply.setCookie('smt_session', created.id, { httpOnly: true, sameSite: 'lax', path: '/' });
+    newDevice = recordSignInDevice(account.id, req.ip, req.headers['user-agent'], created.id);
   }
 
   const user = { id: account.id, email: account.email, displayName: account.displayName };
@@ -904,6 +927,15 @@ async function joinWithExistingAccount(
   req.user = user;
   req.orgId = invite.orgId;
   await audit(req, 'member.join', 'member', account.id, account.email, { role: invite.role });
+  // Signing in with the password here is a sign-in like any other
+  if (newDevice?.isNew) {
+    await audit(req, 'user.login_new_device', 'user', account.id, account.email, {
+      method: 'password',
+      device: newDevice.label,
+      network: newDevice.ipPrefix,
+    });
+    notifyNewDeviceSignIn(account, newDevice, req.ip);
+  }
 
   return reply.status(201).send({ user, orgId: invite.orgId, role: invite.role });
 }

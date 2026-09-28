@@ -37,6 +37,8 @@ PRIVATE.addAddress('::1', 'ipv6');
 PRIVATE.addSubnet('fc00::', 7, 'ipv6'); // unique local
 PRIVATE.addSubnet('64:ff9b::', 96, 'ipv6'); // NAT64 — reaches IPv4 space
 PRIVATE.addSubnet('2002::', 16, 'ipv6'); // 6to4 — ditto
+PRIVATE.addSubnet('::', 96, 'ipv6'); // IPv4-compatible (::10.0.0.1), deprecated but ditto
+PRIVATE.addSubnet('::ffff:0:0:0', 96, 'ipv6'); // IPv4-translated (SIIT) — ditto
 
 export type AllowNets = readonly { address: string; prefix: number; family: 4 | 6 }[];
 

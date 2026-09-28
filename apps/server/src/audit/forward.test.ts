@@ -16,6 +16,7 @@ import { seedOrg } from '../api/routes/test-utils.js';
 import { auditSystem } from './index.js';
 import {
   BATCH_SIZE,
+  SETTLE_MS,
   currentCursor,
   deliver,
   deliverWithRetry,
@@ -31,7 +32,7 @@ import {
 
 const local = { resolve: async () => ({ address: '127.0.0.1', family: 4 as const, internal: true }) };
 const publicAddr = { resolve: async () => ({ address: '127.0.0.1', family: 4 as const, internal: false }) };
-const fast = { ...local, delays: [0, 0] };
+const fast = { ...local, delays: [0, 0], settleMs: 0 };
 
 const entry = (over: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
   id: 'a1',
@@ -362,6 +363,15 @@ describe('forwardOrg', () => {
     expect(await forwardOrg(orgId, { ...fast, now: t + 60_000 })).toBe(2);
     expect(batches.flat().map((e) => e.action)).toEqual(['server.create', 'audit.forwarding_failed']);
     expect(row(orgId).lastStatus).toBe('ok');
+  });
+
+  it('leaves rows younger than the settle time for a later tick', async () => {
+    const orgId = await setUp();
+    auditSystem(orgId, 'server.create', 'server', 's1');
+    // A row stamped earlier can still be waiting for the write lock: not yet
+    expect(await forwardOrg(orgId, { ...local, delays: [0, 0] })).toBe(0);
+    expect(batches).toHaveLength(0);
+    expect(await forwardOrg(orgId, { ...local, delays: [0, 0], now: Date.now() + SETTLE_MS + 1 })).toBe(1);
   });
 
   it('does nothing while disabled', async () => {

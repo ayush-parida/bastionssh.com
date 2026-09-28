@@ -11,9 +11,11 @@
 #   SMT_HTTP_BIND=127.0.0.1:8080              # keep plain HTTP off the network
 #   SMT_ACME_EMAIL=you@example.com            # optional: expiry notices from the CA
 #
-# Caddy refuses to start until SMT_BASE_URL is https://$SMT_DOMAIN and
-# SMT_TRUST_PROXY is set, since either mistake silently breaks passkeys or
-# makes every user share Caddy's IP for rate limits and the audit log.
+# Caddy refuses to start until SMT_BASE_URL is https://$SMT_DOMAIN,
+# SMT_TRUST_PROXY is set and SMT_HTTP_BIND is a loopback address: the first
+# mistake breaks passkeys, the second makes every user share Caddy's IP for
+# rate limits and the audit log, the third lets anyone reach smt directly and
+# claim any client address in X-Forwarded-For.
 services:
   smt:
     build:
@@ -77,6 +79,7 @@ services:
       SMT_DOMAIN: ${SMT_DOMAIN:-}
       SMT_BASE_URL: ${SMT_BASE_URL:-http://localhost:8080}
       SMT_TRUST_PROXY: ${SMT_TRUST_PROXY:-false}
+      SMT_HTTP_BIND: ${SMT_HTTP_BIND:-}
       SMT_ACME_EMAIL: ${SMT_ACME_EMAIL:-}
     entrypoint: ["/bin/sh", "/etc/caddy/check-env.sh"]
     command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

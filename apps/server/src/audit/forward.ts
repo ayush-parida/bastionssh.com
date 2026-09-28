@@ -4,7 +4,7 @@ import http from 'http';
 import https from 'https';
 import net from 'net';
 import tls from 'tls';
-import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, lte, or, sql } from 'drizzle-orm';
 import type { AuditForwardingInfo, AuditLogEntry, SyslogProtocol } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { auditForwarders, auditLog } from '../db/schema.js';
@@ -40,6 +40,13 @@ const RETRY_DELAYS_MS = [500, 2_000];
 const BACKOFF_BASE_MS = 30_000;
 const BACKOFF_MAX_MS = 15 * 60_000;
 const TICK_MS = 10_000;
+/**
+ * Rows younger than this wait for a later tick. A row's created_at is set
+ * before its insert waits for the write lock (up to 5 s by default, e.g. from
+ * the worker process), so it can commit after a newer row; sending only rows
+ * this old keeps the cursor from moving past one still on its way in.
+ */
+export const SETTLE_MS = 15_000;
 const TIMEOUT_MS = 10_000;
 /** UDP syslog: one datagram per row, kept under the practical IPv4 limit. */
 const MAX_UDP_BYTES = 60_000;
@@ -349,14 +356,15 @@ export function describeError(err: unknown): string {
 
 // ── Delivery loop ────────────────────────────────────────────────────────────
 
-/** Rows after the cursor, oldest first. rowid breaks ties between equal timestamps. */
-function pendingRows(row: ForwarderRow) {
+/** Rows after the cursor and no newer than `settledBefore`, oldest first. rowid breaks ties between equal timestamps. */
+function pendingRows(row: ForwarderRow, settledBefore: string) {
   return getDb()
     .select({ entry: auditLog, rowid: sql<number>`${auditLog}.rowid`.as('rid') })
     .from(auditLog)
     .where(
       and(
         eq(auditLog.orgId, row.orgId),
+        lte(auditLog.createdAt, settledBefore),
         or(
           gt(auditLog.createdAt, row.cursorCreatedAt),
           and(eq(auditLog.createdAt, row.cursorCreatedAt), gt(sql`${auditLog}.rowid`, row.cursorRowid)),
@@ -395,10 +403,11 @@ export function resetBackoff(orgId?: string) {
  */
 export async function forwardOrg(
   orgId: string,
-  opts: SendOptions & { delays?: number[]; now?: number } = {},
+  opts: SendOptions & { delays?: number[]; now?: number; settleMs?: number } = {},
 ): Promise<number> {
   const db = getDb();
   const now = opts.now ?? Date.now();
+  const settledBefore = new Date(now - (opts.settleMs ?? SETTLE_MS)).toISOString();
   const wait = backoff.get(orgId);
   if (wait && now < wait.until) return 0;
 
@@ -407,7 +416,7 @@ export async function forwardOrg(
     // Re-read each batch: the owner may have changed or removed it meanwhile
     const row = db.select().from(auditForwarders).where(eq(auditForwarders.orgId, orgId)).get();
     if (!row?.enabled) return sent;
-    const pending = pendingRows(row);
+    const pending = pendingRows(row, settledBefore);
     if (!pending.length) break;
 
     try {
