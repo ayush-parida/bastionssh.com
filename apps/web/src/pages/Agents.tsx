@@ -116,11 +116,13 @@ export default function AgentsPage() {
                 Run this on {created.name} now — the token in it won't be shown again
               </p>
               <p className="text-xs text-muted-foreground mb-2">
-                It installs the agent as a systemd service (Node.js 18+ required). Only a hash of the token
-                is stored; if you lose it, revoke this agent and create another.
+                It installs the agent as a systemd service (Node.js 18+ required). Paste all three lines: the
+                token goes to the installer on stdin, never on a command line, and is kept in a root-only file
+                on the host. Only a hash of the token is stored here; if you lose it, revoke this agent and
+                create another.
               </p>
               <div className="flex items-start gap-2">
-                <code className="flex-1 min-w-0 break-all rounded bg-background px-2 py-1.5 text-xs font-mono select-all">
+                <code className="flex-1 min-w-0 whitespace-pre-wrap break-all rounded bg-background px-2 py-1.5 text-xs font-mono select-all">
                   {created.installCommand}
                 </code>
                 <button

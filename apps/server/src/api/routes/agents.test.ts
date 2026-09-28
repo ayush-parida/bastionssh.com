@@ -107,8 +107,11 @@ describe('agent routes', () => {
     expect(created.token).toMatch(/^bsa_[A-Za-z0-9_-]{43}$/);
     expect(created.status).toBe('offline');
     expect(created.installCommand).toContain('http://localhost:8080/api/agents/install.sh');
-    expect(created.installCommand).toContain(`BASTION_AGENT_TOKEN='${created.token}'`);
     expect(created.installCommand).toContain(`BASTION_ALLOWED_PORTS='22,2222'`);
+    // The token travels in a here-doc (stdin), never on the command line itself
+    const [commandLine, tokenLine] = created.installCommand.split('\n');
+    expect(commandLine).not.toContain(created.token);
+    expect(tokenLine).toBe(created.token);
 
     const row = getDb().select().from(agents).where(eq(agents.id, created.id)).get()!;
     expect(row.tokenHash).toBe(createHash('sha256').update(created.token).digest('hex'));
