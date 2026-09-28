@@ -15,3 +15,14 @@ coverage/
 *.db-wal
 *.sqlite
 .pnpm-store/
+
+# tsc emits to dist/; compiled output beside the sources in a package's src/
+# shadows the .ts files in Vite (./types/x.js resolves to a stale x.js)
+packages/*/src/**/*.js
+packages/*/src/**/*.js.map
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.d.ts.map
+
+# Playwright output
+apps/e2e/test-results/
+apps/e2e/playwright-report/
