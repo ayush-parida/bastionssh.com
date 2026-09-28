@@ -105,7 +105,8 @@ function findUserByEmail(email: string) {
  *  - `atOrBelow`: the target's rank is at most the actor's (a peer is fine).
  *  - `below`: strictly lower, except that owners may act on other owners —
  *    for actions that lock someone out but hand over nothing (suspend,
- *    reactivate, sign out). Admins cannot do these to each other.
+ *    reactivate, sign out, demote, remove). Admins cannot do these to each
+ *    other; the last-owner check still applies on top.
  *  - `strictlyBelow`: strictly lower, no exceptions — for a password reset,
  *    which hands the actor the target's account. Nobody can reset an owner.
  */
@@ -327,19 +328,10 @@ export async function teamRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: `You cannot grant the ${role} role` });
     }
 
-    const member = db
-      .select()
-      .from(memberships)
-      .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
-      .get();
-    if (!member) return reply.status(404).send({ error: 'Not a member of this organization' });
-
-    // Demoting someone above you would let an admin unseat an owner.
-    if (!canGrantRole(req.role, member.role as Role)) {
-      return reply
-        .status(403)
-        .send({ error: `You cannot modify a member with the ${member.role} role` });
-    }
+    // Same rule as suspension: a demotion takes something away, so admins
+    // cannot do it to each other and nobody can do it to someone above them.
+    const member = targetMember(req, reply, userId, 'change the role of', 'below');
+    if (!member) return reply;
     if (wouldOrphanOrg(activeOrgMembers(req.orgId), userId, role)) {
       return reply.status(400).send({ error: 'The organization must keep at least one owner' });
     }
@@ -361,22 +353,8 @@ export async function teamRoutes(app: FastifyInstance) {
     const { userId } = req.params as { userId: string };
     const db = getDb();
 
-    if (userId === req.user.id) {
-      return reply.status(400).send({ error: 'You cannot remove yourself' });
-    }
-
-    const member = db
-      .select()
-      .from(memberships)
-      .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
-      .get();
-    if (!member) return reply.status(404).send({ error: 'Not a member of this organization' });
-
-    if (!canGrantRole(req.role, member.role as Role)) {
-      return reply
-        .status(403)
-        .send({ error: `You cannot remove a member with the ${member.role} role` });
-    }
+    const member = targetMember(req, reply, userId, 'remove', 'below');
+    if (!member) return reply;
     if (wouldOrphanOrg(activeOrgMembers(req.orgId), userId, null)) {
       return reply.status(400).send({ error: 'The organization must keep at least one owner' });
     }
