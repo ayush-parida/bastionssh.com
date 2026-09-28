@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import path from 'path';
+import { defaultBackupDir } from '../backup/files.js';
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -42,6 +44,23 @@ const envSchema = z.object({
     .default('true'),
   SMT_CLOUD_SYNC_INTERVAL: z.coerce.number().min(5).default(15), // minutes between syncs
   SMT_CLOUD_REQUEST_TIMEOUT: z.coerce.number().default(30_000),
+  // ── App database backups ──
+  /** Default: backups/ next to the database (/data/backups). */
+  SMT_BACKUP_DIR: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
+  SMT_BACKUP_INTERVAL_HOURS: z.coerce.number().min(0).default(24), // 0 = no scheduled backups
+  SMT_BACKUP_KEEP: z.coerce.number().int().min(1).default(14), // newest kept per reason
+  SMT_BACKUP_GZIP: z
+    .string()
+    .transform((v) => v === 'true')
+    .default('false'),
+  SMT_BACKUP_PRE_MIGRATION: z
+    .string()
+    .transform((v) => v !== 'false')
+    .default('true'),
+  /** Copy each scheduled/manual backup to this object-storage connection too. */
+  SMT_BACKUP_STORAGE_CONNECTION_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
+  SMT_BACKUP_STORAGE_BUCKET: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
+  SMT_BACKUP_STORAGE_PREFIX: z.string().default('bastionssh-backups/'),
   SMT_WORKER_IN_PROCESS: z
     .string()
     .transform((v) => v === 'true')
@@ -165,6 +184,13 @@ try {
   process.exit(1);
 }
 
+if (env.SMT_BACKUP_STORAGE_CONNECTION_ID && !env.SMT_BACKUP_STORAGE_BUCKET) {
+  console.error('Invalid environment variables: SMT_BACKUP_STORAGE_BUCKET is required when SMT_BACKUP_STORAGE_CONNECTION_ID is set');
+  process.exit(1);
+}
+
+const dbPath = env.SMT_DB_URL ?? path.join('/data', 'smt.db');
+
 if (env.SMT_SMTP_URL && !env.SMT_SMTP_FROM) {
   console.error('Invalid environment variables: SMT_SMTP_FROM is required when SMT_SMTP_URL is set');
   process.exit(1);
@@ -205,6 +231,21 @@ export const config = {
     enabled: env.SMT_CLOUD_SYNC_ENABLED,
     intervalMinutes: env.SMT_CLOUD_SYNC_INTERVAL,
     timeoutMs: env.SMT_CLOUD_REQUEST_TIMEOUT,
+  },
+  backup: {
+    dir: env.SMT_BACKUP_DIR ?? defaultBackupDir(dbPath),
+    intervalHours: env.SMT_BACKUP_INTERVAL_HOURS,
+    keep: env.SMT_BACKUP_KEEP,
+    gzip: env.SMT_BACKUP_GZIP,
+    preMigration: env.SMT_BACKUP_PRE_MIGRATION,
+    storage:
+      env.SMT_BACKUP_STORAGE_CONNECTION_ID && env.SMT_BACKUP_STORAGE_BUCKET
+        ? {
+            connectionId: env.SMT_BACKUP_STORAGE_CONNECTION_ID,
+            bucket: env.SMT_BACKUP_STORAGE_BUCKET,
+            prefix: env.SMT_BACKUP_STORAGE_PREFIX,
+          }
+        : null,
   },
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,

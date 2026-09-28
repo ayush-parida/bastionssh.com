@@ -13,6 +13,8 @@
     "test:watch": "vitest",
     "db:generate": "dotenv -e ../../.env -- drizzle-kit generate",
     "db:migrate": "dotenv -e ../../.env -- tsx src/db/migrate.ts",
+    "db:backup": "dotenv -e ../../.env -- tsx src/cli/backup.ts",
+    "db:restore": "dotenv -e ../../.env -- tsx src/cli/restore.ts",
     "db:studio": "dotenv -e ../../.env -- drizzle-kit studio"
   },
   "dependencies": {

@@ -2,6 +2,9 @@ import { buildApp } from './api/app.js';
 import { startWorker } from './worker/index.js';
 import { startHealthMonitor } from './monitoring/scheduler.js';
 import { startCloudSync } from './cloud/scheduler.js';
+import { startBackupScheduler } from './backup/scheduler.js';
+import { holdServerLock } from './backup/lock.js';
+import { databasePath } from './db/index.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -9,6 +12,9 @@ import logger from './logger.js';
 
 async function main() {
   logger.info('Starting SMT server...');
+
+  // Tells db:restore the database is in use; removed on exit
+  if (databasePath() !== ':memory:') holdServerLock(databasePath(), config.port);
 
   await runMigrations();
   logger.info('Database migrations complete');
@@ -33,9 +39,10 @@ async function main() {
     }
   }
 
-  // Health checks and cloud inventory sync run on plain intervals in-process — no Redis required.
+  // Health checks, cloud inventory sync and database backups run on plain intervals in-process — no Redis required.
   startHealthMonitor();
   startCloudSync();
+  startBackupScheduler();
   if (config.smtp) logger.info('Email notifications enabled (SMTP configured)');
 
   try {

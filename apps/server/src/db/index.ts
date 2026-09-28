@@ -8,10 +8,15 @@ import fs from 'fs';
 let db: ReturnType<typeof drizzle> | null = null;
 let rawDb: Database.Database | null = null;
 
+/** The SQLite file (or ':memory:') the app uses. */
+export function databasePath(): string {
+  return config.dbUrl ?? path.join('/data', 'smt.db');
+}
+
 export function getDb() {
   if (db) return db;
 
-  const dbPath = config.dbUrl ?? path.join('/data', 'smt.db');
+  const dbPath = databasePath();
   const dir = path.dirname(dbPath);
 
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

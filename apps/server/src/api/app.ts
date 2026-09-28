@@ -29,6 +29,7 @@ import { teamRoutes, publicInviteRoutes } from './routes/team.js';
 import { publicPasswordResetRoutes } from './routes/password-reset.js';
 import { apiTokenRoutes } from './routes/tokens.js';
 import { healthRoutes } from './routes/health.js';
+import { backupRoutes } from './routes/backups.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
 import { HostKeyMismatchError } from '../ssh/host-keys.js';
 
@@ -92,6 +93,7 @@ export async function buildApp() {
   await app.register(dnsRoutes, { prefix: '/api/dns' });
   await app.register(teamRoutes, { prefix: '/api/team' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });
+  await app.register(backupRoutes, { prefix: '/api/admin/backups' });
   // Unauthenticated: reading and accepting an invite happens before an account exists
   await app.register(publicInviteRoutes, { prefix: '/api/invites' });
   // Unauthenticated: redeeming an admin-issued reset link
