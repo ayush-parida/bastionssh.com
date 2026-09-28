@@ -22,6 +22,8 @@ vi.mock('ssh2', async () => {
   return { Client, __clients: clients };
 });
 
+// Connecting looks up the server's jump hosts; none of these servers exist, so all connect directly
+await (await import('../db/migrate.js')).runMigrations();
 const { acquire, evictUser, poolKey } = await import('./sftp.js');
 const { __clients: clients } = (await import('ssh2')) as any;
 

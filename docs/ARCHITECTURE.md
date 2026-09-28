@@ -195,6 +195,23 @@ link-local, CGNAT and unique-local ranges before anything is sent to it.
   - Bridge a `pty` to a WebSocket frame stream.
   - Enforce per-connection limits and timeouts.
 
+#### Jump hosts (`/server/ssh/jump.ts`)
+
+- A server may name another server in the same org as its jump host (`servers.jump_server_id`,
+  like `ssh -J`). Every connection path — terminal, one-shot exec (AI, saved commands, cron),
+  the SFTP pool, health probes and host key scans — goes through `connectSsh`, which connects
+  to the jump host with **its own** credentials and host key check, opens a `direct-tcpip`
+  channel to the target's host:port, and runs the target's handshake over it with the
+  target's own host key check. Jump connections close with the target connection.
+- Chains are same-org, loop-free and at most 3 hops; the API refuses anything else and the
+  connect path re-checks. Deleting a jump host makes the servers behind it direct again.
+- **Access decision:** using a server through its jump host does not require access to the
+  jump server. The route is part of how an admin configured the target (like its stored
+  credentials), and the user only gets a channel to the target — never a shell or files on
+  the jump host. Only admins set jump hosts. Each hop is audited as `server.jump` on the
+  jump server, attributed to the user the connection is for (background health checks only
+  log it, to keep the audit log readable).
+
 #### SFTP file transfer (`/server/ssh/sftp.ts`)
 
 - Rides the same `ssh2` connection and the same stored credentials as the terminal —

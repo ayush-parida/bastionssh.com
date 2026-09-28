@@ -17,6 +17,8 @@ export interface Server {
   /** Pinned SSH host key, `SHA256:<base64>` as `ssh-keygen -lf` prints it; null until first connect. */
   hostKeyFingerprint: string | null;
   hostKeyStatus: HostKeyStatus;
+  /** Managed server this one is reached through (like `ssh -J`); null for a direct connection. */
+  jumpServerId: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -34,6 +36,8 @@ export interface CreateServerRequest {
   notes?: string;
   /** Pre-pin the host key instead of trusting whatever answers on first connect. */
   hostKeyFingerprint?: string;
+  /** Reach this server through another server in the org; null or omitted connects directly. */
+  jumpServerId?: string | null;
 }
 
 export interface UpdateServerRequest {
@@ -47,6 +51,8 @@ export interface UpdateServerRequest {
   tags?: string[];
   notes?: string;
   hostKeyFingerprint?: string;
+  /** null removes the jump host. */
+  jumpServerId?: string | null;
 }
 
 export interface ServerGroup {

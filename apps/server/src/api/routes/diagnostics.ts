@@ -40,7 +40,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   const optionsFor = (req: FastifyRequest) => {
     const { auth } = bodySchema.parse(req.body ?? {});
     // A presented key that differs from the pinned one is admin-only evidence
-    return { auth, revealHostKey: rank(req.role) >= rank('admin') };
+    return { auth, revealHostKey: rank(req.role) >= rank('admin'), actorUserId: req.user.id };
   };
 
   /** POST /api/diagnostics/servers/:id {auth?} */

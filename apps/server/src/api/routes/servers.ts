@@ -11,6 +11,7 @@ import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
 import { evictServer } from '../../ssh/sftp.js';
 import { clearedColumns, hostKeyStatus, pinnedColumns } from '../../ssh/host-keys.js';
+import { jumpHostProblem, serversBehind } from '../../ssh/jump.js';
 import { resolveHostKeyAlert } from '../../monitoring/alerts.js';
 import { fingerprintSchema } from './server-host-keys.js';
 
@@ -26,6 +27,8 @@ const createServerSchema = z.object({
   notes: z.string().optional(),
   /** Pre-pin the host key; otherwise the first connection trusts what it sees. */
   hostKeyFingerprint: fingerprintSchema.optional(),
+  /** Reach the server through another one in the org (ssh -J); null connects directly. */
+  jumpServerId: z.string().min(1).nullable().optional(),
 });
 
 /** Strip encryptedPassword and return safe server object */
@@ -79,6 +82,14 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
   };
 }
 
+/**
+ * Drop pooled SFTP connections to a server and to every server reached through
+ * it — theirs run over a tunnel built with this server's old settings.
+ */
+function evictWithDependents(orgId: string, serverId: string) {
+  for (const id of [serverId, ...serversBehind(orgId, serverId)]) evictServer(orgId, id);
+}
+
 /** A server may only point at a vaulted key from its own org. */
 function keyBelongsToOrg(orgId: string, keyId: string): boolean {
   return (
@@ -112,6 +123,10 @@ export async function serverRoutes(app: FastifyInstance) {
     ) {
       return reply.status(400).send({ error: 'Unknown SSH key' });
     }
+    if (body.jumpServerId) {
+      const problem = jumpHostProblem(req.orgId, undefined, body.jumpServerId);
+      if (problem) return reply.status(400).send({ error: problem });
+    }
     const db = getDb();
     const id = nanoid();
 
@@ -133,11 +148,19 @@ export async function serverRoutes(app: FastifyInstance) {
         encryptedPassword: encryptedPassword ?? null,
         tags: JSON.stringify(body.tags),
         notes: body.notes,
+        jumpServerId: body.jumpServerId ?? null,
         ...(body.hostKeyFingerprint && pinnedColumns(body.hostKeyFingerprint, null, req.user.id)),
       })
       .run();
 
-    await audit(req, 'server.create', 'server', id, body.name);
+    await audit(
+      req,
+      'server.create',
+      'server',
+      id,
+      body.name,
+      body.jumpServerId ? { jumpServerId: body.jumpServerId } : undefined,
+    );
     if (body.hostKeyFingerprint) {
       await audit(req, 'server.host_key_pinned', 'server', id, body.name, {
         fingerprint: body.hostKeyFingerprint,
@@ -180,6 +203,13 @@ export async function serverRoutes(app: FastifyInstance) {
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
 
+    const jumpChanged =
+      body.jumpServerId !== undefined && (body.jumpServerId ?? null) !== existing.jumpServerId;
+    if (jumpChanged && body.jumpServerId) {
+      const problem = jumpHostProblem(req.orgId, id, body.jumpServerId);
+      if (problem) return reply.status(400).send({ error: problem });
+    }
+
     const updateData: Partial<typeof servers.$inferInsert> = {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.host !== undefined && { host: body.host }),
@@ -187,6 +217,7 @@ export async function serverRoutes(app: FastifyInstance) {
       ...(body.username !== undefined && { username: body.username }),
       ...(body.tags !== undefined && { tags: JSON.stringify(body.tags) }),
       ...(body.notes !== undefined && { notes: body.notes }),
+      ...(jumpChanged && { jumpServerId: body.jumpServerId ?? null }),
       updatedAt: new Date().toISOString(),
     };
 
@@ -211,9 +242,16 @@ export async function serverRoutes(app: FastifyInstance) {
     }
 
     db.update(servers).set(updateData).where(eq(servers.id, id)).run();
-    // Pooled SFTP channels hold the old host/credentials — force a reconnect
-    evictServer(req.orgId, id);
-    await audit(req, 'server.update', 'server', id, existing.name);
+    // Pooled SFTP channels hold the old host/credentials/route — force a reconnect
+    evictWithDependents(req.orgId, id);
+    await audit(
+      req,
+      'server.update',
+      'server',
+      id,
+      existing.name,
+      jumpChanged ? { jumpServerId: { from: existing.jumpServerId, to: body.jumpServerId ?? null } } : undefined,
+    );
     if (updateData.hostKeyFingerprint !== undefined) {
       if (existing.hostKeyMismatchFingerprint) resolveHostKeyAlert(req.orgId, id);
       if (updateData.hostKeyFingerprint) {
@@ -245,8 +283,10 @@ export async function serverRoutes(app: FastifyInstance) {
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
 
+    // Servers behind this one fall back to direct connections (ON DELETE SET NULL)
+    const dependents = serversBehind(req.orgId, id);
     db.delete(servers).where(eq(servers.id, id)).run();
-    evictServer(req.orgId, id);
+    for (const serverId of [id, ...dependents]) evictServer(req.orgId, serverId);
     await audit(req, 'server.delete', 'server', id, existing.name);
     return reply.status(204).send();
   });

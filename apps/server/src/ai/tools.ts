@@ -167,6 +167,7 @@ export class ToolExecutor {
         command,
         undefined,
         tap,
+        { actorUserId: this.userId },
       ),
     );
 

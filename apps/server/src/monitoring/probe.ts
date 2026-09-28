@@ -1,6 +1,7 @@
 import { Client } from 'ssh2';
 import type { DiskUsage } from '@smt/shared';
 import { HostKeyMismatchError, sshConnectConfig, type SshTarget } from '../ssh/host-keys.js';
+import { connectSsh, type JumpOptions } from '../ssh/jump.js';
 
 /**
  * A single read-only vitals probe.
@@ -284,6 +285,8 @@ export function runProbe(
   target: ProbeTarget,
   auth: ProbeAuth,
   timeoutMs = 20_000,
+  /** Who asked for the probe; a jump hop is audited under them. Absent for background sweeps. */
+  options: JumpOptions = {},
 ): Promise<ProbeResult> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
@@ -346,6 +349,8 @@ export function runProbe(
       finish(() => reject(new ProbeError(cause.message, classify(err))));
     });
 
-    ssh.connect(connectConfig);
+    // Through the server's jump hosts, if any; the hop is audited under the
+    // requesting user, and only logged for background sweeps
+    connectSsh(ssh, target, connectConfig, 'health_check', options);
   });
 }

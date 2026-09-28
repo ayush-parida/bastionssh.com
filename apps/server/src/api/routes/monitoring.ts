@@ -347,7 +347,8 @@ export async function monitoringRoutes(app: FastifyInstance) {
   app.post('/servers/:id/check', { preHandler: requireRole('operator') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
-    const outcome = await checkServerById(req.orgId, id);
+    // A jump hop on the way is audited under the requesting user
+    const outcome = await checkServerById(req.orgId, id, req.user.id);
     if (!outcome) return reply.status(404).send({ error: 'Not found' });
 
     await audit(req, 'server.health_check', 'server', id, undefined, { status: outcome.status });

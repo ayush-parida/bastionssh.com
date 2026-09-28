@@ -454,3 +454,45 @@ describe('migration 0013 (access requests)', () => {
     expect(sqlite.prepare("SELECT name FROM sqlite_master WHERE name = 'access_requests'").get()).toBeTruthy();
   });
 });
+
+const JUMP_HOSTS_TAG = '0014_jump_hosts';
+
+describe('migration 0014 (jump hosts)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(JUMP_HOSTS_TAG);
+  });
+
+  it('keeps existing servers direct and lets a deleted jump host fall back to direct', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < JUMP_HOSTS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at, host_key_fingerprint)
+        VALUES ('bastion', 'o1', 'b', 'b.example', 'root', 'u1', 'now', 'now', 'SHA256:x');
+      INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at)
+        VALUES ('db', 'o1', 'd', '10.0.0.5', 'root', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [JUMP_HOSTS_TAG]);
+
+    expect(db.prepare('SELECT id, host_key_fingerprint, jump_server_id FROM servers ORDER BY id').all()).toEqual([
+      { id: 'bastion', host_key_fingerprint: 'SHA256:x', jump_server_id: null },
+      { id: 'db', host_key_fingerprint: null, jump_server_id: null },
+    ]);
+
+    db.exec(`UPDATE servers SET jump_server_id = 'bastion' WHERE id = 'db'`);
+    expect(() => db.exec(`UPDATE servers SET jump_server_id = 'missing' WHERE id = 'db'`)).toThrow(/FOREIGN KEY/);
+    db.exec(`DELETE FROM servers WHERE id = 'bastion'`);
+    expect(db.prepare('SELECT id, jump_server_id FROM servers').all()).toEqual([{ id: 'db', jump_server_id: null }]);
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (sqlite.prepare('PRAGMA table_info(servers)').all() as { name: string }[]).map((c) => c.name);
+    expect(columns).toContain('jump_server_id');
+    const indexes = (sqlite.prepare('PRAGMA index_list(servers)').all() as { name: string }[]).map((i) => i.name);
+    expect(indexes).toContain('servers_jump_server_idx');
+  });
+});

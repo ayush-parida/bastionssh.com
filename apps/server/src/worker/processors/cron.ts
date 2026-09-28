@@ -76,6 +76,8 @@ export async function runCronJob(data: CronJobData) {
       auth,
       interpolate(cmd),
       COMMAND_TIMEOUT_MS,
+      undefined,
+      { actorUserId: job.createdBy },
     );
     finish({
       status: result.exitCode === 0 ? 'success' : 'failure',

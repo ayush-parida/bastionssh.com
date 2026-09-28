@@ -211,16 +211,26 @@ function recordFailure(
  * Probe one server and persist the result. Never throws — a failed check is a
  * recorded data point, not an exception for the caller to handle.
  */
-export async function checkServer(server: typeof servers.$inferSelect): Promise<CheckOutcome> {
+export async function checkServer(
+  server: typeof servers.$inferSelect,
+  /** The user who asked for this check; absent for background sweeps. */
+  actorUserId?: string,
+): Promise<CheckOutcome> {
   try {
     const { auth } = await resolveServerAuth(server.orgId, server.id);
     const { sample, latencyMs } = await runProbe(
       { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       config.monitoring.timeoutMs,
+      { actorUserId },
     );
     return recordSuccess(server, sample, latencyMs);
   } catch (err) {
+    // A jump host's changed key: that server holds the mismatch and its alert;
+    // this one is merely unreachable through it
+    if (err instanceof HostKeyMismatchError && err.serverId !== server.id) {
+      return recordFailure(server, 'error', err.message);
+    }
     if (err instanceof HostKeyMismatchError) {
       return recordFailure(server, 'host_key_mismatch', err.message);
     }
@@ -239,6 +249,7 @@ export async function checkServer(server: typeof servers.$inferSelect): Promise<
 export async function checkServerById(
   orgId: string,
   serverId: string,
+  actorUserId?: string,
 ): Promise<CheckOutcome | null> {
   const db = getDb();
   const server = db
@@ -247,7 +258,7 @@ export async function checkServerById(
     .where(and(eq(servers.id, serverId), eq(servers.orgId, orgId)))
     .get();
   if (!server) return null;
-  return checkServer(server);
+  return checkServer(server, actorUserId);
 }
 
 /** Mark a server as excluded from monitoring without losing its history. */

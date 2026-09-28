@@ -1,11 +1,12 @@
 import { Client } from 'ssh2';
 import type { DiagnosticsResult, FtpProtocol } from '@smt/shared';
 import type { ftpConnections, servers, storageConnections } from '../db/schema.js';
-import { HostKeyMismatchError, sshConnectConfig, type SshAuth, type SshTarget } from '../ssh/host-keys.js';
+import { HostKeyMismatchError, scanHostKey, sshConnectConfig, type SshAuth, type SshTarget } from '../ssh/host-keys.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
+import { connectSsh, jumpChain, openJumpTunnel, type JumpOptions } from '../ssh/jump.js';
 import { assertSafeHost, backendFor, decryptPassword } from '../ftp/index.js';
 import { assertSafeEndpoint, ops, resolveConnection } from '../storage/index.js';
-import { STEP_TIMEOUTS, type StepOutcome } from './steps.js';
+import { STEP_TIMEOUTS, defaultDeps, type DiagnosticsDeps, type StepOutcome } from './steps.js';
 import { diagnose, type RunOptions } from './run.js';
 import type { DiagnosticService } from './remediation.js';
 
@@ -24,16 +25,20 @@ export interface DiagnoseOptions extends RunOptions {
   auth: boolean;
   /** May the caller see a presented host key that differs from the pinned one (admin evidence)? */
   revealHostKey: boolean;
+  /** Who runs the check; jump host hops are audited under them. */
+  actorUserId?: string;
 }
 
 /**
  * Open an SSH connection through {@link sshConnectConfig} — host key checked as
- * on every connection — and close it as soon as authentication succeeds.
+ * on every connection, through the server's jump hosts when it has any — and
+ * close it as soon as authentication succeeds.
  */
 export function sshAuthCheck(
   target: SshTarget,
   auth: SshAuth,
   timeoutMs: number = STEP_TIMEOUTS.auth,
+  options: JumpOptions = {},
 ): Promise<StepOutcome> {
   const method = auth.privateKey ? 'SSH key' : 'password';
   return new Promise((resolve) => {
@@ -83,18 +88,49 @@ export function sshAuthCheck(
           return finish({ status: 'fail', detail: `The SSH handshake timed out: ${err.message}` });
         }
         finish({ status: 'fail', detail: `Could not log in: ${err.message}` });
-      })
-      .connect(config);
+      });
+    connectSsh(client, target, config, 'diagnostics', options);
   });
 }
 
+/**
+ * Host key scans for a server behind jump hosts: the target's key as presented
+ * through the chain (each hop verified against its own pinned key).
+ */
+function jumpedDeps(base: DiagnosticsDeps, target: SshTarget, options: JumpOptions): DiagnosticsDeps {
+  return {
+    ...base,
+    scanHostKey: async (_host, _port, timeoutMs, preferType) => {
+      const tunnel = await openJumpTunnel(target, 'diagnostics', options).catch((err: unknown) => {
+        // The mismatch message carries the presented key: admin-only evidence
+        if (err instanceof HostKeyMismatchError) {
+          throw new Error('A jump host presented a different host key than the one pinned; an admin must review it.');
+        }
+        throw err;
+      });
+      try {
+        return await scanHostKey(target.host, target.port, timeoutMs, preferType, tunnel?.sock);
+      } finally {
+        tunnel?.close();
+      }
+    },
+  };
+}
+
 export async function diagnoseServer(server: ServerRow, orgId: string, opts: DiagnoseOptions): Promise<DiagnosticsResult> {
-  const host = assertSafeHost(server.host);
+  const target: SshTarget = { id: server.id, host: server.host, port: server.port, username: server.username };
+  const jumpOptions: JumpOptions = { actorUserId: opts.actorUserId };
+  // Behind jump hosts only the outermost hop is reachable from here: the network
+  // steps probe the path to it, and the host key and login go through the chain.
+  const entry = jumpChain(server.id).at(-1);
+  const host = assertSafeHost(entry ? entry.host : server.host);
+  const port = entry ? entry.port : server.port;
+  const runOpts: RunOptions = entry ? { ...opts, deps: jumpedDeps(opts.deps ?? defaultDeps, target, jumpOptions) } : opts;
   return diagnose(
-    { kind: 'server', id: server.id, name: server.name, host, port: server.port, protocol: 'ssh' },
+    { kind: 'server', id: server.id, name: server.name, host: assertSafeHost(server.host), port: server.port, protocol: 'ssh' },
     {
       host,
-      port: server.port,
+      port,
       service: 'ssh',
       verifyTls: true,
       hostKey: { pinned: server.hostKeyFingerprint, pinnedType: server.hostKeyType, revealPresented: opts.revealHostKey },
@@ -110,14 +146,11 @@ export async function diagnoseServer(server: ServerRow, orgId: string, opts: Dia
               remediation: 'Give the server an SSH key or password in its settings.',
             };
           }
-          return sshAuthCheck(
-            { id: server.id, host: server.host, port: server.port, username: server.username },
-            auth,
-          );
+          return sshAuthCheck(target, auth, undefined, jumpOptions);
         },
       }),
     },
-    opts,
+    runOpts,
   );
 }
 

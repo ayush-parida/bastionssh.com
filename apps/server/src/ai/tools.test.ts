@@ -92,6 +92,7 @@ describe('ToolExecutor run_command', () => {
       'systemctl restart pg',
       undefined, // default timeout
       undefined, // no recording tap while recording is off
+      { actorUserId: expect.any(String) },
     );
   });
 
