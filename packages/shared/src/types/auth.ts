@@ -41,6 +41,17 @@ export interface SessionInfo {
   current: boolean;
 }
 
+/** A browser/network the account has signed in from; a sign-in from a new one is emailed. */
+export interface KnownDevice {
+  id: string;
+  /** Browser and OS family, e.g. "Firefox on Linux". */
+  label: string;
+  /** The network it was seen on, coarsened: 203.0.113.0/24 or 2001:db8:1::/48. */
+  ipPrefix: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 /** An organization the caller belongs to, for the org switcher. */
 export interface OrgSummary {
   orgId: string;

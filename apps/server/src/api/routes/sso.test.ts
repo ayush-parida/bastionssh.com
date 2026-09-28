@@ -278,6 +278,20 @@ describe('single sign-on (OIDC)', () => {
       expect(getDb().select().from(memberships).where(eq(memberships.orgId, orgId)).all()).toHaveLength(1);
     });
 
+    it('reports a sign-in from a new network, as other sign-in methods do', async () => {
+      const { orgId, slug } = await orgWithSso('newdev');
+      const email = `${nanoid(8).toLowerCase()}@corp.test`;
+      await ssoSignIn(slug, 'sub-newdev', email);
+      // The first sign-in of an account is not "new"
+      expect(auditFor(orgId, 'user.login_new_device')).toHaveLength(0);
+
+      address += 250; // the next /24
+      await ssoSignIn(slug, 'sub-newdev', email);
+      const rows = auditFor(orgId, 'user.login_new_device');
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.metadata!)).toMatchObject({ method: 'sso' });
+    });
+
     it('links an existing member by verified email', async () => {
       const { orgId, slug, providerId } = await orgWithSso('link', { autoProvision: false });
       const member = await seedPerson(orgId, 'admin');

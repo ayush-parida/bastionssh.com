@@ -266,13 +266,15 @@ function escapeHtml(s: string): string {
  * operator configured SMTP. Best-effort and never awaited by the request: if
  * it was not them, this is how they find out.
  */
-function notifyAccountOwner(user: { email: string; displayName: string }, subject: string, what: string, notice: string) {
+export function notifyAccountOwner(
+  user: { email: string; displayName: string },
+  subject: string,
+  what: string,
+  notice: string,
+  advice = 'If this was not you, ask an organization admin to reset your passkeys and your password right away.',
+) {
   if (!emailAvailable()) return;
-  const lines = [
-    `Hi ${user.displayName},`,
-    what,
-    'If this was not you, ask an organization admin to reset your passkeys and your password right away.',
-  ];
+  const lines = [`Hi ${user.displayName},`, what, advice];
   sendEmail({
     to: [user.email],
     subject,

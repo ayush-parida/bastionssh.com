@@ -8,8 +8,8 @@ import {
   type RegistrationResponseJSON,
 } from '@simplewebauthn/server';
 import { getDb } from '../../db/index.js';
-import { users, sessions, memberships, organizations, passkeys } from '../../db/schema.js';
-import { hashPassword, verifyPassword } from '../../auth/password.js';
+import { users, sessions, memberships, organizations, passkeys, userDevices } from '../../db/schema.js';
+import { hashPassword, verifyAgainstNothing, verifyPassword } from '../../auth/password.js';
 import {
   createSession,
   findUserSession,
@@ -49,6 +49,16 @@ import {
 } from '../../auth/backup-codes.js';
 import { audit } from '../../audit/index.js';
 import { localSignInMembership, ssoRequiredMessage, ssoSessionMayChangeCredentials, SSO_SESSION_ORG_MESSAGE } from '../../auth/sso-policy.js';
+import {
+  accountKey,
+  clearLoginFailures,
+  lockoutStatus,
+  notifyNewDeviceSignIn,
+  recordFailedLogin,
+  recordSignInDevice,
+  reportFailedPassword,
+  sendLocked,
+} from '../../auth/login-security.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { config } from '../../config/index.js';
 import { and, asc, desc, eq, gt, ne, sql } from 'drizzle-orm';
@@ -56,6 +66,7 @@ import type {
   BackupCodeSignedIn,
   BackupCodeStatus,
   GeneratedBackupCodes,
+  KnownDevice,
   Me,
   OrgSummary,
   PasskeyInfo,
@@ -147,7 +158,10 @@ function signInMembership(userId: string, reply: FastifyReply) {
   return { membership: local.membership };
 }
 
-/** Create the session for a completed sign-in, set its cookie, and audit it. */
+/**
+ * Create the session for a completed sign-in, set its cookie, and audit it.
+ * Also where every sign-in method checks for a new device.
+ */
 async function startSession(
   req: FastifyRequest,
   reply: FastifyReply,
@@ -165,6 +179,9 @@ async function startSession(
     passkeyVerified,
   });
   reply.setCookie('smt_session', session.id, { httpOnly: true, sameSite: 'lax', path: '/' });
+  // A passkey is proof enough: it ends any pause the password step is under
+  if (method === 'passkey') clearLoginFailures(accountKey(user.email));
+  const device = recordSignInDevice(user.id, req.ip, req.headers['user-agent'], session.id);
 
   if (membership) {
     // Not behind requireAuth, so fill in who this is for the audit row
@@ -174,7 +191,15 @@ async function startSession(
     else if (method === 'password+backup_code') {
       await audit(req, 'user.login_backup_code', 'user', user.id, user.email, { method, ...auditDetails });
     } else await audit(req, 'user.login_passkey', 'user', user.id, user.email, { method });
+    if (device.isNew) {
+      await audit(req, 'user.login_new_device', 'user', user.id, user.email, {
+        method,
+        device: device.label,
+        network: device.ipPrefix,
+      });
+    }
   }
+  if (device.isNew) notifyNewDeviceSignIn(user, device, req.ip);
   return {
     user: { id: user.id, email: user.email, displayName: user.displayName },
     orgId: membership?.orgId ?? null,
@@ -191,6 +216,14 @@ export async function authRoutes(app: FastifyInstance) {
     const body = loginSchema.parse(req.body);
     const db = getDb();
 
+    // Per account, on top of the per-IP limit: guesses spread over many
+    // addresses still pause the password step. Addresses with no account are
+    // counted the same way, so the answer does not reveal which exist.
+    const key = accountKey(body.email);
+    const lock = lockoutStatus(key);
+    if (lock) return sendLocked(reply, lock);
+    const attempt = recordFailedLogin(key);
+
     // Emails are case-insensitive in practice; lower() also matches rows stored
     // before addresses were normalized.
     const user = db
@@ -198,14 +231,15 @@ export async function authRoutes(app: FastifyInstance) {
       .from(users)
       .where(sql`lower(${users.email}) = ${body.email}`)
       .get();
-    if (!user || !user.passwordHash) {
+    const valid = user?.passwordHash
+      ? await verifyPassword(body.password, user.passwordHash)
+      : await verifyAgainstNothing(body.password);
+    if (!valid || !user) {
+      if (user) reportFailedPassword(req, user, attempt);
+      if (attempt.locked) return sendLocked(reply, attempt.locked);
       return reply.status(401).send({ error: 'Invalid credentials' });
     }
-
-    const valid = await verifyPassword(body.password, user.passwordHash);
-    if (!valid) {
-      return reply.status(401).send({ error: 'Invalid credentials' });
-    }
+    clearLoginFailures(key);
 
     // The password was right, so saying why is not an oracle for anything.
     const landing = signInMembership(user.id, reply);
@@ -382,6 +416,33 @@ export async function authRoutes(app: FastifyInstance) {
       scope: 'one',
       count: 1,
     });
+    return reply.status(204).send();
+  });
+
+  /** Where the caller's account has signed in from; a sign-in from anywhere else is emailed. */
+  app.get('/devices', { preHandler: requireAuth }, async (req): Promise<KnownDevice[]> => {
+    return getDb()
+      .select({
+        id: userDevices.id,
+        label: userDevices.label,
+        ipPrefix: userDevices.ipPrefix,
+        firstSeenAt: userDevices.firstSeenAt,
+        lastSeenAt: userDevices.lastSeenAt,
+      })
+      .from(userDevices)
+      .where(eq(userDevices.userId, req.user.id))
+      .orderBy(desc(userDevices.lastSeenAt))
+      .all();
+  });
+
+  /** Forget a device, so the next sign-in from it is reported as new. */
+  app.delete('/devices/:id', { preHandler: requireAuth }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const removed = getDb()
+      .delete(userDevices)
+      .where(and(eq(userDevices.id, id), eq(userDevices.userId, req.user.id)))
+      .run().changes;
+    if (!removed) return reply.status(404).send({ error: 'Device not found' });
     return reply.status(204).send();
   });
 

@@ -348,6 +348,23 @@ Then put it behind your reverse proxy of choice (Caddy / Nginx / Traefik) with T
 
 **Behind a reverse proxy (upgrade note):** earlier versions trusted `X-Forwarded-For` from anyone. The server now trusts no proxy unless told to, so an existing Caddy/Nginx/Traefik deployment must set `SMT_TRUST_PROXY` (usually `1`) — otherwise every user shares the proxy's IP, and with it one rate-limit bucket (100 requests/min overall, 10 logins/min) and one audit-log IP. The server logs a warning the first time it sees a forwarded request while this is unset. Set `SMT_TRUST_PROXY` so client IPs (used for rate limiting and the audit log) come from `X-Forwarded-For`. It defaults to `false` — trust no proxy — because trusting every hop lets any client pick its own IP. Accepted values: `true` (trust all hops; only when the app is unreachable except through the proxy), a hop count such as `1`, or a comma-separated list of proxy IPs/CIDRs such as `10.0.0.0/8,127.0.0.1`.
 
+**HTTPS with the bundled Caddy.** `deploy/docker/docker-compose.yml` has an opt-in `https` profile that adds [Caddy](https://caddyserver.com) in front of the app. Caddy obtains and renews a certificate for your domain automatically and proxies to the app; without the profile nothing changes (plain HTTP on port 8080). Point the domain's DNS at the host, open ports 80 and 443, then put this in `deploy/docker/.env`:
+
+```bash
+SMT_DOMAIN=bastion.example.com            # the public hostname
+SMT_BASE_URL=https://bastion.example.com  # must be https://$SMT_DOMAIN — passkeys are bound to this hostname
+SMT_TRUST_PROXY=1                         # client IPs come from Caddy's X-Forwarded-For
+SMT_HTTP_BIND=127.0.0.1:8080              # keep the plain-HTTP port off the network
+SMT_ACME_EMAIL=ops@example.com            # optional: certificate expiry notices
+```
+
+```bash
+cd deploy/docker
+docker compose --profile https up -d
+```
+
+Caddy refuses to start (see `docker compose logs caddy`) until `SMT_BASE_URL` is `https://$SMT_DOMAIN`, `SMT_TRUST_PROXY` is set and `SMT_HTTP_BIND` is a loopback address: the first mistake breaks passkeys, the second puts every user behind one rate-limit bucket and one audit-log IP, and the third would let anyone reaching port 8080 directly claim any client address in `X-Forwarded-For`. Passkeys enrolled while the instance ran on `localhost` do not work on the domain (they are bound to the hostname), so enroll them after the switch.
+
 **Storage backends:**
 
 - **SQLite** (default) — zero-config, perfect for solo / small teams.
@@ -420,6 +437,25 @@ Members use **Sign in with SSO** on the login page and enter the org's slug or t
 - **Suspension** is checked at every SSO sign-in and request, as for passwords. Every sign-in, refusal, link, provisioned account and configuration change is audited.
 
 Plain-`http` issuers are only accepted with `NODE_ENV=development`. **SAML is not supported**: the Node SAML libraries are either large or have a history of signature-wrapping vulnerabilities, and every provider listed above also speaks OpenID Connect.
+
+### Sign-in alerts and lockout
+
+- **New-device alerts.** Each account remembers the devices it signs in from — browser and OS family plus the client's network (/24 for IPv4, /48 for IPv6), stored as a hash. A sign-in from a new one is audited (`user.login_new_device`) and, with SMTP configured, emailed to the account. Browser updates and a changing address inside the same network do not count as new. **Settings → Known devices** lists them; forgetting one makes its next use alert again. Devices unused for 180 days are forgotten.
+- **Failed passwords.** Five wrong passwords for one account within 15 minutes, from any mix of addresses, pause password sign-in for that account — 1 minute, then 2, 4, 8, up to 15 minutes for repeat pauses, reset after a quiet day. This is on top of the per-IP limit (10 sign-ins a minute). Each failure is audited (`user.login_failed`), each pause is audited (`user.login_locked`) and the owner is emailed (at most hourly). Unknown addresses are paused the same way, so the response does not reveal which accounts exist.
+- **Why the pause is short:** anyone who knows an address can trigger it, so it must not become a way to keep someone out. **Signing in with a passkey is never paused and ends the pause**, as does an admin-issued password reset link.
+
+### Audit log
+
+**Audit Log** (admins) filters by date, action (`user.*` for a prefix) and actor, and exports every matching event as **CSV** or **JSON Lines** — `GET /api/audit/export?format=csv|jsonl&from=&to=&action=&actorEmail=&resourceType=&resourceId=` for scripts with an API token. Exports are streamed, oldest first, and are themselves audited. In CSV, cells starting with `= + - @` are prefixed with `'` so spreadsheets do not run them.
+
+Owners set, on the same page:
+
+- **Retention** — events older than this many days (default 365, 7–3650) are deleted by a daily job, which records how many it removed (`audit.pruned`).
+- **Forwarding** — every new event is copied, within about half a minute, to one target per organization:
+  - **Syslog** (RFC 5424) over UDP, TCP or TLS (RFC 6587 octet-counted framing). The event's key fields are structured data (`[bastionssh@32473 org=… actor=… action=…]`), the full event is JSON in the message. TLS verifies the collector's certificate for the hostname you enter; paste a CA bundle for a private CA.
+  - **Webhook** — `POST`s JSON batches `{"source":"bastionssh","events":[…]}`. With a signing secret, each request carries `X-BastionSSH-Timestamp` and `X-BastionSSH-Signature: sha256=<HMAC-SHA256(secret, timestamp + "." + body)>`.
+
+  Delivery is at-least-once: a batch is retried three times, then the target backs off (30 s doubling to 15 min) and nothing is skipped — the next attempt resumes where the last success stopped. Failures show on the page and the first one is audited (`audit.forwarding_failed`). Targets and secrets are encrypted at rest. Targets must resolve to public addresses — loopback, private, link-local and cloud-metadata addresses are refused, and the connection goes to the address that was checked — unless the operator allows an internal network with `SMT_AUDIT_FORWARD_ALLOW_NETS` (e.g. `10.20.0.0/16`); metadata addresses are refused regardless. Webhooks need HTTPS unless they point into such an allowed network. Changing retention or forwarding needs a passkey-verified session when the owner has a passkey.
 
 ---
 

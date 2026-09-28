@@ -86,6 +86,41 @@ export function auditAs(
   }
 }
 
+/**
+ * Audit a request that is not signed in (a failed or blocked sign-in) on
+ * behalf of the account it names, into each org that account belongs to.
+ */
+export function auditForAccount(
+  req: FastifyRequest,
+  actor: { id: string; email: string },
+  orgIds: string[],
+  action: AuditAction,
+  metadata?: Record<string, unknown>,
+) {
+  for (const orgId of orgIds) {
+    try {
+      getDb()
+        .insert(auditLog)
+        .values({
+          id: nanoid(),
+          orgId,
+          actorId: actor.id,
+          actorEmail: actor.email,
+          action,
+          resourceType: 'user',
+          resourceId: actor.id,
+          resourceName: actor.email,
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent'],
+          metadata: metadata ? JSON.stringify(metadata) : undefined,
+        })
+        .run();
+    } catch {
+      // Same rule as audit(): never break the caller
+    }
+  }
+}
+
 /** Actor recorded for events the server raises on its own (health checks, cron, TOFU). */
 export const SYSTEM_ACTOR = { id: 'system', email: 'system' } as const;
 

@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import NotificationChannels from '@/components/settings/NotificationChannels.js';
 import AccountSettings from '@/components/settings/AccountSettings.js';
 import Sessions from '@/components/settings/Sessions.js';
+import KnownDevices from '@/components/settings/KnownDevices.js';
 import Passkeys from '@/components/settings/Passkeys.js';
 import ApiTokens from '@/components/settings/ApiTokens.js';
 import { EgressIpSection } from '@/components/diagnostics/Diagnostics.js';
@@ -176,6 +177,7 @@ export default function SettingsPage() {
       <AccountSettings />
       <Passkeys />
       <Sessions />
+      <KnownDevices />
       <ApiTokens />
       <EgressIpSection />
       <DatabaseBackups />

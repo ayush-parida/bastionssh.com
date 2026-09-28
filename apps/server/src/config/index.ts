@@ -20,8 +20,9 @@ const envSchema = z.object({
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
 
   // ── Outbound email (alert notifications) ──
-  SMT_SMTP_URL: z.string().url().optional(), // smtp://user:pass@host:587 or smtps://…:465
-  SMT_SMTP_FROM: z.string().min(3).optional(), // "BastionSSH <alerts@example.com>"
+  // Blank counts as unset, so docker compose can pass them through as `${SMT_SMTP_URL:-}`
+  SMT_SMTP_URL: z.preprocess((v) => (v === '' ? undefined : v), z.string().url().optional()), // smtp://user:pass@host:587 or smtps://…:465
+  SMT_SMTP_FROM: z.preprocess((v) => (v === '' ? undefined : v), z.string().min(3).optional()), // "BastionSSH <alerts@example.com>"
 
   // ── Health monitoring ──
   SMT_MONITORING_ENABLED: z
@@ -97,6 +98,14 @@ const envSchema = z.object({
   SMT_WEBAUTHN_RP_NAME: z.string().min(1).default('BastionSSH'),
   /** Comma-separated origins allowed to complete a ceremony; defaults to SMT_BASE_URL's origin. */
   SMT_WEBAUTHN_ORIGINS: z.string().optional(),
+
+  // ── Audit log forwarding ──
+  /**
+   * Comma-separated IPs/CIDRs a syslog or webhook target may resolve to even
+   * though they are private or loopback (e.g. a collector on the LAN). Empty
+   * means only public addresses.
+   */
+  SMT_AUDIT_FORWARD_ALLOW_NETS: z.string().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -181,6 +190,27 @@ export function parseEgressIp(raw: string | undefined, rawServices: string | und
   return { mode: 'lookup', services: services?.length ? services : DEFAULT_EGRESS_IP_SERVICES };
 }
 
+/**
+ * Parse SMT_AUDIT_FORWARD_ALLOW_NETS into [address, prefix length] pairs. A bare
+ * address is a single host. Throws on anything that is not an IP or CIDR.
+ */
+export function parseAllowNets(raw: string | undefined): { address: string; prefix: number; family: 4 | 6 }[] {
+  return (raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [address = '', bits] = entry.split('/');
+      const family = isIP(address);
+      const max = family === 6 ? 128 : 32;
+      const prefix = bits === undefined ? max : Number(bits);
+      if (!family || !/^\d+$/.test(bits ?? String(max)) || prefix < 0 || prefix > max) {
+        throw new Error(`SMT_AUDIT_FORWARD_ALLOW_NETS: "${entry}" is not an IP address or CIDR`);
+      }
+      return { address, prefix, family: family as 4 | 6 };
+    });
+}
+
 /** The Vite dev server (apps/web/vite.config.ts), which proxies /api to this server. */
 export const DEV_WEB_ORIGINS = ['http://localhost:5173'];
 
@@ -240,6 +270,14 @@ try {
 let egressIp: EgressIpConfig;
 try {
   egressIp = parseEgressIp(env.SMT_EGRESS_IP, env.SMT_EGRESS_IP_SERVICES);
+} catch (err) {
+  console.error(`Invalid environment variables: ${(err as Error).message}`);
+  process.exit(1);
+}
+
+let auditForwardAllowNets: ReturnType<typeof parseAllowNets>;
+try {
+  auditForwardAllowNets = parseAllowNets(env.SMT_AUDIT_FORWARD_ALLOW_NETS);
 } catch (err) {
   console.error(`Invalid environment variables: ${(err as Error).message}`);
   process.exit(1);
@@ -312,6 +350,7 @@ export const config = {
     dir: env.SMT_RECORDINGS_DIR,
     maxBytes: env.SMT_RECORDING_MAX_BYTES,
   },
+  auditForward: { allowNets: auditForwardAllowNets },
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,
   adminEmail: env.SMT_ADMIN_EMAIL,

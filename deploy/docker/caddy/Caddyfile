@@ -1,0 +1,15 @@
+# Used by the `https` profile in ../docker-compose.yml. check-env.sh validates
+# the environment before Caddy starts.
+{
+	{$SMT_ACME_EMAIL_OPTION}
+}
+
+# A bare hostname: Caddy gets a certificate for it and redirects HTTP to HTTPS.
+{$SMT_DOMAIN} {
+	encode zstd gzip
+
+	# Caddy replaces any X-Forwarded-For the client sent with the real client
+	# address, which is why smt can trust exactly one hop (SMT_TRUST_PROXY=1).
+	# WebSockets (terminals) and server-sent events (AI chat) pass through as-is.
+	reverse_proxy smt:8080
+}

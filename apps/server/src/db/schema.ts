@@ -123,6 +123,49 @@ export const backupCodes = sqliteTable(
   }),
 );
 
+/**
+ * Devices an account has signed in from: the browser/OS family plus the
+ * client's /24 (IPv6 /48), hashed. A sign-in from a new one emails the owner.
+ */
+export const userDevices = sqliteTable(
+  'user_devices',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    deviceHash: text('device_hash').notNull(),
+    label: text('label').notNull(), // "Firefox on Linux"
+    ipPrefix: text('ip_prefix').notNull(), // 203.0.113.0/24
+    firstSeenAt: text('first_seen_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    lastSeenAt: text('last_seen_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    userHashIdx: uniqueIndex('user_devices_user_hash_idx').on(t.userId, t.deviceHash),
+  }),
+);
+
+/**
+ * Failed password sign-ins per account. Keyed by an HMAC of the email typed,
+ * not the user id, so an address with no account locks the same way.
+ */
+export const loginFailures = sqliteTable('login_failures', {
+  accountKey: text('account_key').primaryKey(),
+  failures: integer('failures').notNull().default(0),
+  windowStartedAt: text('window_started_at').notNull(),
+  // Password sign-in is refused until then; a passkey sign-in still works and clears it
+  lockedUntil: text('locked_until'),
+  // Locks in a row, for the exponential backoff; forgotten after a quiet day
+  lockouts: integer('lockouts').notNull().default(0),
+  lastFailureAt: text('last_failure_at').notNull(),
+  // Last time the owner was emailed about it
+  notifiedAt: text('notified_at'),
+});
+
 /** One-time, admin-issued links that let a user set a new password. Only the hash is stored. */
 export const passwordResets = sqliteTable('password_resets', {
   id: text('id').primaryKey(),
@@ -189,6 +232,8 @@ export const organizations = sqliteTable('organizations', {
   restrictedSeeServerNames: integer('restricted_see_server_names', { mode: 'boolean' }).notNull().default(true),
   // Longest access a member may request, in minutes
   accessRequestMaxMinutes: integer('access_request_max_minutes').notNull().default(480),
+  // Audit rows older than this are pruned by the daily maintenance job
+  auditRetentionDays: integer('audit_retention_days').notNull().default(365),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -921,19 +966,53 @@ export const sessionRecordingCommands = sqliteTable(
 
 // ── Audit Log ─────────────────────────────────────────────────────────────────
 
-export const auditLog = sqliteTable('audit_log', {
-  id: text('id').primaryKey(),
-  orgId: text('org_id').notNull(),
-  actorId: text('actor_id').notNull(),
-  actorEmail: text('actor_email').notNull(),
-  action: text('action').notNull(),
-  resourceType: text('resource_type').notNull(),
-  resourceId: text('resource_id'),
-  resourceName: text('resource_name'),
-  ipAddress: text('ip_address'),
-  userAgent: text('user_agent'),
-  metadata: text('metadata'), // JSON
+export const auditLog = sqliteTable(
+  'audit_log',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id').notNull(),
+    actorId: text('actor_id').notNull(),
+    actorEmail: text('actor_email').notNull(),
+    action: text('action').notNull(),
+    resourceType: text('resource_type').notNull(),
+    resourceId: text('resource_id'),
+    resourceName: text('resource_name'),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    metadata: text('metadata'), // JSON
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    orgCreatedIdx: index('audit_log_org_created_idx').on(t.orgId, t.createdAt),
+  }),
+);
+
+/**
+ * Where an org's new audit rows are copied to: a syslog collector (RFC 5424)
+ * or a webhook. The target and any secret live in the vaulted config. The
+ * cursor is the last row delivered, by (created_at, rowid).
+ */
+export const auditForwarders = sqliteTable('audit_forwarders', {
+  orgId: text('org_id')
+    .primaryKey()
+    .references(() => organizations.id, { onDelete: 'cascade' }),
+  type: text('type').notNull(), // syslog | webhook
+  enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+  encryptedConfig: text('encrypted_config').notNull(), // JSON, see audit/forward.ts
+  // Protocol + host (or the masked URL) only, safe to show in the UI
+  targetHint: text('target_hint').notNull(),
+  cursorCreatedAt: text('cursor_created_at').notNull(),
+  cursorRowid: integer('cursor_rowid').notNull().default(0),
+  lastStatus: text('last_status'), // ok | failed
+  lastError: text('last_error'),
+  lastSentAt: text('last_sent_at'),
+  createdBy: text('created_by').notNull(),
   createdAt: text('created_at')
+    .notNull()
+    .$defaultFn(() => new Date().toISOString()),
+  updatedAt: text('updated_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });

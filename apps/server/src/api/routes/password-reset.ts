@@ -8,6 +8,7 @@ import { hashPassword } from '../../auth/password.js';
 import { invalidateUserSessions } from '../../auth/session.js';
 import { hashResetToken, resetState } from '../../auth/password-reset.js';
 import { maskEmail } from '../../auth/invite.js';
+import { accountKey, clearLoginFailures } from '../../auth/login-security.js';
 import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 
@@ -118,6 +119,8 @@ export async function publicPasswordResetRoutes(app: FastifyInstance) {
       const revoked = invalidateUserSessions(user.id);
       // ...and whatever those sessions opened: terminals, file sessions, agent chats
       const live = revokeLiveAccess(user.id);
+      // A new password from an admin-issued link ends any pause earlier guesses caused
+      clearLoginFailures(accountKey(user.email));
 
       // Unauthenticated route: attribute the audit row to the account that was reset
       req.user = { id: user.id, email: user.email, displayName: user.displayName };

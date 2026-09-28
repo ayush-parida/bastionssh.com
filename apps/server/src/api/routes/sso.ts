@@ -8,6 +8,7 @@ import { memberships, organizations, sessions, ssoProviders, userIdentities } fr
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { createSession } from '../../auth/session.js';
+import { notifyNewDeviceSignIn, recordSignInDevice } from '../../auth/login-security.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import {
   asProviderKind,
@@ -396,6 +397,16 @@ export async function publicSsoRoutes(app: FastifyInstance) {
         passkeyVerified,
         ...(Array.isArray(claims.amr) && { amr: claims.amr.slice(0, 10) }),
       });
+      // New-device alerts cover SSO sign-ins as they do every other method
+      const device = recordSignInDevice(user.id, req.ip, req.headers['user-agent'], session.id);
+      if (device.isNew) {
+        await audit(req, 'user.login_new_device', 'user', user.id, user.email, {
+          method: 'sso',
+          device: device.label,
+          network: device.ipPrefix,
+        });
+        notifyNewDeviceSignIn(user, device, req.ip);
+      }
 
       // The web app picks the session up from /login and applies the passkey policy from /auth/me
       return reply.redirect(webUrl('/login?sso=done'));

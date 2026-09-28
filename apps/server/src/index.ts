@@ -7,6 +7,8 @@ import { holdServerLock } from './backup/lock.js';
 import { databasePath } from './db/index.js';
 import { startRecordingMaintenance } from './recordings/scheduler.js';
 import { startAccessExpiry } from './auth/access-grants.js';
+import { startMaintenance } from './audit/retention.js';
+import { startAuditForwarding } from './audit/forward.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -52,6 +54,9 @@ async function main() {
   startBackupScheduler();
   // Time-bound server grants: removes expired ones and closes what is still open on them
   startAccessExpiry();
+  // Daily audit-retention prune, and delivery of new audit rows to each org's syslog/webhook target
+  startMaintenance();
+  startAuditForwarding();
   if (config.smtp) logger.info('Email notifications enabled (SMTP configured)');
 
   try {
