@@ -18,6 +18,8 @@ import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
 import { hostKeyPanelPath } from '@/lib/host-keys.js';
 import { HostKeyBadge } from '@/components/servers/HostKey.js';
+import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/components/diagnostics/Diagnostics.js';
+import type { DiagnoseTarget } from '@/lib/diagnostics.js';
 
 interface ServerFormState {
   name: string;
@@ -65,6 +67,7 @@ export default function ServersPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<ServerFormState>(empty);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -129,7 +132,11 @@ export default function ServersPage() {
       const res = await api.post<{ sessionId: string; wsUrl: string }>('/ssh-sessions', { serverId: server.id });
       navigate(`/servers/${server.id}/terminal`, { state: { sessionId: res.sessionId, serverName: server.name } });
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : 'Failed to open terminal');
+      connectionFailedToast(
+        err instanceof Error ? err.message : 'Failed to open terminal',
+        { kind: 'server', id: server.id, name: server.name },
+        setDiagnosing,
+      );
     }
   }
 
@@ -362,7 +369,7 @@ export default function ServersPage() {
                   </button>
                 ))}
               </div>
-              <div className="flex gap-2 mt-auto">
+              <div className="flex flex-wrap gap-2 mt-auto">
                 <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
                   <Terminal size={12} /> Connect
                 </button>
@@ -372,6 +379,7 @@ export default function ServersPage() {
                 <button onClick={() => navigate(`/servers/${s.id}/health`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Activity size={12} /> Health
                 </button>
+                <DiagnoseButton target={{ kind: 'server', id: s.id, name: s.name }} onOpen={setDiagnosing} />
                 <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Pencil size={12} /> Edit
                 </button>
@@ -383,6 +391,8 @@ export default function ServersPage() {
           ))}
         </div>
       )}
+
+      {diagnosing && <DiagnosticsDialog target={diagnosing} onClose={() => setDiagnosing(null)} />}
     </div>
   );
 }

@@ -24,6 +24,8 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { FtpHostKeySection } from '@/components/ftp/FtpHostKey.js';
+import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/components/diagnostics/Diagnostics.js';
+import { isConnectivityFailure, type DiagnoseTarget } from '@/lib/diagnostics.js';
 
 interface ConnectionForm {
   name: string;
@@ -65,9 +67,11 @@ export default function FtpPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const canManage = useHasRole('admin');
+  const canDiagnose = useHasRole('operator');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<ConnectionForm>(empty);
+  const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
 
   const { data: connections, isLoading } = useQuery<FtpConnection[]>({
     queryKey: QUERY_KEY,
@@ -108,15 +112,19 @@ export default function FtpPage() {
   });
 
   const testMutation = useMutation({
-    mutationFn: (id: string) => api.post<FtpTestResult>(`/ftp/connections/${id}/test`),
-    onSuccess: (result) => {
+    mutationFn: (c: FtpConnection) => api.post<FtpTestResult>(`/ftp/connections/${c.id}/test`),
+    onSuccess: (result, c) => {
       invalidate();
       if (result.ok) {
         toast.success(
           `Connected — logged in at ${result.workingDirectory ?? '/'} (${result.entryCount ?? 0} entries)`,
         );
       } else {
-        toast.error(result.error ?? 'Connection failed');
+        connectionFailedToast(
+          result.error ?? 'Connection failed',
+          { kind: 'ftp_connection', id: c.id, name: c.name },
+          setDiagnosing,
+        );
       }
     },
     onError: (err: Error) => toast.error(err.message),
@@ -401,19 +409,31 @@ export default function FtpPage() {
                   {c.lastStatus === 'ok'
                     ? `Connected${c.lastTestedAt ? ` · ${new Date(c.lastTestedAt).toLocaleString()}` : ''}`
                     : `Failed: ${c.lastError ?? 'unknown error'}`}
+                  {c.lastStatus !== 'ok' && isConnectivityFailure(c.lastError) && canDiagnose && (
+                    <button
+                      onClick={() => setDiagnosing({ kind: 'ftp_connection', id: c.id, name: c.name })}
+                      className="text-primary ml-1 shrink-0 font-medium hover:underline"
+                    >
+                      Run diagnostics
+                    </button>
+                  )}
                 </p>
               )}
-              <div className="mt-auto flex gap-2">
+              <div className="mt-auto flex flex-wrap gap-2">
                 <button
                   onClick={() => navigate(`/ftp/${c.id}`)}
                   className="bg-primary/10 text-primary hover:bg-primary/20 flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"
                 >
                   <FolderOpen size={12} /> Browse
                 </button>
+                <DiagnoseButton
+                  target={{ kind: 'ftp_connection', id: c.id, name: c.name }}
+                  onOpen={setDiagnosing}
+                />
                 {canManage && (
                   <>
                     <button
-                      onClick={() => testMutation.mutate(c.id)}
+                      onClick={() => testMutation.mutate(c)}
                       disabled={testMutation.isPending}
                       className="text-muted-foreground hover:bg-muted flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
                     >
@@ -446,6 +466,8 @@ export default function FtpPage() {
           ))}
         </div>
       )}
+
+      {diagnosing && <DiagnosticsDialog target={diagnosing} onClose={() => setDiagnosing(null)} />}
     </div>
   );
 }

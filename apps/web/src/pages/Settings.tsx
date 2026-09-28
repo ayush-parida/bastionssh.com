@@ -9,6 +9,7 @@ import AccountSettings from '@/components/settings/AccountSettings.js';
 import Sessions from '@/components/settings/Sessions.js';
 import Passkeys from '@/components/settings/Passkeys.js';
 import ApiTokens from '@/components/settings/ApiTokens.js';
+import { EgressIpSection } from '@/components/diagnostics/Diagnostics.js';
 
 interface ProviderForm {
   name: string;
@@ -175,6 +176,7 @@ export default function SettingsPage() {
       <Passkeys />
       <Sessions />
       <ApiTokens />
+      <EgressIpSection />
     </div>
   );
 }
