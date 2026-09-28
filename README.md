@@ -29,6 +29,9 @@
   - Explain command output and logs
   - Diagnose errors
   - Generate scripts on the fly
+- 🩺 **Connectivity Diagnostics** — One click walks DNS, TCP, TLS or the SSH banner, the host key and (optionally) a login for a server, FTP/SFTP or storage connection, says which step failed and what to fix, and shows the app's egress IP for firewall rules.
+- 🎥 **Session Recording** — Terminal sessions and one-shot command runs are recorded as asciicast and can be replayed in the browser or downloaded, with a searchable command log.
+- 🪜 **Jump Hosts & Private Networks** — Reach servers through one or more bastions (like `ssh -J`), or through a small outbound agent on a private network that needs no inbound port.
 - 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
 - 🔒 **Secure by Default** — All keys and credentials encrypted at rest. Self-hosted, no telemetry, no cloud lock-in.
 - 📦 **Easy to Distribute** — Single Docker image, `docker compose` one-liner, or prebuilt binaries.
@@ -272,6 +275,40 @@ Some hosts only speak FTP. Add one under **FTP** with a host, port, protocol and
 
 Uploads are capped by `SMT_FTP_MAX_UPLOAD_BYTES` (default 1 GiB).
 
+**SFTP connections** also verify the server's host key (pinned on first use, or scanned and pinned by an admin beforehand) and can log in with one of the org's SSH keys instead of a password (a retired key is refused, and a key still used by a connection cannot be deleted). **Restrict to start directory** (on by default for new connections) keeps every path inside the start or login directory; on SFTP symlinks are resolved before each operation, and refusals are audited as `ftp.path_refused`. Recursive deletes over SFTP stop at 64 levels or 10,000 entries. A single SFTP request, or a stalled transfer, fails after `SMT_SFTP_OP_TIMEOUT_MS` (default 30000).
+
+---
+
+## 🩺 Connectivity diagnostics
+
+**Diagnose** on a server, FTP/SFTP or storage connection (and offered when a terminal fails to connect) runs the checks one by one and stops at the first failure: DNS, TCP, TLS or the protocol banner, the host key against the pinned one, and — only when you tick it — a login with the stored credentials. Each failed step says what to check next, including firewall rules to paste with this app's egress IP, which is also shown under **Settings**. Operators and up can run it (per-server access applies), each run is audited, and runs are limited to 10 a minute per user. Behind a jump host the network checks target the first hop and the host key and login go through the chain; behind an agent they run over its tunnel.
+
+The egress IP is looked up from `SMT_EGRESS_IP_SERVICES` (default `https://api.ipify.org,https://ifconfig.me/ip`, cached 10 minutes). Set `SMT_EGRESS_IP` to a fixed address (e.g. a NAT gateway the echo services cannot see), or to `off` to never look it up.
+
+---
+
+## 🎥 Session recording
+
+Every terminal session and one-shot command run (saved commands, AI-run commands) is recorded in [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/) format, gzipped when it ends. **Recordings** lists them with filters; the player replays the output with idle gaps shortened, and the command log jumps to each command. Admins and owners see the whole org's recordings, everyone else only their own, and never one on a server they cannot access. Views and downloads are audited.
+
+Owners set, on the Recordings page, whether recording is on (default on), whether keystrokes are captured too (default off — they can contain passwords typed at prompts), and how long recordings are kept (default 90 days, pruned daily). Only owners can delete a recording, with a passkey confirmation when they have one.
+
+Recordings are files under `SMT_RECORDINGS_DIR` (default `/data/recordings`, inside the data volume), capped at `SMT_RECORDING_MAX_BYTES` (default 50 MiB uncompressed) each. They are **not** part of the database backups; back that directory up separately if you need them. If the directory cannot be written, sessions still open, unrecorded, and the error is logged.
+
+---
+
+## 🪜 Jump hosts and private networks
+
+**Jump hosts.** An admin can pick another server of the org as a server's **Jump host** in the server form, like `ssh -J`; chains of up to 3 hops work. Every connection — terminal, commands, cron jobs, file browser, health checks, host key scans and diagnostics — connects to each hop with that hop's own credentials and host key check, then to the target over a tunnel with the target's host key check. Using a server does not require access to its jump host; each hop is audited as `server.jump`. Deleting a jump host makes the servers behind it connect directly.
+
+**Connectivity agents.** For servers with no inbound SSH reachable from the app, an admin creates an agent under **Agents**. The install command shown once (it carries the agent's token) installs a small Node.js (18+) service under systemd on a host in that network, which keeps an outbound WebSocket to `SMT_BASE_URL` open. Pick the agent as the server's route in the server form; the app then reaches the server's SSH port through the agent. The agent only ever dials its own loopback (`127.0.0.1`) on the ports listed in `BASTION_ALLOWED_PORTS` (default 22), and it is treated as untrusted transport: host keys are still verified end to end, so pin the server's fingerprint up front where you can. A server uses either a jump host or an agent, not both (a jump host may itself sit behind an agent). Revoking an agent drops its connection at once, and its servers fail closed rather than connecting directly. Agent connections live in the app process, so cron jobs run by a separate worker cannot use them.
+
+---
+
+## 🔁 SSH key rotation
+
+**Rotate** on a server (or several at once from **SSH Keys**) generates a new key, adds it to `~/.ssh/authorized_keys` keeping the old line's options, proves a login with it, switches the server over, and removes the old key — rolling back at whichever step fails. A key still used by other servers on the same account, a cloud account or an SFTP connection is left in place and not retired; otherwise it is retired and refused from then on. Rotation is admin-only, needs a passkey confirmation when the admin has one, and every step is recorded in the rotation history and the audit log. Keys older than 180 days are flagged in the UI. Short-lived SSH certificates are not supported yet; see [docs/ssh-certificates.md](docs/ssh-certificates.md).
+
 ---
 
 ## 👥 Collaboration
@@ -321,7 +358,6 @@ services:
       - SMT_BASE_URL=https://bastionssh.yourcompany.com
       - SMT_ENCRYPTION_KEY=${SMT_ENCRYPTION_KEY} # generate once, keep secret
       - SMT_DB_URL=postgres://bastionssh:bastionssh@db:5432/bastionssh # optional; SQLite by default
-      - SMT_OAUTH_PROVIDER=google # optional SSO
     ports:
       - '8080:8080'
     volumes:
@@ -482,10 +518,10 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 
 - SSH keys and API credentials encrypted at rest.
 - All traffic between browser and app is local (or HTTPS if you put a reverse proxy in front).
-- No telemetry. No external calls except to the AI provider you configure.
+- No telemetry. Outbound calls go only to what you configure (AI provider, notification channels, SSO, audit forwarding) plus the egress IP lookup used by diagnostics (`SMT_EGRESS_IP=off` disables it).
 - Self-hosted — your data never leaves your infrastructure.
 
-> ⚠️ For production deployments, run behind a reverse proxy (Caddy, Nginx, Traefik) with TLS and authentication.
+> ⚠️ For production deployments, serve over HTTPS: use the compose file's `https` profile (bundled Caddy, see above) or your own reverse proxy (Caddy, Nginx, Traefik) with TLS.
 
 ---
 
@@ -517,7 +553,7 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request; run t
 
 ```bash
 pnpm install
-pnpm --filter @smt/shared --filter @smt/cron-parser run build   # the server imports their dist/
+pnpm --filter @smt/shared --filter @smt/cron-parser --filter @smt/agent run build   # the server imports their dist/
 pnpm typecheck
 pnpm lint          # ESLint flat config in eslint.config.js
 pnpm test          # vitest: server routes and cron-parser
