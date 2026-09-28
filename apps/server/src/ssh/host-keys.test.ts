@@ -202,6 +202,54 @@ describe('checkHostKey', () => {
     expect(alertsFor(id)).toHaveLength(1);
   });
 
+  it('caps audit rows for a host alternating between keys, and counts what it held back', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const id = seedServer(orgId, userId);
+      hk.checkHostKey(id, blobOf(ED25519_LINE), 'terminal');
+      const other = ed25519Blob();
+      const otherFp = hk.hostKeyFingerprint(other);
+
+      // A, B, A, B, A: every one differs from the mismatch on file
+      for (const blob of [blobOf(RSA_LINE), other, blobOf(RSA_LINE), other, blobOf(RSA_LINE)]) {
+        expect(hk.checkHostKey(id, blob, 'exec').ok).toBe(false);
+      }
+      const rows = () => auditFor(id, 'server.host_key_mismatch').map((a) => JSON.parse(a.metadata!));
+      expect(rows().map((m) => m.presented)).toEqual([RSA_FP, otherFp]);
+      expect(rows().every((m) => m.suppressed === undefined)).toBe(true);
+      // The mismatch on file still follows the latest key
+      expect(row(id).hostKeyMismatchFingerprint).toBe(RSA_FP);
+
+      // Past the window, the next row for that key reports what was held back
+      vi.setSystemTime(Date.now() + hk.MISMATCH_AUDIT_WINDOW_MS);
+      hk.checkHostKey(id, other, 'exec');
+      hk.checkHostKey(id, blobOf(RSA_LINE), 'exec');
+      expect(rows().slice(2)).toMatchObject([
+        { presented: otherFp, suppressed: 1 },
+        { presented: RSA_FP, suppressed: 2 },
+      ]);
+
+      // Re-pinning changes the expected key: a mismatch against it is new and audited at once
+      hk.pinHostKey(row(id), otherFp, 'ssh-ed25519', userId);
+      hk.checkHostKey(id, blobOf(RSA_LINE), 'exec');
+      expect(rows().at(-1)).toMatchObject({ expected: otherFp, presented: RSA_FP });
+      expect(rows().at(-1)!.suppressed).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('limits per server: the same keys on another server are audited independently', () => {
+    const a = seedServer(orgId, userId);
+    const b = seedServer(orgId, userId);
+    for (const id of [a, b]) {
+      hk.checkHostKey(id, blobOf(ED25519_LINE), 'terminal');
+      hk.checkHostKey(id, blobOf(RSA_LINE), 'terminal');
+    }
+    expect(auditFor(a, 'server.host_key_mismatch')).toHaveLength(1);
+    expect(auditFor(b, 'server.host_key_mismatch')).toHaveLength(1);
+  });
+
   it('pinning or forgetting clears the mismatch and resolves the alert', () => {
     const id = seedServer(orgId, userId);
     hk.checkHostKey(id, blobOf(ED25519_LINE), 'terminal');
