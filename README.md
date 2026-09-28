@@ -279,6 +279,7 @@ Work as a team without sharing SSH keys over Slack ever again.
 
 - **Organizations & workspaces** — Group your team under a shared environment.
 - **Roles & permissions** — `Owner`, `Admin`, `Operator`, `Viewer`. Fine-grained access per server, key, command, or cron job.
+- **Time-limited access** — Members restricted to some servers can request others for a reason and a duration (up to 8 hours by default, configurable). An admin other than the requester approves, optionally for less time, or denies. Access ends by itself: expired grants stop working immediately, and open terminals and file sessions on them are closed within a minute. Admins can also grant time-bound access directly. By default restricted members can see the *names* (only) of servers they cannot use, so they know what to ask for; an org setting turns this off, and then they can only extend access they already have.
 - **Shared resources** — Servers, SSH keys, saved commands, and cron jobs can be private to a user or shared with the team.
 - **Invite by email or link** — Onboard teammates in seconds.
 - **Audit log** — Every connection, command run, key access, and config change is recorded with the actor, timestamp, and target.
