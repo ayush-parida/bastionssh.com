@@ -8,6 +8,9 @@ export interface ResolvedServerAuth {
   auth: { privateKey?: string; password?: string };
 }
 
+/** A retired key was removed from the servers it was rotated off; it is never offered again. */
+export const RETIRED_KEY_MESSAGE = 'This SSH key was retired by a key rotation and can no longer be used';
+
 export class CredentialError extends Error {
   constructor(
     message: string,
@@ -45,6 +48,7 @@ export async function resolveServerAuth(
       .where(and(eq(sshKeys.id, effectiveKeyId), eq(sshKeys.orgId, orgId)))
       .get();
     if (!key) throw new CredentialError('SSH key not found', 404);
+    if (key.retiredAt) throw new CredentialError(RETIRED_KEY_MESSAGE, 409);
     return { server, auth: { privateKey: await vault.decrypt(key.encryptedPrivateKey, key.id) } };
   }
 

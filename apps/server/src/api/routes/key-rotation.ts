@@ -1,0 +1,112 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { and, desc, eq, inArray, or } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
+import type { BulkRotateKeysResponse } from '@smt/shared';
+import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
+import { requireStepUpIfPasskeys } from '../../auth/passkey.js';
+import { getDb } from '../../db/index.js';
+import { keyRotations, servers } from '../../db/schema.js';
+import { audit, auditActorOf } from '../../audit/index.js';
+import { createRotations, rotationView, runRotation, runRotations } from '../../ssh/key-rotation.js';
+
+const rotateSchema = z.object({
+  type: z.enum(['rsa', 'ed25519', 'ecdsa']).optional(),
+});
+
+const bulkRotateSchema = rotateSchema.extend({
+  serverIds: z.array(z.string().min(1)).min(1).max(200),
+});
+
+const historyQuery = z.object({
+  serverId: z.string().optional(),
+  keyId: z.string().optional(),
+  batchId: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+/**
+ * SSH key rotation (see ssh/key-rotation.ts). Rotating changes who can log in
+ * to a server, so it is admin-only and needs a passkey step-up whenever the
+ * admin has a passkey; the history is readable by anyone who can see the server.
+ */
+export async function keyRotationRoutes(app: FastifyInstance) {
+  app.addHook('preHandler', requireAuth);
+
+  /** GET /api/keys/rotations?serverId=&keyId=&batchId=&limit= — newest first */
+  app.get('/keys/rotations', async (req) => {
+    const query = historyQuery.parse(req.query);
+    return getDb()
+      .select()
+      .from(keyRotations)
+      .where(
+        and(
+          eq(keyRotations.orgId, req.orgId),
+          accessibleServerFilter(req, keyRotations.serverId),
+          query.serverId ? eq(keyRotations.serverId, query.serverId) : undefined,
+          query.batchId ? eq(keyRotations.batchId, query.batchId) : undefined,
+          query.keyId
+            ? or(eq(keyRotations.oldKeyId, query.keyId), eq(keyRotations.newKeyId, query.keyId))
+            : undefined,
+        ),
+      )
+      .orderBy(desc(keyRotations.createdAt))
+      .limit(query.limit)
+      .all()
+      .map(rotationView);
+  });
+
+  /** POST /api/servers/:id/rotate-key {type?} — runs to the end and returns the record */
+  app.post('/servers/:id/rotate-key', { preHandler: requireRole('admin') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = rotateSchema.parse(req.body ?? {});
+    if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
+    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
+    const server = getDb()
+      .select()
+      .from(servers)
+      .where(and(eq(servers.id, id), eq(servers.orgId, req.orgId)))
+      .get();
+    if (!server) return reply.status(404).send({ error: 'Not found' });
+
+    const [rotation] = createRotations(req.orgId, [server], req.user.id, null);
+    return runRotation(rotation!.id, auditActorOf(req), { type: body.type });
+  });
+
+  /**
+   * POST /api/keys/rotate {serverIds, type?} — queue one rotation per server
+   * and run them one after another in the background. Answers 202 at once;
+   * poll GET /api/keys/rotations?batchId= for progress.
+   */
+  app.post('/keys/rotate', { preHandler: requireRole('admin') }, async (req, reply) => {
+    const body = bulkRotateSchema.parse(req.body);
+    if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
+    const serverIds = [...new Set(body.serverIds)];
+    if (serverIds.some((id) => !canAccessServer(req, id))) {
+      return reply.status(404).send({ error: 'Server not found' });
+    }
+    const rows = getDb()
+      .select()
+      .from(servers)
+      .where(and(eq(servers.orgId, req.orgId), inArray(servers.id, serverIds)))
+      .all();
+    // Keep the order the servers were selected in
+    const ordered = serverIds.map((id) => rows.find((r) => r.id === id)!);
+
+    const batchId = nanoid();
+    const rotations = createRotations(req.orgId, ordered, req.user.id, batchId);
+    await audit(req, 'ssh_key.rotate_bulk', 'key_rotation', batchId, undefined, {
+      serverIds,
+      type: body.type ?? null,
+    });
+
+    void runRotations(
+      rotations.map((r) => r.id),
+      auditActorOf(req),
+      { type: body.type },
+    );
+    const response: BulkRotateKeysResponse = { batchId, rotations: rotations.map(rotationView) };
+    return reply.status(202).send(response);
+  });
+}

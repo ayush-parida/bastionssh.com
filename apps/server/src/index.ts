@@ -5,6 +5,7 @@ import { startCloudSync } from './cloud/scheduler.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
+import { markInterruptedRotations } from './ssh/key-rotation.js';
 import logger from './logger.js';
 
 async function main() {
@@ -14,6 +15,8 @@ async function main() {
   logger.info('Database migrations complete');
 
   await seedDefaultAdmin();
+  // Rotations run in this process; any still open were cut short by a restart
+  markInterruptedRotations();
 
   const app = await buildApp();
 

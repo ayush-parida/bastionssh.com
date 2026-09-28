@@ -322,3 +322,74 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const KEY_ROTATION_TAG = '0017_key_rotation';
+
+describe('migration 0017 (key rotation)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(KEY_ROTATION_TAG);
+  });
+
+  it('keeps existing keys active and their servers on them', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < KEY_ROTATION_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO ssh_keys (id, org_id, name, type, public_key, fingerprint, encrypted_private_key, key_version, created_by, created_at, updated_at)
+        VALUES ('k1', 'o1', 'deploy', 'ed25519', 'ssh-ed25519 AAAA', 'SHA256:x', 'enc', 1, 'u1', '2024-01-01', '2024-01-01');
+      INSERT INTO servers (id, org_id, name, host, username, default_key_id, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 'root', 'k1', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [KEY_ROTATION_TAG]);
+
+    expect(
+      db.prepare('SELECT id, name, encrypted_private_key, created_at, retired_at, rotated_from_key_id FROM ssh_keys').get(),
+    ).toEqual({
+      id: 'k1',
+      name: 'deploy',
+      encrypted_private_key: 'enc',
+      created_at: '2024-01-01',
+      retired_at: null,
+      rotated_from_key_id: null,
+    });
+    expect(db.prepare('SELECT default_key_id FROM servers').get()).toEqual({ default_key_id: 'k1' });
+    expect(db.prepare('SELECT count(*) AS n FROM key_rotations').get()).toEqual({ n: 0 });
+  });
+
+  it('keeps history when a server is deleted and drops it with the org', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 'root', 'u1', 'now', 'now');
+      INSERT INTO key_rotations (id, org_id, server_id, server_name, old_key_id, old_fingerprint, started_by, created_at)
+        VALUES ('r1', 'o1', 'srv', 's', 'k-gone', 'SHA256:x', 'u1', 'now');
+    `);
+    expect(db.prepare('SELECT status, warnings, old_key_retired FROM key_rotations').get()).toEqual({
+      status: 'pending',
+      warnings: '[]',
+      old_key_retired: 0,
+    });
+
+    db.exec(`DELETE FROM servers WHERE id = 'srv'`);
+    expect(db.prepare('SELECT server_id, server_name FROM key_rotations').get()).toEqual({ server_id: null, server_name: 's' });
+
+    db.exec(`DELETE FROM organizations WHERE id = 'o1'`);
+    expect(db.prepare('SELECT count(*) AS n FROM key_rotations').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const keyColumns = (sqlite.prepare('PRAGMA table_info(ssh_keys)').all() as { name: string }[]).map((c) => c.name);
+    expect(keyColumns).toEqual(expect.arrayContaining(['retired_at', 'rotated_from_key_id']));
+    const rotationColumns = (sqlite.prepare('PRAGMA table_info(key_rotations)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    expect(rotationColumns).toEqual(expect.arrayContaining(['batch_id', 'status', 'step', 'warnings', 'finished_at']));
+  });
+});

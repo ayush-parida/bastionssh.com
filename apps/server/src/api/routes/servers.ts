@@ -5,7 +5,7 @@ import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { servers, sshKeys } from '../../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
@@ -79,13 +79,13 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
   };
 }
 
-/** A server may only point at a vaulted key from its own org. */
+/** A server may only point at a vaulted key from its own org that a rotation has not retired. */
 function keyBelongsToOrg(orgId: string, keyId: string): boolean {
   return (
     getDb()
       .select({ id: sshKeys.id })
       .from(sshKeys)
-      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId)))
+      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId), isNull(sshKeys.retiredAt)))
       .get() !== undefined
   );
 }
@@ -110,7 +110,7 @@ export async function serverRoutes(app: FastifyInstance) {
       body.defaultKeyId &&
       !keyBelongsToOrg(req.orgId, body.defaultKeyId)
     ) {
-      return reply.status(400).send({ error: 'Unknown SSH key' });
+      return reply.status(400).send({ error: 'Unknown or retired SSH key' });
     }
     const db = getDb();
     const id = nanoid();
@@ -169,7 +169,7 @@ export async function serverRoutes(app: FastifyInstance) {
       body.defaultKeyId &&
       !keyBelongsToOrg(req.orgId, body.defaultKeyId)
     ) {
-      return reply.status(400).send({ error: 'Unknown SSH key' });
+      return reply.status(400).send({ error: 'Unknown or retired SSH key' });
     }
     const db = getDb();
 

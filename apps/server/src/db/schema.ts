@@ -231,6 +231,12 @@ export const sshKeys = sqliteTable('ssh_keys', {
   fingerprint: text('fingerprint').notNull(),
   encryptedPrivateKey: text('encrypted_private_key').notNull(),
   keyVersion: integer('key_version').notNull().default(1),
+  // Set by a key rotation once no server uses the key any more. A retired key
+  // cannot be assigned to a server again; it may be deleted.
+  retiredAt: text('retired_at'),
+  // The key this one replaced, when it was created by a rotation. No FK: the
+  // old key may be deleted once retired.
+  rotatedFromKeyId: text('rotated_from_key_id'),
   createdBy: text('created_by').notNull(),
   createdAt: text('created_at')
     .notNull()
@@ -347,6 +353,41 @@ export const memberServerAccess = sqliteTable(
   (t) => ({
     memberServerIdx: uniqueIndex('member_server_access_idx').on(t.orgId, t.userId, t.serverId),
     serverIdx: index('member_server_access_server_idx').on(t.serverId),
+  }),
+);
+
+/**
+ * One SSH key rotation on one server (see ssh/key-rotation.ts). Kept after the
+ * server is deleted, as history; key ids are not foreign keys for the same reason.
+ */
+export const keyRotations = sqliteTable(
+  'key_rotations',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    batchId: text('batch_id'), // shared by the rotations of one bulk request
+    serverId: text('server_id').references(() => servers.id, { onDelete: 'set null' }),
+    serverName: text('server_name').notNull(),
+    oldKeyId: text('old_key_id').notNull(),
+    oldFingerprint: text('old_fingerprint').notNull(),
+    newKeyId: text('new_key_id'), // null until the new key is saved; stays null when rolled back
+    newFingerprint: text('new_fingerprint'),
+    status: text('status').notNull().default('pending'), // pending | running | completed | rolled_back | failed | interrupted
+    step: text('step'), // the step reached, or the one that failed
+    error: text('error'),
+    warnings: text('warnings').notNull().default('[]'), // JSON array of strings
+    oldKeyRetired: integer('old_key_retired', { mode: 'boolean' }).notNull().default(false),
+    startedBy: text('started_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    finishedAt: text('finished_at'),
+  },
+  (t) => ({
+    orgIdx: index('key_rotations_org_idx').on(t.orgId, t.createdAt),
+    serverIdx: index('key_rotations_server_idx').on(t.serverId, t.status),
   }),
 );
 

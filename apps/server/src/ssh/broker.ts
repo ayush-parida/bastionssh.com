@@ -409,12 +409,14 @@ async function exec(
 /**
  * Open a one-shot SSH connection to run a command and return its output.
  * Used by the AI agent when there is no active interactive session.
+ * `stdin`, when given, is written to the command and the input then closed.
  */
 export async function execOnServer(
   server: SshTarget,
   authOptions: SshAuth,
   command: string,
   timeoutMs = 30_000,
+  stdin?: string,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     const client = new Client();
@@ -448,6 +450,7 @@ export async function execOnServer(
             client.end();
             resolve({ stdout: stdout.text(), stderr: stderr.text(), exitCode });
           });
+          if (stdin !== undefined) stream.end(stdin);
         });
       })
       .on('error', (err) => {

@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { CloudAccount, CloudProvider, CloudSyncStatus } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
@@ -135,7 +135,7 @@ function keyBelongsToOrg(orgId: string, keyId: string): boolean {
     getDb()
       .select({ id: sshKeys.id })
       .from(sshKeys)
-      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId)))
+      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId), isNull(sshKeys.retiredAt)))
       .get() !== undefined
   );
 }
@@ -161,7 +161,7 @@ export async function cloudRoutes(app: FastifyInstance) {
   app.post('/accounts', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
     if (body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
-      return reply.status(400).send({ error: 'Default SSH key not found' });
+      return reply.status(400).send({ error: 'Default SSH key not found or retired' });
     }
 
     // Prove the credentials work before storing them
@@ -210,7 +210,7 @@ export async function cloudRoutes(app: FastifyInstance) {
     if (!existing) return reply.status(404).send({ error: 'Not found' });
 
     if (body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
-      return reply.status(400).send({ error: 'Default SSH key not found' });
+      return reply.status(400).send({ error: 'Default SSH key not found or retired' });
     }
 
     const provider = existing.provider as CloudProvider;
