@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { z } from 'zod';
 
 const envSchema = z.object({
@@ -58,6 +59,13 @@ const envSchema = z.object({
   /** Fastify `trustProxy`: false (default), true, a hop count, or a comma-separated IP/CIDR list. */
   SMT_TRUST_PROXY: z.string().optional(),
   SMT_STATIC_DIR: z.string().optional(),
+  /**
+   * This app's public IP, shown in connectivity diagnostics as the source a
+   * firewall must allow. Unset = look it up; an IP = use it; `off` = never look up.
+   */
+  SMT_EGRESS_IP: z.string().optional(),
+  /** Comma-separated https URLs that answer with the caller's IP as plain text. */
+  SMT_EGRESS_IP_SERVICES: z.string().optional(),
 
   // ── Passkeys (WebAuthn) ──
   /** Defaults to the hostname of SMT_BASE_URL. Passkeys are bound to it — changing it orphans them. */
@@ -107,6 +115,46 @@ export function parseTrustProxy(raw: string | undefined): boolean | number | str
   if (value === 'true') return true;
   if (/^\d+$/.test(value)) return Number(value);
   return value;
+}
+
+export const DEFAULT_EGRESS_IP_SERVICES = ['https://api.ipify.org', 'https://ifconfig.me/ip'];
+
+export type EgressIpConfig =
+  | { mode: 'lookup'; services: string[] }
+  | { mode: 'fixed'; ip: string }
+  | { mode: 'disabled' };
+
+/**
+ * Parse SMT_EGRESS_IP / SMT_EGRESS_IP_SERVICES. Anything but an IP address or
+ * an explicit off switch is a configuration mistake worth refusing at startup
+ * rather than a remediation hint that tells users to allow the wrong address.
+ */
+export function parseEgressIp(raw: string | undefined, rawServices: string | undefined): EgressIpConfig {
+  const value = raw?.trim();
+  if (value && ['off', 'false', 'none', 'disabled'].includes(value.toLowerCase())) {
+    return { mode: 'disabled' };
+  }
+  if (value) {
+    if (isIP(value) === 0) throw new Error(`SMT_EGRESS_IP: "${value}" is not an IP address (or "off")`);
+    return { mode: 'fixed', ip: value };
+  }
+  const services = rawServices
+    ?.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => {
+      let url: URL | null = null;
+      try {
+        url = new URL(s);
+      } catch {
+        /* reported below */
+      }
+      if (!url || url.protocol !== 'https:') {
+        throw new Error(`SMT_EGRESS_IP_SERVICES: "${s}" is not an https URL`);
+      }
+      return url.toString();
+    });
+  return { mode: 'lookup', services: services?.length ? services : DEFAULT_EGRESS_IP_SERVICES };
 }
 
 /** The Vite dev server (apps/web/vite.config.ts), which proxies /api to this server. */
@@ -165,6 +213,14 @@ try {
   process.exit(1);
 }
 
+let egressIp: EgressIpConfig;
+try {
+  egressIp = parseEgressIp(env.SMT_EGRESS_IP, env.SMT_EGRESS_IP_SERVICES);
+} catch (err) {
+  console.error(`Invalid environment variables: ${(err as Error).message}`);
+  process.exit(1);
+}
+
 if (env.SMT_SMTP_URL && !env.SMT_SMTP_FROM) {
   console.error('Invalid environment variables: SMT_SMTP_FROM is required when SMT_SMTP_URL is set');
   process.exit(1);
@@ -214,6 +270,7 @@ export const config = {
   adminPassword: resolveAdminPassword(process.env.NODE_ENV, env.SMT_ADMIN_PASSWORD),
   trustProxy: parseTrustProxy(env.SMT_TRUST_PROXY),
   webauthn,
+  egressIp,
   oauth: {
     google:
       env.SMT_OAUTH_GOOGLE_CLIENT_ID && env.SMT_OAUTH_GOOGLE_CLIENT_SECRET

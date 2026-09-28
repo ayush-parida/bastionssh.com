@@ -11,6 +11,7 @@ import AISidebar from '@/components/ai/AISidebar.js';
 import { ArrowLeft, Bot, FolderOpen, Unplug } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { HostKeyMismatchNotice } from '@/components/servers/HostKey.js';
+import { DiagnoseButton } from '@/components/diagnostics/Diagnostics.js';
 
 /** Rolling buffer size for terminal output captured for AI context (bytes) */
 const OUTPUT_BUFFER_SIZE = 8_000;
@@ -161,6 +162,13 @@ export default function TerminalPage() {
           <Bot size={13} />
           AI
         </button>
+        {status === 'disconnected' && id && !hostKeyMismatch && (
+          // A session that failed to open, or dropped: say why, step by step
+          <DiagnoseButton
+            target={{ kind: 'server', id, name: serverName ?? id }}
+            className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[#8b949e] transition-colors hover:bg-[#21262d] hover:text-white"
+          />
+        )}
         {status === 'disconnected' ? (
           <button
             onClick={() => navigate('/servers')}

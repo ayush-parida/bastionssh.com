@@ -15,6 +15,8 @@ import { CHART_COLORS, formatKb, formatUptime, usageTone } from '@/lib/monitorin
 import StatusBadge, { UsageBar } from '@/components/monitoring/StatusBadge.js';
 import MetricChart, { type ChartPoint } from '@/components/charts/MetricChart.js';
 import { HostKeyPanel } from '@/components/servers/HostKey.js';
+import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/components/diagnostics/Diagnostics.js';
+import { isConnectivityFailure, type DiagnoseTarget } from '@/lib/diagnostics.js';
 import {
   ArrowLeft,
   FolderOpen,
@@ -50,6 +52,7 @@ export default function ServerHealthPage() {
   const canCheck = useHasRole('operator');
   const canConfigure = useHasRole('admin');
   const [range, setRange] = useState<MetricRange>('24h');
+  const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
 
   const { data, isLoading } = useQuery<ServerHealthDetail>({
     queryKey: ['server-health', serverId],
@@ -66,12 +69,21 @@ export default function ServerHealthPage() {
   });
 
   const checkMutation = useMutation({
-    mutationFn: () => api.post(`/monitoring/servers/${serverId}/check`),
-    onSuccess: () => {
+    mutationFn: () =>
+      api.post<{ status: string; error?: string }>(`/monitoring/servers/${serverId}/check`),
+    onSuccess: (outcome) => {
       qc.invalidateQueries({ queryKey: ['server-health', serverId] });
       qc.invalidateQueries({ queryKey: ['server-metrics', serverId] });
       qc.invalidateQueries({ queryKey: ['monitoring-overview'] });
-      toast.success('Health check complete');
+      if (outcome.status !== 'online' && outcome.error && data) {
+        connectionFailedToast(
+          outcome.error,
+          { kind: 'server', id: data.health.serverId, name: data.health.serverName },
+          setDiagnosing,
+        );
+      } else {
+        toast.success('Health check complete');
+      }
     },
     onError: (err: Error) => toast.error(err.message),
   });
@@ -141,6 +153,11 @@ export default function ServerHealthPage() {
               {health.monitoringEnabled ? 'Pause checks' : 'Resume checks'}
             </button>
           )}
+          <DiagnoseButton
+            target={{ kind: 'server', id: health.serverId, name: health.serverName }}
+            onOpen={setDiagnosing}
+            className="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm transition-colors hover:bg-muted"
+          />
           {canCheck && (
             <button
               onClick={() => checkMutation.mutate()}
@@ -158,6 +175,14 @@ export default function ServerHealthPage() {
         <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/5 p-4">
           <p className="text-sm font-medium text-red-500">Last check failed</p>
           <p className="mt-1 font-mono text-xs text-muted-foreground">{health.lastError}</p>
+          {canCheck && isConnectivityFailure(health.lastError) && (
+            <button
+              onClick={() => setDiagnosing({ kind: 'server', id: health.serverId, name: health.serverName })}
+              className="mt-2 text-xs font-medium text-primary hover:underline"
+            >
+              Run diagnostics
+            </button>
+          )}
           {health.lastOnlineAt && (
             <p className="mt-2 text-xs text-muted-foreground">
               Last online {relativeTime(health.lastOnlineAt)} · {health.consecutiveFailures} consecutive
@@ -379,6 +404,8 @@ export default function ServerHealthPage() {
           {latest?.loggedInUsers != null && ` · ${latest.loggedInUsers} logged-in user(s)`}
         </p>
       )}
+
+      {diagnosing && <DiagnosticsDialog target={diagnosing} onClose={() => setDiagnosing(null)} />}
     </div>
   );
 }

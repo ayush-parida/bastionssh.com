@@ -25,6 +25,10 @@ services:
       # count, or a comma-separated IP/CIDR list. Behind Caddy/Nginx/Traefik set
       # it (usually 1), or every user shares the proxy's IP for rate limiting.
       SMT_TRUST_PROXY: ${SMT_TRUST_PROXY:-false}
+      # This app's public IP, shown by connectivity diagnostics as the source a
+      # firewall must allow. Unset = look it up from IP echo services (cached
+      # 10 min); an IP = use it; `off` = never look it up.
+      SMT_EGRESS_IP: ${SMT_EGRESS_IP:-}
       # Passkeys need HTTPS (or localhost). They are bound to the RP ID, which
       # defaults to the hostname of SMT_BASE_URL; set these only to override.
       SMT_WEBAUTHN_RP_ID: ${SMT_WEBAUTHN_RP_ID:-}
