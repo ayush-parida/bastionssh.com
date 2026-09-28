@@ -101,7 +101,12 @@ export type AuditAction =
   | 'backup.create'
   | 'backup.download'
   | 'backup.failed'
-  | 'backup.upload_failed';
+  | 'backup.upload_failed'
+  | 'recording.view'
+  | 'recording.download'
+  | 'recording.delete'
+  | 'recording.pruned'
+  | 'org.recording_settings';
 
 export interface AuditLogEntry {
   id: string;

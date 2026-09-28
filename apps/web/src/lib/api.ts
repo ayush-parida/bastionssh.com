@@ -93,6 +93,13 @@ async function upload<T = { path: string; size: number }>(path: string, file: Bl
   return res.json() as Promise<T>;
 }
 
+/** GET a plain-text body (e.g. an asciicast recording). */
+async function text(path: string): Promise<string> {
+  const res = await fetch(`${BASE}${path}`, { credentials: 'include' });
+  if (!res.ok) await fail(res, path);
+  return res.text();
+}
+
 /** Fetch a binary response and trigger a browser download. */
 async function download(path: string, filename: string): Promise<void> {
   const res = await fetch(`${BASE}${path}`, { credentials: 'include' });
@@ -111,6 +118,7 @@ export const api = {
   /** Absolute URL for a path, for links the browser should open itself. */
   url: (path: string) => `${BASE}${path}`,
   get: <T>(path: string) => request<T>(path, { method: 'GET' }),
+  text,
   stream,
   upload,
   download,

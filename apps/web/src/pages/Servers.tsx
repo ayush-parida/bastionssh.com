@@ -5,6 +5,7 @@ import { api } from '@/lib/api.js';
 import {
   CLOUD_PROVIDER_LABEL,
   HOST_KEY_FINGERPRINT_PATTERN,
+  type ActiveRecording,
   type CreateServerRequest,
   type MonitoringOverview,
   type Server,
@@ -129,8 +130,13 @@ export default function ServersPage() {
 
   async function handleConnect(server: Server) {
     try {
-      const res = await api.post<{ sessionId: string; wsUrl: string }>('/ssh-sessions', { serverId: server.id });
-      navigate(`/servers/${server.id}/terminal`, { state: { sessionId: res.sessionId, serverName: server.name } });
+      const res = await api.post<{ sessionId: string; wsUrl: string; recording: ActiveRecording | null }>(
+        '/ssh-sessions',
+        { serverId: server.id },
+      );
+      navigate(`/servers/${server.id}/terminal`, {
+        state: { sessionId: res.sessionId, serverName: server.name, recording: res.recording },
+      });
     } catch (err: unknown) {
       connectionFailedToast(
         err instanceof Error ? err.message : 'Failed to open terminal',

@@ -344,6 +344,7 @@ export async function aiRoutes(app: FastifyInstance) {
             await audit(req, 'ai.command_run', 'server', result.serverId ?? serverId, serverName, {
               ...details,
               exitCode: result.exitCode,
+              ...(result.recordingId && { recordingId: result.recordingId }),
             });
             return result.output;
           } catch (err) {

@@ -6,11 +6,15 @@ import type { FastifyRequest } from 'fastify';
 import { nanoid } from 'nanoid';
 import logger from '../logger.js';
 import { HostKeyMismatchError, sshConnectConfig, type SshAuth, type SshTarget } from './host-keys.js';
+import type { TerminalRecording } from '../recordings/index.js';
+import type { RecordingCommandSource } from '@smt/shared';
 
 export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /** The recording this run was logged on, when the org records sessions. */
+  recordingId?: string;
 }
 
 interface SessionMeta {
@@ -21,6 +25,8 @@ interface SessionMeta {
   orgId: string;
   cols: number;
   rows: number;
+  /** Receives the shell's output, input and resizes; finished when the session ends. */
+  recording?: TerminalRecording | null;
 }
 
 /** Who is asking for a session; it must match the creator. */
@@ -41,6 +47,8 @@ interface ActiveSession {
   bufferFn?: (data: Buffer) => void;
   /** Closes the session if no socket (re)attaches within the grace period */
   reapTimer?: ReturnType<typeof setTimeout>;
+  /** The shell opened; before that a failure discards the recording instead of keeping it. */
+  ready?: boolean;
 }
 
 const sessions = new Map<string, ActiveSession>();
@@ -88,10 +96,18 @@ function scheduleReap(id: string, session: ActiveSession) {
   session.reapTimer.unref?.();
 }
 
+/** Close out the session's recording: kept once a shell opened, dropped if it never did. */
+function endRecording(session: ActiveSession) {
+  const recording = session.meta.recording;
+  if (!recording) return;
+  void (session.ready ? recording.finish() : recording.discard());
+}
+
 function destroy(sessionId: string) {
   const session = sessions.get(sessionId);
   if (session) {
     clearTimeout(session.reapTimer);
+    endRecording(session);
     session.client.end();
     session.socket?.close();
     sessions.delete(sessionId);
@@ -157,6 +173,7 @@ async function createSession(meta: SessionMeta): Promise<string> {
         }
         reject(cause);
         clearTimeout(session.reapTimer);
+        endRecording(session);
         sessions.delete(id);
       })
       .connect(connectConfig);
@@ -170,6 +187,13 @@ async function createSession(meta: SessionMeta): Promise<string> {
   // Buffer output until a WebSocket attaches
   streamPromise
     .then((stream) => {
+      session.ready = true;
+      // Recording listens for the life of the stream, independent of any socket
+      const recording = meta.recording;
+      if (recording) {
+        stream.on('data', (data: Buffer) => recording.output(data));
+        stream.stderr.on('data', (data: Buffer) => recording.output(data));
+      }
       const bufferFn = (data: Buffer) => {
         session.outputBuffer.push(data);
         // Cap buffer at 256 KB
@@ -191,6 +215,7 @@ async function createSession(meta: SessionMeta): Promise<string> {
       });
       stream.once('close', () => {
         clearTimeout(session.reapTimer);
+        endRecording(session);
         session.socket?.close();
         session.client.end();
         sessions.delete(id);
@@ -198,6 +223,7 @@ async function createSession(meta: SessionMeta): Promise<string> {
     })
     .catch(() => {
       clearTimeout(session.reapTimer);
+      endRecording(session);
       sessions.delete(id);
     });
 
@@ -279,11 +305,14 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
       const parsed = JSON.parse(data.toString()) as { type: string; cols?: number; rows?: number };
       if (parsed.type === 'resize' && parsed.cols && parsed.rows) {
         stream.setWindow(parsed.rows, parsed.cols, 0, 0);
+        session.meta.recording?.resize(parsed.cols, parsed.rows);
         return;
       }
     } catch {
       /* raw input */
     }
+    // Only captured when the org opted in to recording keystrokes
+    session.meta.recording?.input(data);
     stream.write(data);
   });
 
@@ -360,10 +389,27 @@ async function exec(
   command: string,
   timeoutMs = 30_000,
   owner?: SessionOwner,
+  source: RecordingCommandSource = 'ai',
 ): Promise<ExecResult> {
   const session = owner ? ownedSession(sessionId, owner) : sessions.get(sessionId);
   if (!session) throw new Error('Session not found');
 
+  // Logged on the terminal's recording, so playback shows what ran behind the shell
+  const recording = session.meta.recording;
+  let result: ExecResult;
+  try {
+    result = await execOnClient(session.client, command, timeoutMs);
+  } catch (err) {
+    // A timed-out or refused command still ran (or tried to) on this connection
+    recording?.command({ source, command, exitCode: null });
+    throw err;
+  }
+  if (!recording) return result;
+  recording.command({ source, command, exitCode: result.exitCode });
+  return { ...result, recordingId: recording.id };
+}
+
+function execOnClient(client: Client, command: string, timeoutMs: number): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     let channel: ClientChannel | undefined;
     let timedOut = false;
@@ -374,7 +420,7 @@ async function exec(
       channel?.close();
     }, timeoutMs);
 
-    session.client.exec(command, (err, stream) => {
+    client.exec(command, (err, stream) => {
       if (err) {
         clearTimeout(timer);
         reject(err);
@@ -408,13 +454,15 @@ async function exec(
 
 /**
  * Open a one-shot SSH connection to run a command and return its output.
- * Used by the AI agent when there is no active interactive session.
+ * Used by the AI agent when there is no active interactive session. `tap`
+ * sees stdout and stderr as they arrive, uncapped (the session recorder).
  */
 export async function execOnServer(
   server: SshTarget,
   authOptions: SshAuth,
   command: string,
   timeoutMs = 30_000,
+  tap?: (data: Buffer) => void,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     const client = new Client();
@@ -438,8 +486,14 @@ export async function execOnServer(
           const stderr = cappedCollector(MAX_EXEC_STDERR);
           let exitCode = 0;
 
-          stream.on('data', (data: Buffer) => stdout.push(data));
-          stream.stderr.on('data', (data: Buffer) => stderr.push(data));
+          stream.on('data', (data: Buffer) => {
+            stdout.push(data);
+            tap?.(data);
+          });
+          stream.stderr.on('data', (data: Buffer) => {
+            stderr.push(data);
+            tap?.(data);
+          });
           stream.on('exit', (code: number | null) => {
             exitCode = code ?? 0;
           });

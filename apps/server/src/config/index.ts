@@ -62,6 +62,11 @@ const envSchema = z.object({
   SMT_BACKUP_STORAGE_CONNECTION_ID: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
   SMT_BACKUP_STORAGE_BUCKET: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
   SMT_BACKUP_STORAGE_PREFIX: z.string().default('bastionssh-backups/'),
+  // ── Session recording ──
+  /** Where terminal recordings (asciicast v2, gzipped once a session ends) are kept. */
+  SMT_RECORDINGS_DIR: z.string().min(1).default('/data/recordings'),
+  /** Per-recording cap on the uncompressed cast; the rest of a longer session is not recorded. */
+  SMT_RECORDING_MAX_BYTES: z.coerce.number().min(4096).default(52_428_800), // 50 MiB
   SMT_WORKER_IN_PROCESS: z
     .string()
     .transform((v) => v === 'true')
@@ -302,6 +307,10 @@ export const config = {
             prefix: env.SMT_BACKUP_STORAGE_PREFIX,
           }
         : null,
+  },
+  recordings: {
+    dir: env.SMT_RECORDINGS_DIR,
+    maxBytes: env.SMT_RECORDING_MAX_BYTES,
   },
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,

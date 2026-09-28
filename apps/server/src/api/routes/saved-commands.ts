@@ -15,6 +15,7 @@ import { commandQueue } from '../../worker/queues.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { executeSavedCommand } from '../../commands/run.js';
+import { recordingSettings } from '../../recordings/index.js';
 import logger from '../../logger.js';
 
 const variablesSchema = z.record(
@@ -215,12 +216,15 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       targets = [...new Set(ids)].map((serverId) => byId.get(serverId)!);
     }
 
+    // Recording ids are chosen now so the audit entry can link to each run's recording
+    const recorded = recordingSettings(req.orgId).enabled;
     const jobs = targets.map((target) => ({
       runId: nanoid(),
       orgId: req.orgId,
       commandId: id,
       serverId: target.id,
       variables,
+      ...(recorded && { recordingId: nanoid() }),
     }));
 
     for (const job of jobs) {
@@ -262,6 +266,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       servers: targets.map((t) => t.name),
       ...(tag && { tag }),
       mode,
+      ...(recorded && { recordingIds: jobs.map((job) => job.recordingId) }),
     });
 
     return reply.status(202).send({

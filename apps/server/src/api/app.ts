@@ -18,6 +18,7 @@ import { cronJobRoutes } from './routes/cron-jobs.js';
 import { aiRoutes } from './routes/ai.js';
 import { auditRoutes } from './routes/audit.js';
 import { sshSessionRoutes } from './routes/ssh-sessions.js';
+import { recordingRoutes } from './routes/recordings.js';
 import { sftpRoutes } from './routes/sftp.js';
 import { storageRoutes } from './routes/storage.js';
 import { ftpRoutes } from './routes/ftp.js';
@@ -85,6 +86,7 @@ export async function buildApp() {
   await app.register(aiRoutes, { prefix: '/api/ai' });
   await app.register(auditRoutes, { prefix: '/api/audit' });
   await app.register(sshSessionRoutes, { prefix: '/api/ssh-sessions' });
+  await app.register(recordingRoutes, { prefix: '/api/recordings' });
   await app.register(sftpRoutes, { prefix: '/api/sftp' });
   await app.register(storageRoutes, { prefix: '/api/storage' });
   await app.register(ftpRoutes, { prefix: '/api/ftp' });

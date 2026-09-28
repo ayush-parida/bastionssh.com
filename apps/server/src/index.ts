@@ -5,6 +5,7 @@ import { startCloudSync } from './cloud/scheduler.js';
 import { startBackupScheduler } from './backup/scheduler.js';
 import { holdServerLock } from './backup/lock.js';
 import { databasePath } from './db/index.js';
+import { startRecordingMaintenance } from './recordings/scheduler.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -20,6 +21,8 @@ async function main() {
   logger.info('Database migrations complete');
 
   await seedDefaultAdmin();
+  // Before the API listens, so no live terminal's recording is mistaken for an orphan
+  await startRecordingMaintenance();
 
   const app = await buildApp();
 

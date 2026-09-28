@@ -3,6 +3,7 @@ import { getDb } from '../db/index.js';
 import { commandRuns, savedCommands } from '../db/schema.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
 import { execOnServer } from '../ssh/broker.js';
+import { startExecRecording, withExecRecording } from '../recordings/index.js';
 import logger from '../logger.js';
 
 /** Maintenance commands (upgrades, backups) run longer than an interactive exec. */
@@ -14,6 +15,8 @@ export interface ExecuteInput {
   commandId: string;
   serverId: string;
   variables?: Record<string, string>;
+  /** Id to record the run under, chosen up front so the audit entry can link to it. */
+  recordingId?: string;
 }
 
 /** `{{name}}`, tolerating inner whitespace (`{{ name }}`). */
@@ -83,11 +86,32 @@ export async function executeSavedCommand(input: ExecuteInput): Promise<void> {
     const { server, auth } = await resolveServerAuth(input.orgId, input.serverId);
     const cmd = interpolate(command.command, input.variables);
 
-    const result = await execOnServer(
-      { id: server.id, host: server.host, port: server.port, username: server.username },
-      auth,
-      cmd,
-      COMMAND_TIMEOUT_MS,
+    const run = db
+      .select({ triggeredBy: commandRuns.triggeredBy })
+      .from(commandRuns)
+      .where(eq(commandRuns.id, input.runId))
+      .get();
+    // Stored and shown as the template: variable values are often credentials
+    const recording = run
+      ? startExecRecording({
+          id: input.recordingId,
+          orgId: input.orgId,
+          serverId: server.id,
+          serverName: server.name,
+          userId: run.triggeredBy,
+          source: 'saved_command',
+          command: command.command,
+        })
+      : null;
+
+    const result = await withExecRecording(recording, (tap) =>
+      execOnServer(
+        { id: server.id, host: server.host, port: server.port, username: server.username },
+        auth,
+        cmd,
+        COMMAND_TIMEOUT_MS,
+        tap,
+      ),
     );
 
     update({
