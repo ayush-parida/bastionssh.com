@@ -17,6 +17,7 @@ import MetricChart, { type ChartPoint } from '@/components/charts/MetricChart.js
 import { HostKeyPanel } from '@/components/servers/HostKey.js';
 import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/components/diagnostics/Diagnostics.js';
 import { isConnectivityFailure, type DiagnoseTarget } from '@/lib/diagnostics.js';
+import { ServerKeyPanel } from '@/components/keys/KeyRotation.js';
 import {
   ArrowLeft,
   Film,
@@ -232,6 +233,7 @@ export default function ServerHealthPage() {
       )}
 
       {serverId && <HostKeyPanel serverId={serverId} />}
+      {serverId && <ServerKeyPanel serverId={serverId} />}
 
       <div className="mb-6 grid grid-cols-2 gap-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-3 lg:grid-cols-6">
         <Fact label="Uptime" value={formatUptime(health.uptimeSeconds)} />

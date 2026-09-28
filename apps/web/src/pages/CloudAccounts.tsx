@@ -426,7 +426,7 @@ export default function CloudAccountsPage() {
                 className={inputClass}
               >
                 <option value="">— none —</option>
-                {keys?.map((k) => (
+                {keys?.filter((k) => !k.retiredAt || k.id === form.defaultKeyId).map((k) => (
                   <option key={k.id} value={k.id}>
                     {k.name} ({k.type})
                   </option>

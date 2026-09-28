@@ -457,6 +457,7 @@ function execOnClient(client: Client, command: string, timeoutMs: number): Promi
  * Open a one-shot SSH connection to run a command and return its output.
  * Used by the AI agent when there is no active interactive session. `tap`
  * sees stdout and stderr as they arrive, uncapped (the session recorder).
+ * `stdin`, when given, is written to the command and the input then closed.
  */
 export async function execOnServer(
   server: SshTarget,
@@ -466,6 +467,7 @@ export async function execOnServer(
   tap?: (data: Buffer) => void,
   /** Who the command runs for; any jump hop is audited under them. */
   options: JumpOptions = {},
+  stdin?: string,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve, reject) => {
     const client = new Client();
@@ -505,6 +507,7 @@ export async function execOnServer(
             client.end();
             resolve({ stdout: stdout.text(), stderr: stderr.text(), exitCode });
           });
+          if (stdin !== undefined) stream.end(stdin);
         });
       })
       .on('error', (err) => {

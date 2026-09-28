@@ -29,6 +29,8 @@ const publicColumns = {
   publicKey: sshKeys.publicKey,
   fingerprint: sshKeys.fingerprint,
   keyVersion: sshKeys.keyVersion,
+  retiredAt: sshKeys.retiredAt,
+  rotatedFromKeyId: sshKeys.rotatedFromKeyId,
   createdBy: sshKeys.createdBy,
   createdAt: sshKeys.createdAt,
   updatedAt: sshKeys.updatedAt,

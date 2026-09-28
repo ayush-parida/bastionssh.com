@@ -14,6 +14,7 @@ import { serverRoutes } from './routes/servers.js';
 import { hostKeyRoutes } from './routes/server-host-keys.js';
 import { agentRoutes, agentConnectRoutes } from './routes/agents.js';
 import { sshKeyRoutes } from './routes/ssh-keys.js';
+import { keyRotationRoutes } from './routes/key-rotation.js';
 import { savedCommandRoutes } from './routes/saved-commands.js';
 import { cronJobRoutes } from './routes/cron-jobs.js';
 import { aiRoutes } from './routes/ai.js';
@@ -89,6 +90,7 @@ export async function buildApp() {
   // Authenticated by the agent's own token, not a user session
   await app.register(agentConnectRoutes, { prefix: '/api/agents' });
   await app.register(sshKeyRoutes, { prefix: '/api/keys' });
+  await app.register(keyRotationRoutes, { prefix: '/api' });
   await app.register(savedCommandRoutes, { prefix: '/api/commands' });
   await app.register(cronJobRoutes, { prefix: '/api/cron-jobs' });
   await app.register(aiRoutes, { prefix: '/api/ai' });

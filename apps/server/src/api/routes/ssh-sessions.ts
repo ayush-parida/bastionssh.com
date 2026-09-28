@@ -10,6 +10,7 @@ import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { vault } from '../../vault/index.js';
 import { startTerminalRecording } from '../../recordings/index.js';
+import { RETIRED_KEY_MESSAGE } from '../../ssh/credentials.js';
 
 const createSessionSchema = z.object({
   serverId: z.string(),
@@ -55,6 +56,7 @@ export async function sshSessionRoutes(app: FastifyInstance) {
         .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, req.orgId)))
         .get();
       if (!found) return reply.status(404).send({ error: 'SSH key not found' });
+      if (found.retiredAt) return reply.status(409).send({ error: RETIRED_KEY_MESSAGE });
       key = found;
     }
 

@@ -14,7 +14,7 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, Server as ServerIcon, Waypoints } from 'lucide-react';
+import { Activity, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -24,6 +24,8 @@ import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/comp
 import type { DiagnoseTarget } from '@/lib/diagnostics.js';
 import { ExpiryBadge } from '@/components/access/ExpiryBadge.js';
 import { RequestAccessDialog, useRequestableServers } from '@/components/access/RequestAccessDialog.js';
+import { KeyAgeBadge, RotationHistory, rotationRequestError } from '@/components/keys/KeyRotation.js';
+import { ROTATION_CONFIRM, rotateServerKey, rotateServerKeys, toastRotation } from '@/lib/key-rotation.js';
 import { useHasRole } from '@/store/auth.js';
 
 interface ServerFormState {
@@ -105,6 +107,9 @@ export default function ServersPage() {
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
   const [requesting, setRequesting] = useState(false);
   const isAdmin = useHasRole('admin');
+  // Servers ticked for a bulk key rotation, and the batch last started
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchId, setBatchId] = useState<string | null>(null);
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -162,6 +167,52 @@ export default function ServersPage() {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['servers'] }); toast.success('Server deleted'); },
     onError: (err: Error) => toast.error(err.message),
   });
+
+  function refreshKeys() {
+    void qc.invalidateQueries({ queryKey: ['servers'] });
+    void qc.invalidateQueries({ queryKey: ['ssh-keys'] });
+    void qc.invalidateQueries({ queryKey: ['key-rotations'] });
+  }
+
+  const rotateMutation = useMutation({
+    mutationFn: (id: string) => rotateServerKey(id),
+    onSuccess: (rotation) => { toastRotation(rotation); refreshKeys(); },
+    onError: rotationRequestError,
+  });
+
+  const bulkRotateMutation = useMutation({
+    mutationFn: (ids: string[]) => rotateServerKeys(ids),
+    onSuccess: (res) => {
+      setSelected(new Set());
+      setBatchId(res.batchId);
+      refreshKeys();
+      toast.success(`Rotating ${res.rotations.length} server key(s) — progress below`);
+    },
+    onError: rotationRequestError,
+  });
+
+  const keysById = new Map((keys ?? []).map((k) => [k.id, k]));
+  const canRotate = (s: Server) => s.authType === 'key' && !!s.defaultKeyId;
+
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleRotate(s: Server) {
+    if (confirm(`Rotate the SSH key of ${s.name}?\n\n${ROTATION_CONFIRM}`)) rotateMutation.mutate(s.id);
+  }
+
+  function handleBulkRotate() {
+    const ids = [...selected];
+    if (confirm(`Rotate the SSH keys of ${ids.length} server(s)? Each gets its own new key; they are rotated one after another.\n\n${ROTATION_CONFIRM}`)) {
+      bulkRotateMutation.mutate(ids);
+    }
+  }
 
   function handleEdit(s: Server) {
     setEditId(s.id);
@@ -251,6 +302,20 @@ export default function ServersPage() {
               <KeyRound size={15} /> Request access
             </button>
           )}
+          {selected.size > 0 && (
+            <>
+              <button
+                onClick={handleBulkRotate}
+                disabled={bulkRotateMutation.isPending}
+                className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50"
+              >
+                <RotateCw size={15} /> Rotate keys ({selected.size})
+              </button>
+              <button onClick={() => setSelected(new Set())} title="Clear selection" className="rounded-md p-2 text-muted-foreground hover:bg-muted">
+                <X size={15} />
+              </button>
+            </>
+          )}
           <button
             onClick={() => { setShowForm(true); setEditId(null); setForm(empty); }}
             className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
@@ -261,6 +326,17 @@ export default function ServersPage() {
       </div>
 
       {requesting && <RequestAccessDialog onClose={() => setRequesting(false)} />}
+      {batchId && (
+        <div className="mb-6 rounded-lg border border-border bg-card p-4">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="flex items-center gap-1.5 font-semibold"><RotateCw size={15} /> Key rotation</h2>
+            <button onClick={() => setBatchId(null)} title="Close" className="rounded p-1 text-muted-foreground hover:bg-muted">
+              <X size={14} />
+            </button>
+          </div>
+          <RotationHistory batchId={batchId} />
+        </div>
+      )}
 
       {allTags.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-1.5">
@@ -326,7 +402,7 @@ export default function ServersPage() {
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                 >
                   <option value="">— none —</option>
-                  {keys?.map((k) => (
+                  {keys?.filter((k) => !k.retiredAt || k.id === form.defaultKeyId).map((k) => (
                     <option key={k.id} value={k.id}>{k.name} ({k.type})</option>
                   ))}
                 </select>
@@ -459,7 +535,18 @@ export default function ServersPage() {
             <div key={s.id} className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="font-semibold truncate">{s.name}</p>
+                  <p className="flex items-center gap-2 font-semibold">
+                    {isAdmin && canRotate(s) && (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(s.id)}
+                        onChange={() => toggleSelected(s.id)}
+                        title="Select for bulk key rotation"
+                        className="shrink-0"
+                      />
+                    )}
+                    <span className="truncate">{s.name}</span>
+                  </p>
                   <p className="text-sm text-muted-foreground font-mono truncate">{s.username}@{s.host}:{s.port}</p>
                 </div>
                 {(() => {
@@ -498,6 +585,9 @@ export default function ServersPage() {
                     <RadioTower size={11} /> {agentById.get(s.agentId)?.name ?? 'agent'}
                   </span>
                 )}
+                {s.defaultKeyId && keysById.get(s.defaultKeyId) && s.authType === 'key' && (
+                  <KeyAgeBadge sshKey={keysById.get(s.defaultKeyId)!} />
+                )}
                 {s.cloud && <CloudBadge cloud={s.cloud} />}
                 {grantExpiry.has(s.id) && <ExpiryBadge expiresAt={grantExpiry.get(s.id)!} />}
                 {s.tags.map((tag) => (
@@ -528,6 +618,16 @@ export default function ServersPage() {
                 <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Pencil size={12} /> Edit
                 </button>
+                {isAdmin && canRotate(s) && (
+                  <button
+                    onClick={() => handleRotate(s)}
+                    disabled={rotateMutation.isPending}
+                    title="Rotate this server's SSH key"
+                    className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted disabled:opacity-50"
+                  >
+                    <RotateCw size={12} className={rotateMutation.isPending && rotateMutation.variables === s.id ? 'animate-spin' : undefined} /> Rotate
+                  </button>
+                )}
                 <button onClick={() => { if (confirm('Delete this server?')) deleteMutation.mutate(s.id); }} className="ml-auto flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-red-500 hover:bg-red-500/10">
                   <Trash2 size={12} />
                 </button>

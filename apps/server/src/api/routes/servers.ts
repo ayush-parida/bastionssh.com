@@ -92,13 +92,13 @@ function evictWithDependents(orgId: string, serverId: string) {
   for (const id of [serverId, ...serversBehind(orgId, serverId)]) evictServer(orgId, id);
 }
 
-/** A server may only point at a vaulted key from its own org. */
+/** A server may only point at a vaulted key from its own org that a rotation has not retired. */
 function keyBelongsToOrg(orgId: string, keyId: string): boolean {
   return (
     getDb()
       .select({ id: sshKeys.id })
       .from(sshKeys)
-      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId)))
+      .where(and(eq(sshKeys.id, keyId), eq(sshKeys.orgId, orgId), isNull(sshKeys.retiredAt)))
       .get() !== undefined
   );
 }
@@ -137,7 +137,7 @@ export async function serverRoutes(app: FastifyInstance) {
       body.defaultKeyId &&
       !keyBelongsToOrg(req.orgId, body.defaultKeyId)
     ) {
-      return reply.status(400).send({ error: 'Unknown SSH key' });
+      return reply.status(400).send({ error: 'Unknown or retired SSH key' });
     }
     if (body.jumpServerId && body.agentId) {
       return reply.status(400).send({ error: ROUTE_CONFLICT });
@@ -220,7 +220,7 @@ export async function serverRoutes(app: FastifyInstance) {
       body.defaultKeyId &&
       !keyBelongsToOrg(req.orgId, body.defaultKeyId)
     ) {
-      return reply.status(400).send({ error: 'Unknown SSH key' });
+      return reply.status(400).send({ error: 'Unknown or retired SSH key' });
     }
     const db = getDb();
 
