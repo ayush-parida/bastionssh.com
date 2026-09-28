@@ -121,6 +121,7 @@ export type AuditAction =
   | 'server.diagnose'
   | 'ftp_connection.diagnose'
   | 'storage_connection.diagnose'
+  /** No longer written (listing backups is not audited); kept for older rows. */
   | 'backup.list'
   | 'backup.create'
   | 'backup.download'

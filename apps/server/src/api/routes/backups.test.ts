@@ -97,7 +97,9 @@ describe('database backup routes', () => {
         upload: { bucket: 'offsite', prefix: 'smt' },
       },
     });
-    expect(audits('backup.list')).toHaveLength(1);
+    // Listing (which the page refetches) is not audited; creating and downloading are
+    await app.inject({ method: 'GET', url: '/api/admin/backups', headers: owner.headers });
+    expect(audits('backup.list')).toHaveLength(0);
   });
 
   let name: string;

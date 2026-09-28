@@ -25,10 +25,10 @@ export async function backupRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireRole('owner'));
   app.addHook('preHandler', requireInstanceOwner);
 
-  app.get('/', async (req): Promise<DbBackupList> => {
-    const backups = listAppBackups();
-    await audit(req, 'backup.list', 'backup', undefined, undefined, { count: backups.length });
-    return { backups, settings: backupSettings() };
+  // Not audited: the page refetches the list, and a listing reveals nothing
+  // the owner cannot already see. Creating and downloading a backup are.
+  app.get('/', async (): Promise<DbBackupList> => {
+    return { backups: listAppBackups(), settings: backupSettings() };
   });
 
   app.post('/', async (req, reply) => {
