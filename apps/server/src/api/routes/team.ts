@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { and, count, desc, eq, inArray, isNull, max, ne, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNull, max, ne, sql, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { MemberServerAccess, OrgMember, OrgSecuritySettings, PasswordResetLink } from '@smt/shared';
 import { rank, requireAuth, requireRole, ROLES, type Role } from '../../auth/middleware.js';
@@ -68,7 +68,11 @@ const joinInviteSchema = z.object({
   password: z.string().max(200).optional(),
 });
 
-const settingsSchema = z.object({ requirePasskey: z.boolean() });
+const settingsSchema = z
+  .object({ requirePasskey: z.boolean().optional(), backupCodeRecoveryOnly: z.boolean().optional() })
+  .refine((b) => b.requirePasskey !== undefined || b.backupCodeRecoveryOnly !== undefined, {
+    message: 'Nothing to change',
+  });
 
 const serverAccessSchema = z.object({
   serverAccess: z.enum(['all', 'restricted']),
@@ -153,7 +157,10 @@ function targetMember(
 function orgSettings(orgId: string): OrgSecuritySettings {
   const db = getDb();
   const org = db
-    .select({ requirePasskey: organizations.requirePasskey })
+    .select({
+      requirePasskey: organizations.requirePasskey,
+      backupCodeRecoveryOnly: organizations.backupCodeRecoveryOnly,
+    })
     .from(organizations)
     .where(eq(organizations.id, orgId))
     .get();
@@ -168,11 +175,38 @@ function orgSettings(orgId: string): OrgSecuritySettings {
       ),
     )
     .get();
-  return { requirePasskey: org?.requirePasskey ?? false, membersWithoutPasskey: withoutPasskey?.n ?? 0 };
+  return {
+    requirePasskey: org?.requirePasskey ?? false,
+    backupCodeRecoveryOnly: org?.backupCodeRecoveryOnly ?? true,
+    membersWithoutPasskey: withoutPasskey?.n ?? 0,
+  };
 }
 
 /** End live access in `orgId` for active members (bar `exceptUserId`) with no passkey-verified session. */
 function revokeUnverifiedLiveAccess(orgId: string, exceptUserId: string) {
+  return revokeMembersLiveAccess(
+    orgId,
+    exceptUserId,
+    sql`not exists (select 1 from ${sessions} where ${sessions.userId} = ${memberships.userId} and ${sessions.passkeyVerified} = 1)`,
+  );
+}
+
+/**
+ * End live access in `orgId` for active members (bar `exceptUserId`) signed in
+ * with a backup code and with no session that has fully verified.
+ */
+function revokeRecoveryLiveAccess(orgId: string, exceptUserId: string) {
+  return revokeMembersLiveAccess(
+    orgId,
+    exceptUserId,
+    and(
+      sql`exists (select 1 from ${sessions} where ${sessions.userId} = ${memberships.userId} and ${sessions.recoveryOnly} = 1)`,
+      sql`not exists (select 1 from ${sessions} where ${sessions.userId} = ${memberships.userId} and ${sessions.passkeyVerified} = 1 and ${sessions.recoveryOnly} = 0)`,
+    )!,
+  );
+}
+
+function revokeMembersLiveAccess(orgId: string, exceptUserId: string, condition: SQL) {
   const db = getDb();
   const members = db
     .select({ userId: memberships.userId })
@@ -182,7 +216,7 @@ function revokeUnverifiedLiveAccess(orgId: string, exceptUserId: string) {
         eq(memberships.orgId, orgId),
         eq(memberships.status, 'active'),
         ne(memberships.userId, exceptUserId),
-        sql`not exists (select 1 from ${sessions} where ${sessions.userId} = ${memberships.userId} and ${sessions.passkeyVerified} = 1)`,
+        condition,
       ),
     )
     .all();
@@ -275,7 +309,9 @@ export async function teamRoutes(app: FastifyInstance) {
   /** Org-wide security policy. Every member may read it; the count is what owners weigh before enabling. */
   app.get('/settings', async (req): Promise<OrgSecuritySettings> => {
     const settings = orgSettings(req.orgId);
-    return rank(req.role) >= rank('admin') ? settings : { requirePasskey: settings.requirePasskey };
+    return rank(req.role) >= rank('admin')
+      ? settings
+      : { requirePasskey: settings.requirePasskey, backupCodeRecoveryOnly: settings.backupCodeRecoveryOnly };
   });
 
   /**
@@ -283,7 +319,7 @@ export async function teamRoutes(app: FastifyInstance) {
    * have used a passkey — proof they can still get in once it applies.
    */
   app.patch('/settings', { preHandler: requireRole('owner') }, async (req, reply) => {
-    const { requirePasskey } = settingsSchema.parse(req.body);
+    const { requirePasskey, backupCodeRecoveryOnly } = settingsSchema.parse(req.body);
     const before = orgSettings(req.orgId);
 
     if (requirePasskey && !before.requirePasskey && !req.passkeyVerified) {
@@ -296,7 +332,7 @@ export async function teamRoutes(app: FastifyInstance) {
       });
     }
 
-    if (requirePasskey !== before.requirePasskey) {
+    if (requirePasskey !== undefined && requirePasskey !== before.requirePasskey) {
       getDb()
         .update(organizations)
         .set({ requirePasskey, updatedAt: new Date().toISOString() })
@@ -310,6 +346,21 @@ export async function teamRoutes(app: FastifyInstance) {
       await audit(req, 'org.passkey_policy', 'organization', req.orgId, undefined, {
         requirePasskey,
         membersWithoutPasskey: before.membersWithoutPasskey,
+        ...(live && { live }),
+      });
+    }
+
+    if (backupCodeRecoveryOnly !== undefined && backupCodeRecoveryOnly !== before.backupCodeRecoveryOnly) {
+      getDb()
+        .update(organizations)
+        .set({ backupCodeRecoveryOnly, updatedAt: new Date().toISOString() })
+        .where(eq(organizations.id, req.orgId))
+        .run();
+      // Terminals and the like opened by a backup-code session before the
+      // switch would keep going; end them unless the member has verified since
+      const live = backupCodeRecoveryOnly ? revokeRecoveryLiveAccess(req.orgId, req.user.id) : undefined;
+      await audit(req, 'org.backup_code_policy', 'organization', req.orgId, undefined, {
+        backupCodeRecoveryOnly,
         ...(live && { live }),
       });
     }

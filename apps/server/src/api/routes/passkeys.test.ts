@@ -791,12 +791,12 @@ describe('passkeys', () => {
       const forAdmin = await get('/api/team/settings', admin.headers);
       expect(forAdmin.statusCode).toBe(200);
       // The owner and the second viewer
-      expect(forAdmin.json()).toEqual({ requirePasskey: false, membersWithoutPasskey: 2 });
+      expect(forAdmin.json()).toEqual({ requirePasskey: false, backupCodeRecoveryOnly: true, membersWithoutPasskey: 2 });
       const adminList = (await get('/api/team/members', admin.headers)).json();
       expect(adminList.find((m: { userId: string }) => m.userId === withKey.userId).passkeyCount).toBe(1);
 
       const forViewer = await get('/api/team/settings', withKey.headers);
-      expect(forViewer.json()).toEqual({ requirePasskey: false });
+      expect(forViewer.json()).toEqual({ requirePasskey: false, backupCodeRecoveryOnly: true });
       const viewerList = (await get('/api/team/members', withKey.headers)).json();
       expect(viewerList.every((m: object) => !('passkeyCount' in m))).toBe(true);
     });

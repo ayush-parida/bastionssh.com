@@ -20,6 +20,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const setUser = useAuthStore((s) => s.setUser);
   const setPasskeyGate = useAuthStore((s) => s.setPasskeyGate);
+  const setRecoveryGate = useAuthStore((s) => s.setRecoveryGate);
   const sessionExpired = useAuthStore((s) => s.sessionExpired);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -74,6 +75,8 @@ export default function LoginPage() {
           { duration: 10_000 },
         );
       }
+      // The org may hold this session to adding a passkey and verifying with it
+      setRecoveryGate(res.recoveryOnly);
       // Most likely a passkey was lost: land where a new one can be added
       signedIn(res, '/settings', { backupCodeSignIn: true });
     } catch (err: unknown) {

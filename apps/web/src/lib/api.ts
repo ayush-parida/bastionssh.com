@@ -26,7 +26,9 @@ export class ApiError extends Error {
  * form means the server-side session is gone, so drop the persisted user —
  * `RequireAuth` then renders the app back at the login screen. A 403
  * PASSKEY_REQUIRED means the org wants a passkey sign-in this session has not
- * done; `RequireAuth` then sends the user to set one up or verify.
+ * done; `RequireAuth` then sends the user to set one up or verify. A 403
+ * RECOVERY_ONLY means a backup-code sign-in must add a passkey and verify with
+ * it first; `RequireAuth` then holds the user at Settings → Passkeys.
  */
 async function fail(res: Response, path: string): Promise<never> {
   if (res.status === 401 && !CREDENTIAL_PATHS.some((p) => path.startsWith(p))) {
@@ -46,6 +48,9 @@ async function fail(res: Response, path: string): Promise<never> {
   }
   if (res.status === 403 && code === 'PASSKEY_REQUIRED') {
     useAuthStore.getState().setPasskeyGate(true);
+  }
+  if (res.status === 403 && code === 'RECOVERY_ONLY') {
+    useAuthStore.getState().setRecoveryGate(true);
   }
   throw new ApiError(message, res.status, code, details);
 }

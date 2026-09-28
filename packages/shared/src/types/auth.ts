@@ -115,6 +115,11 @@ export type LoginResponse = SignedIn | PasskeyLoginStep;
 export interface BackupCodeSignedIn extends SignedIn {
   /** Unused codes left after this one. */
   backupCodesRemaining: number;
+  /**
+   * The org only lets a backup-code sign-in enroll a passkey: add one and
+   * verify with it before anything else works (the API answers RECOVERY_ONLY).
+   */
+  recoveryOnly: boolean;
 }
 
 /** GET /auth/backup-codes. The codes themselves are only ever returned when generated. */
@@ -145,6 +150,8 @@ export interface Me {
   passkeyCount: number;
   /** Unused backup codes, so the app can warn when they run low. */
   backupCodesRemaining: number;
+  /** Signed in with a backup code in an org that allows only enrolling (and verifying with) a passkey. */
+  recoveryOnly: boolean;
 }
 
 export interface LoginRequest {

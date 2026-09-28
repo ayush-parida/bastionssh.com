@@ -27,6 +27,7 @@ import {
   markSessionPasskeyVerified,
   MAX_PASSKEYS_PER_USER,
   orgRequiresPasskey,
+  orgRestrictsBackupCodeSessions,
   FIRST_ENROLLMENT_MAX_SESSION_AGE_MS,
   notifyBackupCodeUsed,
   notifyBackupCodesGenerated,
@@ -147,13 +148,16 @@ async function startSession(
   method: LoginMethod,
   auditDetails: Record<string, unknown> = {},
 ): Promise<SignedIn> {
-  // A backup code is the recovery path for the passkey factor, so it counts as one
+  // A backup code is the recovery path for the passkey factor, so it counts as
+  // one — but the session is marked, and orgs that ask (the default) hold it to
+  // enrolling a new passkey and verifying with it
   const passkeyVerified = method !== 'password';
   const session = await createSession(user.id, {
     ipAddress: req.ip,
     userAgent: req.headers['user-agent'],
     activeOrgId: membership?.orgId,
     passkeyVerified,
+    recoveryOnly: method === 'password+backup_code',
   });
   reply.setCookie('smt_session', session.id, { httpOnly: true, sameSite: 'lax', path: '/' });
 
@@ -277,7 +281,8 @@ export async function authRoutes(app: FastifyInstance) {
     const remaining = remainingBackupCodes(user.id);
     const signedIn = await startSession(req, reply, user, landing.membership, 'password+backup_code', { remaining });
     notifyBackupCodeUsed(user, remaining, req.ip);
-    return { ...signedIn, backupCodesRemaining: remaining } satisfies BackupCodeSignedIn;
+    const recoveryOnly = !!landing.membership && orgRestrictsBackupCodeSessions(landing.membership.orgId);
+    return { ...signedIn, backupCodesRemaining: remaining, recoveryOnly } satisfies BackupCodeSignedIn;
   });
 
   /** Passwordless sign-in, step one: a challenge any of the user's discoverable passkeys can answer. */
@@ -310,7 +315,7 @@ export async function authRoutes(app: FastifyInstance) {
     return startSession(req, reply, user, landing.membership, 'passkey');
   });
 
-  app.post('/logout', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req, reply) => {
+  app.post('/logout', { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true } }, async (req, reply) => {
     const sessionId = req.cookies['smt_session'];
     if (sessionId) await invalidateSession(sessionId);
     reply.clearCookie('smt_session');
@@ -369,7 +374,7 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   /** Organizations the caller belongs to, for the org switcher. */
-  app.get('/orgs', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req): Promise<OrgSummary[]> => {
+  app.get('/orgs', { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true } }, async (req): Promise<OrgSummary[]> => {
     return getDb()
       .select({
         orgId: memberships.orgId,
@@ -392,7 +397,7 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   /** Make another of the caller's orgs the one this browser session works in. */
-  app.post('/switch-org', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req, reply) => {
+  app.post('/switch-org', { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true } }, async (req, reply) => {
     const { orgId } = switchOrgSchema.parse(req.body);
     // An API token has no session to remember the choice on
     if (!req.sessionId) {
@@ -412,7 +417,7 @@ export async function authRoutes(app: FastifyInstance) {
   });
 
   /** Who is signed in, and enough about passkeys for the web app to route an unverified session. */
-  app.get('/me', { preHandler: requireAuth, config: { passkeyExempt: true } }, async (req): Promise<Me> => {
+  app.get('/me', { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true } }, async (req): Promise<Me> => {
     return {
       ...req.user,
       orgId: req.orgId,
@@ -421,6 +426,7 @@ export async function authRoutes(app: FastifyInstance) {
       requirePasskey: orgRequiresPasskey(req.orgId),
       passkeyCount: passkeyCount(req.user.id),
       backupCodesRemaining: remainingBackupCodes(req.user.id),
+      recoveryOnly: req.recoveryOnly,
     };
   });
 
@@ -525,7 +531,8 @@ export async function authRoutes(app: FastifyInstance) {
 
   // ── Passkeys ────────────────────────────────────────────────────────────────
 
-  app.get('/passkeys', { preHandler: requireAuth }, async (req): Promise<PasskeyInfo[]> => {
+  // Listed while recovering too: the page that adds a passkey shows the others
+  app.get('/passkeys', { preHandler: requireAuth, config: { recoveryAllowed: true } }, async (req): Promise<PasskeyInfo[]> => {
     return getDb()
       .select()
       .from(passkeys)
@@ -577,7 +584,7 @@ export async function authRoutes(app: FastifyInstance) {
   app.post(
     '/passkeys/register/options',
     // Checks the password for a first passkey, so limited like /login
-    { preHandler: requireAuth, config: { passkeyExempt: true, ...SIGN_IN_RATE_LIMIT } },
+    { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true, ...SIGN_IN_RATE_LIMIT } },
     async (req, reply) => {
       const body = registerOptionsSchema.parse(req.body ?? {});
       if (!requireBrowserSession(req, reply)) return reply;
@@ -612,7 +619,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post(
     '/passkeys/register/verify',
-    { preHandler: requireAuth, config: { passkeyExempt: true, ...SIGN_IN_RATE_LIMIT } },
+    { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true, ...SIGN_IN_RATE_LIMIT } },
     async (req, reply) => {
       const body = registerVerifySchema.parse(req.body);
       if (!requireBrowserSession(req, reply)) return reply;
@@ -715,7 +722,7 @@ export async function authRoutes(app: FastifyInstance) {
   /** Confirm an existing passkey in the current session — before adding or removing one, or to satisfy an org policy. */
   app.post(
     '/passkeys/step-up/options',
-    { preHandler: requireAuth, config: { passkeyExempt: true } },
+    { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true } },
     async (req, reply) => {
       if (!requireBrowserSession(req, reply)) return reply;
       const credentials = userPasskeys(req.user.id);
@@ -732,7 +739,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.post(
     '/passkeys/step-up/verify',
-    { preHandler: requireAuth, config: { passkeyExempt: true } },
+    { preHandler: requireAuth, config: { passkeyExempt: true, recoveryAllowed: true } },
     async (req, reply) => {
       const body = challengeResponseSchema.parse(req.body);
       if (!requireBrowserSession(req, reply)) return reply;
@@ -749,8 +756,12 @@ export async function authRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'Passkey verification failed' });
       }
 
+      // Also ends a backup-code recovery: the session now has full access
       markSessionPasskeyVerified(req.sessionId);
-      await audit(req, 'user.login_passkey', 'user', req.user.id, req.user.email, { method: 'step_up' });
+      await audit(req, 'user.login_passkey', 'user', req.user.id, req.user.email, {
+        method: 'step_up',
+        ...(req.recoveryOnly && { endedRecovery: true }),
+      });
       return { passkeyVerified: true };
     },
   );

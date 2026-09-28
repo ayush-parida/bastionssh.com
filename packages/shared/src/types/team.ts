@@ -25,6 +25,8 @@ export interface OrgMember {
 /** Org-wide security policy, readable by every member; only owners change it. */
 export interface OrgSecuritySettings {
   requirePasskey: boolean;
+  /** A backup-code sign-in may only enroll a new passkey, then must verify with it. */
+  backupCodeRecoveryOnly: boolean;
   /** Active members who have no passkey yet — they must enroll at their next sign-in. Admins and owners only. */
   membersWithoutPasskey?: number;
 }

@@ -35,6 +35,9 @@ export const sessions = sqliteTable('sessions', {
   activeOrgId: text('active_org_id').references(() => organizations.id, { onDelete: 'set null' }),
   // Signed in (or stepped up) with a passkey. Orgs that require passkeys refuse sessions without it.
   passkeyVerified: integer('passkey_verified', { mode: 'boolean' }).notNull().default(false),
+  // Signed in with a backup code and not yet stepped up with a passkey. In an org
+  // with backupCodeRecoveryOnly it may only enroll a passkey and verify with it.
+  recoveryOnly: integer('recovery_only', { mode: 'boolean' }).notNull().default(false),
 });
 
 /** WebAuthn credentials. Discoverable and user-verifying, so one alone is a full sign-in. */
@@ -169,6 +172,8 @@ export const organizations = sqliteTable('organizations', {
   slug: text('slug').notNull().unique(),
   // Members must sign in with a passkey before their session may act here
   requirePasskey: integer('require_passkey', { mode: 'boolean' }).notNull().default(false),
+  // A backup-code sign-in may only enroll a passkey until it verifies with one
+  backupCodeRecoveryOnly: integer('backup_code_recovery_only', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

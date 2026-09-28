@@ -11,7 +11,13 @@ import {
   secretMatches,
   type TokenScope,
 } from './token.js';
-import { orgRequiresPasskey, PASSKEY_REQUIRED_MESSAGE, TOKEN_PASSKEY_REQUIRED_MESSAGE } from './passkey.js';
+import {
+  orgRequiresPasskey,
+  orgRestrictsBackupCodeSessions,
+  PASSKEY_REQUIRED_MESSAGE,
+  RECOVERY_ONLY_MESSAGE,
+  TOKEN_PASSKEY_REQUIRED_MESSAGE,
+} from './passkey.js';
 
 /** Ordered least- to most-privileged; every role implies the ones before it. */
 export const ROLES = ['viewer', 'operator', 'admin', 'owner'] as const;
@@ -28,6 +34,11 @@ declare module 'fastify' {
     sessionId: string | null;
     /** The session signed in or stepped up with a passkey. Always false for API tokens. */
     passkeyVerified: boolean;
+    /**
+     * Signed in with a backup code, not yet stepped up, in an org that holds
+     * such sessions to enrolling a passkey. Only `recoveryAllowed` routes run.
+     */
+    recoveryOnly: boolean;
   }
   interface FastifyContextConfig {
     /**
@@ -36,6 +47,11 @@ declare module 'fastify' {
      * out, or move to another org.
      */
     passkeyExempt?: boolean;
+    /**
+     * Reachable by a backup-code session held to recovery: enough to add a
+     * passkey, verify with it, see who is signed in, sign out or switch org.
+     */
+    recoveryAllowed?: boolean;
   }
 }
 
@@ -206,6 +222,13 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     });
   }
 
+  // A backup code got this session in; until it verifies with a passkey it may
+  // only enroll one, in orgs that ask for that (the default)
+  const recoveryOnly = !!session?.recoveryOnly && orgRestrictsBackupCodeSessions(membership.orgId);
+  if (recoveryOnly && !req.routeOptions.config.recoveryAllowed) {
+    return reply.status(403).send({ error: RECOVERY_ONLY_MESSAGE, code: 'RECOVERY_ONLY' });
+  }
+
   const membershipRole = ROLES.includes(membership.role as Role)
     ? (membership.role as Role)
     : 'viewer';
@@ -223,6 +246,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   req.viaApiToken = scopes !== null;
   req.sessionId = session?.id ?? null;
   req.passkeyVerified = session?.passkeyVerified ?? false;
+  req.recoveryOnly = recoveryOnly;
 
   if (session) touchSession(session, req.ip);
 }

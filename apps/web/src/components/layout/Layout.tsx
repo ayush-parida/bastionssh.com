@@ -72,6 +72,8 @@ export default function Layout() {
     try {
       const res = await api.post<{ user: User; orgId: string; role: Role }>('/auth/switch-org', { orgId: nextOrgId });
       setUser({ ...(user as User), ...res.user }, res.orgId, res.role);
+      // A backup-code session may have full access in the other org; the server re-raises it if not
+      useAuthStore.getState().setRecoveryGate(false);
       // Query keys are not scoped by org — everything cached belongs to the old one
       await queryClient.resetQueries();
       navigate('/');

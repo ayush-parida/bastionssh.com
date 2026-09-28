@@ -10,11 +10,12 @@ import {
   isReauthRequired,
   passkeyErrorMessage,
   registerPasskey,
+  stepUp,
   withStepUp,
 } from '@/lib/passkeys.js';
 import { useAuthStore } from '@/store/auth.js';
-import type { BackupCodeStatus, PasskeyInfo } from '@smt/shared';
-import { Fingerprint, Pencil, Plus, Trash2, Check, X, TriangleAlert, LifeBuoy } from 'lucide-react';
+import type { BackupCodeStatus, Me, PasskeyInfo } from '@smt/shared';
+import { Fingerprint, Pencil, Plus, Trash2, Check, X, TriangleAlert, LifeBuoy, ShieldCheck } from 'lucide-react';
 import BackupCodes, { backupCodesNeedAttention } from '@/components/settings/BackupCodes.js';
 import { toast } from 'sonner';
 
@@ -33,6 +34,11 @@ export default function Passkeys() {
   // A first passkey was just added; point at backup codes next
   const [suggestCodes, setSuggestCodes] = useState(false);
   const clearUser = useAuthStore((s) => s.clearUser);
+  // Signed in with a backup code in an org that only allows adding a passkey:
+  // add one (or find the old one), verify with it, and the rest opens up
+  const recoveryGate = useAuthStore((s) => s.recoveryGate);
+  const setRecoveryGate = useAuthStore((s) => s.setRecoveryGate);
+  const [verifying, setVerifying] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
   const [password, setPassword] = useState('');
@@ -48,8 +54,38 @@ export default function Passkeys() {
   const { data: codeStatus } = useQuery<BackupCodeStatus>({
     queryKey: ['backup-codes'],
     queryFn: () => api.get('/auth/backup-codes'),
-    enabled: !!passkeys?.length,
+    enabled: !!passkeys?.length && !recoveryGate,
   });
+
+  // The server decides; after an org switch it may no longer apply
+  const { data: me } = useQuery<Me>({
+    queryKey: ['auth-me'],
+    queryFn: () => api.get('/auth/me'),
+    enabled: recoveryGate,
+  });
+  useEffect(() => {
+    if (recoveryGate && me && !me.recoveryOnly) endRecovery();
+  }, [me]);
+
+  function endRecovery() {
+    setRecoveryGate(false);
+    // Everything fetched while held back is stale
+    void qc.resetQueries();
+  }
+
+  /** Verify with a passkey — the new one, or a lost one that turned up — to end a recovery. */
+  async function verifyRecovery() {
+    setVerifying(true);
+    try {
+      await stepUp();
+      endRecovery();
+      toast.success('Verified. You have full access again.');
+    } catch (err) {
+      reportError(err as Error);
+    } finally {
+      setVerifying(false);
+    }
+  }
   const codesNeedAttention = !!passkeys?.length && backupCodesNeedAttention(codeStatus);
 
   useEffect(() => {
@@ -75,6 +111,12 @@ export default function Passkeys() {
       setNewName('');
       setPassword('');
       toast.success('Passkey added');
+      // Straight on to verifying with it, which ends the recovery
+      if (recoveryGate) {
+        toast.message('Now confirm with the passkey you just added.');
+        void verifyRecovery();
+        return;
+      }
       if (first) {
         setSuggestCodes(true);
         toast.message('Next, generate backup codes in case you lose this passkey.');
@@ -131,7 +173,29 @@ export default function Passkeys() {
         signing in with your password also asks for it.
       </p>
 
-      {recovered && (
+      {recoveryGate && (
+        <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+          <LifeBuoy size={15} className="mt-0.5 shrink-0" />
+          <div className="flex-1">
+            <p>
+              You signed in with a backup code. This organization only lets that add a new passkey: add one on this
+              device and confirm with it to get full access. Then remove the lost passkey and generate new backup
+              codes.
+            </p>
+            {supported && !!passkeys?.length && (
+              <button
+                onClick={verifyRecovery}
+                disabled={verifying || addMutation.isPending}
+                className="mt-2 flex items-center gap-1.5 rounded-md border border-amber-500/40 px-2.5 py-1 text-xs font-medium hover:bg-amber-500/10 disabled:opacity-50"
+              >
+                <ShieldCheck size={12} /> {verifying ? 'Waiting for device…' : 'I have a passkey here — verify now'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {recovered && !recoveryGate && (
         <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
           <LifeBuoy size={15} className="mt-0.5 shrink-0" />
           <p>
@@ -229,7 +293,7 @@ export default function Passkeys() {
                   {p.lastUsedAt ? `last used ${relativeTime(p.lastUsedAt)}` : 'never used'}
                 </p>
               </div>
-              {editing?.id !== p.id && (
+              {editing?.id !== p.id && !recoveryGate && (
                 <>
                   <button
                     onClick={() => setEditing({ id: p.id, name: p.name })}
@@ -252,7 +316,7 @@ export default function Passkeys() {
         )}
       </div>
 
-      {!!passkeys?.length && <BackupCodes status={codeStatus} suggest={suggestCodes} />}
+      {!!passkeys?.length && !recoveryGate && <BackupCodes status={codeStatus} suggest={suggestCodes} />}
     </section>
   );
 }

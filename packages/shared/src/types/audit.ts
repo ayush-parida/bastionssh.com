@@ -52,6 +52,7 @@ export type AuditAction =
   | 'user.backup_codes_generated'
   | 'user.login_backup_code'
   | 'org.passkey_policy'
+  | 'org.backup_code_policy'
   | 'api_token.create'
   | 'api_token.revoke'
   | 'server.health_check'

@@ -16,10 +16,17 @@ interface AuthState {
    * `RequireAuth` holds the app at /passkey-setup until it is cleared.
    */
   passkeyGate: boolean;
+  /**
+   * Signed in with a backup code in an org that only lets such a session add
+   * a passkey and verify with it. `RequireAuth` holds the app at Settings →
+   * Passkeys until it is cleared.
+   */
+  recoveryGate: boolean;
   setUser: (user: User, orgId: string | null, role: Role) => void;
   clearUser: () => void;
   expireSession: () => void;
   setPasskeyGate: (on: boolean) => void;
+  setRecoveryGate: (on: boolean) => void;
 }
 
 const signedOut = { user: null, orgId: null, role: null } as const;
@@ -30,19 +37,23 @@ export const useAuthStore = create<AuthState>()(
       ...signedOut,
       sessionExpired: false,
       passkeyGate: false,
+      recoveryGate: false,
       setUser: (user, orgId, role) => set({ user, orgId, role, sessionExpired: false }),
-      clearUser: () => set({ ...signedOut, sessionExpired: false, passkeyGate: false }),
+      clearUser: () => set({ ...signedOut, sessionExpired: false, passkeyGate: false, recoveryGate: false }),
       /**
        * Sign out because the server no longer accepts the session. Idempotent, so
        * a burst of concurrent 401s only raises the notice once.
        */
       expireSession: () =>
-        set((state) => (state.user ? { ...signedOut, sessionExpired: true, passkeyGate: false } : state)),
+        set((state) =>
+          state.user ? { ...signedOut, sessionExpired: true, passkeyGate: false, recoveryGate: false } : state,
+        ),
       setPasskeyGate: (on) => set((state) => (state.passkeyGate === on ? state : { passkeyGate: on })),
+      setRecoveryGate: (on) => set((state) => (state.recoveryGate === on ? state : { recoveryGate: on })),
     }),
     {
       name: 'smt-auth',
-      // `sessionExpired` and `passkeyGate` describe this page load only — never
+      // `sessionExpired` and the gates describe this page load only — never
       // restore them. The server re-raises the gate on the next request.
       partialize: ({ user, orgId, role }) => ({ user, orgId, role }),
     },

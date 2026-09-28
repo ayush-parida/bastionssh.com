@@ -322,3 +322,44 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const RECOVERY_TAG = '0012_backup_code_recovery';
+
+describe('migration 0012 (backup-code recovery sessions)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(RECOVERY_TAG);
+  });
+
+  it('turns the rule on for existing orgs and leaves existing sessions with full access', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < RECOVERY_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, require_passkey, created_at, updated_at) VALUES ('o1', 'Org', 'org', 1, 'now', 'now');
+      INSERT INTO sessions (id, user_id, expires_at, created_at, active_org_id, passkey_verified) VALUES ('s1', 'u1', 'later', 'now', 'o1', 1);
+    `);
+
+    apply(db, [RECOVERY_TAG]);
+
+    expect(db.prepare('SELECT id, require_passkey, backup_code_recovery_only FROM organizations').get()).toEqual({
+      id: 'o1',
+      require_passkey: 1,
+      backup_code_recovery_only: 1,
+    });
+    expect(db.prepare('SELECT id, active_org_id, passkey_verified, recovery_only FROM sessions').get()).toEqual({
+      id: 's1',
+      active_org_id: 'o1',
+      passkey_verified: 1,
+      recovery_only: 0,
+    });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (table: string) =>
+      (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns('organizations')).toContain('backup_code_recovery_only');
+    expect(columns('sessions')).toContain('recovery_only');
+  });
+});
