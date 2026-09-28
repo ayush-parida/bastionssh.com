@@ -363,6 +363,20 @@ describe('checkHostKeyPin', () => {
     expect(JSON.stringify(outcome)).not.toContain(FINGERPRINT);
   });
 
+  it('asks for the pinned key type first, as a real connection does', async () => {
+    const seen: (string | null | undefined)[] = [];
+    const deps = fakeDeps({
+      scanHostKey: async (_host, _port, _timeout, preferType) => {
+        seen.push(preferType);
+        return { fingerprint: FINGERPRINT, type: 'ecdsa-sha2-nistp256' };
+      },
+    });
+    await checkHostKeyPin({ ...base, pinned: FINGERPRINT, pinnedType: 'ecdsa-sha2-nistp256', revealPresented: false }, deps);
+    // Nothing pinned: no preference, the scan shows what a first connection would see
+    await checkHostKeyPin({ ...base, pinned: null, pinnedType: 'ecdsa-sha2-nistp256', revealPresented: false }, deps);
+    expect(seen).toEqual(['ecdsa-sha2-nistp256', null]);
+  });
+
   it('fails when no key could be read', async () => {
     const deps = fakeDeps({ scanHostKey: () => Promise.reject(new Error('Connection closed before a host key was received')) });
     const outcome = await checkHostKeyPin({ ...base, pinned: FINGERPRINT, revealPresented: true }, deps);

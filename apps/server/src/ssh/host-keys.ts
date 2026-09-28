@@ -383,16 +383,20 @@ function preferPinnedKeyType(
 ): ConnectConfig['algorithms'] | undefined {
   try {
     const row = store.load(serverId);
-    // Only types ssh2 can negotiate; anything else would make connect() throw
-    if (!row?.hostKeyFingerprint || !row.hostKeyType || !PREFERABLE_KEY_TYPES.has(row.hostKeyType)) {
-      return undefined;
-    }
-    const algorithms = algorithmsForKeyType(row.hostKeyType);
-    // Remove, then prepend: ssh2 skips a prepend already present in the list
-    return { serverHostKey: { remove: algorithms, prepend: algorithms } } as ConnectConfig['algorithms'];
+    if (!row?.hostKeyFingerprint) return undefined;
+    return preferKeyType(row.hostKeyType);
   } catch {
     return undefined;
   }
+}
+
+/** ssh2 `algorithms` that ask for a host key of `type` first; undefined when it cannot be preferred. */
+export function preferKeyType(type: string | null | undefined): ConnectConfig['algorithms'] | undefined {
+  // Only types ssh2 can negotiate; anything else would make connect() throw
+  if (!type || !PREFERABLE_KEY_TYPES.has(type)) return undefined;
+  const algorithms = algorithmsForKeyType(type);
+  // Remove, then prepend: ssh2 skips a prepend already present in the list
+  return { serverHostKey: { remove: algorithms, prepend: algorithms } } as ConnectConfig['algorithms'];
 }
 
 /**
@@ -439,7 +443,10 @@ export function scanHostKey(
   host: string,
   port: number,
   timeoutMs = SCAN_TIMEOUT_MS,
+  /** Ask for this key type first, as a real connection to a pinned host does. */
+  preferType?: string | null,
 ): Promise<HostKeyScanResult> {
+  const algorithms = preferKeyType(preferType);
   return new Promise((resolve, reject) => {
     const client = new Client();
     let captured: Buffer | undefined;
@@ -484,6 +491,7 @@ export function scanHostKey(
       // Never used: the handshake is abandoned before user authentication
       username: 'smt-host-key-scan',
       readyTimeout: timeoutMs,
+      ...(algorithms && { algorithms }),
       hostVerifier: (key: Buffer) => {
         captured = key;
         return false;

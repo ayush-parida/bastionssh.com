@@ -97,7 +97,7 @@ export async function diagnoseServer(server: ServerRow, orgId: string, opts: Dia
       port: server.port,
       service: 'ssh',
       verifyTls: true,
-      hostKey: { pinned: server.hostKeyFingerprint, revealPresented: opts.revealHostKey },
+      hostKey: { pinned: server.hostKeyFingerprint, pinnedType: server.hostKeyType, revealPresented: opts.revealHostKey },
       ...(opts.auth && {
         authenticate: async (): Promise<StepOutcome> => {
           let auth: SshAuth;
@@ -140,7 +140,11 @@ export async function diagnoseFtp(connection: FtpConnectionRow, opts: DiagnoseOp
       service,
       verifyTls: connection.verifyTls,
       ...(protocol === 'sftp' && {
-        hostKey: { pinned: connection.hostKeyFingerprint, revealPresented: opts.revealHostKey },
+        hostKey: {
+          pinned: connection.hostKeyFingerprint,
+          pinnedType: connection.hostKeyType,
+          revealPresented: opts.revealHostKey,
+        },
       }),
       ...(opts.auth && {
         authenticate: async (): Promise<StepOutcome> => {

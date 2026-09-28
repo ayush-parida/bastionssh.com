@@ -46,7 +46,7 @@ export interface DiagnosticPlan {
   /** Whether an untrusted TLS certificate fails the connection (FTPS, HTTPS). */
   verifyTls: boolean;
   /** SSH endpoints: the pinned fingerprint, and whether the caller may see a different presented one. */
-  hostKey?: { pinned: string | null; revealPresented: boolean };
+  hostKey?: { pinned: string | null; pinnedType?: string | null; revealPresented: boolean };
   /** Log in with stored credentials. Undefined when not requested. */
   authenticate?: () => Promise<StepOutcome>;
 }

@@ -22,7 +22,7 @@ export interface DiagnosticsDeps {
   resolve4(host: string): Promise<string[]>;
   connect(address: string, port: number): Socket;
   tlsConnect(options: ConnectionOptions): TLSSocket;
-  scanHostKey(host: string, port: number, timeoutMs: number): Promise<HostKeyScanResult>;
+  scanHostKey(host: string, port: number, timeoutMs: number, preferType?: string | null): Promise<HostKeyScanResult>;
 }
 
 export const defaultDeps: DiagnosticsDeps = {
@@ -30,7 +30,7 @@ export const defaultDeps: DiagnosticsDeps = {
   resolve4: (host) => new dns.promises.Resolver({ timeout: 3_000, tries: 1 }).resolve4(host),
   connect: (address, port) => net.connect({ host: address, port }),
   tlsConnect: (options) => tls.connect(options),
-  scanHostKey: (host, port, timeoutMs) => scanHostKey(host, port, timeoutMs),
+  scanHostKey: (host, port, timeoutMs, preferType) => scanHostKey(host, port, timeoutMs, preferType),
 };
 
 /** Per-step budgets. Generous enough for a slow link, short enough to finish well inside a minute. */
@@ -736,13 +736,15 @@ export async function checkHttpResponse(
  * anything — and compare it with the pinned one.
  */
 export async function checkHostKeyPin(
-  opts: { host: string; port: number; pinned: string | null; revealPresented: boolean },
+  opts: { host: string; port: number; pinned: string | null; pinnedType?: string | null; revealPresented: boolean },
   deps: DiagnosticsDeps,
   timeoutMs: number = STEP_TIMEOUTS.hostKey,
 ): Promise<StepOutcome> {
   let presented: HostKeyScanResult;
   try {
-    presented = await deps.scanHostKey(opts.host, opts.port, timeoutMs);
+    // Ask for the pinned key's type first, like a real connection: a host with
+    // several key types would otherwise present another one and look "changed"
+    presented = await deps.scanHostKey(opts.host, opts.port, timeoutMs, opts.pinned ? opts.pinnedType : null);
   } catch (err) {
     return {
       status: 'fail',
