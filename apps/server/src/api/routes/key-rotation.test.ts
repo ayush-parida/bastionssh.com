@@ -17,6 +17,8 @@ interface Call {
   kind: Kind;
   loginBlob: string;
   command: string;
+  /** Who any jump hop is audited under */
+  actorUserId?: string;
 }
 interface Result {
   stdout: string;
@@ -39,9 +41,9 @@ vi.mock('../../ssh/broker.js', async (importOriginal) => {
       command: string,
       _t: number,
       _tap: unknown,
-      _options: unknown,
+      options: { actorUserId?: string } | undefined,
       stdin?: string,
-    ) => fakeExec(target, auth, command, stdin),
+    ) => fakeExec(target, auth, command, stdin, options?.actorUserId),
   };
 });
 
@@ -74,11 +76,17 @@ function listed(home: string, blob: string): boolean {
     .some((line) => !line.trim().startsWith('#') && line.trim().split(/\s+/).includes(blob));
 }
 
-async function fakeExec(target: { id: string }, auth: { privateKey?: string }, command: string, stdin?: string): Promise<Result> {
+async function fakeExec(
+  target: { id: string },
+  auth: { privateKey?: string },
+  command: string,
+  stdin?: string,
+  actorUserId?: string,
+): Promise<Result> {
   const home = fake.homes.get(target.id);
   if (!home) throw new Error('connect ECONNREFUSED');
   const kind: Kind = stdin?.includes('echo added') ? 'install' : stdin?.includes('echo removed') ? 'remove' : 'verify';
-  const call = { serverId: target.id, kind, loginBlob: blobOfPrivate(auth.privateKey!), command };
+  const call = { serverId: target.id, kind, loginBlob: blobOfPrivate(auth.privateKey!), command, actorUserId };
   fake.calls.push(call);
   const override = await fake.intercept?.(call, home);
   if (override) return override;
@@ -203,6 +211,8 @@ describe('SSH key rotation', { timeout: 30_000 }, () => {
       ['verify', 'new'],
       ['remove', 'new'],
     ]);
+    // Every connection is opened for the admin, so a jump hop is audited under them
+    expect(fake.calls.every((c) => c.actorUserId === admin.userId)).toBe(true);
 
     expect(audited('ssh_key.rotate', srv.id)).toHaveLength(1);
     expect(audited('ssh_key.retire', old.id)).toHaveLength(1);

@@ -9,6 +9,7 @@ import { execOnServer } from './broker.js';
 import { generateKeyPair } from './keygen.js';
 import { evictServer } from './sftp.js';
 import { HostKeyMismatchError, type SshTarget } from './host-keys.js';
+import type { JumpOptions } from './jump.js';
 import logger from '../logger.js';
 
 /**
@@ -180,8 +181,9 @@ async function runScript<T extends string>(
   script: string,
   args: string[],
   outcomes: readonly T[],
+  options: JumpOptions = {},
 ): Promise<T> {
-  const result = await execOnServer(target, { privateKey }, scriptCommand(args), SCRIPT_TIMEOUT_MS, undefined, {}, script);
+  const result = await execOnServer(target, { privateKey }, scriptCommand(args), SCRIPT_TIMEOUT_MS, undefined, options, script);
   const outcome = lastLine(result.stdout) as T;
   if (result.exitCode === 0 && outcomes.includes(outcome)) return outcome;
   const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
@@ -190,24 +192,38 @@ async function runScript<T extends string>(
 }
 
 /** Over `loginKey`: append the new key line unless it is already there. */
-export function installKey(target: SshTarget, loginKey: string, oldBlob: string, newPublicKey: string, tag: string) {
+export function installKey(
+  target: SshTarget,
+  loginKey: string,
+  oldBlob: string,
+  newPublicKey: string,
+  tag: string,
+  options: JumpOptions = {},
+) {
   return runScript(
     target,
     loginKey,
     INSTALL_SCRIPT,
     [oldBlob, publicKeyType(newPublicKey), publicKeyBlob(newPublicKey), tag],
     ['added', 'present'] as const,
+    options,
   );
 }
 
 /** Over `loginKey`: delete the lines of `removeBlob`, only while `keepBlob` stays listed. */
-export function removeKey(target: SshTarget, loginKey: string, removeBlob: string, keepBlob: string) {
-  return runScript(target, loginKey, REMOVE_SCRIPT, [removeBlob, keepBlob], ['removed', 'absent'] as const);
+export function removeKey(
+  target: SshTarget,
+  loginKey: string,
+  removeBlob: string,
+  keepBlob: string,
+  options: JumpOptions = {},
+) {
+  return runScript(target, loginKey, REMOVE_SCRIPT, [removeBlob, keepBlob], ['removed', 'absent'] as const, options);
 }
 
 /** A fresh connection that authenticates with `privateKey` and nothing else. */
-async function verifyLogin(target: SshTarget, privateKey: string) {
-  const result = await execOnServer(target, { privateKey }, `echo ${VERIFY_TOKEN}`, SCRIPT_TIMEOUT_MS);
+async function verifyLogin(target: SshTarget, privateKey: string, options: JumpOptions = {}) {
+  const result = await execOnServer(target, { privateKey }, `echo ${VERIFY_TOKEN}`, SCRIPT_TIMEOUT_MS, undefined, options);
   if (result.exitCode !== 0 || !result.stdout.includes(VERIFY_TOKEN)) {
     throw new Error(`The login with the new key did not run the check command: ${result.stderr.trim() || `exit code ${result.exitCode}`}`);
   }
@@ -479,6 +495,8 @@ async function performRotation(
   const db = getDb();
   const rotationId = initial.id;
   const warnings: string[] = [];
+  // Any jump hop is audited under whoever asked for the rotation
+  const hop: JumpOptions = { actorUserId: actor.userId };
   // Widened: enter() reassigns it, which narrowing cannot see
   let step = 'prepare' as KeyRotationStep;
   const update = (patch: Partial<typeof keyRotations.$inferInsert>) =>
@@ -541,7 +559,7 @@ async function performRotation(
 
     enter('install');
     touched = true;
-    const installed = await installKey(target, oldPrivate, oldBlob, newPublicKey, `bastionssh-key-${newKeyId}`).catch(
+    const installed = await installKey(target, oldPrivate, oldBlob, newPublicKey, `bastionssh-key-${newKeyId}`, hop).catch(
       (err: unknown) => {
         if ((err instanceof RemoteStepError && err.unchanged) || failedBeforeRunning(err)) touched = false;
         throw err;
@@ -550,7 +568,7 @@ async function performRotation(
     logger.info({ rotationId, serverId, installed }, 'New SSH key installed for rotation');
 
     enter('verify');
-    await verifyLogin(target, newPrivate);
+    await verifyLogin(target, newPrivate, hop);
 
     enter('switch');
     const encryptedPrivateKey = await vault.encrypt(newPrivate, newKeyId);
@@ -593,7 +611,7 @@ async function performRotation(
         `The old key was left in authorized_keys: ${sharing.join(', ')} log in to the same account with it. Rotate them too, then remove it by hand.`,
       );
     } else {
-      const removed = await removeKey(target, newPrivate, oldBlob, newBlob);
+      const removed = await removeKey(target, newPrivate, oldBlob, newBlob, hop);
       if (removed === 'absent') {
         warnings.push('The old key was not found in ~/.ssh/authorized_keys when it was due to be removed.');
       }
@@ -610,7 +628,7 @@ async function performRotation(
     } else {
       if (touched && target) {
         try {
-          await removeKey(target, oldPrivate, newBlob, oldBlob);
+          await removeKey(target, oldPrivate, newBlob, oldBlob, hop);
         } catch (rbErr) {
           warnings.push(
             `The new key line (tagged bastionssh-key-${newKeyId}) may still be in authorized_keys — removing it failed: ${errorMessage(rbErr)}. Its private key was discarded, so it grants no access; remove it by hand.`,
@@ -646,7 +664,7 @@ async function performRotation(
     newId: string,
   ): Promise<KeyRotationStatus> {
     try {
-      await verifyLogin(target, oldPrivate);
+      await verifyLogin(target, oldPrivate, hop);
     } catch (err) {
       warnings.push(
         `Kept the new key: the old key no longer logs in (${errorMessage(err)}), so it was most likely removed. Check ~/.ssh/authorized_keys.`,
@@ -671,7 +689,7 @@ async function performRotation(
     }
     evictServer(initial.orgId, serverId);
     try {
-      await removeKey(target, oldPrivate, newBlob, oldBlob);
+      await removeKey(target, oldPrivate, newBlob, oldBlob, hop);
     } catch (err) {
       warnings.push(
         `The new key line (tagged bastionssh-key-${newId}) could not be removed from authorized_keys: ${errorMessage(err)}. Its private key was deleted, so it grants no access; remove it by hand.`,
