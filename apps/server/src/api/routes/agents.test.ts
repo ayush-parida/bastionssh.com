@@ -225,11 +225,14 @@ describe('agent routes', () => {
     it('routes a server through an agent of its own org', async () => {
       const { id: agentId } = await createAgent('assign');
       const serverId = seedServer(orgId, admin.userId, 'private-1');
-      getDb().update(servers).set({ hostKeyFingerprint: `SHA256:${'B'.repeat(43)}` }).where(eq(servers.id, serverId)).run();
+      const pinned = `SHA256:${'B'.repeat(43)}`;
+      getDb().update(servers).set({ hostKeyFingerprint: pinned }).where(eq(servers.id, serverId)).run();
 
       const res = await app.inject({ method: 'PATCH', url: `/api/servers/${serverId}`, headers: admin.headers, payload: { agentId } });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toMatchObject({ agentId, hostKeyFingerprint: null, hostKeyStatus: 'unknown' });
+      // The agent is untrusted transport: the pinned key must still match through it
+      expect(res.json()).toMatchObject({ agentId, hostKeyFingerprint: pinned });
+      expect(audited(serverId, 'server.host_key_cleared')).toHaveLength(0);
       const [entry] = audited(serverId, 'server.update');
       expect(JSON.parse(entry!.metadata!)).toEqual({ agentId: { from: null, to: agentId } });
 

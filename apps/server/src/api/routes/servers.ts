@@ -213,12 +213,13 @@ export async function serverRoutes(app: FastifyInstance) {
     };
 
     // A new host or port is a different endpoint: the old key says nothing about
-    // it. So is a new route — an agent's loopback is not the host's address.
+    // it. A new route is not: the agent is untrusted transport, so the pinned
+    // key stays and must still match through it — forgetting it here would let
+    // whoever holds the agent's token answer the next connection with any key.
     const agentChanged = body.agentId !== undefined && body.agentId !== existing.agentId;
     const endpointChanged =
       (body.host !== undefined && body.host !== existing.host) ||
-      (body.port !== undefined && body.port !== existing.port) ||
-      agentChanged;
+      (body.port !== undefined && body.port !== existing.port);
     if (body.hostKeyFingerprint) {
       if (body.hostKeyFingerprint !== existing.hostKeyFingerprint || endpointChanged) {
         Object.assign(updateData, pinnedColumns(body.hostKeyFingerprint, null, req.user.id));

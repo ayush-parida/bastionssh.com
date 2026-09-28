@@ -190,6 +190,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
       send(socket, encodeOpened(streamId));
     });
     local.on('data', (chunk: Buffer) => {
+      // The app already closed the stream (the socket is draining or connecting)
+      if (stream.done) return;
       for (const frame of encodeDataFrames(streamId, chunk)) send(socket, frame);
       if (socket.bufferedAmount > WS_HIGH_WATER && !paused.has(local)) {
         local.pause();

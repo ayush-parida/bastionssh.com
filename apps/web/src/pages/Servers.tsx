@@ -151,7 +151,7 @@ export default function ServersPage() {
   const editing = editId ? servers?.find((s) => s.id === editId) : undefined;
   const endpointChanged =
     !!editing &&
-    (form.host !== editing.host || form.port !== String(editing.port) || form.agentId !== (editing.agentId ?? ''));
+    (form.host !== editing.host || form.port !== String(editing.port));
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -326,7 +326,7 @@ export default function ServersPage() {
               />
               {endpointChanged && editing?.hostKeyFingerprint && form.hostKeyFingerprint.trim() === editing.hostKeyFingerprint && (
                 <p className="mt-1 text-xs text-amber-600">
-                  Changing the host, port or route forgets the pinned key — the next connection trusts the new endpoint's key unless you enter its fingerprint here.
+                  Changing the host or port forgets the pinned key — the next connection trusts the new endpoint's key unless you enter its fingerprint here.
                 </p>
               )}
             </div>
