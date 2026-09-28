@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { servers, sshKeys } from '../../db/schema.js';
+import { ftpConnections, servers, sshKeys } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import type { GenerateSSHKeyResponse, SSHKey } from '@smt/shared';
 import { nanoid } from 'nanoid';
@@ -122,6 +122,21 @@ export async function sshKeyRoutes(app: FastifyInstance) {
         error: `Key is in use as the default key for ${inUse.length} server(s)${
           names.length ? ` (${names.join(', ')})` : ''
         }. Assign those servers a different key before deleting it.`,
+      });
+    }
+
+    // ftp_connections.ssh_key_id has no ON DELETE action either
+    const fileConnections = db
+      .select({ name: ftpConnections.name, orgId: ftpConnections.orgId })
+      .from(ftpConnections)
+      .where(eq(ftpConnections.sshKeyId, id))
+      .all();
+    if (fileConnections.length > 0) {
+      const names = fileConnections.filter((c) => c.orgId === req.orgId).map((c) => c.name);
+      return reply.status(409).send({
+        error: `Key is used to log in to ${fileConnections.length} file connection(s)${
+          names.length ? ` (${names.join(', ')})` : ''
+        }. Switch those connections to another key or a password before deleting it.`,
       });
     }
 

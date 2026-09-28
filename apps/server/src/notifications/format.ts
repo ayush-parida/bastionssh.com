@@ -12,6 +12,12 @@ export interface AlertEvent {
   value?: number;
   threshold?: number;
   openedAt?: string;
+  /**
+   * What the alert is about when it is not a managed server — an SFTP file
+   * connection's host key, say. `serverId` then carries that row's id, and
+   * nothing is looked up in the servers table.
+   */
+  subject?: ServerRef;
 }
 
 export interface ServerRef {

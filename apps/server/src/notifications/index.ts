@@ -184,7 +184,7 @@ async function dispatch(events: AlertEvent[]): Promise<void> {
 
     const sends: Promise<boolean>[] = [];
     for (const event of orgEvents) {
-      const server = serverRef(event.serverId);
+      const server = event.subject ?? serverRef(event.serverId);
       if (!server) continue;
 
       for (const channel of channels) {

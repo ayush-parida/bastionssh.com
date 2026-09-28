@@ -32,7 +32,7 @@ export const FTP_PROTOCOL_OPTIONS: readonly FtpProtocolOption[] = [
     protocol: 'sftp',
     label: 'SFTP (SSH File Transfer)',
     defaultPort: 22,
-    hint: 'File transfer over SSH with a password. Works with SFTP-only (chrooted, no shell) accounts. The host key is trusted on first connect and checked on every connect after.',
+    hint: 'File transfer over SSH with a password or one of your SSH keys. Works with SFTP-only (chrooted, no shell) accounts. The host key is trusted on first connect and checked on every connect after.',
   },
   {
     protocol: 'ftp',
@@ -54,6 +54,9 @@ export function ftpProtocolOption(protocol: FtpProtocol): FtpProtocolOption {
 
 export type FtpTestStatus = 'ok' | 'failed';
 
+/** `key` logs in with one of the org's SSH keys; SFTP only. */
+export type FtpAuthMethod = 'password' | 'key';
+
 export interface FtpConnection {
   id: string;
   orgId: string;
@@ -66,6 +69,14 @@ export interface FtpConnection {
   verifyTls: boolean;
   /** Directory the browser opens at; null means the account's login directory. */
   rootPath: string | null;
+  /**
+   * Refuse every path outside `rootPath` (or the login directory when that is
+   * null). Over SFTP symlinks are resolved too, so a link cannot lead out.
+   */
+  restrictToRoot: boolean;
+  authMethod: FtpAuthMethod;
+  /** The org SSH key used when `authMethod` is `key`. */
+  sshKeyId: string | null;
   /** Pinned SSH host key (SFTP only); null until the first connection or for FTP/FTPS. */
   hostKeyFingerprint: string | null;
   /** Always `unknown` for FTP/FTPS, which have no host key. */
@@ -87,10 +98,17 @@ export interface CreateFtpConnectionRequest {
   port?: number;
   protocol?: FtpProtocol;
   username: string;
-  password: string;
+  /** Defaults to `password`. */
+  authMethod?: FtpAuthMethod;
+  /** Required with password auth. */
+  password?: string;
+  /** Required with key auth. */
+  sshKeyId?: string | null;
   /** Defaults to true. */
   verifyTls?: boolean;
   rootPath?: string | null;
+  /** Defaults to true for new connections. */
+  restrictToRoot?: boolean;
 }
 
 export interface UpdateFtpConnectionRequest {
@@ -99,10 +117,13 @@ export interface UpdateFtpConnectionRequest {
   port?: number;
   protocol?: FtpProtocol;
   username?: string;
-  /** Omit to keep the stored password. */
+  authMethod?: FtpAuthMethod;
+  /** Omit to keep the stored password. Required when switching to password auth. */
   password?: string;
+  sshKeyId?: string | null;
   verifyTls?: boolean;
   rootPath?: string | null;
+  restrictToRoot?: boolean;
 }
 
 /** GET /api/ftp/connections/:id/host-key — SFTP connections only. */
@@ -149,8 +170,10 @@ export interface FtpEntry {
 export interface FtpListResponse {
   /** The absolute directory being listed. */
   path: string;
-  /** Parent directory, or null at the filesystem root. */
+  /** Parent directory, or null at the filesystem root (or the restricted root). */
   parent: string | null;
+  /** The directory a restricted connection is confined to; null when unrestricted. */
+  root: string | null;
   entries: FtpEntry[];
 }
 

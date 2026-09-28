@@ -322,3 +322,52 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const FTP_OPTIONS_TAG = '0019_ftp_connection_options';
+
+describe('migration 0019 (ftp connection options)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(FTP_OPTIONS_TAG);
+  });
+
+  it('keeps existing connections unrestricted and on password auth', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < FTP_OPTIONS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO ftp_connections (id, org_id, name, host, port, protocol, username, encrypted_password, verify_tls, root_path, host_key_fingerprint, created_by, created_at, updated_at)
+        VALUES ('f1', 'o1', 'site', 'sftp.example.com', 22, 'sftp', 'deploy', 'enc', 1, '/var/www', 'SHA256:x', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [FTP_OPTIONS_TAG]);
+
+    expect(
+      db
+        .prepare(
+          `SELECT id, protocol, encrypted_password, root_path, host_key_fingerprint,
+             restrict_to_root, auth_method, ssh_key_id
+           FROM ftp_connections`,
+        )
+        .get(),
+    ).toEqual({
+      id: 'f1',
+      protocol: 'sftp',
+      encrypted_password: 'enc',
+      root_path: '/var/www',
+      host_key_fingerprint: 'SHA256:x',
+      restrict_to_root: 0,
+      auth_method: 'password',
+      ssh_key_id: null,
+    });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (
+      sqlite.prepare('PRAGMA table_info(ftp_connections)').all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(columns).toEqual(expect.arrayContaining(['restrict_to_root', 'auth_method', 'ssh_key_id']));
+  });
+});

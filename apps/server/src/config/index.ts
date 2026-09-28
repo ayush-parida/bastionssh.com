@@ -14,6 +14,8 @@ const envSchema = z.object({
   SMT_SFTP_MAX_UPLOAD_BYTES: z.coerce.number().default(1_073_741_824), // 1 GiB
   SMT_STORAGE_MAX_UPLOAD_BYTES: z.coerce.number().default(5_368_709_120), // 5 GiB
   SMT_FTP_MAX_UPLOAD_BYTES: z.coerce.number().default(1_073_741_824), // 1 GiB
+  // One SFTP request on a file connection (or a stalled transfer) may take this long
+  SMT_SFTP_OP_TIMEOUT_MS: z.coerce.number().int().min(1).default(30_000),
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
 
   // ── Outbound email (alert notifications) ──
@@ -184,6 +186,7 @@ export const config = {
   sftpMaxUploadBytes: env.SMT_SFTP_MAX_UPLOAD_BYTES,
   storageMaxUploadBytes: env.SMT_STORAGE_MAX_UPLOAD_BYTES,
   ftpMaxUploadBytes: env.SMT_FTP_MAX_UPLOAD_BYTES,
+  sftpOpTimeoutMs: env.SMT_SFTP_OP_TIMEOUT_MS,
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
   /** null = email delivery unavailable; the notifications UI says so. */
   smtp: env.SMT_SMTP_URL ? { url: env.SMT_SMTP_URL, from: env.SMT_SMTP_FROM ?? '' } : null,

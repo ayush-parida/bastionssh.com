@@ -617,9 +617,15 @@ export const ftpConnections = sqliteTable(
     port: integer('port').notNull().default(21),
     protocol: text('protocol').notNull().default('ftps'), // ftp | ftps | ftps-implicit | sftp
     username: text('username').notNull(),
-    encryptedPassword: text('encrypted_password').notNull(),
+    encryptedPassword: text('encrypted_password').notNull(), // '' when authMethod = key
     verifyTls: integer('verify_tls', { mode: 'boolean' }).notNull().default(true),
     rootPath: text('root_path'), // null = the account's login directory
+    // Confine every path to rootPath (or the login directory). Off for rows that
+    // predate the option; the API defaults it on for new connections.
+    restrictToRoot: integer('restrict_to_root', { mode: 'boolean' }).notNull().default(false),
+    authMethod: text('auth_method').notNull().default('password'), // password | key (SFTP only)
+    // The org SSH key used when authMethod = key
+    sshKeyId: text('ssh_key_id').references(() => sshKeys.id),
     // SFTP only — pinned SSH host key; null = trust on first use (see ssh/host-keys.ts)
     hostKeyFingerprint: text('host_key_fingerprint'), // SHA256:<base64, no padding>
     hostKeyType: text('host_key_type'),

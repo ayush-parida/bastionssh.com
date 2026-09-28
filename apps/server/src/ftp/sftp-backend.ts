@@ -1,23 +1,30 @@
 import { Client } from 'ssh2';
 import type { Attributes, FileEntry, SFTPWrapper } from 'ssh2';
 import { pipeline } from 'node:stream/promises';
-import type { Readable, Writable } from 'node:stream';
+import { Transform, type Readable, type Writable } from 'node:stream';
 import type { FtpEntry, FtpEntryType, FtpTestResult } from '@smt/shared';
+import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { HostKeyMismatchError, sshConnectConfig } from '../ssh/host-keys.js';
 import { FtpError } from './errors.js';
 import { ftpHostKeyStore } from './host-keys.js';
 import { MAX_RESOLVED_LINKS, sortEntries } from './ops.js';
 import { baseName, joinPath, normalizeRemotePath } from './paths.js';
-import type { FileBackend, FileSession, FtpConnectionRow } from './backend.js';
+import type { FileBackend, FileCredentials, FileSession, FtpConnectionRow } from './backend.js';
 
 /**
  * SFTP file connections over ssh2. Only the `sftp` subsystem is ever opened —
  * never exec or a shell — so SFTP-only accounts (ForceCommand internal-sftp,
  * chrooted) work. Password auth, answered over keyboard-interactive too, since
  * some servers only offer that (one hidden password prompt only; see
- * keyboardAnswers). The host key is checked against the one pinned
- * on the connection row (trust on first use, refuse on mismatch).
+ * keyboardAnswers), or public key auth with an org SSH key. The host key is
+ * checked against the one pinned on the connection row (trust on first use,
+ * refuse on mismatch).
+ *
+ * Every request is bounded by SMT_SFTP_OP_TIMEOUT_MS, and a transfer by the
+ * same timeout between chunks. A server that stops answering gets a 504 and
+ * the session is closed, so the next call reconnects instead of queueing
+ * behind a request that will never finish.
  */
 
 /** Handshake plus authentication must finish within this. */
@@ -27,6 +34,9 @@ const SUBSYSTEM_TIMEOUT_MS = 10_000;
 /** A keepalive every 15s; three unanswered ones and the connection is dropped. */
 export const KEEPALIVE_INTERVAL_MS = 15_000;
 export const KEEPALIVE_COUNT_MAX = 3;
+/** A recursive delete refuses a tree deeper or bigger than this before removing anything. */
+export const MAX_DELETE_DEPTH = 64;
+export const MAX_DELETE_ENTRIES = 10_000;
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -186,11 +196,82 @@ export interface SftpFileSession extends FileSession {
   realpath(path: string): Promise<string>;
 }
 
-export function sftpSession(client: Client, sftp: SFTPWrapper): SftpFileSession {
+export interface SftpSessionOptions {
+  /** Longest one request, or the gap between two chunks of a transfer, may take. */
+  opTimeoutMs?: number;
+}
+
+export function sftpSession(
+  client: Client,
+  sftp: SFTPWrapper,
+  options: SftpSessionOptions = {},
+): SftpFileSession {
+  const opTimeoutMs = options.opTimeoutMs ?? config.sftpOpTimeoutMs;
   let closed = false;
   const markClosed = () => {
     closed = true;
   };
+
+  /**
+   * A request that outlives the timeout means the server (or the path to it)
+   * has stalled. One SFTP request cannot be cancelled, so the whole session
+   * goes: anything queued after it would only wait behind it.
+   */
+  const timedOut = (what: string) => {
+    markClosed();
+    client.end();
+    return new FtpError(`SFTP ${what} timed out after ${opTimeoutMs}ms; the session was closed`, 504);
+  };
+
+  function bounded<T>(
+    fallback: string,
+    fn: (cb: (err: Error | null | undefined, value: T) => void) => void,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => reject(timedOut('request')), opTimeoutMs);
+      timer.unref?.();
+      call(fallback, fn).then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (err: unknown) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      );
+    });
+  }
+
+  /**
+   * Pass-through that fails a transfer once no chunk has moved for the
+   * operation timeout — whichever side stalled: a server that stops sending,
+   * or a browser that stops reading or uploading.
+   */
+  function watchdog(): Transform {
+    let timer: NodeJS.Timeout | undefined;
+    const arm = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => stream.destroy(timedOut('transfer')), opTimeoutMs);
+      timer.unref?.();
+    };
+    const stream: Transform = new Transform({
+      transform(chunk, _encoding, callback) {
+        arm();
+        callback(null, chunk);
+      },
+      flush(callback) {
+        clearTimeout(timer);
+        callback();
+      },
+      destroy(err, callback) {
+        clearTimeout(timer);
+        callback(err);
+      },
+    });
+    arm();
+    return stream;
+  }
   client.on('close', markClosed);
   client.on('end', markClosed);
   // The pool closes a broken session; this only keeps the error from being unhandled
@@ -204,19 +285,19 @@ export function sftpSession(client: Client, sftp: SFTPWrapper): SftpFileSession 
   });
 
   const readdir = (dir: string) =>
-    call<FileEntry[]>('Could not list directory', (cb) => sftp.readdir(dir, cb));
+    bounded<FileEntry[]>('Could not list directory', (cb) => sftp.readdir(dir, cb));
   const lstat = (path: string) =>
-    call<Attributes>('Could not read file details', (cb) => sftp.lstat(path, cb));
+    bounded<Attributes>('Could not read file details', (cb) => sftp.lstat(path, cb));
   const stat = (path: string) =>
-    call<Attributes>('Could not read file details', (cb) => sftp.stat(path, cb));
+    bounded<Attributes>('Could not read file details', (cb) => sftp.stat(path, cb));
   const readlink = (path: string) =>
-    call<string>('Could not read link', (cb) => sftp.readlink(path, cb));
+    bounded<string>('Could not read link', (cb) => sftp.readlink(path, cb));
   const unlink = (path: string) =>
-    call<void>('Could not delete file', (cb) => sftp.unlink(path, cb));
+    bounded<void>('Could not delete file', (cb) => sftp.unlink(path, cb));
   const rmdir = (path: string) =>
-    call<void>('Could not delete directory', (cb) => sftp.rmdir(path, cb));
+    bounded<void>('Could not delete directory', (cb) => sftp.rmdir(path, cb));
   const realpath = (path: string) =>
-    call<string>('Could not resolve the login directory', (cb) => sftp.realpath(path, cb));
+    bounded<string>('Could not resolve path', (cb) => sftp.realpath(path, cb));
 
   /**
    * Fill in where each link points and whether that is a directory. readdir
@@ -254,16 +335,47 @@ export function sftpSession(client: Client, sftp: SFTPWrapper): SftpFileSession 
     return entries;
   }
 
+  /**
+   * Walk the whole tree first and return the removals depth-first (children
+   * before their directory). Nothing is deleted until the walk has stayed
+   * within MAX_DELETE_DEPTH and MAX_DELETE_ENTRIES, so an oversized tree is
+   * refused whole rather than left half-deleted.
+   */
+  async function planRemoval(root: string): Promise<{ path: string; dir: boolean }[]> {
+    const plan: { path: string; dir: boolean }[] = [];
+    let entries = 0;
+    const walk = async (dir: string, depth: number): Promise<void> => {
+      if (depth > MAX_DELETE_DEPTH) {
+        throw new FtpError(
+          `Refusing to delete: the tree is more than ${MAX_DELETE_DEPTH} levels deep`,
+          400,
+        );
+      }
+      for (const row of await readdir(dir)) {
+        if (row.filename === '.' || row.filename === '..') continue;
+        if (++entries > MAX_DELETE_ENTRIES) {
+          throw new FtpError(
+            `Refusing to delete: the tree has more than ${MAX_DELETE_ENTRIES} entries`,
+            400,
+          );
+        }
+        const child = joinPath(dir, row.filename);
+        // readdir rows carry lstat attributes, so a link to a directory is a link here
+        const type = entryType(row.attrs.mode ?? (await lstat(child)).mode);
+        if (type === 'directory') await walk(child, depth + 1);
+        else plan.push({ path: child, dir: false });
+      }
+      plan.push({ path: dir, dir: true });
+    };
+    await walk(root, 1);
+    return plan;
+  }
+
   async function removeTree(path: string): Promise<void> {
-    for (const row of await readdir(path)) {
-      if (row.filename === '.' || row.filename === '..') continue;
-      const child = joinPath(path, row.filename);
-      // readdir rows carry lstat attributes, so a link to a directory is a link here
-      const type = entryType(row.attrs.mode ?? (await lstat(child)).mode);
-      if (type === 'directory') await removeTree(child);
-      else await unlink(child);
+    for (const step of await planRemoval(path)) {
+      if (step.dir) await rmdir(step.path);
+      else await unlink(step.path);
     }
-    await rmdir(path);
   }
 
   return {
@@ -315,7 +427,7 @@ export function sftpSession(client: Client, sftp: SFTPWrapper): SftpFileSession 
 
     async download(path, destination: Writable) {
       try {
-        await pipeline(sftp.createReadStream(checked(path)), destination);
+        await pipeline(sftp.createReadStream(checked(path)), watchdog(), destination);
       } catch (err) {
         throw toSftpError(err, 'Could not download file');
       }
@@ -323,16 +435,16 @@ export function sftpSession(client: Client, sftp: SFTPWrapper): SftpFileSession 
 
     async upload(source: Readable, path) {
       try {
-        await pipeline(source, sftp.createWriteStream(checked(path)));
+        await pipeline(source, watchdog(), sftp.createWriteStream(checked(path)));
       } catch (err) {
         throw toSftpError(err, 'Could not upload file');
       }
     },
 
     mkdir: (path) =>
-      call<void>('Could not create directory', (cb) => sftp.mkdir(checked(path), cb)),
+      bounded<void>('Could not create directory', (cb) => sftp.mkdir(checked(path), cb)),
     rename: (from, to) =>
-      call<void>('Could not rename', (cb) => sftp.rename(checked(from), checked(to), cb)),
+      bounded<void>('Could not rename', (cb) => sftp.rename(checked(from), checked(to), cb)),
     // unlink never follows a link, so a link is removed rather than its target
     removeFile: async (path) => unlink(checked(path)),
     removeEmptyDir: async (path) => rmdir(checked(path)),
@@ -369,33 +481,38 @@ export function keyboardAnswers(
   return [password];
 }
 
-export interface SftpOpenOptions {
+export interface SftpOpenOptions extends SftpSessionOptions {
   readyTimeoutMs?: number;
 }
 
-/** Connect, verify the host key, log in and open the SFTP subsystem. */
+/**
+ * Connect, verify the host key, log in and open the SFTP subsystem. With a
+ * private key only public key auth is offered: there is no password to send,
+ * so keyboard-interactive stays off.
+ */
 export function openSftp(
   connection: FtpConnectionRow,
-  password: string,
+  credentials: FileCredentials,
   options: SftpOpenOptions = {},
 ): Promise<SftpFileSession> {
   const readyTimeout = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+  const password = credentials.privateKey ? undefined : credentials.password;
   return new Promise((resolve, reject) => {
     const client = new Client();
-    const { config, guard } = sshConnectConfig(
+    const { config: connectConfig, guard } = sshConnectConfig(
       {
         id: connection.id,
         host: connection.host,
         port: connection.port,
         username: connection.username,
       },
-      { password },
+      credentials.privateKey ? { privateKey: credentials.privateKey } : { password },
       'sftp',
       {
         readyTimeout,
         keepaliveInterval: KEEPALIVE_INTERVAL_MS,
         keepaliveCountMax: KEEPALIVE_COUNT_MAX,
-        tryKeyboard: true,
+        tryKeyboard: password !== undefined,
       },
       ftpHostKeyStore,
     );
@@ -419,6 +536,10 @@ export function openSftp(
 
     client
       .on('keyboard-interactive', (_name, _instructions, _lang, prompts, finish) => {
+        if (password === undefined) {
+          finish(prompts.map(() => ''));
+          return;
+        }
         const answers = keyboardAnswers(prompts, password, passwordSent);
         if (answers.includes(password)) passwordSent = true;
         finish(answers);
@@ -435,14 +556,14 @@ export function openSftp(
           }
           settled = true;
           clearTimeout(timer);
-          resolve(sftpSession(client, sftp));
+          resolve(sftpSession(client, sftp, options));
         });
       })
       .on('error', (err: Error) => fail(toSftpConnectError(guard.error(err))))
       .on('close', () => fail(new FtpError('SFTP connection closed before login finished', 502)));
 
     try {
-      client.connect(config);
+      client.connect(connectConfig);
     } catch (err) {
       fail(toSftpConnectError(err));
     }
@@ -456,11 +577,11 @@ export function openSftp(
  */
 export async function testSftpConnection(
   connection: FtpConnectionRow,
-  password: string,
+  credentials: FileCredentials,
 ): Promise<FtpTestResult> {
   let session: SftpFileSession | undefined;
   try {
-    session = await openSftp(connection, password);
+    session = await openSftp(connection, credentials);
     const resolved = await session.realpath(connection.rootPath ?? '.');
     const workingDirectory = normalizeRemotePath(resolved.startsWith('/') ? resolved : `/${resolved}`);
     const entries = await session.list(workingDirectory);
@@ -474,6 +595,6 @@ export async function testSftpConnection(
 }
 
 export const sftpBackend: FileBackend = {
-  open: (connection, password) => openSftp(connection, password),
+  open: (connection, credentials) => openSftp(connection, credentials),
   testConnection: testSftpConnection,
 };

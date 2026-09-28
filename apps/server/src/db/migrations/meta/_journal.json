@@ -85,6 +85,13 @@
       "when": 1777900000000,
       "tag": "0011_ftp_host_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1778700000000,
+      "tag": "0019_ftp_connection_options",
+      "breakpoints": true
     }
   ]
 }

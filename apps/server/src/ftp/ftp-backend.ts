@@ -40,8 +40,9 @@ function ftpSession(client: Client): FileSession {
 }
 
 export const ftpBackend: FileBackend = {
-  async open(connection, password) {
-    return ftpSession(await openClient(toTarget(connection), password));
+  async open(connection, credentials) {
+    return ftpSession(await openClient(toTarget(connection), credentials.password ?? ''));
   },
-  testConnection: (connection, password) => ops.testConnection(toTarget(connection), password),
+  testConnection: (connection, credentials) =>
+    ops.testConnection(toTarget(connection), credentials.password ?? ''),
 };

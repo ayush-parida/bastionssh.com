@@ -54,6 +54,8 @@ export interface FakeSsh2State {
   calls: unknown[][];
   /** Paths whose write stream was destroyed before finishing. */
   abortedWrites: string[];
+  /** SFTP ops (e.g. 'readdir', or 'read' for a download) the server never answers. */
+  stalled: Set<string>;
   reset(): void;
 }
 
@@ -80,6 +82,7 @@ function createState(): FakeSsh2State {
     clients: [],
     calls: [],
     abortedWrites: [],
+    stalled: new Set(),
     reset() {
       state.fs.clear();
       state.home = '/home/deploy';
@@ -92,6 +95,7 @@ function createState(): FakeSsh2State {
       state.denied.clear();
       state.calls.length = 0;
       state.abortedWrites.length = 0;
+      state.stalled.clear();
     },
   };
   return state;
@@ -146,6 +150,8 @@ function makeSftp(state: FakeSsh2State) {
   /** Record the call; answer PERMISSION_DENIED for a denied path. */
   const enter = (op: string, cb: (...args: any[]) => void, ...paths: string[]) => {
     state.calls.push([op, ...paths]);
+    // A stalled server: the request is never answered
+    if (state.stalled.has(op)) return false;
     if (paths.some(isDenied)) {
       later(cb, denied());
       return false;
@@ -192,12 +198,31 @@ function makeSftp(state: FakeSsh2State) {
     later(cb, undefined, node.target);
   };
 
+  /** Resolve links in every component, like realpath(3); undefined when something is missing. */
+  const resolveReal = (p: string, depth = 0): string | undefined => {
+    let cur = '/';
+    for (const part of p.split('/').filter(Boolean)) {
+      const next = cur === '/' ? `/${part}` : `${cur}/${part}`;
+      const node = state.fs.get(next);
+      if (!node) return undefined;
+      if (node.type !== 'link') {
+        cur = next;
+        continue;
+      }
+      if (depth > 8) return undefined;
+      const resolved = resolveReal(posix.resolve(cur, node.target!), depth + 1);
+      if (!resolved) return undefined;
+      cur = resolved;
+    }
+    return cur;
+  };
+
   sftp.realpath = (p: string, cb: (...args: any[]) => void) => {
     if (!enter('realpath', cb, p)) return;
     const abs = p === '.' ? state.home : posix.resolve(state.home, p);
-    const found = follow(abs);
-    if (!found) return later(cb, noSuchFile());
-    later(cb, undefined, found[0]);
+    const real = resolveReal(abs);
+    if (!real) return later(cb, noSuchFile());
+    later(cb, undefined, real);
   };
 
   sftp.mkdir = (p: string, cb: (...args: any[]) => void) => {
@@ -246,6 +271,7 @@ function makeSftp(state: FakeSsh2State) {
       read() {
         if (done) return;
         done = true;
+        if (state.stalled.has('read')) return;
         if (isDenied(p)) return this.destroy(denied());
         const found = follow(p);
         if (!found) return this.destroy(noSuchFile());
@@ -264,6 +290,8 @@ function makeSftp(state: FakeSsh2State) {
       construct(cb) {
         if (isDenied(p)) return cb(denied());
         if (!state.fs.has(posix.dirname(p))) return cb(noSuchFile());
+        // Opening for write creates (or truncates) the file, like SSH_FXF_TRUNC
+        state.fs.set(p, { type: 'file', data: Buffer.alloc(0) });
         cb();
       },
       write(chunk: Buffer, _enc, cb) {

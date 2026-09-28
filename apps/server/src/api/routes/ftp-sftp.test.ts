@@ -116,6 +116,8 @@ describe('ftp routes with an SFTP connection', () => {
         username: 'deploy',
         password: 'shh-secret',
         rootPath: '/var/www/html',
+        // This suite browses above the root; the jail has its own suite
+        restrictToRoot: false,
       },
     });
     expect(res.statusCode).toBe(201);

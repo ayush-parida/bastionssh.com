@@ -1,18 +1,20 @@
 import { and, eq } from 'drizzle-orm';
 import { getDb } from '../db/index.js';
-import { ftpConnections } from '../db/schema.js';
+import { ftpConnections, sshKeys } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import logger from '../logger.js';
 import { FtpError, toFtpError } from './errors.js';
-import type { FileBackend, FileSession, FtpConnectionRow } from './backend.js';
+import type { FileBackend, FileCredentials, FileSession, FtpConnectionRow } from './backend.js';
 import { ftpBackend } from './ftp-backend.js';
+import { jailSession } from './jail.js';
 import { sftpBackend } from './sftp-backend.js';
 
 export * from './errors.js';
 export * from './paths.js';
 export * as ops from './ops.js';
 export { toTarget } from './ftp-backend.js';
-export type { FileBackend, FileSession, FtpConnectionRow } from './backend.js';
+export { FtpPathRefusedError, isWithin, jailSession } from './jail.js';
+export type { FileBackend, FileCredentials, FileSession, FtpConnectionRow } from './backend.js';
 
 /** SFTP goes through ssh2; every other protocol is basic-ftp. */
 export function backendFor(protocol: string): FileBackend {
@@ -78,8 +80,33 @@ export function loadConnection(orgId: string, id: string): FtpConnectionRow {
   return connection;
 }
 
-export async function decryptPassword(connection: FtpConnectionRow): Promise<string> {
-  return vault.decrypt(connection.encryptedPassword, connection.id);
+/**
+ * Decrypt what the connection logs in with: the org SSH key it names (SFTP key
+ * auth), else its stored password. The key must still belong to the
+ * connection's org.
+ */
+export async function resolveCredentials(connection: FtpConnectionRow): Promise<FileCredentials> {
+  if (connection.authMethod === 'key') {
+    const key = connection.sshKeyId
+      ? getDb()
+          .select()
+          .from(sshKeys)
+          .where(and(eq(sshKeys.id, connection.sshKeyId), eq(sshKeys.orgId, connection.orgId)))
+          .get()
+      : undefined;
+    if (!key) throw new FtpError('The SSH key for this connection no longer exists', 400);
+    return { privateKey: await vault.decrypt(key.encryptedPrivateKey, key.id) };
+  }
+  return { password: await vault.decrypt(connection.encryptedPassword, connection.id) };
+}
+
+/** Open a logged-in session, confined to the root when the connection says so. */
+export async function openSession(connection: FtpConnectionRow): Promise<FileSession> {
+  const session = await backendFor(connection.protocol).open(
+    connection,
+    await resolveCredentials(connection),
+  );
+  return connection.restrictToRoot ? jailSession(session, connection.rootPath) : session;
 }
 
 /**
@@ -117,10 +144,7 @@ export async function withSession<T>(
         // Release whatever is left of a session the server dropped
         current.session?.close();
         current.session = undefined;
-        current.session = await backendFor(connection.protocol).open(
-          connection,
-          await decryptPassword(connection),
-        );
+        current.session = await openSession(connection);
       }
       const session = current.session;
       try {

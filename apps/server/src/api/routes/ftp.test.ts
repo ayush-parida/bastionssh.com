@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { Readable, type Writable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 
 // Must run before `config` is imported: a tiny cap lets the upload guard be
 // exercised with a handful of bytes.
@@ -75,6 +75,8 @@ const connectionBody = {
   host: 'FTP.Example.com',
   username: 'deploy',
   password: 'shh-secret',
+  // This suite browses outside the login directory; the jail has its own suite
+  restrictToRoot: false,
 };
 
 describe('ftp routes', () => {
@@ -357,6 +359,11 @@ describe('ftp routes', () => {
 
   it('fails a chunked upload that runs past the cap', async () => {
     vi.mocked(ops.upload).mockClear();
+    // Like basic-ftp once STOR is accepted: the body is piped into the data socket
+    vi.mocked(ops.upload).mockImplementationOnce(async (_c, body) => {
+      const { pipeline } = await import('node:stream/promises');
+      await pipeline(body, new Writable({ write: (_chunk, _enc, cb) => cb() }));
+    });
     const res = await app.inject({
       method: 'PUT',
       url: `/api/ftp/connections/${connectionId}/file?path=/home/deploy/big.bin`,
@@ -368,6 +375,8 @@ describe('ftp routes', () => {
       payload: Readable.from([Buffer.alloc(10), Buffer.alloc(10)]),
     });
     expect(res.statusCode).toBe(413);
+    // STOR had started, so the partial file is removed (best effort)
+    expect(ops.removeFile).toHaveBeenCalledWith(expect.anything(), '/home/deploy/big.bin');
   });
 
   it('survives a client that aborts before the transfer starts', async () => {
@@ -497,6 +506,43 @@ describe('ftp routes', () => {
       expect.objectContaining({ host: 'ftp2.example.com' }),
       'shh-secret',
     );
+  });
+
+  it('confines a restricted connection to its root, lexically', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/ftp/connections',
+      headers: admin.headers,
+      payload: { ...connectionBody, name: 'jailed', restrictToRoot: undefined, rootPath: '/home/deploy' },
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().restrictToRoot).toBe(true);
+    const jailed = created.json().id;
+    const get = (url: string) =>
+      app.inject({ method: 'GET', url: `/api/ftp/connections/${jailed}${url}`, headers: viewer.headers });
+
+    const home = await get('/list?path=.');
+    expect(home.statusCode).toBe(200);
+    expect(home.json()).toMatchObject({ path: '/home/deploy', parent: null });
+
+    vi.mocked(ops.list).mockClear();
+    vi.mocked(ops.download).mockClear();
+    for (const path of ['/home/deploy/../../etc', '/home', '/home/deployer', '/']) {
+      expect((await get(`/list?path=${encodeURIComponent(path)}`)).statusCode, path).toBe(403);
+    }
+    expect((await get('/download?path=/etc/passwd')).statusCode).toBe(403);
+    const rename = await app.inject({
+      method: 'POST',
+      url: `/api/ftp/connections/${jailed}/rename`,
+      headers: operator.headers,
+      payload: { from: '/home/deploy/index.html', to: '/home/deploy/../other/index.html' },
+    });
+    expect(rename.statusCode).toBe(403);
+    expect(ops.list).not.toHaveBeenCalled();
+    expect(ops.download).not.toHaveBeenCalled();
+
+    // FTP cannot see where a link leads, so inside the root is all it checks
+    expect((await get('/list?path=/home/deploy/logs')).statusCode).toBe(200);
   });
 
   it('deletes a connection', async () => {
