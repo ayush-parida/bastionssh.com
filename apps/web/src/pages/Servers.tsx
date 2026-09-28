@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import {
   CLOUD_PROVIDER_LABEL,
+  type Agent,
   HOST_KEY_FINGERPRINT_PATTERN,
   type CreateServerRequest,
   type MonitoringOverview,
@@ -12,12 +13,13 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
+import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, Server as ServerIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
 import { hostKeyPanelPath } from '@/lib/host-keys.js';
 import { HostKeyBadge } from '@/components/servers/HostKey.js';
+import { useHasRole } from '@/store/auth.js';
 
 interface ServerFormState {
   name: string;
@@ -30,9 +32,11 @@ interface ServerFormState {
   tags: string;
   /** Optional pinned host key; blank leaves it alone (trust on first use for a new server). */
   hostKeyFingerprint: string;
+  /** Connectivity agent to go through; blank connects directly. */
+  agentId: string;
 }
 
-const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '' };
+const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '', agentId: '' };
 
 /** Tags are entered as a comma-separated list and stored as an array. */
 function splitTags(input: string): string[] {
@@ -65,6 +69,7 @@ export default function ServersPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<ServerFormState>(empty);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const isAdmin = useHasRole('admin');
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -75,6 +80,14 @@ export default function ServersPage() {
     queryKey: ['ssh-keys'],
     queryFn: () => api.get('/keys'),
   });
+
+  // Agents are admin-only, as is editing servers
+  const { data: agents } = useQuery<Agent[]>({
+    queryKey: ['agents'],
+    queryFn: () => api.get('/agents'),
+    enabled: isAdmin,
+  });
+  const agentById = new Map((agents ?? []).map((a) => [a.id, a]));
 
   // Live health for the status dot on each card; the Monitoring page owns the detail.
   const { data: overview } = useQuery<MonitoringOverview>({
@@ -120,6 +133,7 @@ export default function ServersPage() {
       password: '',
       tags: (s.tags ?? []).join(', '),
       hostKeyFingerprint: s.hostKeyFingerprint ?? '',
+      agentId: s.agentId ?? '',
     });
     setShowForm(true);
   }
@@ -136,7 +150,8 @@ export default function ServersPage() {
   // The server being edited, to tell a changed endpoint or fingerprint from a no-op
   const editing = editId ? servers?.find((s) => s.id === editId) : undefined;
   const endpointChanged =
-    !!editing && (form.host !== editing.host || form.port !== String(editing.port));
+    !!editing &&
+    (form.host !== editing.host || form.port !== String(editing.port) || form.agentId !== (editing.agentId ?? ''));
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -159,6 +174,8 @@ export default function ServersPage() {
       ...(form.authType === 'password' && form.password ? { password: form.password } : {}),
       tags: splitTags(form.tags),
       ...(sendFingerprint ? { hostKeyFingerprint: fingerprint } : {}),
+      // Only when changed: a server keeps a revoked agent until an admin picks another
+      ...(!editing || form.agentId !== (editing.agentId ?? '') ? { agentId: form.agentId || null } : {}),
     };
     if (editId) updateMutation.mutate({ id: editId, body });
     else createMutation.mutate(body);
@@ -258,6 +275,29 @@ export default function ServersPage() {
               )}
             </div>
             <div className="col-span-2">
+              <label className="block text-sm font-medium mb-1">Connect via</label>
+              <select
+                value={form.agentId}
+                onChange={(e) => setForm((prev) => ({ ...prev, agentId: e.target.value }))}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+              >
+                <option value="">Direct connection</option>
+                {agents
+                  ?.filter((a) => a.status !== 'revoked' || a.id === form.agentId)
+                  .map((a) => (
+                    <option key={a.id} value={a.id} disabled={a.status === 'revoked'}>
+                      Agent: {a.name} ({a.status})
+                    </option>
+                  ))}
+              </select>
+              {form.agentId && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  The agent connects to 127.0.0.1 on the port above, from the host it runs on — the host field
+                  is only a label. The port must be on the agent's allowlist.
+                </p>
+              )}
+            </div>
+            <div className="col-span-2">
               <label className="block text-sm font-medium mb-1">
                 Tags <span className="text-muted-foreground text-xs">(comma separated — target these with saved commands)</span>
               </label>
@@ -286,7 +326,7 @@ export default function ServersPage() {
               />
               {endpointChanged && editing?.hostKeyFingerprint && form.hostKeyFingerprint.trim() === editing.hostKeyFingerprint && (
                 <p className="mt-1 text-xs text-amber-600">
-                  Changing the host or port forgets the pinned key — the next connection trusts the new endpoint's key unless you enter its fingerprint here.
+                  Changing the host, port or route forgets the pinned key — the next connection trusts the new endpoint's key unless you enter its fingerprint here.
                 </p>
               )}
             </div>
@@ -347,6 +387,16 @@ export default function ServersPage() {
                 >
                   <HostKeyBadge status={s.hostKeyStatus} />
                 </button>
+                {s.agentId && (
+                  <span
+                    title={agentById.get(s.agentId) ? `Through agent ${agentById.get(s.agentId)!.name} (${agentById.get(s.agentId)!.status})` : 'Through a connectivity agent'}
+                    className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${
+                      agentById.get(s.agentId)?.status === 'revoked' ? 'bg-red-500/10 text-red-500' : 'bg-muted text-muted-foreground'
+                    }`}
+                  >
+                    <RadioTower size={11} /> {agentById.get(s.agentId)?.name ?? 'agent'}
+                  </span>
+                )}
                 {s.cloud && <CloudBadge cloud={s.cloud} />}
                 {s.tags.map((tag) => (
                   <button
