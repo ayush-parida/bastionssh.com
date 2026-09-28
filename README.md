@@ -529,9 +529,18 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 
 ## 🛣️ Roadmap
 
-- [ ] SFTP / file browser
-- [ ] Multi-server command execution (fan-out)
-- [x] Server monitoring (CPU, memory, disk)
+- [x] SFTP / file browser
+- [x] Multi-server command execution (fan-out: saved commands by server list or tag)
+- [x] Server monitoring (CPU, memory, disk) with alert notifications
+- [x] Connectivity diagnostics
+- [x] Time-limited access requests (JIT)
+- [x] Session recording and replay
+- [x] Jump hosts and connectivity agents for private networks
+- [x] Single sign-on (OIDC)
+- [x] SSH key rotation
+- [x] Audit log retention and forwarding (syslog, webhook)
+- [x] App database backups (scheduled, pre-migration, optional encrypted off-site copy)
+- [ ] Short-lived SSH certificates ([design notes](docs/ssh-certificates.md))
 - [ ] Live shared terminal sessions
 - [ ] End-to-end encrypted secret sharing
 - [ ] Plugin marketplace

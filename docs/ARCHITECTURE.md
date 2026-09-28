@@ -211,6 +211,11 @@ link-local, CGNAT and unique-local ranges before anything is sent to it.
   the jump host. Only admins set jump hosts. Each hop is audited as `server.jump` on the
   jump server, attributed to the user the connection is for (background health checks only
   log it, to keep the audit log readable).
+- **Errors at a hop** (unreachable, refused login, changed host key) name the jump host, so
+  they are only returned as-is to someone who may access the jump server (`canAccessServer`:
+  admins, or members granted it). Everyone else — and background work with no user, whose
+  errors are stored in health samples members can read — gets `The route to this server
+  failed at hop N` (hops counted from the app outwards). The full error is always logged.
 
 #### SFTP file transfer (`/server/ssh/sftp.ts`)
 
@@ -358,6 +363,17 @@ REST surface, all under `/api/ftp`:
 
 - Append-only table with: actor, action, resource, before/after diff (redacted), IP, user agent, timestamp.
 - Hooked at the API layer via Fastify plugins.
+- **Retention** (`retention.ts`) — a daily in-process job deletes each org's rows older than
+  its retention (default 365 days, 7–3650), in chunks, and records `audit.pruned`.
+- **Forwarding** (`forward.ts`) — one target per org: syslog (RFC 5424 over UDP, TCP or TLS
+  with octet-counted framing) or a webhook (JSON batches, optional HMAC signature). A 10 s
+  in-process tick sends rows older than a 15 s settle window in batches of 200; the cursor
+  only moves past accepted rows (at-least-once), and a failing target backs off from 30 s to
+  15 min. Targets are encrypted in the vault and must resolve to public addresses unless
+  `SMT_AUDIT_FORWARD_ALLOW_NETS` allows an internal network (metadata addresses never).
+- Noisy events are capped rather than dropped silently: repeated host key mismatches for the
+  same key write one row per 10 minutes carrying a `suppressed` count. Read-only list views
+  (e.g. the backup list, which the page refetches) are not audited.
 
 ### 4.8 App Database Backups (`/server/backup`)
 
@@ -366,7 +382,82 @@ REST surface, all under `/api/ftp`:
 - `db/migrate.ts` — before drizzle applies a pending migration to a non-empty database, a `pre-migration` backup is taken; failure aborts startup.
 - `lock.ts` — the server writes `<db>.lock` and touches it every 30 s; `cli/restore.ts` refuses while it is fresh (works across Docker pid namespaces), while its pid is alive on this host, or while the port answers.
 - `upload.ts` — optional copy to a registered object-storage connection via `storage/ops.putObject`, encrypted (AES-256-GCM, key derived from `SMT_ENCRYPTION_KEY`, `crypt.ts`) since the bucket is browsable by the connection's org members.
-- API: `GET/POST /api/admin/backups`, `GET /api/admin/backups/:name/download` — owner of the instance's first organization only; download needs a browser session plus passkey step-up; names must match the generated pattern exactly.
+- API: `GET/POST /api/admin/backups`, `GET /api/admin/backups/:name/download` — owner of the instance's first organization only; download needs a browser session plus passkey step-up; names must match the generated pattern exactly. Creating, downloading and failures are audited (`backup.create`, `backup.download`, `backup.failed`, `backup.upload_failed`); listing is not.
+- Session recordings (files under `SMT_RECORDINGS_DIR`) are not part of these backups.
+
+### 4.9 Connectivity Diagnostics (`/server/diagnostics`)
+
+- `run.ts` runs ordered steps and stops at the first failure: DNS, TCP, TLS or the
+  protocol banner, the host key against the pinned one, and optionally a login with the
+  stored credentials. Each failed step carries a remediation (`remediation.ts`), including
+  firewall rules with the app's egress IP (`egress.ts`, `SMT_EGRESS_IP[_SERVICES]`).
+- `targets.ts` adapts servers, FTP/SFTP and storage connections. Behind a jump host the
+  network steps probe the first hop and the host key/login go through the chain; behind an
+  agent they run over its tunnel. A presented key that does not match is only revealed to
+  admins.
+- Operator and up, per-server access applies, audited (`*.diagnose`), 10 runs a minute per user.
+
+### 4.10 Access Requests / JIT Access (`/server/auth/access-grants.ts`, `api/routes/access-requests.ts`)
+
+- Restricted members request servers for a reason and a duration (org maximum, 8 h by
+  default); at most 10 pending and 20 created per hour each; undecided requests lapse after
+  3 days. Admins and owners are notified through the org's channels (as notices).
+- An admin other than the requester approves (optionally for less time) or denies; the
+  decision is conditional on the row still being pending, so two admins cannot both win.
+  Approval refuses (409) a requester who has left or is suspended, re-checked inside the
+  decision transaction; suspending or removing a member cancels their pending requests.
+- Approval writes time-bound rows in `member_server_access` via `extendGrants`, which never
+  shortens existing access. `activeGrantFilter` ignores expired grants at once; a sweep
+  every minute deletes them and closes terminals/SFTP/agent streams still open on them.
+
+### 4.11 Session Recording (`/server/recordings`)
+
+- Terminals and one-shot command runs are written as asciicast v2 (`recorder.ts`) under
+  `SMT_RECORDINGS_DIR`, appended as they happen, capped at `SMT_RECORDING_MAX_BYTES` (a
+  truncation marker is written), and gzipped at the end. Keystrokes only when the org opts in.
+- Recording fails open: an unwritable directory leaves the session unrecorded and logs it.
+- Admins see the org's recordings, others their own, never on a server they cannot access;
+  views and downloads are audited; deletion is owner-only with passkey step-up. A daily
+  job prunes past the org's retention (default 90 days).
+
+### 4.12 Connectivity Agents (`/server/agents`, `packages/agent`)
+
+- For servers without inbound SSH: a single-file Node agent under systemd dials the app
+  (`SMT_BASE_URL`) over an outbound WebSocket and multiplexes TCP streams (`hub.ts`, at
+  most 64 per agent, keepalive every 30 s). Only the app opens streams, and only to the
+  agent's own loopback on its allowed ports; host keys are still verified end to end.
+- Tokens (`bsa_…`) are shown once and stored as a SHA-256 hash. The install command
+  downloads `install.sh` to a temp file and runs it as root with the token on **stdin** (a
+  here-doc), never in a process's arguments; the script refuses to be piped into `sh`,
+  checks the agent bundle's SHA-256, and writes the token to `/etc/bastion-agent/agent.env`
+  (0600, in a 0700 directory), which the hardened unit (`DynamicUser`, `ProtectSystem=strict`)
+  loads with `EnvironmentFile=`.
+- A server uses a jump host or an agent, not both (a jump host may sit behind an agent).
+  Revoking an agent drops its connection; its servers then fail closed. Agent connections
+  live in the app process, so a separate worker cannot use them.
+
+### 4.13 Single Sign-On (`/server/auth/sso.ts`, `sso-policy.ts`)
+
+- Per-org OIDC (code flow + PKCE, `openid-client`); identities keyed by (provider, `sub`).
+- An SSO session (`sessions.sso_provider_id`) only works in its provider's org. When the
+  account belongs to other orgs too, it may not add account-wide credentials (passkeys,
+  backup codes, API tokens), and `GET/DELETE /api/auth/sessions` show and end only SSO
+  sessions of the same org (`manageableSessionsFilter`): the other org's IdP must not see
+  or sign out password/passkey sessions (usable in any org) or other orgs' SSO sessions.
+  A password or passkey session manages every session of the account.
+- An org may enforce SSO: non-SSO sessions of members other than owners are refused
+  (owners keep a break-glass way in); API tokens are unaffected.
+
+### 4.14 SSH Key Rotation (`/server/ssh/key-rotation.ts`)
+
+- prepare → install the new key over the old one → verify a fresh login with the new key
+  alone → switch the server → remove the old key's lines over the new one → retire the old
+  key once nothing uses it. Any failure rolls back; the server never points at a key it
+  does not accept. authorized_keys is edited by small POSIX scripts sent on stdin.
+- Admin-only with passkey step-up; steps are kept in the rotation history and audited,
+  including jump hops under the admin who asked. Other servers logging in to the same
+  account (host, port, user — behind an agent, the agent stands in for the host) with the
+  old key share its authorized_keys, so the old line is left there and the key not retired.
 
 ---
 
@@ -495,7 +586,7 @@ silently, so the UI can tell "not checked" apart from "not watched".
 ### Authentication
 
 - Built-in email + password (Argon2id hashing).
-- Per-org OpenID Connect SSO (`/server/auth/sso.ts`, `openid-client`): code flow + PKCE, state/nonce/verifier kept server-side, ID token checked against the IdP JWKS; identities keyed by (provider, `sub`) in `user_identities`. SSO sessions carry `sessions.sso_provider_id` and only work in that org. No SAML.
+- Per-org OpenID Connect SSO (`/server/auth/sso.ts`, `openid-client`): code flow + PKCE, state/nonce/verifier kept server-side, ID token checked against the IdP JWKS; identities keyed by (provider, `sub`) in `user_identities`. SSO sessions carry `sessions.sso_provider_id` and only work in that org (see 4.13 for what they may manage). No SAML.
 - Optional TOTP 2FA.
 - Session cookies: `HttpOnly`, `Secure`, `SameSite=Lax`, rotating on privilege change.
 
