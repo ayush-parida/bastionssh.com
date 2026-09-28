@@ -13,7 +13,7 @@ import {
 import { openAgentTunnel } from '../agents/hub.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
 import { connectSsh, jumpChain, openJumpTunnel, type JumpOptions } from '../ssh/jump.js';
-import { assertSafeHost, backendFor, decryptPassword } from '../ftp/index.js';
+import { assertSafeHost, backendFor, resolveCredentials } from '../ftp/index.js';
 import { assertSafeEndpoint, ops, resolveConnection } from '../storage/index.js';
 import { STEP_TIMEOUTS, defaultDeps, type DiagnosticsDeps, type StepOutcome } from './steps.js';
 import { diagnose, type RunOptions } from './run.js';
@@ -214,7 +214,7 @@ export async function diagnoseFtp(connection: FtpConnectionRow, opts: DiagnoseOp
         authenticate: async (): Promise<StepOutcome> => {
           try {
             // The same login and listing as the Test button
-            const result = await backendFor(protocol).testConnection(connection, await decryptPassword(connection));
+            const result = await backendFor(protocol).testConnection(connection, await resolveCredentials(connection));
             if (result.ok) {
               return {
                 status: 'ok',

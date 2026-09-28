@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
-import { PassThrough, Readable, Transform } from 'node:stream';
+import { PassThrough, Readable, Transform, Writable } from 'node:stream';
 import { eq } from 'drizzle-orm';
 
 vi.mock('ssh2', async (importOriginal) => ({
@@ -67,7 +67,7 @@ function seedFs() {
 }
 
 async function open(connection = seedConnection()) {
-  return backend.openSftp(connection, 'shh');
+  return backend.openSftp(connection, { password: 'shh' });
 }
 
 beforeAll(async () => {
@@ -316,7 +316,7 @@ describe('sftp session', () => {
     session.close();
   });
 
-  it('fails an upload that the size guard cuts off, with its 413, and never commits it', async () => {
+  it('fails an upload that the size guard cuts off, with its 413, and never commits its data', async () => {
     const session = await open();
     let bytes = 0;
     const counter = new Transform({
@@ -328,7 +328,8 @@ describe('sftp session', () => {
     });
     Readable.from([Buffer.alloc(6), Buffer.alloc(6)]).pipe(counter);
     await expect(session.upload(counter, '/var/www/html/big.bin')).rejects.toMatchObject({ statusCode: 413 });
-    expect(state.fs.has('/var/www/html/big.bin')).toBe(false);
+    // Opening for write created it empty; the upload route removes that leftover
+    expect(state.fs.get('/var/www/html/big.bin')?.data?.length ?? 0).toBe(0);
     expect(state.abortedWrites).toContain('/var/www/html/big.bin');
     // The channel is still fine for the next request
     expect(session.closed).toBe(false);
@@ -341,6 +342,110 @@ describe('sftp session', () => {
     state.clients.at(-1)!.drop();
     expect(session.closed).toBe(true);
     expect(session.survives(new Error('whatever'))).toBe(false);
+  });
+});
+
+describe('operation timeout', () => {
+  const openWithTimeout = () =>
+    backend.openSftp(seedConnection(), { password: 'shh' }, { opTimeoutMs: 30 });
+
+  it('fails a request the server never answers with a 504 and closes the session', async () => {
+    const session = await openWithTimeout();
+    state.stalled.add('lstat');
+    await expect(session.stat('/var/www/html/index.html')).rejects.toMatchObject({
+      statusCode: 504,
+      message: expect.stringMatching(/request timed out after 30ms/),
+    });
+    expect(session.closed).toBe(true);
+    expect(session.survives(new Error('x'))).toBe(false);
+    expect(state.clients.at(-1)!.ended).toBe(true);
+  });
+
+  it('fails a transfer that stops moving', async () => {
+    const session = await openWithTimeout();
+    state.stalled.add('read');
+    await expect(session.download('/var/www/html/index.html', new PassThrough())).rejects.toMatchObject({
+      statusCode: 504,
+      message: expect.stringMatching(/transfer timed out/),
+    });
+    expect(session.closed).toBe(true);
+  });
+
+  it('fails a small upload whose write handle never opens', async () => {
+    const session = await openWithTimeout();
+    state.stalled.add('open');
+    // Smaller than any stream buffer: every chunk has passed before the stall
+    await expect(
+      session.upload(Readable.from([Buffer.from('tiny')]), '/var/www/html/tiny.txt'),
+    ).rejects.toMatchObject({ statusCode: 504, message: expect.stringMatching(/transfer timed out/) });
+    expect(session.closed).toBe(true);
+  });
+
+  it('fails a download the reader stops taking after the last chunk', async () => {
+    const session = await openWithTimeout();
+    // Never read: the whole small file sits in the buffer, the source has ended
+    const destination = new Writable({ highWaterMark: 1, write() {} });
+    await expect(session.download('/var/www/html/index.html', destination)).rejects.toMatchObject({
+      statusCode: 504,
+    });
+    expect(session.closed).toBe(true);
+  });
+
+  it('leaves a quick request alone', async () => {
+    const session = await openWithTimeout();
+    await session.list('/var/www/html');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(session.closed).toBe(false);
+    session.close();
+  });
+});
+
+describe('recursive delete limits', () => {
+  it('refuses a tree deeper than MAX_DELETE_DEPTH before removing anything', async () => {
+    let dir = '/var/www/html/deep';
+    for (let i = 0; i <= backend.MAX_DELETE_DEPTH; i++) {
+      state.fs.set(dir, { type: 'dir' });
+      dir = `${dir}/d`;
+    }
+    const session = await open();
+    await expect(session.removeDirRecursive('/var/www/html/deep')).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(/more than 64 levels deep/),
+    });
+    expect(state.calls.some(([op]) => op === 'rmdir' || op === 'unlink')).toBe(false);
+    expect(state.fs.has('/var/www/html/deep')).toBe(true);
+    // A refusal is not a broken session
+    expect(session.closed).toBe(false);
+  });
+
+  it('refuses a tree with more than MAX_DELETE_ENTRIES entries before removing anything', async () => {
+    state.fs.set('/var/www/html/big', { type: 'dir' });
+    for (let i = 0; i <= backend.MAX_DELETE_ENTRIES; i++) {
+      state.fs.set(`/var/www/html/big/f${i}`, { type: 'file', data: Buffer.alloc(0) });
+    }
+    const session = await open();
+    await expect(session.removeDirRecursive('/var/www/html/big')).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringMatching(/more than 10000 entries/),
+    });
+    expect(state.calls.some(([op]) => op === 'unlink')).toBe(false);
+  });
+});
+
+describe('key authentication', () => {
+  it('offers only the private key: no password, no keyboard-interactive', async () => {
+    (await backend.openSftp(seedConnection(), { privateKey: 'PEM', password: 'ignored' })).close();
+    const config = state.clients.at(-1)!.config;
+    expect(config.privateKey).toBe('PEM');
+    expect(config.password).toBeUndefined();
+    expect(config.tryKeyboard).toBe(false);
+    expect(config.hostVerifier).toBeTypeOf('function');
+  });
+
+  it('is never asked a keyboard-interactive prompt', async () => {
+    state.keyboardPrompts = [{ prompt: 'Password: ', echo: false }];
+    (await backend.openSftp(seedConnection(), { privateKey: 'PEM' })).close();
+    expect(state.keyboardAnswers).toBeNull();
   });
 });
 
@@ -379,7 +484,7 @@ describe('connecting', () => {
     state.connectError = null;
     state.hang = true;
     await expect(
-      backend.openSftp(seedConnection(), 'shh', { readyTimeoutMs: 20 }),
+      backend.openSftp(seedConnection(), { password: 'shh' }, { readyTimeoutMs: 20 }),
     ).rejects.toMatchObject({ statusCode: 504 });
     expect(state.clients.at(-1)!.ended).toBe(true);
   });
@@ -426,28 +531,28 @@ describe('connecting', () => {
 
 describe('testConnection', () => {
   it('logs in, resolves the root, counts entries, and closes', async () => {
-    const result = await backend.testSftpConnection(seedConnection(), 'shh');
+    const result = await backend.testSftpConnection(seedConnection(), { password: 'shh' });
     expect(result).toEqual({ ok: true, workingDirectory: '/var/www/html', entryCount: 6 });
     expect(state.calls).toContainEqual(['realpath', '/var/www/html']);
     expect(state.clients.at(-1)!.ended).toBe(true);
   });
 
   it("resolves '.' when there is no root", async () => {
-    const result = await backend.testSftpConnection(seedConnection({ rootPath: null }), 'shh');
+    const result = await backend.testSftpConnection(seedConnection({ rootPath: null }), { password: 'shh' });
     expect(result).toEqual({ ok: true, workingDirectory: '/home/deploy', entryCount: 0 });
   });
 
   it('reports a failure in the result, but throws a changed host key', async () => {
     state.authFail = true;
-    const failed = await backend.testSftpConnection(seedConnection(), 'shh');
+    const failed = await backend.testSftpConnection(seedConnection(), { password: 'shh' });
     expect(failed).toEqual({ ok: false, error: expect.stringMatching(/^Authentication failed/) });
 
     state.authFail = false;
-    const missingRoot = await backend.testSftpConnection(seedConnection({ rootPath: '/gone' }), 'shh');
+    const missingRoot = await backend.testSftpConnection(seedConnection({ rootPath: '/gone' }), { password: 'shh' });
     expect(missingRoot).toMatchObject({ ok: false });
 
     await expect(
-      backend.testSftpConnection(seedConnection({ hostKeyFingerprint: `SHA256:${'B'.repeat(43)}` }), 'shh'),
+      backend.testSftpConnection(seedConnection({ hostKeyFingerprint: `SHA256:${'B'.repeat(43)}` }), { password: 'shh' }),
     ).rejects.toBeInstanceOf(HostKeyMismatchError);
   });
 });

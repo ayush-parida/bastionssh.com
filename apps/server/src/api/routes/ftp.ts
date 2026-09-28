@@ -1,11 +1,12 @@
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { PassThrough, Transform, type Readable } from 'node:stream';
+import { Transform, type Readable } from 'node:stream';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import {
   FTP_PROTOCOLS,
   ftpProtocolOption,
+  type FtpAuthMethod,
   type FtpConnection,
   type FtpProtocol,
   type FtpTestResult,
@@ -15,18 +16,20 @@ import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { getDb } from '../../db/index.js';
-import { ftpConnections } from '../../db/schema.js';
+import { ftpConnections, sshKeys } from '../../db/schema.js';
+import logger from '../../logger.js';
 import { vault } from '../../vault/index.js';
 import {
   FtpError,
+  FtpPathRefusedError,
   assertSafeHost,
   backendFor,
   baseName,
-  decryptPassword,
   evictConnection,
   loadConnection,
   normalizeRemotePath,
   parentOf,
+  resolveCredentials,
   withSession,
   type FtpConnectionRow,
 } from '../../ftp/index.js';
@@ -36,14 +39,18 @@ import {
   ftpHostKeyStatus,
   ftpHostKeyView,
   pinFtpHostKey,
+  resolveFtpHostKeyAlert,
 } from '../../ftp/host-keys.js';
-import { HostKeyMismatchError } from '../../ssh/host-keys.js';
+import { HostKeyMismatchError, HostKeyScanError, scanHostKey } from '../../ssh/host-keys.js';
 import { fingerprintSchema } from './server-host-keys.js';
+import { RETIRED_KEY_MESSAGE } from '../../ssh/credentials.js';
 
 const protocolSchema = z.enum(FTP_PROTOCOLS);
 const portSchema = z.number().int().min(1).max(65535);
 const rootPathSchema = z.string().max(1024).nullable();
 const pathSchema = z.string().min(1).max(4096);
+const authMethodSchema = z.enum(['password', 'key']);
+const sshKeyIdSchema = z.string().min(1).max(64).nullable();
 
 const createSchema = z.object({
   name: z.string().min(1).max(100),
@@ -51,9 +58,13 @@ const createSchema = z.object({
   port: portSchema.optional(),
   protocol: protocolSchema.default('ftps'),
   username: z.string().min(1).max(256),
-  password: z.string().min(1).max(1024),
+  authMethod: authMethodSchema.default('password'),
+  password: z.string().min(1).max(1024).optional(),
+  sshKeyId: sshKeyIdSchema.optional(),
   verifyTls: z.boolean().default(true),
   rootPath: rootPathSchema.optional(),
+  // New connections are confined to their root unless the admin opts out
+  restrictToRoot: z.boolean().default(true),
 });
 
 const updateSchema = z.object({
@@ -62,9 +73,12 @@ const updateSchema = z.object({
   port: portSchema.optional(),
   protocol: protocolSchema.optional(),
   username: z.string().min(1).max(256).optional(),
+  authMethod: authMethodSchema.optional(),
   password: z.string().min(1).max(1024).optional(),
+  sshKeyId: sshKeyIdSchema.optional(),
   verifyTls: z.boolean().optional(),
   rootPath: rootPathSchema.optional(),
+  restrictToRoot: z.boolean().optional(),
 });
 
 const pathQuery = z.object({ path: pathSchema });
@@ -84,6 +98,9 @@ const publicColumns = {
   username: ftpConnections.username,
   verifyTls: ftpConnections.verifyTls,
   rootPath: ftpConnections.rootPath,
+  restrictToRoot: ftpConnections.restrictToRoot,
+  authMethod: ftpConnections.authMethod,
+  sshKeyId: ftpConnections.sshKeyId,
   hostKeyFingerprint: ftpConnections.hostKeyFingerprint,
   hostKeyMismatchFingerprint: ftpConnections.hostKeyMismatchFingerprint,
   lastStatus: ftpConnections.lastStatus,
@@ -129,6 +146,63 @@ function publicConnection(orgId: string, id: string): FtpConnection | undefined 
   return row ? toPublic(row) : undefined;
 }
 
+/**
+ * Check how a connection will log in. Key auth is SFTP only and needs one of
+ * the org's SSH keys; password auth needs a password unless one is already
+ * stored (`hasPassword`). Returns the key id to store.
+ */
+function checkAuth(
+  orgId: string,
+  protocol: FtpProtocol,
+  authMethod: FtpAuthMethod,
+  sshKeyId: string | null | undefined,
+  hasPassword: boolean,
+): string | null {
+  if (authMethod === 'password') {
+    if (!hasPassword) throw new FtpError('Password is required for password authentication', 400);
+    return null;
+  }
+  if (protocol !== 'sftp') {
+    throw new FtpError('SSH key authentication is only available for SFTP connections', 400);
+  }
+  if (!sshKeyId) throw new FtpError('Choose an SSH key for key authentication', 400);
+  const key = getDb()
+    .select({ id: sshKeys.id, retiredAt: sshKeys.retiredAt })
+    .from(sshKeys)
+    .where(and(eq(sshKeys.id, sshKeyId), eq(sshKeys.orgId, orgId)))
+    .get();
+  if (!key) throw new FtpError('SSH key not found', 400);
+  if (key.retiredAt) throw new FtpError(RETIRED_KEY_MESSAGE, 400);
+  return key.id;
+}
+
+/**
+ * sendError for the file routes: a path the jail refused is also audited, so
+ * attempts to reach outside a connection's root leave a trace.
+ */
+async function fileError(req: FastifyRequest, reply: FastifyReply, id: string, err: unknown) {
+  if (err instanceof FtpPathRefusedError) {
+    await audit(req, 'ftp.path_refused', 'ftp_connection', id, publicConnection(req.orgId, id)?.name, {
+      path: err.path,
+    });
+  }
+  return sendError(reply, err);
+}
+
+/**
+ * Best effort: delete what an upload cut off at the size cap left behind. The
+ * failed transfer may have closed the session, so this queues its own call
+ * (reconnecting if needed); any failure is only logged.
+ */
+async function removePartialUpload(req: FastifyRequest, id: string, path: string) {
+  try {
+    await withSession(req.orgId, id, req.user.id, (session) => session.removeFile(path));
+    logger.info({ connectionId: id, path }, 'Removed partial FTP upload after the size limit');
+  } catch (err) {
+    logger.warn({ err, connectionId: id, path }, 'Could not remove partial FTP upload');
+  }
+}
+
 /** An SFTP connection in the caller's org; host keys mean nothing for FTP/FTPS. */
 function loadSftpConnection(orgId: string, id: string): FtpConnectionRow {
   const connection = loadConnection(orgId, id);
@@ -171,6 +245,13 @@ export async function ftpRoutes(app: FastifyInstance) {
       const host = assertSafeHost(body.host);
       const rootPath = resolveRootPath(body.rootPath);
       const port = body.port ?? ftpProtocolOption(body.protocol).defaultPort;
+      const sshKeyId = checkAuth(
+        req.orgId,
+        body.protocol,
+        body.authMethod,
+        body.sshKeyId,
+        body.password !== undefined,
+      );
       const id = nanoid();
       getDb()
         .insert(ftpConnections)
@@ -182,9 +263,14 @@ export async function ftpRoutes(app: FastifyInstance) {
           port,
           protocol: body.protocol,
           username: body.username,
-          encryptedPassword: await vault.encrypt(body.password, id),
+          // Key auth keeps no password at all
+          encryptedPassword:
+            body.authMethod === 'password' ? await vault.encrypt(body.password!, id) : '',
+          authMethod: body.authMethod,
+          sshKeyId,
           verifyTls: body.verifyTls,
           rootPath,
+          restrictToRoot: body.restrictToRoot,
           createdBy: req.user.id,
         })
         .run();
@@ -193,6 +279,9 @@ export async function ftpRoutes(app: FastifyInstance) {
         host,
         port,
         protocol: body.protocol,
+        authMethod: body.authMethod,
+        ...(sshKeyId && { sshKeyId }),
+        restrictToRoot: body.restrictToRoot,
       });
       return reply.status(201).send(publicConnection(req.orgId, id));
     } catch (err) {
@@ -217,15 +306,27 @@ export async function ftpRoutes(app: FastifyInstance) {
       const protocol = (body.protocol ?? existing.protocol) as FtpProtocol;
       const rootPath =
         body.rootPath !== undefined ? resolveRootPath(body.rootPath) : existing.rootPath;
+      const authMethod = (body.authMethod ?? existing.authMethod) as FtpAuthMethod;
+      const sshKeyId = checkAuth(
+        req.orgId,
+        protocol,
+        authMethod,
+        body.sshKeyId !== undefined ? body.sshKeyId : existing.sshKeyId,
+        // Switching from key auth back to a password needs a new password
+        body.password !== undefined || existing.authMethod === 'password',
+      );
+      const authChanged = authMethod !== existing.authMethod || sshKeyId !== existing.sshKeyId;
+      const restrictToRoot = body.restrictToRoot ?? existing.restrictToRoot;
       const endpointChanged =
         host !== existing.host ||
         (body.port !== undefined && body.port !== existing.port) ||
         protocol !== existing.protocol;
       const targetChanged =
         endpointChanged ||
+        authChanged ||
         (body.username !== undefined && body.username !== existing.username) ||
         (body.verifyTls !== undefined && body.verifyTls !== existing.verifyTls) ||
-        body.password !== undefined;
+        (authMethod === 'password' && body.password !== undefined);
 
       db.update(ftpConnections)
         .set({
@@ -234,11 +335,17 @@ export async function ftpRoutes(app: FastifyInstance) {
           ...(body.port !== undefined && { port: body.port }),
           protocol,
           ...(body.username !== undefined && { username: body.username }),
-          ...(body.password !== undefined && {
-            encryptedPassword: await vault.encrypt(body.password, id),
-          }),
+          authMethod,
+          sshKeyId,
+          // Key auth keeps no password; a stored one is dropped on the switch
+          ...(authMethod === 'key'
+            ? { encryptedPassword: '' }
+            : body.password !== undefined && {
+                encryptedPassword: await vault.encrypt(body.password, id),
+              }),
           ...(body.verifyTls !== undefined && { verifyTls: body.verifyTls }),
           rootPath,
+          restrictToRoot,
           // A new target or credential invalidates whatever the last test reported;
           // a rename does not.
           ...(targetChanged && { lastStatus: null, lastError: null, lastTestedAt: null }),
@@ -250,7 +357,20 @@ export async function ftpRoutes(app: FastifyInstance) {
         .run();
 
       evictConnection(id);
-      await audit(req, 'ftp_connection.update', 'ftp_connection', id, existing.name);
+      if (endpointChanged) resolveFtpHostKeyAlert(existing);
+      // Loosening the jail or changing credentials is worth spelling out
+      const changes = {
+        ...(restrictToRoot !== existing.restrictToRoot && { restrictToRoot }),
+        ...(authChanged && { authMethod, ...(sshKeyId && { sshKeyId }) }),
+      };
+      await audit(
+        req,
+        'ftp_connection.update',
+        'ftp_connection',
+        id,
+        existing.name,
+        Object.keys(changes).length ? changes : undefined,
+      );
       return publicConnection(req.orgId, id);
     } catch (err) {
       return sendError(reply, err);
@@ -269,6 +389,7 @@ export async function ftpRoutes(app: FastifyInstance) {
 
     db.delete(ftpConnections).where(eq(ftpConnections.id, id)).run();
     evictConnection(id);
+    resolveFtpHostKeyAlert(existing);
     await audit(req, 'ftp_connection.delete', 'ftp_connection', id, existing.name);
     return reply.status(204).send();
   });
@@ -295,7 +416,7 @@ export async function ftpRoutes(app: FastifyInstance) {
       try {
         result = await backendFor(connection.protocol).testConnection(
           connection,
-          await decryptPassword(connection),
+          await resolveCredentials(connection),
         );
       } catch (err) {
         // A changed SFTP host key answers 409 like any other request, but the
@@ -329,6 +450,26 @@ export async function ftpRoutes(app: FastifyInstance) {
     },
   );
 
+  /**
+   * POST …/host-key/scan — read the key the host presents right now, without
+   * logging in; nothing is stored. The admin compares it out of band and pins
+   * it with PUT.
+   */
+  app.post(
+    '/connections/:id/host-key/scan',
+    { preHandler: requireRole('admin') },
+    async (req, reply) => {
+      const { id } = req.params as { id: string };
+      try {
+        const connection = loadSftpConnection(req.orgId, id);
+        return await scanHostKey(connection.host, connection.port);
+      } catch (err) {
+        if (err instanceof HostKeyScanError) return reply.status(502).send({ error: err.message });
+        return sendError(reply, err);
+      }
+    },
+  );
+
   /** PUT …/host-key {fingerprint} — pin a known-good fingerprint */
   app.put(
     '/connections/:id/host-key',
@@ -340,7 +481,7 @@ export async function ftpRoutes(app: FastifyInstance) {
         const connection = loadSftpConnection(req.orgId, id);
         // Keep the key type when this is the key already pinned
         const type = fingerprint === connection.hostKeyFingerprint ? connection.hostKeyType : null;
-        pinFtpHostKey(id, fingerprint, type);
+        pinFtpHostKey(connection, fingerprint, type);
         evictConnection(id);
         await audit(req, 'ftp_connection.host_key_pinned', 'ftp_connection', id, connection.name, {
           fingerprint,
@@ -375,7 +516,7 @@ export async function ftpRoutes(app: FastifyInstance) {
           });
         }
         // The type is filled in from the real key on the next connection
-        pinFtpHostKey(id, fingerprint, null);
+        pinFtpHostKey(connection, fingerprint, null);
         evictConnection(id);
         await audit(req, 'ftp_connection.host_key_accepted', 'ftp_connection', id, connection.name, {
           fingerprint,
@@ -396,7 +537,7 @@ export async function ftpRoutes(app: FastifyInstance) {
       const { id } = req.params as { id: string };
       try {
         const connection = loadSftpConnection(req.orgId, id);
-        forgetFtpHostKey(id);
+        forgetFtpHostKey(connection);
         evictConnection(id);
         await audit(req, 'ftp_connection.host_key_forgotten', 'ftp_connection', id, connection.name, {
           previous: connection.hostKeyFingerprint,
@@ -423,11 +564,18 @@ export async function ftpRoutes(app: FastifyInstance) {
             : normalizeRemotePath(query.path);
         const entries = await session.list(path);
         await audit(req, 'ftp.list', 'ftp_connection', id, connection.name, { path });
-        return { path, parent: parentOf(path), entries };
+        // A restricted connection offers no way up from its root
+        const jailRoot = (await session.jailRoot?.()) ?? null;
+        return {
+          path,
+          parent: path === jailRoot ? null : parentOf(path),
+          root: jailRoot,
+          entries,
+        };
       });
       return listing;
     } catch (err) {
-      return sendError(reply, err);
+      return fileError(req, reply, id, err);
     }
   });
 
@@ -436,6 +584,7 @@ export async function ftpRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const query = pathQuery.parse(req.query);
     const path = normalizeRemotePath(query.path);
+    let streaming = false;
     try {
       await withSession(req.orgId, id, req.user.id, async (session, connection) => {
         // Listing the parent first turns a missing file into a clean 404 instead
@@ -450,7 +599,24 @@ export async function ftpRoutes(app: FastifyInstance) {
         const size = entry.type === 'symlink' ? await session.linkTargetSize(path) : entry.size;
         await audit(req, 'ftp.download', 'ftp_connection', id, connection.name, { path, size });
 
-        const body = new PassThrough();
+        // Headers wait for the first byte (or the end of an empty file), so a
+        // transfer that fails before any data — a server that stalls until the
+        // operation timeout, say — still answers with its own status.
+        let started!: () => void;
+        const firstByte = new Promise<void>((resolve) => (started = resolve));
+        const body = new Transform({
+          transform(chunk, _encoding, callback) {
+            started();
+            callback(null, chunk);
+          },
+          flush(callback) {
+            started();
+            callback();
+          },
+        });
+        const transfer = session.download(path, body);
+        await Promise.race([firstByte, transfer]);
+
         void reply
           .header('Content-Type', 'application/octet-stream')
           .header(
@@ -458,9 +624,10 @@ export async function ftpRoutes(app: FastifyInstance) {
             `attachment; filename*=UTF-8''${encodeURIComponent(baseName(path))}`,
           );
         if (size > 0) void reply.header('Content-Length', String(size));
+        streaming = true;
         void reply.send(body);
         try {
-          await session.download(path, body);
+          await transfer;
         } catch (err) {
           // Headers are gone; the only honest signal left is a broken stream.
           body.destroy(err instanceof Error ? err : new Error(String(err)));
@@ -469,8 +636,8 @@ export async function ftpRoutes(app: FastifyInstance) {
       });
       return reply;
     } catch (err) {
-      if (reply.sent) return reply;
-      return sendError(reply, err);
+      if (reply.sent || streaming) return reply;
+      return fileError(req, reply, id, err);
     }
   });
 
@@ -503,10 +670,12 @@ export async function ftpRoutes(app: FastifyInstance) {
       // STOR), and every chunk emitted in between would be lost. Backpressure
       // keeps the body paused until the data socket is ready.
       let bytes = 0;
+      let overCap = false;
       const counter = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
           bytes += chunk.length;
           if (bytes > config.ftpMaxUploadBytes) {
+            overCap = true;
             callback(
               new FtpError(`Upload exceeds the ${config.ftpMaxUploadBytes} byte limit`, 413),
             );
@@ -525,18 +694,30 @@ export async function ftpRoutes(app: FastifyInstance) {
       // that takes the process down. session.upload still sees the error: a
       // destroyed stream fails the pipeline it is handed to.
       counter.on('error', () => {});
+      // The backend only starts reading `counter` once the remote file is open
+      // for writing (SFTP open, FTP STOR accepted). Before that nothing on the
+      // server has been touched, so there is nothing to clean up.
+      let writing = false;
+      counter.once('resume', () => {
+        writing = true;
+      });
       source.pipe(counter);
 
-      await withSession(req.orgId, id, req.user.id, async (session, connection) => {
-        await session.upload(counter, path);
-        await audit(req, 'ftp.upload', 'ftp_connection', id, connection.name, {
-          path,
-          size: bytes,
+      try {
+        await withSession(req.orgId, id, req.user.id, async (session, connection) => {
+          await session.upload(counter, path);
+          await audit(req, 'ftp.upload', 'ftp_connection', id, connection.name, {
+            path,
+            size: bytes,
+          });
         });
-      });
+      } catch (err) {
+        if (overCap && writing) await removePartialUpload(req, id, path);
+        throw err;
+      }
       return reply.status(201).send({ path, size: bytes });
     } catch (err) {
-      return sendError(reply, err);
+      return fileError(req, reply, id, err);
     }
   });
 
@@ -556,7 +737,7 @@ export async function ftpRoutes(app: FastifyInstance) {
         });
         return reply.status(201).send({ path });
       } catch (err) {
-        return sendError(reply, err);
+        return fileError(req, reply, id, err);
       }
     },
   );
@@ -582,7 +763,7 @@ export async function ftpRoutes(app: FastifyInstance) {
         }
         return { from, to };
       } catch (err) {
-        return sendError(reply, err);
+        return fileError(req, reply, id, err);
       }
     },
   );
@@ -614,7 +795,7 @@ export async function ftpRoutes(app: FastifyInstance) {
         });
         return reply.status(204).send();
       } catch (err) {
-        return sendError(reply, err);
+        return fileError(req, reply, id, err);
       }
     },
   );

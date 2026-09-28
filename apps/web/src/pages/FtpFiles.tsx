@@ -164,6 +164,10 @@ export default function FtpFilesPage() {
 
   // Breadcrumb segments for the resolved directory
   const segments = cwd === '.' ? [] : cwd.split('/').filter(Boolean);
+  // A restricted connection refuses anything above its root, so those crumbs are plain text
+  const jailRoot = listQuery.data?.root ?? null;
+  const reachable = (dir: string) =>
+    jailRoot === null || jailRoot === '/' || dir === jailRoot || dir.startsWith(`${jailRoot}/`);
 
   return (
     <div
@@ -190,7 +194,7 @@ export default function FtpFilesPage() {
           </div>
           <p className="text-muted-foreground text-sm">
             {connection
-              ? `${connection.protocol === 'ftp' ? 'FTP' : 'FTPS'} · ${connection.username}@${connection.host}:${connection.port}`
+              ? `${connection.protocol === 'ftp' ? 'FTP' : connection.protocol === 'sftp' ? 'SFTP' : 'FTPS'} · ${connection.username}@${connection.host}:${connection.port}${connection.restrictToRoot ? ' · restricted' : ''}`
               : (id ?? '')}
           </p>
         </div>
@@ -240,17 +244,25 @@ export default function FtpFilesPage() {
             <ArrowUp size={13} />
           </button>
         )}
-        <button onClick={() => setPath('/')} className="text-primary font-mono hover:underline">
-          /
-        </button>
+        {reachable('/') ? (
+          <button onClick={() => setPath('/')} className="text-primary font-mono hover:underline">
+            /
+          </button>
+        ) : (
+          <span className="text-muted-foreground font-mono">/</span>
+        )}
         {segments.map((seg, i) => (
           <span key={`${seg}-${i}`} className="flex items-center gap-1">
-            <button
-              onClick={() => setPath(`/${segments.slice(0, i + 1).join('/')}`)}
-              className="text-primary font-mono hover:underline"
-            >
-              {seg}
-            </button>
+            {reachable(`/${segments.slice(0, i + 1).join('/')}`) ? (
+              <button
+                onClick={() => setPath(`/${segments.slice(0, i + 1).join('/')}`)}
+                className="text-primary font-mono hover:underline"
+              >
+                {seg}
+              </button>
+            ) : (
+              <span className="text-muted-foreground font-mono">{seg}</span>
+            )}
             {i < segments.length - 1 && <span className="text-muted-foreground">/</span>}
           </span>
         ))}

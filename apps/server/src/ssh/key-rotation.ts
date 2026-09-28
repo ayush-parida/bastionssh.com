@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull, ne } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { KeyRotation, KeyRotationStatus, KeyRotationStep, KeyType } from '@smt/shared';
 import { getDb } from '../db/index.js';
-import { cloudAccounts, keyRotations, servers, sshKeys } from '../db/schema.js';
+import { cloudAccounts, ftpConnections, keyRotations, servers, sshKeys } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import { auditAs, type AuditActor } from '../audit/index.js';
 import { execOnServer } from './broker.js';
@@ -399,6 +399,18 @@ function retireIfUnused(
   if (accounts.length > 0) {
     warnings.push(
       `The old key was not retired: cloud account(s) ${accounts.map((a) => a.name).join(', ')} still assign it to new servers.`,
+    );
+    return false;
+  }
+  // SFTP file connections log in with org keys too; a retired key would stop them
+  const fileConnections = db
+    .select({ name: ftpConnections.name })
+    .from(ftpConnections)
+    .where(and(eq(ftpConnections.sshKeyId, key.id), eq(ftpConnections.authMethod, 'key')))
+    .all();
+  if (fileConnections.length > 0) {
+    warnings.push(
+      `The old key was not retired: file connection(s) ${fileConnections.map((c) => c.name).join(', ')} still log in with it.`,
     );
     return false;
   }

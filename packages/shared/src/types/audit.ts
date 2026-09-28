@@ -110,6 +110,7 @@ export type AuditAction =
   | 'ftp.mkdir'
   | 'ftp.rename'
   | 'ftp.delete'
+  | 'ftp.path_refused'
   | 'cloud_account.create'
   | 'cloud_account.update'
   | 'cloud_account.delete'

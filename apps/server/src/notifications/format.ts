@@ -25,6 +25,12 @@ export interface AlertEvent {
   openedAt?: string;
   /** Present exactly when `kind` is `notice`. */
   notice?: Notice;
+  /**
+   * What the alert is about when it is not a managed server — an SFTP file
+   * connection's host key, say. `serverId` then carries that row's id, and
+   * nothing is looked up in the servers table.
+   */
+  subject?: ServerRef;
 }
 
 /** Wrap a notice so the channel adapters can carry it. It names no server. */

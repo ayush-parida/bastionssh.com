@@ -1,7 +1,12 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { HOST_KEY_FINGERPRINT_PATTERN, type FtpConnection, type FtpHostKey } from '@smt/shared';
-import { ShieldAlert, Trash2 } from 'lucide-react';
+import {
+  HOST_KEY_FINGERPRINT_PATTERN,
+  type FtpConnection,
+  type FtpHostKey,
+  type HostKeyScanResult,
+} from '@smt/shared';
+import { ScanLine, ShieldAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
@@ -12,7 +17,8 @@ const VERIFY_HINT = 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub';
 
 /**
  * Host key status for an SFTP connection card: the badge and fingerprint for
- * everyone; pin, accept a changed key and forget for admins. Same trust model
+ * everyone; scan & pin, pin by hand, accept a changed key and forget for
+ * admins. Same trust model
  * as a server's host key panel, compacted to fit a card.
  */
 export function FtpHostKeySection({ connection }: { connection: FtpConnection }) {
@@ -20,6 +26,7 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
   const isAdmin = useHasRole('admin');
   const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState('');
+  const [scan, setScan] = useState<HostKeyScanResult | null>(null);
   const base = `/ftp/connections/${connection.id}/host-key`;
 
   // Only admins may read the trust details and mismatch evidence
@@ -34,11 +41,21 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
     void qc.invalidateQueries({ queryKey: ['ftp-connections'] });
   }
 
+  const scanMutation = useMutation({
+    mutationFn: () => api.post<HostKeyScanResult>(`${base}/scan`),
+    onSuccess: (result) => {
+      setPinning(false);
+      setScan(result);
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
   const pinMutation = useMutation({
     mutationFn: (fingerprint: string) => api.put<FtpHostKey>(base, { fingerprint }),
     onSuccess: () => {
       setPinning(false);
       setDraft('');
+      setScan(null);
       refresh();
       toast.success('Host key pinned');
     },
@@ -76,6 +93,15 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
     pinMutation.mutate(value);
   }
 
+  function confirmScanPin(result: HostKeyScanResult) {
+    const ok = confirm(
+      `Pin ${result.fingerprint} (${result.type}) for "${connection.name}"?\n\n` +
+        `Only confirm if it matches what the host itself reports (${VERIFY_HINT}, or ask the ` +
+        'hosting provider). A scan cannot tell a real host from an impostor.',
+    );
+    if (ok) pinMutation.mutate(result.fingerprint);
+  }
+
   function confirmAccept() {
     if (!mismatch) return;
     const ok = confirm(
@@ -103,7 +129,20 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
-              onClick={() => setPinning((v) => !v)}
+              onClick={() => scanMutation.mutate()}
+              disabled={scanMutation.isPending}
+              title="Read the key the host presents now, then confirm it before pinning"
+              className="text-muted-foreground hover:bg-muted flex items-center gap-1 rounded px-2 py-0.5 disabled:opacity-50"
+            >
+              <ScanLine size={12} />
+              {scanMutation.isPending ? 'Scanning…' : 'Scan & pin'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setScan(null);
+                setPinning((v) => !v);
+              }}
               className="text-muted-foreground hover:bg-muted rounded px-2 py-0.5"
             >
               Pin…
@@ -161,6 +200,36 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
           >
             Accept new key…
           </button>
+        </div>
+      )}
+
+      {scan && (
+        <div className="border-border bg-muted/40 rounded-md border p-2">
+          <p className="font-medium">The host presents</p>
+          <div className="mt-1 flex min-w-0 items-center gap-2">
+            <Fingerprint value={scan.fingerprint} className="min-w-0" />
+            <span className="text-muted-foreground shrink-0">{scan.type}</span>
+          </div>
+          {fingerprint && scan.fingerprint !== fingerprint && (
+            <p className="mt-1 text-red-600">This differs from the pinned fingerprint.</p>
+          )}
+          <div className="mt-2 flex gap-1.5">
+            <button
+              type="button"
+              onClick={() => confirmScanPin(scan)}
+              disabled={pinMutation.isPending}
+              className="bg-primary text-primary-foreground hover:bg-primary/90 rounded-md px-2.5 py-1 font-medium disabled:opacity-50"
+            >
+              Pin this key…
+            </button>
+            <button
+              type="button"
+              onClick={() => setScan(null)}
+              className="border-border hover:bg-muted rounded-md border px-2.5 py-1"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 

@@ -7,9 +7,11 @@ import {
   FTP_PROTOCOL_OPTIONS,
   ftpProtocolOption,
   type CreateFtpConnectionRequest,
+  type FtpAuthMethod,
   type FtpConnection,
   type FtpProtocol,
   type FtpTestResult,
+  type SSHKey,
   type UpdateFtpConnectionRequest,
 } from '@smt/shared';
 import {
@@ -17,6 +19,8 @@ import {
   CircleCheck,
   FolderOpen,
   FolderSync,
+  KeyRound,
+  Lock,
   Pencil,
   PlugZap,
   Plus,
@@ -33,9 +37,12 @@ interface ConnectionForm {
   host: string;
   port: string;
   username: string;
+  authMethod: FtpAuthMethod;
   password: string;
+  sshKeyId: string;
   verifyTls: boolean;
   rootPath: string;
+  restrictToRoot: boolean;
 }
 
 const empty: ConnectionForm = {
@@ -44,9 +51,13 @@ const empty: ConnectionForm = {
   host: '',
   port: '21',
   username: '',
+  authMethod: 'password',
   password: '',
+  sshKeyId: '',
   verifyTls: true,
   rootPath: '',
+  // New connections are confined to their start directory unless unticked
+  restrictToRoot: true,
 };
 
 const QUERY_KEY = ['ftp-connections'];
@@ -76,6 +87,13 @@ export default function FtpPage() {
   const { data: connections, isLoading } = useQuery<FtpConnection[]>({
     queryKey: QUERY_KEY,
     queryFn: () => api.get('/ftp/connections'),
+  });
+
+  // Only the connection form (admins) needs the org's keys, for key auth
+  const { data: sshKeys } = useQuery<SSHKey[]>({
+    queryKey: ['ssh-keys'],
+    queryFn: () => api.get('/keys'),
+    enabled: showForm,
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: QUERY_KEY });
@@ -144,9 +162,12 @@ export default function FtpPage() {
       host: c.host,
       port: String(c.port),
       username: c.username,
+      authMethod: c.authMethod,
       password: '',
+      sshKeyId: c.sshKeyId ?? '',
       verifyTls: c.verifyTls,
       rootPath: c.rootPath ?? '',
+      restrictToRoot: c.restrictToRoot,
     });
     setShowForm(true);
   }
@@ -160,6 +181,11 @@ export default function FtpPage() {
   const option = ftpProtocolOption(form.protocol);
   // SFTP authenticates the host by its SSH key, not a certificate
   const usesTls = form.protocol !== 'ftp' && form.protocol !== 'sftp';
+  // Key auth is SFTP only; FTP/FTPS always log in with the password
+  const authMethod: FtpAuthMethod = form.protocol === 'sftp' ? form.authMethod : 'password';
+  const editing = connections?.find((c) => c.id === editId);
+  // A stored password can only be kept when the connection already logs in with one
+  const passwordRequired = !editing || editing.authMethod !== 'password';
 
   function setProtocol(protocol: FtpProtocol) {
     setForm((p) => {
@@ -178,6 +204,10 @@ export default function FtpPage() {
     e.preventDefault();
     const port = Number(form.port);
     const rootPath = form.rootPath.trim() || null;
+    const auth =
+      authMethod === 'key'
+        ? { authMethod, sshKeyId: form.sshKeyId }
+        : { authMethod, ...(form.password ? { password: form.password } : {}) };
     if (editId) {
       updateMutation.mutate({
         id: editId,
@@ -187,10 +217,11 @@ export default function FtpPage() {
           host: form.host,
           port,
           username: form.username,
-          // Blank means "keep the stored password" — it is never sent back to the client
-          ...(form.password ? { password: form.password } : {}),
+          // A blank password means "keep the stored one" — it is never sent back to the client
+          ...auth,
           verifyTls: form.verifyTls,
           rootPath,
+          restrictToRoot: form.restrictToRoot,
         },
       });
     } else {
@@ -200,9 +231,10 @@ export default function FtpPage() {
         host: form.host,
         port,
         username: form.username,
-        password: form.password,
+        ...auth,
         verifyTls: form.verifyTls,
         rootPath,
+        restrictToRoot: form.restrictToRoot,
       });
     }
   }
@@ -297,22 +329,61 @@ export default function FtpPage() {
                 className={`${inputClass} font-mono`}
               />
             </div>
-            <div>
-              <label className="mb-1 block text-sm font-medium">Password</label>
-              <input
-                type="password"
-                required={!editId}
-                autoComplete="new-password"
-                value={form.password}
-                onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
-                className={`${inputClass} font-mono`}
-              />
-              {editId && (
-                <p className="text-muted-foreground mt-1 text-xs">
-                  Leave blank to keep the existing password.
-                </p>
-              )}
-            </div>
+            {form.protocol === 'sftp' && (
+              <div>
+                <label className="mb-1 block text-sm font-medium">Authentication</label>
+                <select
+                  value={form.authMethod}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, authMethod: e.target.value as FtpAuthMethod }))
+                  }
+                  className={inputClass}
+                >
+                  <option value="password">Password</option>
+                  <option value="key">SSH key</option>
+                </select>
+              </div>
+            )}
+            {authMethod === 'key' ? (
+              <div>
+                <label className="mb-1 block text-sm font-medium">SSH key</label>
+                <select
+                  required
+                  value={form.sshKeyId}
+                  onChange={(e) => setForm((p) => ({ ...p, sshKeyId: e.target.value }))}
+                  className={inputClass}
+                >
+                  <option value="">Choose a key…</option>
+                  {sshKeys?.filter((k) => !k.retiredAt || k.id === form.sshKeyId).map((k) => (
+                    <option key={k.id} value={k.id}>
+                      {k.name} ({k.type})
+                    </option>
+                  ))}
+                </select>
+                {sshKeys?.length === 0 && (
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    No SSH keys yet — generate or import one under Keys.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div>
+                <label className="mb-1 block text-sm font-medium">Password</label>
+                <input
+                  type="password"
+                  required={passwordRequired}
+                  autoComplete="new-password"
+                  value={form.password}
+                  onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
+                  className={`${inputClass} font-mono`}
+                />
+                {!passwordRequired && (
+                  <p className="text-muted-foreground mt-1 text-xs">
+                    Leave blank to keep the existing password.
+                  </p>
+                )}
+              </div>
+            )}
             <div>
               <label className="mb-1 block text-sm font-medium">
                 Start directory <span className="text-muted-foreground text-xs">(optional)</span>
@@ -338,6 +409,24 @@ export default function FtpPage() {
               Verify TLS certificate
               <span className="text-muted-foreground text-xs">
                 (untick for a self-signed certificate)
+              </span>
+            </label>
+            <label className="col-span-2 flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={form.restrictToRoot}
+                onChange={(e) => setForm((p) => ({ ...p, restrictToRoot: e.target.checked }))}
+                className="border-input mt-0.5 size-4 rounded"
+              />
+              <span>
+                Restrict to the start directory
+                <span className="text-muted-foreground block text-xs">
+                  Every path must stay inside the start directory (or the login directory when
+                  none is set).
+                  {form.protocol === 'sftp'
+                    ? ' Symlinks that lead out of it are refused too.'
+                    : ' FTP cannot tell where a symlink leads, so paths are only checked by name.'}
+                </span>
               </span>
             </label>
             <div className="col-span-2 flex gap-2">
@@ -385,6 +474,23 @@ export default function FtpPage() {
                   </p>
                   {c.rootPath && (
                     <p className="text-muted-foreground truncate font-mono text-xs">{c.rootPath}</p>
+                  )}
+                  {(c.restrictToRoot || c.authMethod === 'key') && (
+                    <p className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
+                      {c.restrictToRoot && (
+                        <span
+                          className="flex items-center gap-1"
+                          title="Paths outside the start directory are refused"
+                        >
+                          <Lock size={10} /> Restricted
+                        </span>
+                      )}
+                      {c.authMethod === 'key' && (
+                        <span className="flex items-center gap-1" title="Logs in with an SSH key">
+                          <KeyRound size={10} /> SSH key
+                        </span>
+                      )}
+                    </p>
                   )}
                 </div>
                 <span

@@ -51,7 +51,7 @@ const { nanoid } = await import('nanoid');
 const { buildApp } = await import('../app.js');
 const { runMigrations } = await import('../../db/migrate.js');
 const { getDb } = await import('../../db/index.js');
-const { auditLog, cloudAccounts, keyRotations, memberServerAccess, memberships, passkeys, servers, sshKeys } =
+const { auditLog, cloudAccounts, ftpConnections, keyRotations, memberServerAccess, memberships, passkeys, servers, sshKeys } =
   await import('../../db/schema.js');
 const { vault } = await import('../../vault/index.js');
 const { resolveServerAuth } = await import('../../ssh/credentials.js');
@@ -383,6 +383,31 @@ describe('SSH key rotation', { timeout: 30_000 }, () => {
     const res = (await rotate(srv.id)).json();
     expect(res).toMatchObject({ status: 'completed', oldKeyRetired: false });
     expect(res.warnings.join(' ')).toMatch(/aws-prod/);
+    expect(keyRow(old.id)!.retiredAt).toBeNull();
+  });
+
+  it('does not retire a key an SFTP file connection logs in with', async () => {
+    const old = await seedKey();
+    const srv = seedFleetServer(old.id, [old.line]);
+    db()
+      .insert(ftpConnections)
+      .values({
+        id: nanoid(),
+        orgId,
+        name: 'sftp-backups',
+        host: 'files.example',
+        port: 22,
+        protocol: 'sftp',
+        username: 'backup',
+        encryptedPassword: '',
+        authMethod: 'key',
+        sshKeyId: old.id,
+        createdBy: owner.userId,
+      })
+      .run();
+    const res = (await rotate(srv.id)).json();
+    expect(res).toMatchObject({ status: 'completed', oldKeyRetired: false });
+    expect(res.warnings.join(' ')).toMatch(/sftp-backups/);
     expect(keyRow(old.id)!.retiredAt).toBeNull();
   });
 
