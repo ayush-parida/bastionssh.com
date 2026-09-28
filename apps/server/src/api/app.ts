@@ -25,6 +25,7 @@ import { monitoringRoutes } from './routes/monitoring.js';
 import { notificationRoutes } from './routes/notifications.js';
 import { cloudRoutes } from './routes/cloud.js';
 import { dnsRoutes } from './routes/dns.js';
+import { diagnosticsRoutes } from './routes/diagnostics.js';
 import { teamRoutes, publicInviteRoutes } from './routes/team.js';
 import { publicPasswordResetRoutes } from './routes/password-reset.js';
 import { apiTokenRoutes } from './routes/tokens.js';
@@ -90,6 +91,7 @@ export async function buildApp() {
   await app.register(notificationRoutes, { prefix: '/api/notifications' });
   await app.register(cloudRoutes, { prefix: '/api/cloud' });
   await app.register(dnsRoutes, { prefix: '/api/dns' });
+  await app.register(diagnosticsRoutes, { prefix: '/api/diagnostics' });
   await app.register(teamRoutes, { prefix: '/api/team' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });
   // Unauthenticated: reading and accepting an invite happens before an account exists

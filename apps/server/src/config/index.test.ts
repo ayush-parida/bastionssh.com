@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { DEV_ADMIN_PASSWORD, DEV_WEB_ORIGINS, parseTrustProxy, resolveAdminPassword, resolveWebauthn } from './index.js';
+import {
+  DEFAULT_EGRESS_IP_SERVICES,
+  DEV_ADMIN_PASSWORD,
+  DEV_WEB_ORIGINS,
+  parseEgressIp,
+  parseTrustProxy,
+  resolveAdminPassword,
+  resolveWebauthn,
+} from './index.js';
 
 describe('resolveAdminPassword', () => {
   it('falls back to the dev password when NODE_ENV is explicitly development or test', () => {
@@ -75,5 +83,34 @@ describe('resolveWebauthn', () => {
         resolveWebauthn({ ...base, nodeEnv: 'production', baseUrl: 'https://ssh.example.com', origins: `https://ok.example.com,${bad}` }),
       ).toThrow(`SMT_WEBAUTHN_ORIGINS: "${bad}" is not an origin`);
     }
+  });
+});
+
+describe('parseEgressIp', () => {
+  it('looks the IP up from the default services when unset', () => {
+    expect(parseEgressIp(undefined, undefined)).toEqual({ mode: 'lookup', services: DEFAULT_EGRESS_IP_SERVICES });
+    expect(parseEgressIp('  ', '')).toEqual({ mode: 'lookup', services: DEFAULT_EGRESS_IP_SERVICES });
+  });
+
+  it('uses a configured address as-is', () => {
+    expect(parseEgressIp('49.43.168.212', undefined)).toEqual({ mode: 'fixed', ip: '49.43.168.212' });
+    expect(parseEgressIp('2001:db8::1', undefined)).toEqual({ mode: 'fixed', ip: '2001:db8::1' });
+  });
+
+  it('can be switched off', () => {
+    expect(parseEgressIp('off', undefined)).toEqual({ mode: 'disabled' });
+    expect(parseEgressIp('FALSE', undefined)).toEqual({ mode: 'disabled' });
+  });
+
+  it('refuses anything that is not an address', () => {
+    expect(() => parseEgressIp('my-nat-gateway', undefined)).toThrow(/not an IP address/);
+  });
+
+  it('takes its own list of https services', () => {
+    expect(parseEgressIp(undefined, 'https://ip.example.com/raw, https://icanhazip.com')).toEqual({
+      mode: 'lookup',
+      services: ['https://ip.example.com/raw', 'https://icanhazip.com/'],
+    });
+    expect(() => parseEgressIp(undefined, 'http://ip.example.com')).toThrow(/not an https URL/);
   });
 });

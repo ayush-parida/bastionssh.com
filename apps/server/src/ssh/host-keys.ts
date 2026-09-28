@@ -32,7 +32,7 @@ import logger from '../logger.js';
  */
 
 /** Why a connection was opened — recorded with TOFU and mismatch audit rows. */
-export type HostKeyPurpose = 'terminal' | 'exec' | 'sftp' | 'health_check';
+export type HostKeyPurpose = 'terminal' | 'exec' | 'sftp' | 'health_check' | 'diagnostics';
 
 export interface SshTarget {
   /** The servers row id — the pinned key is looked up by it. */

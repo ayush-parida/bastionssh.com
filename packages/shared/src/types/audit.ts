@@ -93,7 +93,10 @@ export type AuditAction =
   | 'cloud_account.delete'
   | 'cloud_account.test'
   | 'cloud_account.sync'
-  | 'dns.lookup';
+  | 'dns.lookup'
+  | 'server.diagnose'
+  | 'ftp_connection.diagnose'
+  | 'storage_connection.diagnose';
 
 export interface AuditLogEntry {
   id: string;
