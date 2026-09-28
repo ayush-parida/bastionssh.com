@@ -13,6 +13,8 @@ import CommandsPage from '@/pages/Commands.js';
 import CronJobsPage from '@/pages/CronJobs.js';
 import AIChatPage from '@/pages/AIChat.js';
 import AuditPage from '@/pages/Audit.js';
+import RecordingsPage from '@/pages/Recordings.js';
+import RecordingPlayerPage from '@/pages/RecordingPlayer.js';
 import SettingsPage from '@/pages/Settings.js';
 import TerminalPage from '@/pages/Terminal.js';
 import FilesPage from '@/pages/Files.js';
@@ -82,6 +84,8 @@ export default function App() {
           <Route path="cron-jobs" element={<CronJobsPage />} />
           <Route path="ai" element={<AIChatPage />} />
           <Route path="audit" element={<AuditPage />} />
+          <Route path="recordings" element={<RecordingsPage />} />
+          <Route path="recordings/:id" element={<RecordingPlayerPage />} />
           <Route path="team" element={<TeamPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>

@@ -17,6 +17,7 @@ import MetricChart, { type ChartPoint } from '@/components/charts/MetricChart.js
 import { HostKeyPanel } from '@/components/servers/HostKey.js';
 import {
   ArrowLeft,
+  Film,
   FolderOpen,
   HardDrive,
   Pause,
@@ -130,6 +131,13 @@ export default function ServerHealthPage() {
           >
             <FolderOpen size={14} />
             Files
+          </Link>
+          <Link
+            to={`/recordings?serverId=${serverId}`}
+            className="flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm transition-colors hover:bg-muted"
+          >
+            <Film size={14} />
+            Recordings
           </Link>
           {canConfigure && (
             <button

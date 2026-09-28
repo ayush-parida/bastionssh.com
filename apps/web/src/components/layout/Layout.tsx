@@ -19,6 +19,7 @@ import {
   Clock,
   Bot,
   ScrollText,
+  Film,
   Settings,
   Users,
   Building2,
@@ -42,6 +43,7 @@ const navItems = [
   { to: '/cron-jobs', label: 'Cron Jobs', icon: Clock },
   { to: '/ai', label: 'AI Assistant', icon: Bot },
   { to: '/audit', label: 'Audit Log', icon: ScrollText },
+  { to: '/recordings', label: 'Recordings', icon: Film },
   { to: '/team', label: 'Team & Access', icon: Users },
   { to: '/settings', label: 'Settings', icon: Settings },
 ];

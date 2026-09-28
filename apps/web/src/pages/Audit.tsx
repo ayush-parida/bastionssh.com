@@ -1,9 +1,18 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import type { AuditLogEntry } from '@smt/shared';
-import { ScrollText } from 'lucide-react';
+import { Film, ScrollText } from 'lucide-react';
 import { relativeTime } from '@/lib/utils.js';
+
+/** The recording an entry points at: a connect or command run records one, and views/downloads name it. */
+function recordingOf(e: AuditLogEntry): string | undefined {
+  const fromMeta = e.metadata?.recordingId;
+  if (typeof fromMeta === 'string') return fromMeta;
+  if (e.resourceType === 'recording' && e.action !== 'recording.delete') return e.resourceId;
+  return undefined;
+}
 
 export default function AuditPage() {
   const [page, setPage] = useState(1);
@@ -52,7 +61,20 @@ export default function AuditPage() {
                       <span className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-mono bg-muted">{e.action}</span>
                     </td>
                     <td className="px-4 py-3 text-xs text-muted-foreground">{e.resourceType}{e.resourceName ? ` · ${e.resourceName}` : ''}</td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground font-mono truncate max-w-xs">{e.metadata ? JSON.stringify(e.metadata) : ''}</td>
+                    <td className="px-4 py-3 text-xs text-muted-foreground font-mono max-w-xs">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate">{e.metadata ? JSON.stringify(e.metadata) : ''}</span>
+                        {recordingOf(e) && (
+                          <Link
+                            to={`/recordings/${recordingOf(e)}`}
+                            title="Play the recording"
+                            className="flex shrink-0 items-center gap-1 font-sans text-primary hover:underline"
+                          >
+                            <Film size={12} /> Recording
+                          </Link>
+                        )}
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>

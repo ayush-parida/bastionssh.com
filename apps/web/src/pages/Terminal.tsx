@@ -1,14 +1,14 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import type { Server } from '@smt/shared';
+import type { ActiveRecording, Server } from '@smt/shared';
 import XTerminal, {
   type TerminalConnectionStatus,
   type XTerminalHandle,
 } from '@/components/terminal/XTerminal.js';
 import AISidebar from '@/components/ai/AISidebar.js';
-import { ArrowLeft, Bot, FolderOpen, Unplug } from 'lucide-react';
+import { ArrowLeft, Bot, FolderOpen, Keyboard, Unplug } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { HostKeyMismatchNotice } from '@/components/servers/HostKey.js';
 
@@ -33,6 +33,8 @@ export default function TerminalPage() {
   const navigate = useNavigate();
   const sessionId: string | undefined = location.state?.sessionId;
   const stateServerName: string | undefined = location.state?.serverName;
+  /** Set when the org records this session; says whether keystrokes are captured too. */
+  const recording: ActiveRecording | null | undefined = location.state?.recording;
 
   const [aiOpen, setAiOpen] = useState(false);
   const [status, setStatus] = useState<TerminalConnectionStatus>('connecting');
@@ -49,6 +51,15 @@ export default function TerminalPage() {
     queryFn: () => api.get(`/servers/${id}`),
     enabled: !!id,
   });
+
+  // Say so up front: keystroke recording captures passwords typed at hidden prompts too
+  useEffect(() => {
+    if (recording?.inputRecorded) {
+      toast.warning('Keystrokes in this session are recorded, including any passwords you type.', {
+        id: `recording-input-${sessionId}`,
+      });
+    }
+  }, [recording?.inputRecorded, sessionId]);
 
   const serverName = server?.name ?? stateServerName ?? id;
   const endpoint = server ? `${server.username}@${server.host}:${server.port}` : undefined;
@@ -140,6 +151,28 @@ export default function TerminalPage() {
             {STATUS_LABEL[status]}
           </span>
         </div>
+
+        {recording && (
+          <span
+            className={`flex shrink-0 items-center gap-1.5 rounded px-2 py-0.5 text-xs ${
+              recording.inputRecorded ? 'bg-[#d29922]/15 text-[#e3b341]' : 'text-[#8b949e]'
+            }`}
+            title={
+              recording.inputRecorded
+                ? 'This session is recorded, including everything you type — passwords entered at sudo or login prompts too.'
+                : 'This session\'s output is recorded for playback. Keystrokes are not recorded.'
+            }
+          >
+            <span className="size-2 rounded-full bg-[#f85149]" aria-hidden="true" />
+            REC
+            {recording.inputRecorded && (
+              <>
+                <Keyboard size={12} aria-hidden="true" />
+                <span className="hidden md:inline">Keystrokes recorded</span>
+              </>
+            )}
+          </span>
+        )}
 
         <button
           onClick={() => navigate(`/servers/${id}/files`)}
