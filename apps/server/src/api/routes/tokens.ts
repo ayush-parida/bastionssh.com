@@ -8,6 +8,7 @@ import { apiTokens } from '../../db/schema.js';
 import { generateApiToken, isExpired } from '../../auth/token.js';
 import { audit } from '../../audit/index.js';
 import { anyActiveOrgRequiresPasskey, passkeyCount } from '../../auth/passkey.js';
+import { ssoSessionMayChangeCredentials } from '../../auth/sso-policy.js';
 
 const createTokenSchema = z.object({
   name: z.string().trim().min(1).max(100),
@@ -52,6 +53,8 @@ export async function apiTokenRoutes(app: FastifyInstance) {
         .status(403)
         .send({ error: 'API tokens cannot create other tokens' });
     }
+    // A token works in every org its owner belongs to; one org's SSO cannot vouch for that
+    if (!ssoSessionMayChangeCredentials(req, reply)) return reply;
     // A token outlives the sign-in that made it, so it may only be as strong
     // as that sign-in: with any passkey on the account, or in any org that
     // requires one (a token is not tied to one org), the session must have

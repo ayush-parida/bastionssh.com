@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { browserSupportsWebAuthn, browserSupportsWebAuthnAutofill, WebAuthnAbortService } from '@simplewebauthn/browser';
 import { useAuthStore } from '@/store/auth.js';
-import { api } from '@/lib/api.js';
+import { api, ApiError } from '@/lib/api.js';
 import {
   finishPasswordLogin,
   finishWithBackupCode,
@@ -12,15 +12,33 @@ import {
   passkeyErrorMessage,
   passwordlessLogin,
 } from '@/lib/passkeys.js';
-import type { LoginResponse, PasskeyLoginStep, SignedIn, User } from '@smt/shared';
-import { Fingerprint, KeyRound } from 'lucide-react';
+import type { LoginResponse, Me, PasskeyLoginStep, SignedIn, SsoErrorCode, SsoLookupResult, User } from '@smt/shared';
+import { Building2, Fingerprint, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
+
+/** What each /login?sso_error=… means. Fixed text: nothing from the URL is shown. */
+const SSO_ERRORS: Record<SsoErrorCode, string> = {
+  expired: 'The single sign-on attempt expired or was already used. Try again.',
+  state: 'The single sign-on attempt did not start in this browser. Try again from here.',
+  denied: 'Your identity provider did not sign you in.',
+  unavailable: 'Single sign-on is not available for that organization right now.',
+  token: 'Your identity provider’s answer could not be verified. Ask your administrator to check the SSO setup.',
+  email_unverified: 'Your identity provider did not confirm your email address.',
+  domain: 'Your email domain is not allowed to sign in to this organization.',
+  not_member: 'You are not a member of this organization. Ask an admin to invite you.',
+  account_exists:
+    'An account with your email already exists but is not in this organization. Ask an admin of the organization to invite it.',
+  identity_conflict: 'Your account is already linked to a different identity at this provider. Ask an admin for help.',
+  suspended: 'Your access to this organization is suspended. Contact an organization admin.',
+};
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const setUser = useAuthStore((s) => s.setUser);
   const setPasskeyGate = useAuthStore((s) => s.setPasskeyGate);
   const sessionExpired = useAuthStore((s) => s.sessionExpired);
+  const ssoRequired = useAuthStore((s) => s.ssoRequired);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -32,6 +50,12 @@ export default function LoginPage() {
   // Set while switching to a backup code, so the aborted passkey prompt is not reported
   const switchingToCode = useRef(false);
   const passkeysAvailable = !insecureContext && browserSupportsWebAuthn();
+  // "Sign in with SSO": an org slug or work email, then which org and IdP it leads to
+  const [ssoMode, setSsoMode] = useState(!!ssoRequired);
+  const [ssoQuery, setSsoQuery] = useState(ssoRequired?.orgSlug ?? '');
+  const [ssoTarget, setSsoTarget] = useState<SsoLookupResult | null>(null);
+  const ssoError = params.get('sso_error') as SsoErrorCode | null;
+  const returningFromSso = params.get('sso') === 'done';
 
   function signedIn(res: SignedIn, to = '/', state?: unknown) {
     WebAuthnAbortService.cancelCeremony();
@@ -85,9 +109,31 @@ export default function LoginPage() {
     }
   }
 
+  // Back from the identity provider with a session cookie: load who it is for
+  useEffect(() => {
+    if (!returningFromSso) return;
+    api
+      .get<Me>('/auth/me')
+      .then((me) => {
+        setUser({ id: me.id, email: me.email, displayName: me.displayName } as User, me.orgId, me.role);
+        // SSO counts as a passkey sign-in only when the IdP reported phishing-resistant MFA
+        if (me.requirePasskey && !me.passkeyVerified) {
+          setPasskeyGate(true);
+          navigate('/passkey-setup', { replace: true });
+        } else {
+          navigate('/', { replace: true });
+        }
+      })
+      .catch((err: unknown) => {
+        setParams({}, { replace: true });
+        toast.error(err instanceof Error ? err.message : 'Single sign-on failed');
+      });
+    // Once per return from the identity provider
+  }, [returningFromSso]);
+
   // Offer saved passkeys in the email field's autofill list, where supported
   useEffect(() => {
-    if (!passkeysAvailable) return;
+    if (!passkeysAvailable || returningFromSso) return;
     let active = true;
     browserSupportsWebAuthnAutofill()
       .then((supported) => {
@@ -140,10 +186,41 @@ export default function LoginPage() {
       }
       signedIn(res);
     } catch (err: unknown) {
+      if (err instanceof ApiError && err.code === 'SSO_REQUIRED') {
+        // Right password, but this org only takes single sign-on from them
+        setPassword('');
+        openSso(String(err.details?.orgSlug ?? ''));
+      }
       toast.error(err instanceof Error ? err.message : 'Login failed');
     } finally {
       setLoading(false);
     }
+  }
+
+  function openSso(query = '') {
+    WebAuthnAbortService.cancelCeremony();
+    setSsoMode(true);
+    setSsoTarget(null);
+    if (query) setSsoQuery(query);
+  }
+
+  async function lookupSso(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      setSsoTarget(await api.post<SsoLookupResult>('/auth/sso/lookup', { query: ssoQuery }));
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Could not find single sign-on for that');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function continueToSso() {
+    if (!ssoTarget) return;
+    setLoading(true);
+    // A full-page navigation: the server redirects on to the identity provider
+    window.location.assign(ssoTarget.startUrl);
   }
 
   async function handlePasskey() {
@@ -170,7 +247,85 @@ export default function LoginPage() {
             Your session expired. Please sign in again.
           </div>
         )}
-        {pending && usingCode ? (
+        {ssoRequired && (
+          <div
+            role="status"
+            className="mb-6 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400"
+          >
+            {ssoRequired.message}
+          </div>
+        )}
+        {ssoError && (
+          <div
+            role="alert"
+            className="mb-6 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400"
+          >
+            {SSO_ERRORS[ssoError] ?? 'Single sign-on failed. Try again.'}
+          </div>
+        )}
+        {returningFromSso ? (
+          <p className="text-sm text-muted-foreground">Finishing single sign-on…</p>
+        ) : ssoMode ? (
+          ssoTarget ? (
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 px-3 py-3 text-sm">
+                <Building2 size={18} className="mt-0.5 shrink-0 text-primary" />
+                <p>
+                  Sign in to <span className="font-medium">{ssoTarget.orgName}</span> through{' '}
+                  <span className="font-mono text-xs">{ssoTarget.providerHost}</span>.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={continueToSso}
+                disabled={loading}
+                className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              >
+                {loading ? 'Redirecting…' : 'Continue'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSsoTarget(null)}
+                disabled={loading}
+                className="w-full rounded-md border border-border px-4 py-2 text-sm hover:bg-muted disabled:opacity-50"
+              >
+                Back
+              </button>
+            </div>
+          ) : (
+            <form onSubmit={lookupSso} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-1" htmlFor="sso-query">Organization or work email</label>
+                <input
+                  id="sso-query"
+                  type="text"
+                  autoFocus
+                  required
+                  autoComplete="email"
+                  spellCheck={false}
+                  placeholder="acme or you@acme.com"
+                  value={ssoQuery}
+                  onChange={(e) => setSsoQuery(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading || !ssoQuery.trim()}
+                className="w-full rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              >
+                {loading ? 'Looking up…' : 'Continue with SSO'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSsoMode(false)}
+                className="w-full rounded-md border border-border px-4 py-2 text-sm hover:bg-muted"
+              >
+                Sign in with a password or passkey
+              </button>
+            </form>
+          )
+        ) : pending && usingCode ? (
           <form onSubmit={completeWithCode} className="space-y-4">
             <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 px-3 py-3 text-sm">
               <KeyRound size={18} className="mt-0.5 shrink-0 text-primary" />
@@ -284,6 +439,14 @@ export default function LoginPage() {
               className="w-full flex items-center justify-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               <Fingerprint size={15} /> Sign in with a passkey
+            </button>
+            <button
+              type="button"
+              onClick={() => openSso(email.includes('@') ? email : '')}
+              disabled={loading}
+              className="mt-2 w-full flex items-center justify-center gap-2 rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-muted disabled:opacity-50 transition-colors"
+            >
+              <Building2 size={15} /> Sign in with SSO
             </button>
           </>
         )}

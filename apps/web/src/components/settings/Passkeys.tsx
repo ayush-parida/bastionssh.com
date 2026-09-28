@@ -13,7 +13,7 @@ import {
   withStepUp,
 } from '@/lib/passkeys.js';
 import { useAuthStore } from '@/store/auth.js';
-import type { BackupCodeStatus, PasskeyInfo } from '@smt/shared';
+import type { BackupCodeStatus, Me, PasskeyInfo } from '@smt/shared';
 import { Fingerprint, Pencil, Plus, Trash2, Check, X, TriangleAlert, LifeBuoy } from 'lucide-react';
 import BackupCodes, { backupCodesNeedAttention } from '@/components/settings/BackupCodes.js';
 import { toast } from 'sonner';
@@ -44,13 +44,18 @@ export default function Passkeys() {
     queryFn: () => api.get('/auth/passkeys'),
   });
 
+  // An account made by single sign-on has no password: nothing to confirm for a
+  // first passkey, and no password sign-in for backup codes to finish
+  const { data: me } = useQuery<Me>({ queryKey: ['auth-me'], queryFn: () => api.get('/auth/me') });
+  const hasPassword = me?.hasPassword ?? true;
+
   // Backup codes only exist alongside a passkey
   const { data: codeStatus } = useQuery<BackupCodeStatus>({
     queryKey: ['backup-codes'],
     queryFn: () => api.get('/auth/backup-codes'),
-    enabled: !!passkeys?.length,
+    enabled: !!passkeys?.length && hasPassword,
   });
-  const codesNeedAttention = !!passkeys?.length && backupCodesNeedAttention(codeStatus);
+  const codesNeedAttention = !!passkeys?.length && hasPassword && backupCodesNeedAttention(codeStatus);
 
   useEffect(() => {
     if (recovered) sectionRef.current?.scrollIntoView({ block: 'start' });
@@ -68,14 +73,14 @@ export default function Passkeys() {
   const first = passkeys?.length === 0;
   const addMutation = useMutation({
     mutationFn: (name: string) =>
-      withStepUp(() => registerPasskey(name.trim() || undefined, first ? password : undefined)),
+      withStepUp(() => registerPasskey(name.trim() || undefined, first && hasPassword ? password : undefined)),
     onSuccess: () => {
       refresh();
       setAdding(false);
       setNewName('');
       setPassword('');
       toast.success('Passkey added');
-      if (first) {
+      if (first && hasPassword) {
         setSuggestCodes(true);
         toast.message('Next, generate backup codes in case you lose this passkey.');
       }
@@ -165,7 +170,7 @@ export default function Passkeys() {
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
             />
           </div>
-          {first && (
+          {first && hasPassword && (
             <div className="flex-1">
               <label className="block text-sm font-medium mb-1">Your password</label>
               <input
@@ -252,7 +257,7 @@ export default function Passkeys() {
         )}
       </div>
 
-      {!!passkeys?.length && <BackupCodes status={codeStatus} suggest={suggestCodes} />}
+      {!!passkeys?.length && hasPassword && <BackupCodes status={codeStatus} suggest={suggestCodes} />}
     </section>
   );
 }

@@ -384,10 +384,12 @@ User         1───* APIToken
 - **audit_log** — append-only, partitioned by month.
 - **sessions** — browser auth sessions (Lucia).
 - **api_tokens** — programmatic access tokens, scoped + hashed.
+- **sso_providers** — one OIDC provider per org: `issuer`, `client_id`, `encrypted_client_secret`, allowed domains, default role, auto-provision / enforce / trust-IdP-MFA flags, groups claim + role mappings.
+- **user_identities** — `(provider_id, subject)` unique → `user_id`; **sso_login_states** — pending sign-ins (state hash, encrypted PKCE verifier, nonce), 10-minute lifetime.
 
 ### Encrypted columns
 
-`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key`, `storage_connections.encrypted_secret_access_key` and `ftp_connections.encrypted_password` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
+`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key`, `storage_connections.encrypted_secret_access_key`, `ftp_connections.encrypted_password` and `sso_providers.encrypted_client_secret` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
 
 ---
 
@@ -467,7 +469,7 @@ silently, so the UI can tell "not checked" apart from "not watched".
 ### Authentication
 
 - Built-in email + password (Argon2id hashing).
-- OAuth/OIDC (Google, GitHub, GitLab, generic OIDC).
+- Per-org OpenID Connect SSO (`/server/auth/sso.ts`, `openid-client`): code flow + PKCE, state/nonce/verifier kept server-side, ID token checked against the IdP JWKS; identities keyed by (provider, `sub`) in `user_identities`. SSO sessions carry `sessions.sso_provider_id` and only work in that org. No SAML.
 - Optional TOTP 2FA.
 - Session cookies: `HttpOnly`, `Secure`, `SameSite=Lax`, rotating on privilege change.
 
