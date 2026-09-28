@@ -327,6 +327,27 @@ describe('connection refused before the socket attaches', () => {
     expect(sock.close).toHaveBeenCalledWith(4404, 'Session not found');
   });
 
+  it('keeps the reason when the waiting socket closed before the handshake failed', async () => {
+    state.connectError = mismatch();
+    const id = await SSHBroker.createSession({
+      server: { id: 's1', host: 'h', port: 22, username: 'root' },
+      password: 'pw',
+      ...OWNER,
+      cols: 80,
+      rows: 24,
+    });
+    const gone = makeSocket();
+    const attached = SSHBroker.attach(id, gone, makeReq(OWNER));
+    // The browser gives up (a reload, a StrictMode remount) while SSH connects
+    gone.close();
+    await flush();
+    await attached;
+    await flush();
+    const retry = makeSocket();
+    await SSHBroker.attach(id, retry, makeReq(OWNER));
+    expect(retry.close).toHaveBeenCalledWith(WS_CLOSE_HOST_KEY_MISMATCH, 'HOST_KEY_MISMATCH');
+  });
+
   it('still reports straight to a socket that was already waiting', async () => {
     state.connectError = mismatch();
     const id = await SSHBroker.createSession({

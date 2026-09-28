@@ -41,6 +41,8 @@ interface ActiveSession {
   bufferFn?: (data: Buffer) => void;
   /** Closes the session if no socket (re)attaches within the grace period */
   reapTimer?: ReturnType<typeof setTimeout>;
+  /** An open socket was told why the connection failed; nothing to keep for later */
+  failureReported?: boolean;
 }
 
 const sessions = new Map<string, ActiveSession>();
@@ -81,12 +83,18 @@ function rememberFailure(id: string, meta: SessionMeta, error: unknown) {
   failedSessions.set(id, { userId: meta.userId, orgId: meta.orgId, error, timer });
 }
 
+function forgetFailure(sessionId: string) {
+  const failed = failedSessions.get(sessionId);
+  if (!failed) return;
+  clearTimeout(failed.timer);
+  failedSessions.delete(sessionId);
+}
+
 /** Take the failure recorded for a session, only for its owner. */
 function takeFailure(sessionId: string, owner: SessionOwner): unknown {
   const failed = failedSessions.get(sessionId);
   if (!failed || failed.userId !== owner.userId || failed.orgId !== owner.orgId) return undefined;
-  clearTimeout(failed.timer);
-  failedSessions.delete(sessionId);
+  forgetFailure(sessionId);
   return failed.error ?? new Error('SSH connection failed');
 }
 
@@ -240,8 +248,9 @@ async function createSession(meta: SessionMeta): Promise<string> {
     })
     .catch((err: unknown) => {
       clearTimeout(session.reapTimer);
-      // Only when no socket was there to be told; attach() reports it otherwise
-      if (!session.socket) rememberFailure(id, meta, err);
+      // Only when no open socket was told; attach() reports it otherwise. One
+      // that closed while SSH was still connecting heard nothing.
+      if (!session.failureReported) rememberFailure(id, meta, err);
       sessions.delete(id);
     });
 
@@ -273,7 +282,11 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
   try {
     stream = await session.streamPromise;
   } catch (err: unknown) {
-    reportFailure(socket, err);
+    if (socket.readyState === socket.OPEN) {
+      reportFailure(socket, err);
+      session.failureReported = true;
+      forgetFailure(sessionId);
+    }
     sessions.delete(sessionId);
     return;
   }
