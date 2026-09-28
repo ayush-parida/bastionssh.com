@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Client } from 'ssh2';
 import type { ConnectConfig } from 'ssh2';
+import type { Duplex } from 'node:stream';
 import { and, eq, isNull, ne, or } from 'drizzle-orm';
 import {
   HOST_KEY_FINGERPRINT_PATTERN,
@@ -12,6 +13,7 @@ import { getDb } from '../db/index.js';
 import { servers } from '../db/schema.js';
 import { auditSystem } from '../audit/index.js';
 import { openHostKeyAlert, resolveHostKeyAlert } from '../monitoring/alerts.js';
+import { openAgentTunnel } from '../agents/hub.js';
 import logger from '../logger.js';
 
 /**
@@ -29,6 +31,11 @@ import logger from '../logger.js';
  *
  * The same checks guard SFTP file connections (ftp/host-keys.ts); a
  * {@link HostKeyStore} says which table holds the pinned key.
+ *
+ * A server assigned to a connectivity agent is reached through that agent's
+ * tunnel instead of a TCP connection to its host ({@link sshConnectConfig}
+ * supplies the `sock`). The agent is untrusted transport: the handshake, and
+ * this verification, still run end to end with the server's sshd.
  */
 
 /** Why a connection was opened — recorded with TOFU and mismatch audit rows. */
@@ -138,6 +145,8 @@ export interface HostKeySubject {
   port: number;
   hostKeyFingerprint: string | null;
   hostKeyType: string | null;
+  /** Servers only: the connectivity agent the connection goes through, if any. */
+  agentId?: string | null;
 }
 
 /**
@@ -221,6 +230,8 @@ export type HostKeyCheck = { ok: true } | { ok: false; error: Error };
 export interface HostKeyEndpoint {
   host: string;
   port: number;
+  /** The agent it went through (null = direct); omitted where agents do not apply. */
+  agentId?: string | null;
 }
 
 /**
@@ -255,7 +266,12 @@ export function checkHostKey(
         error: new Error(`Host key could not be verified: ${kind === 'server' ? 'server' : 'connection'} not found`),
       };
     }
-    if (endpoint && (row.host !== endpoint.host || row.port !== endpoint.port)) {
+    if (
+      endpoint &&
+      (row.host !== endpoint.host ||
+        row.port !== endpoint.port ||
+        (endpoint.agentId !== undefined && (row.agentId ?? null) !== endpoint.agentId))
+    ) {
       logger.warn(
         { serverId, kind, connectedTo: endpoint, current: { host: row.host, port: row.port }, purpose },
         'Server address changed while connecting — host key not checked, connection refused',
@@ -377,12 +393,8 @@ function algorithmsForKeyType(type: string): string[] {
  * would be refused as a "changed" key. Other types stay offered afterwards, so
  * an impostor with a different key still shows up as a mismatch.
  */
-function preferPinnedKeyType(
-  serverId: string,
-  store: HostKeyStore,
-): ConnectConfig['algorithms'] | undefined {
+function preferPinnedKeyType(row: HostKeySubject | undefined): ConnectConfig['algorithms'] | undefined {
   try {
-    const row = store.load(serverId);
     // Only types ssh2 can negotiate; anything else would make connect() throw
     if (!row?.hostKeyFingerprint || !row.hostKeyType || !PREFERABLE_KEY_TYPES.has(row.hostKeyType)) {
       return undefined;
@@ -396,10 +408,24 @@ function preferPinnedKeyType(
 }
 
 /**
+ * The socket for a server reached through a connectivity agent: a tunnel to
+ * `port` on the agent's own loopback. Undefined for a direct connection.
+ */
+export function agentSocketFor(
+  row: { orgId: string; agentId?: string | null } | undefined,
+  port: number,
+): Duplex | undefined {
+  return row?.agentId ? openAgentTunnel({ orgId: row.orgId, agentId: row.agentId }, port) : undefined;
+}
+
+/**
  * The one way to build ssh2 connect options for a managed server: target,
  * credentials and a host key verifier bound to that server. Callers wire
  * `guard.error` into their `'error'` handler so a refused key surfaces as a
  * {@link HostKeyMismatchError} rather than ssh2's generic handshake error.
+ *
+ * A server assigned to an agent gets the agent tunnel as `sock`, whatever the
+ * caller passed: which route a connection takes is the server row's decision.
  */
 export function sshConnectConfig(
   target: SshTarget,
@@ -408,16 +434,22 @@ export function sshConnectConfig(
   extra: Omit<ConnectConfig, 'host' | 'port' | 'username' | 'hostVerifier' | 'hostHash'> = {},
   store: HostKeyStore = serverHostKeyStore,
 ): { config: ConnectConfig; guard: HostKeyGuard } {
-  const guard = hostKeyGuard(target.id, purpose, { host: target.host, port: target.port }, store);
+  // Not caught: without the row we cannot tell whether this server must go
+  // through an agent, and connecting straight to its host could be wrong.
+  const row = store.load(target.id);
+  const agentId = store.kind === 'server' ? (row?.agentId ?? null) : undefined;
+  const guard = hostKeyGuard(target.id, purpose, { host: target.host, port: target.port, agentId }, store);
   // The verifier must see the raw key blob: a caller-supplied hostHash would
   // make ssh2 hand it a hex digest instead, which never equals a fingerprint.
-  const { hostHash: _ignored, ...rest } = extra as ConnectConfig;
-  const algorithms = rest.algorithms ?? preferPinnedKeyType(target.id, store);
+  const { hostHash: _ignored, sock: callerSock, ...rest } = extra as ConnectConfig;
+  const algorithms = rest.algorithms ?? preferPinnedKeyType(row);
+  const sock = agentId && row ? agentSocketFor(row, target.port) : callerSock;
   return {
     guard,
     config: {
       ...rest,
       ...(algorithms && { algorithms }),
+      ...(sock && { sock }),
       host: target.host,
       port: target.port,
       username: target.username,
@@ -439,6 +471,8 @@ export function scanHostKey(
   host: string,
   port: number,
   timeoutMs = SCAN_TIMEOUT_MS,
+  /** An agent tunnel to scan through instead of connecting to host:port. */
+  sock?: Duplex,
 ): Promise<HostKeyScanResult> {
   return new Promise((resolve, reject) => {
     const client = new Client();
@@ -481,6 +515,7 @@ export function scanHostKey(
     client.connect({
       host,
       port,
+      ...(sock && { sock: sock as NonNullable<ConnectConfig['sock']> }),
       // Never used: the handshake is abandoned before user authentication
       username: 'smt-host-key-scan',
       readyTimeout: timeoutMs,

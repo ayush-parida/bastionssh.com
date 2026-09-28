@@ -1,0 +1,32 @@
+{
+  "name": "@smt/agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Outbound connectivity agent: tunnels the app's SSH connections to servers it cannot reach directly",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./agent": {
+      "import": "./dist/agent.js",
+      "types": "./dist/agent.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json && node build.mjs",
+    "clean": "rm -rf dist *.tsbuildinfo",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.27.0",
+    "typescript": "^5.5.0"
+  }
+}

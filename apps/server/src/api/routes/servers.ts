@@ -4,8 +4,8 @@ import type { CloudProvider, CloudServerState, Server } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
-import { servers, sshKeys } from '../../db/schema.js';
-import { eq, and } from 'drizzle-orm';
+import { agents, servers, sshKeys } from '../../db/schema.js';
+import { eq, and, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
@@ -26,6 +26,8 @@ const createServerSchema = z.object({
   notes: z.string().optional(),
   /** Pre-pin the host key; otherwise the first connection trusts what it sees. */
   hostKeyFingerprint: fingerprintSchema.optional(),
+  /** Reach the server through this connectivity agent (to its loopback, on `port`); null = directly. */
+  agentId: z.string().min(1).nullable().optional(),
 });
 
 /** Strip encryptedPassword and return safe server object */
@@ -90,6 +92,17 @@ function keyBelongsToOrg(orgId: string, keyId: string): boolean {
   );
 }
 
+/** A server may only route through a live (unrevoked) agent of its own org. */
+function agentUsableByOrg(orgId: string, agentId: string): boolean {
+  return (
+    getDb()
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.orgId, orgId), isNull(agents.revokedAt)))
+      .get() !== undefined
+  );
+}
+
 export async function serverRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
@@ -112,6 +125,9 @@ export async function serverRoutes(app: FastifyInstance) {
     ) {
       return reply.status(400).send({ error: 'Unknown SSH key' });
     }
+    if (body.agentId && !agentUsableByOrg(req.orgId, body.agentId)) {
+      return reply.status(400).send({ error: 'Unknown or revoked agent' });
+    }
     const db = getDb();
     const id = nanoid();
 
@@ -133,11 +149,12 @@ export async function serverRoutes(app: FastifyInstance) {
         encryptedPassword: encryptedPassword ?? null,
         tags: JSON.stringify(body.tags),
         notes: body.notes,
+        agentId: body.agentId ?? null,
         ...(body.hostKeyFingerprint && pinnedColumns(body.hostKeyFingerprint, null, req.user.id)),
       })
       .run();
 
-    await audit(req, 'server.create', 'server', id, body.name);
+    await audit(req, 'server.create', 'server', id, body.name, body.agentId ? { agentId: body.agentId } : undefined);
     if (body.hostKeyFingerprint) {
       await audit(req, 'server.host_key_pinned', 'server', id, body.name, {
         fingerprint: body.hostKeyFingerprint,
@@ -179,6 +196,10 @@ export async function serverRoutes(app: FastifyInstance) {
       .where(and(eq(servers.id, id), eq(servers.orgId, req.orgId)))
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
+    // Re-sending the agent a server already has is a no-op, even once it is revoked
+    if (body.agentId && body.agentId !== existing.agentId && !agentUsableByOrg(req.orgId, body.agentId)) {
+      return reply.status(400).send({ error: 'Unknown or revoked agent' });
+    }
 
     const updateData: Partial<typeof servers.$inferInsert> = {
       ...(body.name !== undefined && { name: body.name }),
@@ -187,13 +208,17 @@ export async function serverRoutes(app: FastifyInstance) {
       ...(body.username !== undefined && { username: body.username }),
       ...(body.tags !== undefined && { tags: JSON.stringify(body.tags) }),
       ...(body.notes !== undefined && { notes: body.notes }),
+      ...(body.agentId !== undefined && { agentId: body.agentId }),
       updatedAt: new Date().toISOString(),
     };
 
-    // A new host or port is a different endpoint: the old key says nothing about it
+    // A new host or port is a different endpoint: the old key says nothing about
+    // it. So is a new route — an agent's loopback is not the host's address.
+    const agentChanged = body.agentId !== undefined && body.agentId !== existing.agentId;
     const endpointChanged =
       (body.host !== undefined && body.host !== existing.host) ||
-      (body.port !== undefined && body.port !== existing.port);
+      (body.port !== undefined && body.port !== existing.port) ||
+      agentChanged;
     if (body.hostKeyFingerprint) {
       if (body.hostKeyFingerprint !== existing.hostKeyFingerprint || endpointChanged) {
         Object.assign(updateData, pinnedColumns(body.hostKeyFingerprint, null, req.user.id));
@@ -213,7 +238,14 @@ export async function serverRoutes(app: FastifyInstance) {
     db.update(servers).set(updateData).where(eq(servers.id, id)).run();
     // Pooled SFTP channels hold the old host/credentials — force a reconnect
     evictServer(req.orgId, id);
-    await audit(req, 'server.update', 'server', id, existing.name);
+    await audit(
+      req,
+      'server.update',
+      'server',
+      id,
+      existing.name,
+      agentChanged ? { agentId: { from: existing.agentId, to: body.agentId } } : undefined,
+    );
     if (updateData.hostKeyFingerprint !== undefined) {
       if (existing.hostKeyMismatchFingerprint) resolveHostKeyAlert(req.orgId, id);
       if (updateData.hostKeyFingerprint) {

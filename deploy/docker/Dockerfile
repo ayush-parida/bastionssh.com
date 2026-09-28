@@ -25,6 +25,7 @@ WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* tsconfig.base.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/cron-parser/package.json packages/cron-parser/
+COPY packages/agent/package.json packages/agent/
 COPY apps/server/package.json apps/server/
 
 RUN pnpm install --frozen-lockfile
@@ -32,8 +33,10 @@ RUN pnpm install --frozen-lockfile
 COPY packages/ packages/
 COPY apps/server/ apps/server/
 
+# The agent is also bundled into one file the server hands to install scripts
 RUN pnpm --filter @smt/shared build && \
     pnpm --filter @smt/cron-parser build && \
+    pnpm --filter @smt/agent build && \
     pnpm --filter @smt/server build
 
 # ─── Stage 3: Runtime ─────────────────────────────────────────────────────────
@@ -45,6 +48,7 @@ WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/cron-parser/package.json packages/cron-parser/
+COPY packages/agent/package.json packages/agent/
 COPY apps/server/package.json apps/server/
 
 RUN pnpm install --frozen-lockfile --prod
@@ -52,6 +56,7 @@ RUN pnpm install --frozen-lockfile --prod
 # Copy built artifacts
 COPY --from=server-builder /app/packages/shared/dist     ./packages/shared/dist
 COPY --from=server-builder /app/packages/cron-parser/dist ./packages/cron-parser/dist
+COPY --from=server-builder /app/packages/agent/dist      ./packages/agent/dist
 COPY --from=server-builder /app/apps/server/dist ./apps/server/dist
 COPY --from=web-builder    /app/apps/web/dist    ./apps/web/dist
 

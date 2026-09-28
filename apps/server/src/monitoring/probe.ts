@@ -269,7 +269,8 @@ export class ProbeError extends Error {
 
 /** Connection-level failures mean the host is unreachable; everything else is a config/auth error. */
 function classify(err: NodeJS.ErrnoException): 'offline' | 'error' {
-  const offlineCodes = ['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ENOTFOUND'];
+  // EAGENTOFFLINE: the server's connectivity agent is not connected
+  const offlineCodes = ['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'ENOTFOUND', 'EAGENTOFFLINE'];
   if (err.code && offlineCodes.includes(err.code)) return 'offline';
   if (/timed out|timeout/i.test(err.message)) return 'offline';
   return 'error';

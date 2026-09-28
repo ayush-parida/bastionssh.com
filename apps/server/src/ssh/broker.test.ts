@@ -51,6 +51,11 @@ vi.mock('ssh2', async () => {
   return { Client, __state: state };
 });
 
+// sshConnectConfig reads the server row (it decides whether the connection
+// goes through an agent); an empty schema means every server connects directly.
+const { runMigrations } = await import('../db/migrate.js');
+await runMigrations();
+
 const { SSHBroker, getSessionForUser, DETACHED_GRACE_MS } = await import('./broker.js');
 const { __state: state } = (await import('ssh2')) as any;
 

@@ -9,6 +9,8 @@ import { servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import { evictServer } from '../../ssh/sftp.js';
 import {
+  SCAN_TIMEOUT_MS,
+  agentSocketFor,
   forgetHostKey,
   hostKeyView,
   pinHostKey,
@@ -53,7 +55,8 @@ export async function hostKeyRoutes(app: FastifyInstance) {
   app.post('/:id/host-key/scan', async (req, reply) => {
     const server = findServer(req);
     if (!server) return reply.status(404).send({ error: 'Not found' });
-    return scanHostKey(server.host, server.port);
+    // Through the server's agent, when it has one — the same route a connection takes
+    return scanHostKey(server.host, server.port, SCAN_TIMEOUT_MS, agentSocketFor(server, server.port));
   });
 
   /** PUT /api/servers/:id/host-key {fingerprint} — pin a known-good fingerprint */

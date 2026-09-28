@@ -322,3 +322,69 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const AGENTS_TAG = '0015_agents';
+
+describe('migration 0015 (connectivity agents)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(AGENTS_TAG);
+  });
+
+  it('keeps existing servers connecting directly, pinned keys intact', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < AGENTS_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, port, username, host_key_fingerprint, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 2222, 'root', 'SHA256:x', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [AGENTS_TAG]);
+
+    expect(db.prepare('SELECT id, host, port, host_key_fingerprint, agent_id FROM servers').get()).toEqual({
+      id: 'srv',
+      host: 'h',
+      port: 2222,
+      host_key_fingerprint: 'SHA256:x',
+      agent_id: null,
+    });
+  });
+
+  it('keeps token hashes unique, unassigns servers of a deleted agent and drops agents with their org', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO agents (id, org_id, name, token_hash, created_by, created_at) VALUES ('a1', 'o1', 'dc', 'h1', 'u1', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, agent_id, created_by, created_at, updated_at)
+        VALUES ('srv', 'o1', 's', 'h', 'root', 'a1', 'u1', 'now', 'now');
+    `);
+    expect(() =>
+      db.exec(
+        `INSERT INTO agents (id, org_id, name, token_hash, created_by, created_at) VALUES ('a2', 'o1', 'x', 'h1', 'u1', 'now')`,
+      ),
+    ).toThrow(/UNIQUE/);
+
+    db.exec(`DELETE FROM agents WHERE id = 'a1'`);
+    expect(db.prepare('SELECT agent_id FROM servers').get()).toEqual({ agent_id: null });
+
+    db.exec(`INSERT INTO agents (id, org_id, name, token_hash, created_by, created_at) VALUES ('a3', 'o1', 'y', 'h3', 'u1', 'now')`);
+    db.exec(`DELETE FROM organizations WHERE id = 'o1'`);
+    expect(db.prepare('SELECT count(*) AS n FROM agents').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (sqlite.prepare('PRAGMA table_info(servers)').all() as { name: string }[]).map((c) => c.name);
+    expect(columns).toContain('agent_id');
+    const agentColumns = (sqlite.prepare('PRAGMA table_info(agents)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    expect(agentColumns).toEqual(
+      expect.arrayContaining(['id', 'org_id', 'name', 'token_hash', 'last_seen_at', 'version', 'created_by', 'revoked_at']),
+    );
+  });
+});

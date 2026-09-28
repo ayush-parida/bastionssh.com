@@ -17,6 +17,8 @@ export interface Server {
   /** Pinned SSH host key, `SHA256:<base64>` as `ssh-keygen -lf` prints it; null until first connect. */
   hostKeyFingerprint: string | null;
   hostKeyStatus: HostKeyStatus;
+  /** Reached through this connectivity agent instead of directly; null = direct. */
+  agentId: string | null;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -34,6 +36,8 @@ export interface CreateServerRequest {
   notes?: string;
   /** Pre-pin the host key instead of trusting whatever answers on first connect. */
   hostKeyFingerprint?: string;
+  /** Connect through this agent (to its loopback, on `port`); null or absent = directly to `host`. */
+  agentId?: string | null;
 }
 
 export interface UpdateServerRequest {
@@ -47,6 +51,7 @@ export interface UpdateServerRequest {
   tags?: string[];
   notes?: string;
   hostKeyFingerprint?: string;
+  agentId?: string | null;
 }
 
 export interface ServerGroup {
