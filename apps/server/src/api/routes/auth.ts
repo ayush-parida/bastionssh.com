@@ -49,7 +49,13 @@ import {
   remainingBackupCodes,
 } from '../../auth/backup-codes.js';
 import { audit } from '../../audit/index.js';
-import { localSignInMembership, ssoRequiredMessage, ssoSessionMayChangeCredentials, SSO_SESSION_ORG_MESSAGE } from '../../auth/sso-policy.js';
+import {
+  localSignInMembership,
+  manageableSessionsFilter,
+  ssoRequiredMessage,
+  ssoSessionMayChangeCredentials,
+  SSO_SESSION_ORG_MESSAGE,
+} from '../../auth/sso-policy.js';
 import {
   accountKey,
   clearLoginFailures,
@@ -374,12 +380,21 @@ export async function authRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
-  /** The caller's own signed-in browsers. */
+  /**
+   * The caller's own signed-in browsers. An SSO session of an account in
+   * several orgs sees only its org's SSO sessions (manageableSessionsFilter).
+   */
   app.get('/sessions', { preHandler: requireAuth }, async (req): Promise<SessionInfo[]> => {
     const rows = getDb()
       .select()
       .from(sessions)
-      .where(and(eq(sessions.userId, req.user.id), gt(sessions.expiresAt, new Date().toISOString())))
+      .where(
+        and(
+          eq(sessions.userId, req.user.id),
+          gt(sessions.expiresAt, new Date().toISOString()),
+          manageableSessionsFilter(req),
+        ),
+      )
       .orderBy(desc(sessions.lastSeenAt))
       .all();
     return rows.map((s) => ({
@@ -393,14 +408,16 @@ export async function authRoutes(app: FastifyInstance) {
     }));
   });
 
-  /** Sign out every session but the one making the request. */
+  /** Sign out every session but the one making the request (those it may manage). */
   app.delete('/sessions', { preHandler: requireAuth }, async (req) => {
     const revoked = getDb()
       .delete(sessions)
       .where(
-        req.sessionId
-          ? and(eq(sessions.userId, req.user.id), ne(sessions.id, req.sessionId))
-          : eq(sessions.userId, req.user.id),
+        and(
+          eq(sessions.userId, req.user.id),
+          req.sessionId ? ne(sessions.id, req.sessionId) : undefined,
+          manageableSessionsFilter(req),
+        ),
       )
       .run().changes;
     await audit(req, 'user.sessions_revoked', 'user', req.user.id, req.user.email, {
@@ -412,7 +429,7 @@ export async function authRoutes(app: FastifyInstance) {
 
   app.delete('/sessions/:id', { preHandler: requireAuth }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const target = findUserSession(req.user.id, id);
+    const target = findUserSession(req.user.id, id, manageableSessionsFilter(req));
     if (!target) return reply.status(404).send({ error: 'Session not found' });
 
     await invalidateSession(target.id);

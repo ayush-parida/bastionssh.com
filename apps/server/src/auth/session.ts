@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { getDb } from '../db/index.js';
 import { sessions } from '../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { and, eq, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -96,11 +96,11 @@ export function publicSessionId(sessionId: string): string {
 }
 
 /** Resolve a public handle back to one of this user's sessions. */
-export function findUserSession(userId: string, publicId: string) {
+export function findUserSession(userId: string, publicId: string, scope?: SQL) {
   return getDb()
     .select()
     .from(sessions)
-    .where(eq(sessions.userId, userId))
+    .where(and(eq(sessions.userId, userId), scope))
     .all()
     .find((s) => publicSessionId(s.id) === publicId);
 }

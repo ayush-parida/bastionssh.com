@@ -407,7 +407,7 @@ describe('connecting through a jump host', () => {
 describe('jump host errors shown to users', () => {
   /** A restricted member granted the target only (plus `extra`). */
   function restrictedMember(extra: string[] = []) {
-    const member = seedUser(orgId, 'member').userId;
+    const member = seedUser(orgId, 'operator').userId;
     getDb()
       .update(memberships)
       .set({ serverAccess: 'restricted' })

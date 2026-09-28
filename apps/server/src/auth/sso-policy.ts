@@ -1,7 +1,7 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { and, asc, eq, ne } from 'drizzle-orm';
+import { and, asc, eq, inArray, ne, type SQL } from 'drizzle-orm';
 import { getDb } from '../db/index.js';
-import { memberships, organizations, ssoProviders } from '../db/schema.js';
+import { memberships, organizations, sessions, ssoProviders } from '../db/schema.js';
 
 /**
  * Where single sign-on constrains a request. Kept apart from the OIDC flow in
@@ -88,13 +88,41 @@ export function localSignInMembership(userId: string): LocalSignIn {
  * Sends 403 and returns false when refused.
  */
 export function ssoSessionMayChangeCredentials(req: FastifyRequest, reply: FastifyReply): boolean {
-  if (!req.ssoOrgId) return true;
-  const elsewhere = getDb()
-    .select({ orgId: memberships.orgId })
-    .from(memberships)
-    .where(and(eq(memberships.userId, req.user.id), ne(memberships.orgId, req.ssoOrgId)))
-    .get();
-  if (!elsewhere) return true;
+  if (!req.ssoOrgId || !memberElsewhere(req.user.id, req.ssoOrgId)) return true;
   reply.status(403).send({ error: SSO_SESSION_CREDENTIALS_MESSAGE, code: 'SSO_SESSION_CREDENTIALS' });
   return false;
+}
+
+/** Whether the account belongs to any org besides `orgId`. */
+function memberElsewhere(userId: string, orgId: string): boolean {
+  return !!getDb()
+    .select({ orgId: memberships.orgId })
+    .from(memberships)
+    .where(and(eq(memberships.userId, userId), ne(memberships.orgId, orgId)))
+    .get();
+}
+
+/**
+ * Which of the account's sessions the requesting session may list and sign
+ * out (GET/DELETE /api/auth/sessions), as a WHERE fragment on `sessions`, or
+ * undefined for all of them.
+ *
+ * A password, passkey or backup-code session proves the account itself and
+ * manages every session. An SSO session proves only what its org's IdP vouches
+ * for: when the account also belongs to other orgs it sees and signs out only
+ * sessions that signed in through that same org's SSO (itself included).
+ * Password/passkey sessions — which can switch to any org — and other orgs'
+ * SSO sessions stay hidden and untouched; their IPs and browsers are not that
+ * IdP's business, and it must not be able to sign the account out of them.
+ * An account in that one org only is not restricted.
+ */
+export function manageableSessionsFilter(req: FastifyRequest): SQL | undefined {
+  if (!req.ssoOrgId || !memberElsewhere(req.user.id, req.ssoOrgId)) return undefined;
+  const providerIds = getDb()
+    .select({ id: ssoProviders.id })
+    .from(ssoProviders)
+    .where(eq(ssoProviders.orgId, req.ssoOrgId))
+    .all()
+    .map((p) => p.id);
+  return inArray(sessions.ssoProviderId, providerIds);
 }

@@ -20,6 +20,7 @@ import { hashPassword } from '../../auth/password.js';
 import { vault } from '../../vault/index.js';
 import { addMembership, seedOrg, seedSession, seedUser } from './test-utils.js';
 import { resolveSsoAccount, type IdTokenClaims } from '../../auth/sso.js';
+import { createSession, publicSessionId } from '../../auth/session.js';
 
 /**
  * A mocked identity provider behind a stubbed global fetch: a discovery
@@ -589,6 +590,61 @@ describe('single sign-on (OIDC)', () => {
       });
       expect(passkey.statusCode).toBe(403);
       expect(passkey.json().code).toBe('SSO_SESSION_CREDENTIALS');
+    });
+
+    it("see and sign out only their own org's SSO sessions when the account is in other orgs too", async () => {
+      const { orgId, slug, providerId } = await orgWithSso('scope');
+      const member = await seedPerson(orgId, 'operator');
+      const other = seedOrg(`scope-b-${nanoid(6).toLowerCase()}`);
+      addMembership(member.userId, other, 'admin');
+      const otherProvider = await configureProvider(other);
+
+      const signed = await ssoSignIn(slug, 'sub-scope', member.email);
+      const sameOrgSso = await createSession(member.userId, { ssoProviderId: providerId });
+      const otherOrgSso = await createSession(member.userId, { ssoProviderId: otherProvider });
+      const password = await seedSession(member.userId);
+      const exists = (id: string) => !!getDb().select().from(sessions).where(eq(sessions.id, id)).get();
+
+      const listed = await app.inject({ method: 'GET', url: '/api/auth/sessions', headers: signed.headers });
+      expect(listed.statusCode).toBe(200);
+      const ids = listed.json().map((s: { id: string }) => s.id);
+      expect(ids).toHaveLength(2);
+      expect(ids).toContain(publicSessionId(sameOrgSso.id));
+      expect(ids).not.toContain(publicSessionId(otherOrgSso.id));
+      expect(ids).not.toContain(publicSessionId(password.sessionId));
+
+      for (const hidden of [otherOrgSso.id, password.sessionId]) {
+        const res = await app.inject({
+          method: 'DELETE',
+          url: `/api/auth/sessions/${publicSessionId(hidden)}`,
+          headers: signed.headers,
+        });
+        expect(res.statusCode).toBe(404);
+        expect(exists(hidden)).toBe(true);
+      }
+
+      const revoked = await app.inject({ method: 'DELETE', url: '/api/auth/sessions', headers: signed.headers });
+      expect(revoked.json()).toEqual({ revoked: 1 });
+      expect(exists(sameOrgSso.id)).toBe(false);
+      expect(exists(otherOrgSso.id)).toBe(true);
+      expect(exists(password.sessionId)).toBe(true);
+      expect(exists(signed.session!)).toBe(true);
+
+      // A password session proves the account itself and manages all of them
+      const all = await app.inject({ method: 'GET', url: '/api/auth/sessions', headers: password.headers });
+      expect(all.json()).toHaveLength(3);
+    });
+
+    it('manage every session of an account that belongs to their org only', async () => {
+      const { orgId, slug } = await orgWithSso('scope-one');
+      const member = await seedPerson(orgId, 'operator');
+      const signed = await ssoSignIn(slug, 'sub-scope-one', member.email);
+      const password = await seedSession(member.userId);
+
+      const listed = await app.inject({ method: 'GET', url: '/api/auth/sessions', headers: signed.headers });
+      expect(listed.json().map((s: { id: string }) => s.id)).toContain(publicSessionId(password.sessionId));
+      const revoked = await app.inject({ method: 'DELETE', url: '/api/auth/sessions', headers: signed.headers });
+      expect(revoked.json()).toEqual({ revoked: 1 });
     });
 
     it('are subject to the org passkey policy unless the IdP asserts phishing-resistant MFA', async () => {
