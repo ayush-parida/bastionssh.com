@@ -2,6 +2,8 @@ import { buildApp } from './api/app.js';
 import { startWorker } from './worker/index.js';
 import { startHealthMonitor } from './monitoring/scheduler.js';
 import { startCloudSync } from './cloud/scheduler.js';
+import { startMaintenance } from './audit/retention.js';
+import { startAuditForwarding } from './audit/forward.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -36,6 +38,9 @@ async function main() {
   // Health checks and cloud inventory sync run on plain intervals in-process — no Redis required.
   startHealthMonitor();
   startCloudSync();
+  // Daily audit-retention prune, and delivery of new audit rows to each org's syslog/webhook target
+  startMaintenance();
+  startAuditForwarding();
   if (config.smtp) logger.info('Email notifications enabled (SMTP configured)');
 
   try {

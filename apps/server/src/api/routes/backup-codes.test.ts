@@ -267,10 +267,11 @@ describe('backup codes', () => {
       const audit = auditOf(person.userId).find((a) => a.action === 'user.login_backup_code');
       expect(JSON.parse(audit!.metadata!)).toEqual({ method: 'password+backup_code', remaining: 9 });
 
-      expect(fake.sendEmail).toHaveBeenCalledTimes(1);
-      expect(fake.sendEmail.mock.calls[0]![0]).toMatchObject({
+      // Signing in from a new address also sends the new-device notice; this one is about the code
+      const codeMails = fake.sendEmail.mock.calls.filter((c) => /backup code was used/.test(c[0].subject));
+      expect(codeMails).toHaveLength(1);
+      expect(codeMails[0]![0]).toMatchObject({
         to: [person.email],
-        subject: expect.stringMatching(/backup code was used/),
         text: expect.stringContaining('9 unused codes are left'),
       });
 

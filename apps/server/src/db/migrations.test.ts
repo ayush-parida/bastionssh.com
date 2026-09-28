@@ -322,3 +322,69 @@ describe('migration 0011 (ftp connection host keys)', () => {
     );
   });
 });
+
+const LOGIN_SECURITY_TAG = '0018_login_security_audit_retention';
+
+describe('migration 0018 (login security, audit retention and forwarding)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(LOGIN_SECURITY_TAG);
+  });
+
+  it('keeps existing orgs and audit rows, gives orgs a year of retention and nothing forwarded', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < LOGIN_SECURITY_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO audit_log (id, org_id, actor_id, actor_email, action, resource_type, created_at)
+        VALUES ('a1', 'o1', 'u1', 'a@x.test', 'server.create', 'server', '2026-01-01T00:00:00.000Z');
+      INSERT INTO sessions (id, user_id, expires_at) VALUES ('s1', 'u1', '2999-01-01');
+    `);
+
+    apply(db, [LOGIN_SECURITY_TAG]);
+
+    expect(db.prepare('SELECT id, audit_retention_days FROM organizations').get()).toEqual({
+      id: 'o1',
+      audit_retention_days: 365,
+    });
+    expect(db.prepare('SELECT id, action FROM audit_log').all()).toEqual([{ id: 'a1', action: 'server.create' }]);
+    expect(db.prepare('SELECT count(*) AS n FROM audit_forwarders').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM user_devices').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM login_failures').get()).toEqual({ n: 0 });
+    const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map(
+      (r) => r.name,
+    );
+    expect(indexes).toEqual(expect.arrayContaining(['audit_log_org_created_idx', 'user_devices_user_hash_idx']));
+  });
+
+  it('keeps one row per device and drops devices and forwarders with their owner', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO user_devices (id, user_id, device_hash, label, ip_prefix, first_seen_at, last_seen_at)
+        VALUES ('d1', 'u1', 'h', 'Firefox on Linux', '203.0.113.0/24', 'now', 'now');
+      INSERT INTO audit_forwarders (org_id, type, encrypted_config, target_hint, cursor_created_at, created_by, created_at, updated_at)
+        VALUES ('o1', 'syslog', 'enc', 'udp://x:514', '', 'u1', 'now', 'now');
+    `);
+    expect(() =>
+      db.exec(
+        "INSERT INTO user_devices (id, user_id, device_hash, label, ip_prefix, first_seen_at, last_seen_at) VALUES ('d2', 'u1', 'h', 'x', 'y', 'now', 'now')",
+      ),
+    ).toThrow(/UNIQUE/);
+    expect(db.prepare('SELECT enabled, cursor_rowid FROM audit_forwarders').get()).toEqual({ enabled: 1, cursor_rowid: 0 });
+    db.exec("DELETE FROM users WHERE id = 'u1'; DELETE FROM organizations WHERE id = 'o1';");
+    expect(db.prepare('SELECT count(*) AS n FROM user_devices').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM audit_forwarders').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const tables = (sqlite.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(
+      (r) => r.name,
+    );
+    expect(tables).toEqual(expect.arrayContaining(['user_devices', 'login_failures', 'audit_forwarders']));
+  });
+});

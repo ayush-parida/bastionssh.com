@@ -93,7 +93,17 @@ export type AuditAction =
   | 'cloud_account.delete'
   | 'cloud_account.test'
   | 'cloud_account.sync'
-  | 'dns.lookup';
+  | 'dns.lookup'
+  | 'user.login_new_device'
+  | 'user.login_failed'
+  | 'user.login_locked'
+  | 'audit.export'
+  | 'audit.pruned'
+  | 'audit.retention_update'
+  | 'audit.forwarding_update'
+  | 'audit.forwarding_delete'
+  | 'audit.forwarding_test'
+  | 'audit.forwarding_failed';
 
 export interface AuditLogEntry {
   id: string;
@@ -109,3 +119,61 @@ export interface AuditLogEntry {
   metadata?: Record<string, unknown>;
   createdAt: string;
 }
+
+export type AuditExportFormat = 'csv' | 'jsonl';
+
+/** Filters shared by the audit list and export. Every field is optional. */
+export interface AuditLogFilters {
+  /** ISO timestamp or YYYY-MM-DD, inclusive. */
+  from?: string;
+  /** ISO timestamp or YYYY-MM-DD; a bare date includes that whole day. */
+  to?: string;
+  /** An exact action, or a prefix ending in `*` (e.g. `user.*`). */
+  action?: string;
+  actorEmail?: string;
+  resourceType?: string;
+  resourceId?: string;
+}
+
+export type SyslogProtocol = 'udp' | 'tcp' | 'tls';
+export type AuditForwarderType = 'syslog' | 'webhook';
+
+/** What the UI may see of the forwarding target. Webhook URLs and secrets are never returned. */
+export interface AuditForwardingInfo {
+  type: AuditForwarderType;
+  enabled: boolean;
+  /** tls://logs.example.com:6514, or the webhook URL with its path masked. */
+  targetHint: string;
+  syslog?: { host: string; port: number; protocol: SyslogProtocol; facility: number; hasCaCert: boolean };
+  webhook?: { hasSecret: boolean };
+  lastStatus: 'ok' | 'failed' | null;
+  lastError: string | null;
+  lastSentAt: string | null;
+  updatedAt: string;
+}
+
+export interface AuditSettings {
+  retentionDays: number;
+  forwarding: AuditForwardingInfo | null;
+}
+
+export type AuditForwardingInput =
+  | {
+      type: 'syslog';
+      host: string;
+      port: number;
+      protocol: SyslogProtocol;
+      /** RFC 5424 facility code, 0–23. Defaults to 13 (log audit). */
+      facility?: number;
+      /** PEM bundle to trust for protocol "tls"; omitted keeps the current one, "" removes it. */
+      caCert?: string;
+      enabled?: boolean;
+    }
+  | {
+      type: 'webhook';
+      /** Required when creating or switching to a webhook; omitted keeps the current URL. */
+      url?: string;
+      /** HMAC-SHA256 signing secret; omitted keeps the current one, "" removes it. */
+      secret?: string;
+      enabled?: boolean;
+    };
