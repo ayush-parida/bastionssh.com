@@ -174,6 +174,10 @@ export const organizations = sqliteTable('organizations', {
   recordingEnabled: integer('recording_enabled', { mode: 'boolean' }).notNull().default(true),
   recordingInput: integer('recording_input', { mode: 'boolean' }).notNull().default(false),
   recordingRetentionDays: integer('recording_retention_days').notNull().default(90),
+  // Restricted members may see the names (only) of servers they cannot use, to ask for access
+  restrictedSeeServerNames: integer('restricted_see_server_names', { mode: 'boolean' }).notNull().default(true),
+  // Longest access a member may request, in minutes
+  accessRequestMaxMinutes: integer('access_request_max_minutes').notNull().default(480),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -345,6 +349,10 @@ export const memberServerAccess = sqliteTable(
     serverId: text('server_id')
       .notNull()
       .references(() => servers.id, { onDelete: 'cascade' }),
+    // Null = permanent. Past = no longer counts; the expiry sweep deletes it.
+    expiresAt: text('expires_at'),
+    grantedBy: text('granted_by'), // user id; null for grants that predate tracking
+    reason: text('reason'),
     createdAt: text('created_at')
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -352,6 +360,38 @@ export const memberServerAccess = sqliteTable(
   (t) => ({
     memberServerIdx: uniqueIndex('member_server_access_idx').on(t.orgId, t.userId, t.serverId),
     serverIdx: index('member_server_access_server_idx').on(t.serverId),
+    expiresIdx: index('member_server_access_expires_idx').on(t.expiresAt),
+  }),
+);
+
+/** A restricted member asking for time-bound access to some servers. */
+export const accessRequests = sqliteTable(
+  'access_requests',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    serverIds: text('server_ids').notNull(), // JSON array
+    reason: text('reason').notNull(),
+    durationMinutes: integer('duration_minutes').notNull(), // as requested
+    status: text('status').notNull().default('pending'), // pending | approved | denied | expired | cancelled
+    approvedMinutes: integer('approved_minutes'), // may be shorter than requested
+    decidedBy: text('decided_by'),
+    decidedAt: text('decided_at'),
+    decisionNote: text('decision_note'),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    // Pending: when the request lapses undecided. Approved: when the granted access ends.
+    expiresAt: text('expires_at').notNull(),
+  },
+  (t) => ({
+    orgStatusIdx: index('access_requests_org_status_idx').on(t.orgId, t.status),
+    userIdx: index('access_requests_user_idx').on(t.userId),
   }),
 );
 

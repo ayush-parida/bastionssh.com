@@ -12,6 +12,7 @@ import type {
   PasswordResetLink,
   Role,
   Server,
+  UpdateMemberServerAccess,
 } from '@smt/shared';
 import {
   Plus,
@@ -30,6 +31,8 @@ import {
   Fingerprint,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { ExpiryBadge } from '@/components/access/ExpiryBadge.js';
+import { DURATION_OPTIONS } from '@/lib/access.js';
 
 const ROLE_OPTIONS: { value: Role; label: string; hint: string }[] = [
   { value: 'viewer', label: 'Viewer', hint: 'Read-only access' },
@@ -112,11 +115,15 @@ function accessSummary(m: OrgMember): string {
   return `${m.serverCount} server${m.serverCount === 1 ? '' : 's'}`;
 }
 
-/** Pick which servers a restricted member may use. */
+/** How long a grant lasts, as picked in the dialog: as it is now, forever, or minutes from now. */
+type GrantChoice = 'keep' | 'permanent' | number;
+
+/** Pick which servers a restricted member may use, and for how long. */
 function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: () => void }) {
   const qc = useQueryClient();
   const [mode, setMode] = useState<MemberServerAccess['serverAccess'] | null>(null);
   const [selected, setSelected] = useState<Set<string> | null>(null);
+  const [durations, setDurations] = useState<Record<string, GrantChoice>>({});
 
   const { data: servers } = useQuery<Server[]>({ queryKey: ['servers'], queryFn: () => api.get('/servers') });
   const { data: access, isLoading } = useQuery<MemberServerAccess>({
@@ -127,13 +134,29 @@ function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: (
   // Local edits win; until the first edit, show what the server has
   const effectiveMode = mode ?? access?.serverAccess ?? 'all';
   const effectiveSelected = selected ?? new Set(access?.serverIds ?? []);
+  const currentExpiry = new Map((access?.grants ?? []).map((g) => [g.serverId, g.expiresAt]));
+
+  /** A time-bound grant starts on "keep"; anything else on "permanent". */
+  function choiceFor(serverId: string): GrantChoice {
+    return durations[serverId] ?? (currentExpiry.get(serverId) ? 'keep' : 'permanent');
+  }
 
   const saveMutation = useMutation({
-    mutationFn: () =>
-      api.put<MemberServerAccess>(`/team/members/${member.userId}/access`, {
+    mutationFn: () => {
+      const serverIds = [...effectiveSelected];
+      // Only what changed is sent; a server left out keeps the expiry it has
+      const expiresInMinutes: Record<string, number | null> = {};
+      for (const id of serverIds) {
+        const choice = choiceFor(id);
+        if (typeof choice === 'number') expiresInMinutes[id] = choice;
+        else if (choice === 'permanent' && currentExpiry.get(id)) expiresInMinutes[id] = null;
+      }
+      return api.put<MemberServerAccess>(`/team/members/${member.userId}/access`, {
         serverAccess: effectiveMode,
-        serverIds: [...effectiveSelected],
-      }),
+        serverIds,
+        expiresInMinutes,
+      } satisfies UpdateMemberServerAccess);
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['team-members'] });
       qc.invalidateQueries({ queryKey: ['member-access', member.userId] });
@@ -199,17 +222,38 @@ function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: (
                   {!servers?.length ? (
                     <p className="px-3 py-4 text-sm text-muted-foreground">No servers yet.</p>
                   ) : (
-                    servers.map((srv) => (
-                      <label key={srv.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
-                        <input
-                          type="checkbox"
-                          checked={effectiveSelected.has(srv.id)}
-                          onChange={() => toggle(srv.id)}
-                        />
-                        <span className="flex-1 truncate">{srv.name}</span>
-                        <span className="text-xs text-muted-foreground font-mono truncate">{srv.host}</span>
-                      </label>
-                    ))
+                    servers.map((srv) => {
+                      const checked = effectiveSelected.has(srv.id);
+                      const expiresAt = currentExpiry.get(srv.id);
+                      const choice = choiceFor(srv.id);
+                      return (
+                        <div key={srv.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
+                          <label className="flex flex-1 min-w-0 items-center gap-2">
+                            <input type="checkbox" checked={checked} onChange={() => toggle(srv.id)} />
+                            <span className="truncate">{srv.name}</span>
+                            <span className="text-xs text-muted-foreground font-mono truncate">{srv.host}</span>
+                          </label>
+                          {checked && expiresAt && choice === 'keep' && <ExpiryBadge expiresAt={expiresAt} />}
+                          {checked && (
+                            <select
+                              value={String(choice)}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setDurations({ ...durations, [srv.id]: v === 'keep' || v === 'permanent' ? v : Number(v) });
+                              }}
+                              title="How long this access lasts"
+                              className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                            >
+                              {expiresAt && <option value="keep">Keep expiry</option>}
+                              <option value="permanent">Permanent</option>
+                              {DURATION_OPTIONS.map((o) => (
+                                <option key={o.minutes} value={o.minutes}>For {o.label}</option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               )}

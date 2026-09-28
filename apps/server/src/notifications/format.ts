@@ -1,18 +1,39 @@
-import type { AlertSeverity, AlertType, NotificationChannelType } from '@smt/shared';
+import type { AlertSeverity, AlertType, NoticeEvent, NotificationChannelType } from '@smt/shared';
 import { getAdapter } from './channels/index.js';
+
+/**
+ * Something that is not a server alert — an access request, say — delivered
+ * through the same channels. Carried on an {@link AlertEvent} of kind `notice`.
+ */
+export interface Notice {
+  event: NoticeEvent;
+  title: string;
+  message: string;
+  details: [string, string][];
+}
 
 /** One thing worth telling someone about. Pure data — no DB rows, so it is testable. */
 export interface AlertEvent {
-  kind: 'opened' | 'resolved' | 'test';
+  kind: 'opened' | 'resolved' | 'test' | 'notice';
   orgId: string;
   serverId: string;
-  type: AlertType | 'test';
+  type: AlertType | 'test' | 'notice';
   severity: AlertSeverity;
   message: string;
   value?: number;
   threshold?: number;
   openedAt?: string;
+  /** Present exactly when `kind` is `notice`. */
+  notice?: Notice;
 }
+
+/** Wrap a notice so the channel adapters can carry it. It names no server. */
+export function noticeEvent(orgId: string, notice: Notice): AlertEvent {
+  return { kind: 'notice', orgId, serverId: '', type: 'notice', severity: 'warning', message: notice.message, notice };
+}
+
+/** Stands in for the server on a notice, which is about none. */
+export const NOTICE_SERVER: ServerRef = { id: '', name: 'BastionSSH', host: '' };
 
 export interface ServerRef {
   id: string;
@@ -28,12 +49,13 @@ const SEVERITY_RANK: Record<AlertSeverity, number> = { warning: 0, critical: 1 }
  * suppressing the all-clear would leave a false alarm standing.
  */
 export function passesSeverityFilter(event: AlertEvent, minSeverity: AlertSeverity): boolean {
-  if (event.kind === 'resolved') return true;
+  // Notices are not alerts and have no severity of their own
+  if (event.kind === 'resolved' || event.kind === 'notice') return true;
   return SEVERITY_RANK[event.severity] >= SEVERITY_RANK[minSeverity];
 }
 
 /** Human label for an alert type, e.g. `cpu_high` → "CPU high". */
-export function alertLabel(type: AlertType | 'test'): string {
+export function alertLabel(type: AlertType | 'test' | 'notice'): string {
   const labels: Record<string, string> = {
     offline: 'Offline',
     cpu_high: 'CPU high',
@@ -42,6 +64,7 @@ export function alertLabel(type: AlertType | 'test'): string {
     load_high: 'Load high',
     host_key_mismatch: 'SSH host key changed',
     test: 'Test notification',
+    notice: 'Notice',
   };
   return labels[type] ?? type;
 }
@@ -64,6 +87,7 @@ export function maskUrl(raw: string): string {
 
 /** Plain-text summary shared by the Slack payload and log lines. */
 export function summarize(event: AlertEvent, server: ServerRef): string {
+  if (event.kind === 'notice') return event.message;
   if (event.kind === 'test') {
     return `Test notification from Server Manager — delivery to this channel is working.`;
   }
@@ -86,6 +110,7 @@ function escapeHtml(s: string): string {
 
 /** `[WARNING] CPU high on web-01` / `[Resolved] …` / a fixed line for tests. */
 export function emailSubject(event: AlertEvent, server: ServerRef): string {
+  if (event.notice) return event.notice.title;
   if (event.kind === 'test') return 'Test notification from Server Manager';
   const prefix = event.kind === 'resolved' ? '[Resolved]' : `[${event.severity.toUpperCase()}]`;
   return `${prefix} ${alertLabel(event.type)} on ${server.name}`;
@@ -97,7 +122,19 @@ export function emailBody(
   server: ServerRef,
   sentAt: string,
 ): { text: string; html: string } {
-  const details = [
+  const details = event.notice
+    ? [...event.notice.details.map(([k, v]) => `${k}: ${v}`), `Sent: ${sentAt}`]
+    : alertDetails(event, server, sentAt);
+  const headline = summarize(event, server);
+  const text = [headline, '', ...details].join('\n');
+  const html =
+    `<p><strong>${escapeHtml(headline)}</strong></p>` +
+    `<pre style="font-family:monospace">${escapeHtml(details.join('\n'))}</pre>`;
+  return { text, html };
+}
+
+function alertDetails(event: AlertEvent, server: ServerRef, sentAt: string): string[] {
+  return [
     `Server: ${server.name} (${server.host})`,
     ...(event.kind !== 'test'
       ? [`Alert: ${alertLabel(event.type)}`, `Severity: ${event.severity}`]
@@ -107,12 +144,6 @@ export function emailBody(
     ...(event.openedAt ? [`Opened: ${event.openedAt}`] : []),
     `Sent: ${sentAt}`,
   ];
-  const headline = summarize(event, server);
-  const text = [headline, '', ...details].join('\n');
-  const html =
-    `<p><strong>${escapeHtml(headline)}</strong></p>` +
-    `<pre style="font-family:monospace">${escapeHtml(details.join('\n'))}</pre>`;
-  return { text, html };
 }
 
 /** `ops@example.com +2` — enough to tell two email channels apart in a list. */

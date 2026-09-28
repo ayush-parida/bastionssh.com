@@ -6,6 +6,7 @@ import { startBackupScheduler } from './backup/scheduler.js';
 import { holdServerLock } from './backup/lock.js';
 import { databasePath } from './db/index.js';
 import { startRecordingMaintenance } from './recordings/scheduler.js';
+import { startAccessExpiry } from './auth/access-grants.js';
 import { config } from './config/index.js';
 import { runMigrations } from './db/migrate.js';
 import { seedDefaultAdmin } from './db/seed.js';
@@ -46,6 +47,8 @@ async function main() {
   startHealthMonitor();
   startCloudSync();
   startBackupScheduler();
+  // Time-bound server grants: removes expired ones and closes what is still open on them
+  startAccessExpiry();
   if (config.smtp) logger.info('Email notifications enabled (SMTP configured)');
 
   try {

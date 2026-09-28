@@ -1,5 +1,5 @@
 import type { FastifyRequest } from 'fastify';
-import { and, eq, inArray, isNull, or, type SQL } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, or, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { getDb } from '../db/index.js';
 import { memberServerAccess, memberships, savedCommands, servers } from '../db/schema.js';
@@ -14,7 +14,19 @@ import { rank } from './middleware.js';
  * their membership is `restricted`, in which case only the servers granted in
  * `member_server_access`. A server someone cannot access is reported as not
  * found, never as forbidden, so its existence does not leak.
+ *
+ * A grant may carry an expiry. Once past it the grant stops counting here at
+ * once; the expiry sweep (auth/access-grants.ts) later deletes the row and
+ * closes whatever is still open on the server.
  */
+
+/**
+ * WHERE fragment for grants still in force at `now`: permanent, or expiring
+ * later. Expiries are ISO-8601 UTC strings, so they compare as text.
+ */
+export function activeGrantFilter(now: string = new Date().toISOString()): SQL {
+  return or(isNull(memberServerAccess.expiresAt), gt(memberServerAccess.expiresAt, now))!;
+}
 
 /** Who is asking. A FastifyRequest after `requireAuth` works as-is. */
 export type AccessSubject =
@@ -49,7 +61,9 @@ export function serverScope(who: AccessSubject): ServerScope {
   const serverIds = db
     .select({ serverId: memberServerAccess.serverId })
     .from(memberServerAccess)
-    .where(and(eq(memberServerAccess.orgId, orgId), eq(memberServerAccess.userId, userId)))
+    .where(
+      and(eq(memberServerAccess.orgId, orgId), eq(memberServerAccess.userId, userId), activeGrantFilter()),
+    )
     .all()
     .map((row) => row.serverId);
   return { all: false, serverIds };

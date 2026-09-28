@@ -7,16 +7,20 @@ export const discord: ChannelAdapter = {
   type: 'discord',
   prepare: (input) => urlTarget(input),
   build(target, event, server) {
-    const embedTitle =
-      event.kind === 'test'
+    const embedTitle = event.notice
+      ? event.notice.title
+      : event.kind === 'test'
         ? 'Test notification'
         : `${event.kind === 'resolved' ? 'Resolved: ' : ''}${alertLabel(event.type)}`;
-    const description =
-      `${server.name} (${server.host})` + (event.kind === 'opened' ? `\n${event.message}` : '');
+    const description = event.notice
+      ? event.notice.details.map(([k, v]) => `${k}: ${v}`).join('\n')
+      : `${server.name} (${server.host})` + (event.kind === 'opened' ? `\n${event.message}` : '');
     return {
       url: target,
       body: {
         content: summarize(event, server),
+        // Never ping: notices carry member-typed text
+        allowed_mentions: { parse: [] },
         embeds: [{ title: embedTitle, description, color: COLOR[tone(event)] }],
       },
     };

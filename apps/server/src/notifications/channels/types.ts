@@ -70,6 +70,7 @@ export function urlTarget(input: ChannelInput, what?: string): { target: string;
 
 /** `[CRITICAL] CPU high on web-01` / `Resolved: CPU high on web-01` / `Test notification`. */
 export function title(event: AlertEvent, server: ServerRef): string {
+  if (event.notice) return event.notice.title;
   if (event.kind === 'test') return 'Test notification';
   if (event.kind === 'resolved') return `Resolved: ${alertLabel(event.type)} on ${server.name}`;
   return `[${event.severity.toUpperCase()}] ${alertLabel(event.type)} on ${server.name}`;
@@ -77,6 +78,7 @@ export function title(event: AlertEvent, server: ServerRef): string {
 
 /** Stable per-alert key so paging tools resolve the incident they opened. */
 export function dedupKey(event: AlertEvent, sentAt: string): string {
+  if (event.kind === 'notice') return `smt:notice:${sentAt}`;
   if (event.kind === 'test') return `smt:test:${sentAt}`;
   return `smt:${event.serverId}:${event.type}`;
 }
@@ -86,12 +88,14 @@ export type Tone = 'critical' | 'warning' | 'resolved' | 'test';
 
 export function tone(event: AlertEvent): Tone {
   if (event.kind === 'resolved') return 'resolved';
-  if (event.kind === 'test') return 'test';
+  // A notice is informational, like a test message
+  if (event.kind === 'test' || event.kind === 'notice') return 'test';
   return event.severity;
 }
 
 /** Key/value lines shared by the richer payloads. */
 export function facts(event: AlertEvent, server: ServerRef, sentAt: string): [string, string][] {
+  if (event.notice) return [...event.notice.details, ['Sent', sentAt]];
   const out: [string, string][] = [['Server', `${server.name} (${server.host})`]];
   if (event.kind !== 'test') {
     out.push(['Alert', alertLabel(event.type)], ['Severity', event.severity]);

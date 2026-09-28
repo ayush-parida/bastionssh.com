@@ -1,5 +1,6 @@
 import TeamMembers from '@/components/settings/TeamMembers.js';
 import PasskeyPolicy from '@/components/settings/PasskeyPolicy.js';
+import AccessRequests from '@/components/access/AccessRequests.js';
 
 export default function TeamPage() {
   return (
@@ -9,6 +10,7 @@ export default function TeamPage() {
         Who can use this organization, what they may do, and which servers they can reach
       </p>
       <PasskeyPolicy />
+      <AccessRequests />
       <TeamMembers />
     </div>
   );

@@ -13,7 +13,7 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
+import { Activity, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, Server as ServerIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -21,6 +21,8 @@ import { hostKeyPanelPath } from '@/lib/host-keys.js';
 import { HostKeyBadge } from '@/components/servers/HostKey.js';
 import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/components/diagnostics/Diagnostics.js';
 import type { DiagnoseTarget } from '@/lib/diagnostics.js';
+import { ExpiryBadge } from '@/components/access/ExpiryBadge.js';
+import { RequestAccessDialog, useRequestableServers } from '@/components/access/RequestAccessDialog.js';
 
 interface ServerFormState {
   name: string;
@@ -69,6 +71,7 @@ export default function ServersPage() {
   const [form, setForm] = useState<ServerFormState>(empty);
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
+  const [requesting, setRequesting] = useState(false);
 
   const { data: servers, isLoading } = useQuery<Server[]>({
     queryKey: ['servers'],
@@ -88,6 +91,12 @@ export default function ServersPage() {
   });
 
   const healthById = new Map((overview?.servers ?? []).map((h) => [h.serverId, h]));
+
+  // Restricted members: which of their servers are time-bound, and a way to ask for more
+  const { data: requestable } = useRequestableServers();
+  const grantExpiry = new Map(
+    (requestable?.servers ?? []).flatMap((s) => (s.granted?.expiresAt ? [[s.id, s.granted.expiresAt] as const] : [])),
+  );
 
   const allTags = [...new Set((servers ?? []).flatMap((s) => s.tags ?? []))].sort();
   const visibleServers = tagFilter
@@ -184,13 +193,25 @@ export default function ServersPage() {
           <h1 className="text-2xl font-bold">Servers</h1>
           <p className="text-muted-foreground text-sm">Manage SSH server connections</p>
         </div>
-        <button
-          onClick={() => { setShowForm(true); setEditId(null); setForm(empty); }}
-          className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-        >
-          <Plus size={15} /> Add server
-        </button>
+        <div className="flex items-center gap-2">
+          {requestable?.restricted && (
+            <button
+              onClick={() => setRequesting(true)}
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-muted"
+            >
+              <KeyRound size={15} /> Request access
+            </button>
+          )}
+          <button
+            onClick={() => { setShowForm(true); setEditId(null); setForm(empty); }}
+            className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            <Plus size={15} /> Add server
+          </button>
+        </div>
       </div>
+
+      {requesting && <RequestAccessDialog onClose={() => setRequesting(false)} />}
 
       {allTags.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-1.5">
@@ -361,6 +382,7 @@ export default function ServersPage() {
                   <HostKeyBadge status={s.hostKeyStatus} />
                 </button>
                 {s.cloud && <CloudBadge cloud={s.cloud} />}
+                {grantExpiry.has(s.id) && <ExpiryBadge expiresAt={grantExpiry.get(s.id)!} />}
                 {s.tags.map((tag) => (
                   <button
                     key={tag}

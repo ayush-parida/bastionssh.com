@@ -7,15 +7,19 @@ import logger from '../logger.js';
 import {
   emailBody,
   emailSubject,
+  maskUrl,
+  NOTICE_SERVER,
+  noticeEvent,
   parseRecipients,
   passesSeverityFilter,
   type AlertEvent,
+  type Notice,
   type ServerRef,
 } from './format.js';
 import { emailAvailable, sendEmail } from './email.js';
 import { getAdapter, type OutboundRequest } from './channels/index.js';
 
-export { describeRecipients, maskUrl, type AlertEvent } from './format.js';
+export { describeRecipients, maskUrl, type AlertEvent, type Notice } from './format.js';
 export { emailAvailable } from './email.js';
 export {
   assertSafeUrl,
@@ -211,6 +215,48 @@ export function notifyAlertsChanged(events: AlertEvent[]): void {
   if (events.length === 0) return;
   void dispatch(events).catch((err) => {
     logger.error({ err }, 'Alert notification dispatch failed');
+  });
+}
+
+/** Paging tools open incidents; a notice is not one, so it never goes there. */
+const NOTICE_SKIPS = new Set<string>(['pagerduty', 'opsgenie']);
+
+async function dispatchNotice(orgId: string, notice: Notice, emailTo: string[]): Promise<void> {
+  const event = noticeEvent(orgId, notice);
+  const sends = enabledChannels(orgId)
+    .filter((channel) => !NOTICE_SKIPS.has(channel.type))
+    .map((channel) => deliver(channel, event, NOTICE_SERVER));
+
+  const recipients = [...new Set(emailTo)];
+  if (recipients.length && emailAvailable()) {
+    const { text, html } = emailBody(event, NOTICE_SERVER, new Date().toISOString());
+    const subject = emailSubject(event, NOTICE_SERVER);
+    sends.push(
+      withRetry(() => sendEmail({ to: recipients, subject, text, html })).then(
+        () => true,
+        (err) => {
+          logger.warn({ err: err instanceof Error ? err.message : String(err), event: notice.event }, 'Notice email failed');
+          return false;
+        },
+      ),
+    );
+  }
+  if (sends.length === 0) return;
+  const results = await Promise.all(sends);
+  logger.info(
+    { orgId, event: notice.event, sent: results.filter(Boolean).length, failed: results.filter((r) => !r).length },
+    'Notice dispatched',
+  );
+}
+
+/**
+ * Tell the org's chat and email channels (not paging tools) about something
+ * that is not a server alert, and email `emailTo` directly when SMTP is set
+ * up. Fire-and-forget like alerts: delivery never fails the caller.
+ */
+export function notifyNotice(orgId: string, notice: Notice, emailTo: string[] = []): void {
+  void dispatchNotice(orgId, notice, emailTo).catch((err) => {
+    logger.error({ err }, 'Notice dispatch failed');
   });
 }
 
