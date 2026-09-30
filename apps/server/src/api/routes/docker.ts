@@ -30,6 +30,7 @@ import { Demuxer, LineSplitter, type DockerStreamType } from '../../docker/demux
 import { redactInspect } from '../../docker/redact.js';
 import { permissionsFor, requireDocker } from '../../docker/permissions.js';
 import { dockerSettings, updateDockerSettings } from '../../docker/settings.js';
+import { closeDisallowedExecSessions } from '../../docker/exec.js';
 import { apiPath, containerRef, imageRef } from '../../docker/validation.js';
 import {
   containersPerNetwork,
@@ -245,6 +246,8 @@ export async function dockerRoutes(app: FastifyInstance) {
     const body = settingsSchema.parse(req.body);
     const before = dockerSettings(req.orgId);
     const after = updateDockerSettings(req.orgId, body);
+    // Operators' container shells end when exec is taken away from them
+    if (before.operatorsCanExec && !after.operatorsCanExec) closeDisallowedExecSessions(req.orgId);
     await audit(req, 'org.docker_settings', 'organization', req.orgId, undefined, { before, after });
     return after;
   });

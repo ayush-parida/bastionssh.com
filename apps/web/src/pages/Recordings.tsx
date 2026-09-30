@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { OrgMember, Server, SessionRecording } from '@smt/shared';
-import { Film, Keyboard, Scissors, Terminal as TerminalIcon, Zap } from 'lucide-react';
+import { Container, Film, Keyboard, Scissors, Terminal as TerminalIcon, Zap } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { formatBytes, relativeTime } from '@/lib/utils.js';
 import { useHasRole } from '@/store/auth.js';
@@ -33,6 +33,8 @@ export default function RecordingsPage() {
   const userId = params.get('userId') ?? '';
   const from = params.get('from') ?? '';
   const to = params.get('to') ?? '';
+  /** Container shells whose container name or id contains this. */
+  const container = params.get('container') ?? '';
 
   function setFilter(key: string, value: string) {
     const next = new URLSearchParams(params);
@@ -47,6 +49,7 @@ export default function RecordingsPage() {
   if (userId) query.set('userId', userId);
   if (from) query.set('from', dayBound(from, false));
   if (to) query.set('to', dayBound(to, true));
+  if (container) query.set('container', container);
 
   const { data, isLoading } = useQuery<{ items: SessionRecording[]; total: number }>({
     queryKey: ['recordings', query.toString()],
@@ -108,7 +111,17 @@ export default function RecordingsPage() {
           <span className="mb-1 block">To</span>
           <input type="date" value={to} onChange={(e) => setFilter('to', e.target.value)} className={inputClass} />
         </label>
-        {(serverId || userId || from || to) && (
+        <label className="text-xs text-muted-foreground">
+          <span className="mb-1 block">Container</span>
+          <input
+            type="search"
+            value={container}
+            onChange={(e) => setFilter('container', e.target.value)}
+            placeholder="Name or id"
+            className={`${inputClass} w-40`}
+          />
+        </label>
+        {(serverId || userId || from || to || container) && (
           <button
             onClick={() => {
               setParams({}, { replace: true });
@@ -156,6 +169,13 @@ export default function RecordingsPage() {
                         {r.kind === 'terminal' ? (
                           <>
                             <TerminalIcon size={12} className="shrink-0 text-muted-foreground" /> Terminal
+                          </>
+                        ) : r.kind === 'container' ? (
+                          <>
+                            <Container size={12} className="shrink-0 text-muted-foreground" />
+                            <span className="truncate max-w-xs" title={r.command ?? ''}>
+                              Shell in <span className="font-mono">{r.container?.name ?? r.command}</span>
+                            </span>
                           </>
                         ) : (
                           <>

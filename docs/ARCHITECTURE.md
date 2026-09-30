@@ -461,8 +461,8 @@ REST surface, all under `/api/ftp`:
 
 ### 4.15 Docker (`/server/docker`, `api/routes/docker.ts`)
 
-Design: `docs/superpowers/specs/2026-09-30-docker-management-design.md`. Phase D1 (read)
-is in place; actions, exec, Compose and the fleet view build on the same pieces.
+Design: `docs/superpowers/specs/2026-09-30-docker-management-design.md`. Phases D1 (read),
+D2 (actions) and D3 (exec) are in place; Compose and the fleet view build on the same pieces.
 
 - **Transport** (`transport.ts`): no Docker client library and no second SSH path. Over a
   pooled ssh2 connection built with `sshConnectConfig` + `connectSsh` (so host keys, jump
@@ -504,6 +504,31 @@ is in place; actions, exec, Compose and the fleet view build on the same pieces.
   operators follow the org's `docker_settings`; prune, env reveal and per-server settings
   are admin. Org settings are read by any member and changed by admins
   (`org.docker_settings`); probes are audited as `docker.probe`, reads are not.
+- **Actions** (`api/routes/docker-actions.ts`, helpers in `actions.ts`): container
+  start/stop/restart/kill/pause/unpause (Docker's 304 "already in that state" answers
+  `{ changed: false }`), remove, image pull (`POST /images/create` streamed as SSE `pull`
+  events; the reference validated and split into `fromImage` + tag or digest, never "all
+  tags"; leaving cancels it), image remove, prune (containers, networks, volumes, images in
+  `docker system prune` order; dry run from `/system/df` + `/networks`, which knows that
+  volume prune spares named volumes from API 1.42), and env reveal — admin, browser session,
+  passkey step-up required outright (`DOCKER_REVEAL_NEEDS_PASSKEY` without one). Each is
+  audited against the server (`docker.container_*`, `docker.image_pull` with its outcome,
+  `docker.image_remove`, `docker.prune` with what was reclaimed — also after a partial
+  failure — and `docker.env_reveal` with variable names only).
+- **Exec** (`exec.ts`, `api/routes/docker-exec.ts`): `POST …/containers/:cid/exec` checks
+  the container runs, picks `/bin/bash` or `/bin/sh` (a detached `<shell> -c 'exit 0'` must
+  exit 0; recent engines refuse the start with a 400 when the binary is missing), creates a
+  TTY exec (`ConsoleSize` from API 1.42, plus `/exec/:id/resize`) and hijacks its start.
+  `execChannel` shapes the raw stream (demuxed without a TTY) like an ssh2 shell channel,
+  and `SSHBroker.adoptSession` registers it: the browser attaches over
+  `/api/ssh-sessions/:id/ws`, and buffering, reaping, recording (kind `container`, the
+  container named in `command` as `name (id12)`), `closeForUser` on revocation and
+  `DELETE /api/ssh-sessions/:id` all come from the broker. The route holds the pooled SSH
+  lease for the shell's life. Closing writes ^C ^D and half-closes stdin — dropping the
+  attach alone would leave the process running in the container — then records the exit
+  code (`docker.exec_start` / `docker.exec_end`). `closeDisallowedExecSessions` ends
+  container shells whose owner lost `exec` (demotion, `operatorsCanExec` switched off); the
+  WebSocket re-checks `exec` on re-attach.
 
 ---
 
@@ -664,6 +689,11 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Docker lists, info, events  | viewer   | —           |
 | Docker logs, stats, top, inspect | operator | —      |
 | Docker org settings, server probe | viewer (settings) | admin |
+| Docker start / stop / restart / pause / kill, pull | — | operator |
+| Docker shell in a container | — | operator if `operatorsCanExec`, else admin |
+| Docker remove containers / images | — | operator if `operatorsCanRemove`, else admin |
+| Docker prune               | —        | admin, if `allowPrune` |
+| Docker env reveal          | —        | admin + passkey step-up |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
 

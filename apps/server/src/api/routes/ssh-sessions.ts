@@ -11,6 +11,7 @@ import { config } from '../../config/index.js';
 import { vault } from '../../vault/index.js';
 import { startTerminalRecording } from '../../recordings/index.js';
 import { RETIRED_KEY_MESSAGE } from '../../ssh/credentials.js';
+import { dockerCan } from '../../docker/permissions.js';
 
 const createSessionSchema = z.object({
   serverId: z.string(),
@@ -104,7 +105,9 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     // Access may have been withdrawn since the session was opened; re-attaching
     // (e.g. after a page reload) must not outlive the grant.
     const owned = SSHBroker.getSessionForUser(id, req.user.id, req.orgId);
-    if (owned?.server.id && !canAccessServer(req, owned.server.id)) {
+    // A shell in a container also needs the Docker exec permission still (role, org setting)
+    const refused = owned?.container && !dockerCan(req, 'exec');
+    if ((owned?.server.id && !canAccessServer(req, owned.server.id)) || refused) {
       await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
       socket.close(4404, 'Session not found');
       return;

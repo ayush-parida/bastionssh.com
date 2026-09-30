@@ -42,6 +42,7 @@ import {
 import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { abortDockerStreams } from '../../docker/sse.js';
+import { closeDisallowedExecSessions } from '../../docker/exec.js';
 import { passkeyCount, requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { deleteBackupCodes } from '../../auth/backup-codes.js';
 import {
@@ -420,7 +421,10 @@ export async function teamRoutes(app: FastifyInstance) {
     // Docker logs and stats are gated by role when a stream opens: a demotion
     // ends the open ones, so they are not followed on after the role that
     // allowed them is gone (the page reopens what the new role still allows)
-    if (rank(role) < rank(member.role as Role)) abortDockerStreams(userId, { orgId: req.orgId });
+    if (rank(role) < rank(member.role as Role)) {
+      abortDockerStreams(userId, { orgId: req.orgId });
+      closeDisallowedExecSessions(req.orgId, userId);
+    }
 
     const target = db.select().from(users).where(eq(users.id, userId)).get();
     await audit(req, 'member.role_change', 'member', userId, target?.email, {

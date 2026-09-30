@@ -48,6 +48,14 @@ export interface FakeDaemon {
 export interface FakeDaemonOptions {
   apiVersion?: string;
   minApiVersion?: string;
+  /**
+   * More endpoints, tried before the built-in ones (later phases' suites add
+   * theirs): return true when the request was taken. `route` has the version
+   * prefix stripped.
+   */
+  routes?: (req: http.IncomingMessage, res: http.ServerResponse, route: string, containers: FakeContainer[]) => boolean;
+  /** Hijacked calls tried before the built-in echo: return true when taken. */
+  upgrade?: (req: http.IncomingMessage, socket: net.Socket, head: Buffer, route: string) => boolean;
 }
 
 const DEFAULT_CONTAINERS: FakeContainer[] = [
@@ -99,6 +107,7 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
     const route = url.pathname.replace(/^\/v\d+\.\d+/, '');
     const q = url.searchParams;
     let m: RegExpMatchArray | null;
+    if (opts.routes?.(req, res, route, containers)) return;
 
     if (route === '/_ping') return res.end('OK');
     if (route === '/version') {
@@ -251,6 +260,8 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
   // Hijacked calls: switch protocols, then echo what arrives, upper-cased
   server.on('upgrade', (req, socket: net.Socket, head: Buffer) => {
     requests.push(req.url ?? '');
+    const route = new URL(req.url ?? '/', 'http://docker').pathname.replace(/^\/v\d+\.\d+/, '');
+    if (opts.upgrade?.(req, socket, head, route)) return;
     socket.write(
       'HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n',
     );

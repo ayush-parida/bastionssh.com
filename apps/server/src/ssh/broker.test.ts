@@ -481,3 +481,96 @@ describe('connection refused before the socket attaches', () => {
     expect(later.close).toHaveBeenCalledWith(4404, 'Session not found');
   });
 });
+
+describe('adopted sessions (a shell in a container)', () => {
+  /** A terminal channel opened elsewhere, as docker/exec.ts hands it over. */
+  function makeChannel() {
+    const ch: any = new EventEmitter();
+    ch.stderr = new EventEmitter();
+    ch.writable = true;
+    ch.write = vi.fn();
+    ch.setWindow = vi.fn();
+    return ch;
+  }
+
+  function adopt(owner = OWNER) {
+    const channel = makeChannel();
+    const end = vi.fn();
+    const recording = {
+      id: 'r1',
+      inputRecorded: false,
+      output: vi.fn(),
+      input: vi.fn(),
+      resize: vi.fn(),
+      command: vi.fn(),
+      finish: vi.fn(async () => {}),
+      discard: vi.fn(async () => {}),
+    };
+    const id = SSHBroker.adoptSession(
+      {
+        server: { id: 's1', host: 'h', port: 22, username: 'root' },
+        ...owner,
+        cols: 80,
+        rows: 24,
+        recording,
+        container: { id: 'c'.repeat(64), name: 'web' },
+      },
+      channel,
+      end,
+    );
+    return { id, channel, end, recording };
+  }
+
+  it('attaches like an SSH shell: buffered output, input, resize, recording', async () => {
+    const { id, channel, recording } = adopt();
+    await flush();
+    channel.emit('data', Buffer.from('before attach'));
+    expect(getSessionForUser(id, 'u1', 'o1')).toMatchObject({ container: { name: 'web' } });
+
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq(OWNER));
+    expect(sock.send).toHaveBeenCalledWith(Buffer.from('before attach'));
+    sock.emit('message', Buffer.from(JSON.stringify({ type: 'resize', cols: 100, rows: 30 })));
+    expect(channel.setWindow).toHaveBeenCalledWith(30, 100, 0, 0);
+    expect(recording.resize).toHaveBeenCalledWith(100, 30);
+    sock.emit('message', Buffer.from('ls\r'));
+    expect(channel.write).toHaveBeenCalledWith(Buffer.from('ls\r'));
+    expect(recording.output).toHaveBeenCalledWith(Buffer.from('before attach'));
+  });
+
+  it('ends once when the shell exits, keeping the recording', async () => {
+    const { id, channel, end, recording } = adopt();
+    await flush();
+    const sock = makeSocket();
+    await SSHBroker.attach(id, sock, makeReq(OWNER));
+    channel.emit('close');
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(recording.finish).toHaveBeenCalled();
+    expect(sock.close).toHaveBeenCalled();
+    await SSHBroker.close(id, OWNER);
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('is closed on revocation and by closeWhere, and runs no commands', async () => {
+    const first = adopt();
+    await flush();
+    await expect(SSHBroker.exec(first.id, 'id', 1000, OWNER)).rejects.toThrow(/container shell/);
+    expect(SSHBroker.closeForUser('u1', { orgId: 'o1' })).toBeGreaterThanOrEqual(1);
+    expect(first.end).toHaveBeenCalled();
+
+    const mine = adopt();
+    const theirs = adopt({ userId: 'u2', orgId: 'o1' });
+    await flush();
+    expect(SSHBroker.closeWhere((s) => s.container !== null && s.userId === 'u2')).toBe(1);
+    expect(theirs.end).toHaveBeenCalled();
+    expect(mine.end).not.toHaveBeenCalled();
+    await SSHBroker.close(mine.id, OWNER);
+  });
+
+  it('is reaped when never attached', async () => {
+    const { end } = adopt();
+    await flush();
+    vi.advanceTimersByTime(DETACHED_GRACE_MS);
+    expect(end).toHaveBeenCalled();
+  });
+});
