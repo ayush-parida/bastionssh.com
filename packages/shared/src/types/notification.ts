@@ -217,6 +217,8 @@ export interface AlertWebhookPayload {
     value?: number;
     threshold?: number;
     openedAt?: string;
+    /** The container a Docker container alert is about. */
+    container?: string;
   };
   server: {
     id: string;

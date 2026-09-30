@@ -33,6 +33,9 @@ function matchesState(c: DockerContainer, filter: StateFilter): boolean {
   }
 }
 
+/** The server refuses more server ids per request (routes/docker-fleet.ts); a larger fleet is checked in turns. */
+const MAX_CHECK = 200;
+
 const fleetKey = (all: boolean) => ['docker-fleet', all] as const;
 
 /**
@@ -250,7 +253,7 @@ export default function ContainersPage() {
                 Not checked for Docker yet: {notDetected.map((s) => s.serverName).join(', ')}
               </p>
               <button
-                onClick={() => check.mutate(notDetected.map((s) => s.serverId))}
+                onClick={() => check.mutate(notDetected.slice(0, MAX_CHECK).map((s) => s.serverId))}
                 disabled={check.isPending}
                 className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
               >

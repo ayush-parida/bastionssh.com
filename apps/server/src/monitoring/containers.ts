@@ -109,8 +109,11 @@ function toInspect(serverId: string, list: ContainerSnapshot[]): ContainerSnapsh
     if (c.state === 'exited' || c.state === 'dead') {
       const code = exitCodeFromStatus(c.status);
       if (code === 0) return -1;
-      // Exited with a known `no` policy never alerts: nothing to learn
-      if (known?.get(c.id) === 'no') return -1;
+      // A known policy and an exit code the status already gives leave nothing to
+      // learn (only 137 needs the OOM flag); inspecting them again every sweep
+      // would keep exited containers past the cap from ever being looked at
+      const policy = known?.get(c.id);
+      if (policy === 'no' || (policy !== undefined && code !== null && code !== 137)) return -1;
       return 2;
     }
     return -1;

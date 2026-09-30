@@ -224,6 +224,26 @@ describe('sampleContainers', () => {
     await sampleContainers('srv', docker);
     expect(paths.filter((p) => p !== '/containers/json')).toHaveLength(MAX_INSPECTS_PER_SWEEP);
   });
+
+  it('gets to every failed container over a few sweeps, even past the per-sweep cap', async () => {
+    const failed = listed(
+      Array.from({ length: MAX_INSPECTS_PER_SWEEP + 15 }, (_, i) => ({
+        id: `f${i}`,
+        name: `f${i}`,
+        state: 'exited',
+        status: 'Exited (1) 5 minutes ago',
+      })),
+    );
+    const { docker, paths } = stub(failed, () => ({
+      HostConfig: { RestartPolicy: { Name: 'on-failure' } },
+      State: { ExitCode: 1, OOMKilled: false },
+    }));
+    await sampleContainers('srv', docker);
+    const second = await sampleContainers('srv', docker);
+    expect(new Set(paths.filter((p) => p !== '/containers/json')).size).toBe(failed.length);
+    expect(second.every((c) => c.restartPolicy === 'on-failure')).toBe(true);
+    expect(evaluateContainers('srv', second).filter((c) => c.type === 'container_exited')).toHaveLength(failed.length);
+  });
 });
 
 describe('container alerts in the health check', () => {

@@ -26,6 +26,7 @@ export const webhook: ChannelAdapter = {
         ...(event.value !== undefined && { value: event.value }),
         ...(event.threshold !== undefined && { threshold: event.threshold }),
         ...(event.openedAt && { openedAt: event.openedAt }),
+        ...(event.container && { container: event.container }),
       },
       server: { id: server.id, name: server.name, host: server.host },
       sentAt,

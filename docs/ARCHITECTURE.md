@@ -522,12 +522,15 @@ is in place; actions, exec, Compose and the fleet view build on the same pieces.
   its own SSH connection (`runProbe(…, extra)`, 12 s, never fails the check) listing
   containers on servers with `docker_mode = 'auto'` that were detected — the sweep never
   detects. Only restarting, recently started and failed-exit containers are inspected
-  (≤ 20 per sweep; restart policies cached). `container_unhealthy`,
+  (≤ 20 per sweep; restart policies cached, so an exited container whose policy and
+  exit code are known is not inspected again). `container_unhealthy`,
   `container_restarting` (restart count +3 within 10 minutes, counted in memory across
   sweeps) and `container_exited` (non-zero, restart policy not `no`, SIGTERM/non-OOM
   SIGKILL ignored) are reconciled per (server, container name, type) — the name leads the
   message, as `server_alerts` has no container column — and host reconciliation leaves
-  them alone. Notifications carry the container, so paging dedup keys are per container.
+  them alone. Notifications carry the container: titles and summaries name it
+  (`Container exited (api)`), webhooks get `alert.container`, and paging dedup keys are
+  per container.
   Turning the setting off, Docker off or pausing monitoring closes them silently; a sample
   that fails leaves them as they are.
 

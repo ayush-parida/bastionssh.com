@@ -1,5 +1,5 @@
 import type { NotificationChannelType, OpsgenieRegion } from '@smt/shared';
-import { alertLabel, maskUrl, type AlertEvent, type ServerRef } from '../format.js';
+import { eventLabel, maskUrl, type AlertEvent, type ServerRef } from '../format.js';
 
 /** Bad channel input the caller can fix — maps to a 400. */
 export class ChannelInputError extends Error {}
@@ -72,8 +72,8 @@ export function urlTarget(input: ChannelInput, what?: string): { target: string;
 export function title(event: AlertEvent, server: ServerRef): string {
   if (event.notice) return event.notice.title;
   if (event.kind === 'test') return 'Test notification';
-  if (event.kind === 'resolved') return `Resolved: ${alertLabel(event.type)} on ${server.name}`;
-  return `[${event.severity.toUpperCase()}] ${alertLabel(event.type)} on ${server.name}`;
+  if (event.kind === 'resolved') return `Resolved: ${eventLabel(event)} on ${server.name}`;
+  return `[${event.severity.toUpperCase()}] ${eventLabel(event)} on ${server.name}`;
 }
 
 /** Stable per-alert key so paging tools resolve the incident they opened. */
@@ -98,7 +98,7 @@ export function facts(event: AlertEvent, server: ServerRef, sentAt: string): [st
   if (event.notice) return [...event.notice.details, ['Sent', sentAt]];
   const out: [string, string][] = [['Server', `${server.name} (${server.host})`]];
   if (event.kind !== 'test') {
-    out.push(['Alert', alertLabel(event.type)], ['Severity', event.severity]);
+    out.push(['Alert', eventLabel(event)], ['Severity', event.severity]);
   }
   if (event.value !== undefined) out.push(['Value', String(event.value)]);
   if (event.threshold !== undefined) out.push(['Threshold', String(event.threshold)]);

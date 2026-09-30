@@ -81,6 +81,16 @@ export function alertLabel(type: AlertType | 'test' | 'notice'): string {
 }
 
 /**
+ * The alert's label, naming the container for container alerts
+ * (`Container exited (api)`), so two containers resolving on one server are
+ * told apart in every channel.
+ */
+export function eventLabel(event: Pick<AlertEvent, 'type' | 'container'>): string {
+  const label = alertLabel(event.type);
+  return event.container ? `${label} (${event.container})` : label;
+}
+
+/**
  * Hide the secret in a webhook URL while keeping enough to tell two channels
  * apart. Slack and Mattermost both put the token in the final path segment.
  */
@@ -103,9 +113,9 @@ export function summarize(event: AlertEvent, server: ServerRef): string {
     return `Test notification from Server Manager — delivery to this channel is working.`;
   }
   if (event.kind === 'resolved') {
-    return `Resolved: ${alertLabel(event.type)} on ${server.name} (${server.host})`;
+    return `Resolved: ${eventLabel(event)} on ${server.name} (${server.host})`;
   }
-  return `${alertLabel(event.type)} on ${server.name} (${server.host}) — ${event.message}`;
+  return `${eventLabel(event)} on ${server.name} (${server.host}) — ${event.message}`;
 }
 
 function escapeHtml(s: string): string {
@@ -124,7 +134,7 @@ export function emailSubject(event: AlertEvent, server: ServerRef): string {
   if (event.notice) return event.notice.title;
   if (event.kind === 'test') return 'Test notification from Server Manager';
   const prefix = event.kind === 'resolved' ? '[Resolved]' : `[${event.severity.toUpperCase()}]`;
-  return `${prefix} ${alertLabel(event.type)} on ${server.name}`;
+  return `${prefix} ${eventLabel(event)} on ${server.name}`;
 }
 
 /** Plain-text and HTML bodies with the same content; HTML is escaped, never templated. */
@@ -148,7 +158,7 @@ function alertDetails(event: AlertEvent, server: ServerRef, sentAt: string): str
   return [
     `Server: ${server.name} (${server.host})`,
     ...(event.kind !== 'test'
-      ? [`Alert: ${alertLabel(event.type)}`, `Severity: ${event.severity}`]
+      ? [`Alert: ${eventLabel(event)}`, `Severity: ${event.severity}`]
       : []),
     ...(event.value !== undefined ? [`Value: ${event.value}`] : []),
     ...(event.threshold !== undefined ? [`Threshold: ${event.threshold}`] : []),
