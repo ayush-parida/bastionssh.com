@@ -31,6 +31,8 @@ export interface AlertEvent {
    * nothing is looked up in the servers table.
    */
   subject?: ServerRef;
+  /** The container a Docker container alert is about; alerts for different containers are separate incidents. */
+  container?: string;
 }
 
 /** Wrap a notice so the channel adapters can carry it. It names no server. */
@@ -69,10 +71,23 @@ export function alertLabel(type: AlertType | 'test' | 'notice'): string {
     disk_high: 'Disk high',
     load_high: 'Load high',
     host_key_mismatch: 'SSH host key changed',
+    container_unhealthy: 'Container unhealthy',
+    container_restarting: 'Container restarting',
+    container_exited: 'Container exited',
     test: 'Test notification',
     notice: 'Notice',
   };
   return labels[type] ?? type;
+}
+
+/**
+ * The alert's label, naming the container for container alerts
+ * (`Container exited (api)`), so two containers resolving on one server are
+ * told apart in every channel.
+ */
+export function eventLabel(event: Pick<AlertEvent, 'type' | 'container'>): string {
+  const label = alertLabel(event.type);
+  return event.container ? `${label} (${event.container})` : label;
 }
 
 /**
@@ -98,9 +113,9 @@ export function summarize(event: AlertEvent, server: ServerRef): string {
     return `Test notification from Server Manager — delivery to this channel is working.`;
   }
   if (event.kind === 'resolved') {
-    return `Resolved: ${alertLabel(event.type)} on ${server.name} (${server.host})`;
+    return `Resolved: ${eventLabel(event)} on ${server.name} (${server.host})`;
   }
-  return `${alertLabel(event.type)} on ${server.name} (${server.host}) — ${event.message}`;
+  return `${eventLabel(event)} on ${server.name} (${server.host}) — ${event.message}`;
 }
 
 function escapeHtml(s: string): string {
@@ -119,7 +134,7 @@ export function emailSubject(event: AlertEvent, server: ServerRef): string {
   if (event.notice) return event.notice.title;
   if (event.kind === 'test') return 'Test notification from Server Manager';
   const prefix = event.kind === 'resolved' ? '[Resolved]' : `[${event.severity.toUpperCase()}]`;
-  return `${prefix} ${alertLabel(event.type)} on ${server.name}`;
+  return `${prefix} ${eventLabel(event)} on ${server.name}`;
 }
 
 /** Plain-text and HTML bodies with the same content; HTML is escaped, never templated. */
@@ -143,7 +158,7 @@ function alertDetails(event: AlertEvent, server: ServerRef, sentAt: string): str
   return [
     `Server: ${server.name} (${server.host})`,
     ...(event.kind !== 'test'
-      ? [`Alert: ${alertLabel(event.type)}`, `Severity: ${event.severity}`]
+      ? [`Alert: ${eventLabel(event)}`, `Severity: ${event.severity}`]
       : []),
     ...(event.value !== undefined ? [`Value: ${event.value}`] : []),
     ...(event.threshold !== undefined ? [`Threshold: ${event.threshold}`] : []),

@@ -11,7 +11,9 @@ import {
 } from '../auth/server-access.js';
 import { rank } from '../auth/middleware.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
-import type { AITool, HostKeyStatus } from '@smt/shared';
+import { dockerSettings } from '../docker/settings.js';
+import { aiContainerLogs, aiInspect, aiListContainers } from '../docker/ai-tools.js';
+import { dockerPermissions, type AITool, type DockerCapability, type HostKeyStatus, type Role } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -58,6 +60,70 @@ export const AGENT_TOOLS: AITool[] = [
     },
   },
   {
+    name: 'docker_list_containers',
+    description:
+      'List the Docker containers on a server: name, short id, image, state and health, status, published ports and Compose project. Read-only. Running containers only unless "all" is true. Use this before reading logs or inspecting a container, to get its exact name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        server_id: {
+          type: 'string',
+          description: 'ID of the server. Omit to use the server the user is looking at.',
+        },
+        all: {
+          type: 'boolean',
+          description: 'Include stopped and exited containers (default false).',
+        },
+      },
+    },
+  },
+  {
+    name: 'docker_container_logs',
+    description:
+      'Read the most recent log lines of a Docker container (stdout and stderr; stderr lines start with "[stderr]"). Read-only. At most 500 lines, and long output is truncated from the oldest end, like run_command.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        server_id: {
+          type: 'string',
+          description: 'ID of the server. Omit to use the server the user is looking at.',
+        },
+        container: {
+          type: 'string',
+          description: 'Container name or id, as docker_list_containers shows it.',
+        },
+        tail: {
+          type: 'number',
+          description: 'Number of lines from the end (default 100, max 500).',
+        },
+        since: {
+          type: 'string',
+          description: 'Only lines after this time: unix seconds or an ISO date (optional).',
+        },
+      },
+      required: ['container'],
+    },
+  },
+  {
+    name: 'docker_inspect',
+    description:
+      'Inspect a Docker container: configuration, state (exit code, health, restart count), restart policy, mounts, networks and labels, as JSON. Read-only. Environment variable values are always redacted (KEY=••••); do not ask for them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        server_id: {
+          type: 'string',
+          description: 'ID of the server. Omit to use the server the user is looking at.',
+        },
+        container: {
+          type: 'string',
+          description: 'Container name or id, as docker_list_containers shows it.',
+        },
+      },
+      required: ['container'],
+    },
+  },
+  {
     name: 'get_recent_audit',
     description:
       'Retrieve recent audit log entries to understand what actions have been performed.',
@@ -96,6 +162,15 @@ export class ToolExecutor {
         return this.listSavedCommands(input);
       case 'get_recent_audit':
         return this.getRecentAudit(input);
+      case 'docker_list_containers':
+        return aiListContainers(this.requester(), this.dockerTarget(input, 'view'), input.all === true);
+      case 'docker_container_logs':
+        return aiContainerLogs(this.requester(), this.dockerTarget(input, 'inspect'), input.container, {
+          tail: input.tail,
+          since: input.since,
+        });
+      case 'docker_inspect':
+        return aiInspect(this.requester(), this.dockerTarget(input, 'inspect'), input.container);
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -199,6 +274,36 @@ export class ToolExecutor {
     };
   }
 
+  /** The user the agent acts for, in the shape the Docker service takes. */
+  private requester() {
+    return { orgId: this.orgId, user: { id: this.userId } } as Parameters<typeof aiListContainers>[0];
+  }
+
+  /**
+   * The server a Docker tool reads from: `server_id`, else the one the user is
+   * looking at or connected to (as for run_command). The caller's role must allow `capability` under the org's
+   * Docker settings — logs and inspect need an operator, like the Docker tab.
+   * A server they cannot access reads as not found (withDockerClient again).
+   */
+  private dockerTarget(input: Record<string, unknown>, capability: DockerCapability): string {
+    const { serverId } = this.target(input);
+    if (!serverId) throw new Error('No server specified: pass server_id');
+    if (!this.canUse(serverId)) throw new Error('Server not found');
+    const role = (this.memberRole() ?? 'viewer') as Role;
+    if (!dockerPermissions(role, dockerSettings(this.orgId))[capability]) {
+      throw new Error('Your role does not allow reading container logs or details');
+    }
+    return serverId;
+  }
+
+  private memberRole(): string | undefined {
+    return getDb()
+      .select({ role: memberships.role })
+      .from(memberships)
+      .where(and(eq(memberships.userId, this.userId), eq(memberships.orgId, this.orgId)))
+      .get()?.role;
+  }
+
   private canUse(serverId: string): boolean {
     return canAccessServer({ orgId: this.orgId, userId: this.userId }, serverId);
   }
@@ -264,12 +369,7 @@ export class ToolExecutor {
     const limit = Math.min((input.limit as number | undefined) ?? 10, 50);
 
     // The audit log route is admin-only; below that, the agent only sees the caller's own actions
-    const membership = db
-      .select({ role: memberships.role })
-      .from(memberships)
-      .where(and(eq(memberships.userId, this.userId), eq(memberships.orgId, this.orgId)))
-      .get();
-    const ownOnly = rank(membership?.role ?? 'viewer') < rank('admin');
+    const ownOnly = rank(this.memberRole() ?? 'viewer') < rank('admin');
 
     const rows = db
       .select()
@@ -368,6 +468,7 @@ export function buildSystemPrompt(opts: {
     'Prefer read-only diagnostic commands first.',
     'Read-only commands run immediately. Any command that could change a server (restarts, installs, edits, deletes, writes to files, sudo, and anything not recognised as read-only) is shown to the user, who must approve it before it runs — you do not need to ask for confirmation in chat first, but do say what the change will do.',
     'Repository config can make git run programs, so most git commands need approval. To inspect a repository without it, use `git diff --no-ext-diff --no-textconv …`, or put `--no-ext-diff --no-textconv --no-show-signature` plus an explicit format such as `--oneline` right after `git log` / `git show`.',
+    'For Docker, read with docker_list_containers, docker_container_logs and docker_inspect (environment values stay redacted). Changes such as `docker restart <name>` go through run_command and need approval like any other change.',
     'If the user declines a command, or the approval expires, do not retry the same command or a variation of it. Explain what you would have done and ask how they want to proceed.',
     '',
     '## Registered Servers',

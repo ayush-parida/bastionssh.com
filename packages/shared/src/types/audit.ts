@@ -160,7 +160,8 @@ export type AuditAction =
   | 'docker.compose_down'
   | 'docker.compose_pull'
   | 'docker.compose_restart'
-  | 'org.docker_settings';
+  | 'org.docker_settings'
+  | 'ai.docker_read';
 
 export interface AuditLogEntry {
   id: string;

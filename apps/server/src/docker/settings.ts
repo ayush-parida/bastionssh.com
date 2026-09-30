@@ -25,6 +25,7 @@ export function parseDockerSettings(raw: string | null | undefined): DockerSetti
     operatorsCanExec: pick('operatorsCanExec'),
     operatorsCanRemove: pick('operatorsCanRemove'),
     allowPrune: pick('allowPrune'),
+    containerAlerts: pick('containerAlerts'),
   };
 }
 

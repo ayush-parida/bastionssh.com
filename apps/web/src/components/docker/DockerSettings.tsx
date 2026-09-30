@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DockerSettings as Settings } from '@smt/shared';
-import { Container, Eraser, TerminalSquare, Trash2 } from 'lucide-react';
+import { BellRing, Container, Eraser, TerminalSquare, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
@@ -48,6 +48,13 @@ const ROWS: { key: keyof Settings; title: string; detail: string; icon: typeof C
     title: 'Allow pruning',
     detail: 'Admins may delete unused containers, images, volumes and networks in one go.',
     icon: Eraser,
+  },
+  {
+    key: 'containerAlerts',
+    title: 'Alert on unhealthy, crash-looping and failed containers',
+    detail:
+      'The health check also lists containers on servers where Docker was detected, and alerts through your notification channels. Off by default.',
+    icon: BellRing,
   },
 ];
 

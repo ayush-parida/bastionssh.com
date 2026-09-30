@@ -78,6 +78,7 @@ const settingsSchema = z
     operatorsCanExec: z.boolean().optional(),
     operatorsCanRemove: z.boolean().optional(),
     allowPrune: z.boolean().optional(),
+    containerAlerts: z.boolean().optional(),
   })
   .strict()
   .refine((v) => Object.keys(v).length > 0, 'Nothing to change');

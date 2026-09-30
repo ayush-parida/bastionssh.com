@@ -40,6 +40,7 @@ import { dockerRoutes } from './routes/docker.js';
 import { dockerActionRoutes } from './routes/docker-actions.js';
 import { dockerExecRoutes } from './routes/docker-exec.js';
 import { dockerComposeRoutes } from './routes/docker-compose.js';
+import { dockerFleetRoutes } from './routes/docker-fleet.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
 import { HostKeyMismatchError } from '../ssh/host-keys.js';
 
@@ -114,6 +115,7 @@ export async function buildApp() {
   await app.register(dockerActionRoutes, { prefix: '/api/docker' });
   await app.register(dockerExecRoutes, { prefix: '/api/docker' });
   await app.register(dockerComposeRoutes, { prefix: '/api/docker' });
+  await app.register(dockerFleetRoutes, { prefix: '/api/docker' });
   await app.register(teamRoutes, { prefix: '/api/team' });
   await app.register(accessRequestRoutes, { prefix: '/api/access-requests' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });

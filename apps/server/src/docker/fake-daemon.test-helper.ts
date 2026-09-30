@@ -33,6 +33,11 @@ export interface FakeContainer {
   Env?: string[];
   /** Replaces the default compose labels (project `shop`, service = name). */
   Labels?: Record<string, string>;
+  /** Inspect facts for container alerts; default 0 restarts, policy `no`, exit 0. */
+  RestartCount?: number;
+  RestartPolicy?: string;
+  ExitCode?: number;
+  OOMKilled?: boolean;
 }
 
 export interface FakeDaemon {
@@ -183,7 +188,9 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
       return json(res, 200, {
         Id: c.Id,
         Name: c.Names[0],
-        State: { Status: c.State },
+        State: { Status: c.State, ExitCode: c.ExitCode ?? 0, OOMKilled: c.OOMKilled === true },
+        RestartCount: c.RestartCount ?? 0,
+        HostConfig: { RestartPolicy: { Name: c.RestartPolicy ?? 'no' } },
         Config: { Tty: c.Tty === true, Env: c.Env ?? [], Labels: { tier: 'web' } },
       });
     }

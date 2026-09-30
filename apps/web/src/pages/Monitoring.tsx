@@ -27,6 +27,9 @@ const ALERT_LABEL: Record<ServerAlert['type'], string> = {
   disk_high: 'Disk filling up',
   load_high: 'High load',
   host_key_mismatch: 'SSH host key changed',
+  container_unhealthy: 'Container unhealthy',
+  container_restarting: 'Container restarting',
+  container_exited: 'Container exited',
 };
 
 function SummaryTile({
@@ -255,7 +258,10 @@ export default function MonitoringPage() {
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">
-                    <Link to={`/servers/${alert.serverId}/health`} className="hover:underline">
+                    <Link
+                      to={`/servers/${alert.serverId}/${alert.type.startsWith('container_') ? 'docker' : 'health'}`}
+                      className="hover:underline"
+                    >
                       {alert.serverName ?? alert.serverId}
                     </Link>
                     <span className="text-muted-foreground"> · {ALERT_LABEL[alert.type]}</span>

@@ -462,7 +462,7 @@ REST surface, all under `/api/ftp`:
 ### 4.15 Docker (`/server/docker`, `api/routes/docker.ts`)
 
 Design: `docs/superpowers/specs/2026-09-30-docker-management-design.md`. Phases D1 (read),
-D2 (actions), D3 (exec) and D4 (Compose) are in place; the fleet view builds on the same pieces.
+D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet view) are in place.
 
 - **Transport** (`transport.ts`): no Docker client library and no second SSH path. Over a
   pooled ssh2 connection built with `sshConnectConfig` + `connectSsh` (so host keys, jump
@@ -548,6 +548,35 @@ D2 (actions), D3 (exec) and D4 (Compose) are in place; the fleet view builds on 
   off). `GET compose/:project/logs` merges up to 32 containers' log streams into one SSE,
   each line tagged `source: "<service>-<n>"`, optionally one `service`. Listing is `view`,
   logs `inspect`, actions `pull` (operators and up).
+- **Fleet view** (`fleet.ts`, `api/routes/docker-fleet.ts`): `GET /api/docker/containers
+  ?serverIds&all` fans out over the accessible servers where Docker was detected (or the
+  ids asked for, which detects them), five at a time, 10 s each through
+  `withDockerClient`, and answers with partial results — one row per server, its error on
+  that row — plus the servers skipped (Docker off, never detected). Ids the caller cannot
+  access are left out silently. The browser leaving cancels requests in flight and the
+  servers not yet asked. Web: the **Containers** page.
+- **AI tools** (`ai-tools.ts`, `ai/tools.ts`): `docker_list_containers`,
+  `docker_container_logs` (tail ≤ 500, no follow, newest 64 KB kept) and `docker_inspect`
+  (always redacted) in `AGENT_TOOLS`, read-only, through `withDockerClient`; logs and
+  inspect need the `inspect` capability from the caller's membership role. The chat route
+  audits each call as `ai.docker_read` (tool, container, error — not the output), since it
+  goes to the AI provider. Mutations stay on `run_command` and its approval.
+- **Container alerts** (`monitoring/containers.ts`): opt-in per org
+  (`docker_settings.containerAlerts`, default off). The health probe runs a follow-up on
+  its own SSH connection (`runProbe(…, extra)`, 12 s, never fails the check) listing
+  containers on servers with `docker_mode = 'auto'` that were detected — the sweep never
+  detects. Only restarting, recently started and failed-exit containers are inspected
+  (≤ 20 per sweep; restart policies cached, so an exited container whose policy and
+  exit code are known is not inspected again). `container_unhealthy`,
+  `container_restarting` (restart count +3 within 10 minutes, counted in memory across
+  sweeps) and `container_exited` (non-zero, restart policy not `no`, SIGTERM/non-OOM
+  SIGKILL ignored) are reconciled per (server, container name, type) — the name leads the
+  message, as `server_alerts` has no container column — and host reconciliation leaves
+  them alone. Notifications carry the container: titles and summaries name it
+  (`Container exited (api)`), webhooks get `alert.container`, and paging dedup keys are
+  per container.
+  Turning the setting off, Docker off or pausing monitoring closes them silently; a sample
+  that fails leaves them as they are.
 
 ---
 
@@ -713,6 +742,8 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Docker remove containers / images | — | operator if `operatorsCanRemove`, else admin |
 | Docker prune               | —        | admin, if `allowPrune` |
 | Docker env reveal          | —        | admin + passkey step-up |
+| Docker fleet view (Containers page) | viewer | —      |
+| AI Docker tools (list / logs, inspect) | operator (chat) | — |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
 

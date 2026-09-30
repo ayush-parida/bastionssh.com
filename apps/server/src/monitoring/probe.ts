@@ -277,18 +277,27 @@ function classify(err: NodeJS.ErrnoException): 'offline' | 'error' {
   return 'error';
 }
 
+/** Time the optional follow-up on the probe's connection gets once the vitals are in. */
+export const PROBE_EXTRA_TIMEOUT_MS = 12_000;
+
 /**
  * Open a short-lived SSH connection, run the probe, and disconnect. Deliberately
  * unpooled: a health check that reuses a cached connection can report "online"
  * for a host that no longer accepts new ones.
+ *
+ * `extra` runs on the same connection after the vitals arrived (container
+ * sampling, monitoring/containers.ts). It has its own time limit and can never
+ * fail the check: when it throws, times out or the connection drops under it,
+ * the result simply has no `extra`.
  */
-export function runProbe(
+export function runProbe<T = never>(
   target: ProbeTarget,
   auth: ProbeAuth,
   timeoutMs = 20_000,
   /** Who asked for the probe; a jump hop is audited under them. Absent for background sweeps. */
   options: JumpOptions = {},
-): Promise<ProbeResult> {
+  extra?: (ssh: Client) => Promise<T>,
+): Promise<ProbeResult & { extra?: T }> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const ssh = new Client();
@@ -297,10 +306,14 @@ export function runProbe(
     });
     let settled = false;
 
+    /** Set once the vitals are in; from then on the check has succeeded. */
+    let vitals: ProbeResult | null = null;
+
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(extraTimer);
       try {
         ssh.end();
       } catch {
@@ -312,6 +325,7 @@ export function runProbe(
     const timer = setTimeout(() => {
       finish(() => reject(new ProbeError(`Probe timed out after ${timeoutMs}ms`, 'offline')));
     }, timeoutMs);
+    let extraTimer: NodeJS.Timeout | undefined;
 
     ssh.on('ready', () => {
       ssh.exec(PROBE_SCRIPT, (err, stream) => {
@@ -338,12 +352,24 @@ export function runProbe(
             const detail = stderr.trim().split('\n')[0] || `probe exited with code ${code}`;
             return finish(() => reject(new ProbeError(`No metrics returned: ${detail}`)));
           }
-          finish(() => resolve({ sample, latencyMs }));
+          vitals = { sample, latencyMs };
+          if (!extra) return finish(() => resolve({ sample, latencyMs }));
+          // The vitals are in: from here on the check succeeds whatever `extra` does
+          clearTimeout(timer);
+          extraTimer = setTimeout(() => finish(() => resolve({ sample, latencyMs })), PROBE_EXTRA_TIMEOUT_MS);
+          extra(ssh).then(
+            (value) => finish(() => resolve({ sample, latencyMs, extra: value })),
+            () => finish(() => resolve({ sample, latencyMs })),
+          );
         });
       });
     });
 
     ssh.on('error', (err: NodeJS.ErrnoException) => {
+      if (vitals) {
+        const done = vitals;
+        return finish(() => resolve(done));
+      }
       const cause = guard.error(err);
       // Refused on purpose, not unreachable — the collector records it as such
       if (cause instanceof HostKeyMismatchError) return finish(() => reject(cause));

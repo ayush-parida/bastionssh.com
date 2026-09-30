@@ -120,6 +120,28 @@ describe('summarize', () => {
     expect(alertLabel('memory_high')).toBe('Memory high');
     expect(alertLabel('offline')).toBe('Offline');
   });
+
+  it('names the container of a resolved container alert in every channel', () => {
+    const resolved: AlertEvent = {
+      kind: 'resolved',
+      orgId: 'org1',
+      serverId: 'srv1',
+      type: 'container_exited',
+      severity: 'critical',
+      message: 'api: exited with code 1 (restart policy on-failure)',
+      openedAt: NOW,
+      container: 'api',
+    };
+    expect(summarize(resolved, SERVER)).toBe('Resolved: Container exited (api) on web-01 (10.0.0.4)');
+    expect(emailSubject(resolved, SERVER)).toBe('[Resolved] Container exited (api) on web-01');
+    expect(emailBody(resolved, SERVER, NOW).text).toContain('Alert: Container exited (api)');
+    const body = buildPayload('webhook', resolved, SERVER, NOW) as AlertWebhookPayload;
+    expect(body.alert.container).toBe('api');
+    const discord = buildPayload('discord', resolved, SERVER, NOW) as {
+      embeds: { title: string }[];
+    };
+    expect(discord.embeds[0]!.title).toContain('(api)');
+  });
 });
 
 describe('discord payload', () => {
