@@ -592,7 +592,7 @@ pnpm test:e2e      # Playwright browser tests (below)
 
 ### Browser tests
 
-`pnpm test:e2e` builds the server and web app, starts the built server on `http://localhost:18473` against a throwaway SQLite database (`NODE_ENV=test`, a fixed `SMT_ADMIN_PASSWORD`, monitoring and cloud sync off), serves the web build from it, and runs the Playwright suite in `apps/e2e` with Chromium. It covers password sign-in, passkey registration and sign-in (through Chrome's virtual WebAuthn authenticator), backup codes, the team invite flow, the AI command-approval card (against a stub OpenAI-compatible provider the test starts), and the FTP form's SFTP option.
+`pnpm test:e2e` builds the server and web app, starts the built server on `http://localhost:18473` against a throwaway SQLite database (`NODE_ENV=test`, a fixed `SMT_ADMIN_PASSWORD`, monitoring and cloud sync off), serves the web build from it, and runs the Playwright suite in `apps/e2e` with Chromium. It covers password sign-in, passkey registration and sign-in (through Chrome's virtual WebAuthn authenticator), backup codes, the team invite flow, the AI command-approval card (against a stub OpenAI-compatible provider the test starts), the FTP form's SFTP option, and the Docker pages against a stubbed Docker API (confirmations for container actions and prune, container shells, Compose actions, the Containers fleet view).
 
 - First time only: `pnpm --filter @smt/e2e exec playwright install chromium`
 - Another port: `E2E_PORT=19000 pnpm test:e2e`
