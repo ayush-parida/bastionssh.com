@@ -472,7 +472,9 @@ is in place; actions, exec, Compose and the fleet view build on the same pieces.
   The dial-stdio stream reports the CLI's stderr when it exits early.
 - **Pool** (`pool.ts`): one SSH connection per (org, server, user), closed after 2 idle
   minutes, evicted by `revokeLiveAccess` (with the user's Docker event streams) and when a
-  server is edited, deleted, its host key changes or its key is rotated.
+  server is edited, deleted, its host key changes or its key is rotated. Demoting a
+  member ends their open Docker streams, since logs and stats are gated by role when a
+  stream opens.
 - **Client** (`client.ts`): `http.request` with an `Agent` whose `createConnection` opens
   the stream; JSON calls with a timeout and body cap, streaming calls (logs, stats,
   events), and hijacked calls (`Upgrade: tcp`, for exec). Paths are versioned with the

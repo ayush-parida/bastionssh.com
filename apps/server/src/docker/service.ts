@@ -62,20 +62,23 @@ export async function leaseSsh(req: Pick<FastifyRequest, 'orgId' | 'user'>, serv
   );
 }
 
-/** Detection in flight per server, so a burst of first requests probes once. */
+/** Detection in flight per server and socket override, so a burst of first requests probes once. */
 const probing = new Map<string, Promise<DockerProbeResult>>();
 
 /** Probe over `ssh` and record the outcome; concurrent callers for one server share the run. */
 export function runProbe(ssh: Client, server: ServerRow): Promise<DockerProbeResult> {
-  let pending = probing.get(server.id);
+  const override = server.dockerSocketPath;
+  // A changed socket path is a different daemon: it never joins a run for the old one
+  const key = `${server.id}\0${override ?? ''}`;
+  let pending = probing.get(key);
   if (!pending) {
-    pending = probeDocker(ssh, { override: server.dockerSocketPath, username: server.username })
+    pending = probeDocker(ssh, { override, username: server.username })
       .then((result) => {
-        recordProbe(server.id, result);
+        recordProbe(server.id, result, override);
         return result;
       })
-      .finally(() => probing.delete(server.id));
-    probing.set(server.id, pending);
+      .finally(() => probing.delete(key));
+    probing.set(key, pending);
   }
   return pending;
 }

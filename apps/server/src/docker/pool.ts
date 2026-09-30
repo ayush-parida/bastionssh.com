@@ -23,6 +23,8 @@ interface PooledConnection {
   /** Leases out (requests and open streams); the idle timer only runs at 0. */
   active: number;
   idleTimer?: NodeJS.Timeout;
+  /** The pool entry this connection was opened for; a newer one may replace it under the same key. */
+  entry?: Promise<PooledConnection>;
 }
 
 export interface DockerLease {
@@ -50,26 +52,34 @@ function scheduleIdleClose(key: string, conn: PooledConnection) {
   clearTimeout(conn.idleTimer);
   conn.idleTimer = setTimeout(() => {
     if (conn.active > 0) return; // the last release reschedules
-    if (pool.get(key) !== undefined) pool.delete(key);
+    // Only forget this connection: after an eviction, a stale lease's release
+    // lands here too, and must not drop a newer connection out of reach of
+    // the next eviction
+    forget(key, conn);
     endQuietly(conn);
   }, IDLE_TIMEOUT_MS);
   conn.idleTimer.unref?.();
 }
 
+/** Remove `key` from the pool if it still holds `conn`, not a newer connection. */
+function forget(key: string, conn: PooledConnection) {
+  if (conn.entry && pool.get(key) === conn.entry) pool.delete(key);
+}
+
 function openConnection(key: string, target: SshTarget, auth: SshAuth, actorUserId?: string): Promise<PooledConnection> {
-  return new Promise<PooledConnection>((resolve, reject) => {
-    const client = new Client();
+  const client = new Client();
+  const conn: PooledConnection = { client, active: 0 };
+  conn.entry = new Promise<PooledConnection>((resolve, reject) => {
     const { config, guard } = sshConnectConfig(target, auth, 'docker', { readyTimeout: CONNECT_TIMEOUT_MS });
     let settled = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      pool.delete(key);
+      forget(key, conn);
       client.end();
       reject(new DockerError('SSH connection for Docker timed out', 504));
     }, CONNECT_TIMEOUT_MS + 1_000);
 
-    const conn: PooledConnection = { client, active: 0 };
     client
       .on('ready', () => {
         if (settled) return;
@@ -86,7 +96,7 @@ function openConnection(key: string, target: SshTarget, auth: SshAuth, actorUser
         }
         settled = true;
         clearTimeout(timer);
-        pool.delete(key);
+        forget(key, conn);
         if (cause instanceof HostKeyMismatchError) return reject(cause);
         // A jump host failure already says where the route broke
         if (typeof (cause as { statusCode?: unknown }).statusCode === 'number') return reject(cause);
@@ -96,20 +106,15 @@ function openConnection(key: string, target: SshTarget, auth: SshAuth, actorUser
         clearTimeout(timer);
         clearTimeout(conn.idleTimer);
         // Only forget this connection, not a newer one opened under the same key
-        void pool.get(key)?.then(
-          (current) => {
-            if (current === conn) pool.delete(key);
-          },
-          () => {},
-        );
+        forget(key, conn);
         if (!settled) {
           settled = true;
-          pool.delete(key);
           reject(new DockerError('SSH connection closed before it was ready', 502));
         }
       });
     connectSsh(client, target, config, 'docker', { actorUserId });
   });
+  return conn.entry;
 }
 
 /**
@@ -148,7 +153,8 @@ export async function acquire(
       if (released) return;
       released = true;
       conn.active = Math.max(0, conn.active - 1);
-      if (conn.active === 0) scheduleIdleClose(key, conn);
+      // An evicted or closed connection is already gone: nothing to schedule
+      if (conn.active === 0 && pool.get(key) === conn.entry) scheduleIdleClose(key, conn);
     },
   };
 }

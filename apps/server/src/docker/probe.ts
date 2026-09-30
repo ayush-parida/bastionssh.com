@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import type { Client } from 'ssh2';
 import {
   DEFAULT_DOCKER_SOCKET,
@@ -294,9 +294,11 @@ export function probeStatus(problem: DockerProblem | null): number {
 /**
  * Store a probe's outcome on the server row. A failure forgets what an
  * earlier probe found, so the tab shows the new diagnosis rather than a
- * transport that no longer works.
+ * transport that no longer works. `override` is the socket path the probe
+ * ran with: when an admin changed it meanwhile, the outcome describes the
+ * old daemon and is dropped.
  */
-export function recordProbe(serverId: string, result: DockerProbeResult): void {
+export function recordProbe(serverId: string, result: DockerProbeResult, override: string | null): void {
   getDb()
     .update(servers)
     .set(
@@ -310,7 +312,12 @@ export function recordProbe(serverId: string, result: DockerProbeResult): void {
           }
         : clearedDetection(),
     )
-    .where(eq(servers.id, serverId))
+    .where(
+      and(
+        eq(servers.id, serverId),
+        override === null ? isNull(servers.dockerSocketPath) : eq(servers.dockerSocketPath, override),
+      ),
+    )
     .run();
 }
 

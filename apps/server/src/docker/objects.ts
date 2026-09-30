@@ -284,13 +284,22 @@ export function toStatsSample(raw: Raw): DockerStatsSample {
   };
 }
 
+/**
+ * An event's action without what the engine appends to exec actions:
+ * `exec_create: sh -c "mysql -p…"` carries the command line, which may hold
+ * secrets, and viewers (who may not read logs) receive these events.
+ */
+export function eventAction(action: string): string {
+  return action.startsWith('exec_') ? action.replace(/:.*$/s, '') : action;
+}
+
 export function toEngineEvent(raw: Raw): DockerEngineEvent {
   const actor = obj(raw.Actor);
   const attributes = obj(actor.Attributes);
   const timeNano = num(raw.timeNano);
   return {
     type: str(raw.Type, str(raw.type)),
-    action: str(raw.Action, str(raw.status)),
+    action: eventAction(str(raw.Action, str(raw.status))),
     id: str(actor.ID, str(raw.id)),
     name: typeof attributes.name === 'string' ? attributes.name : null,
     time: timeNano ? new Date(timeNano / 1e6).toISOString() : (isoTime(raw.time) ?? new Date().toISOString()),

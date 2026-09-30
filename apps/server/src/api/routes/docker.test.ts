@@ -61,6 +61,7 @@ import { auditLog, servers } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { activeDockerStreamCount, MAX_STREAMS_PER_USER } from '../../docker/sse.js';
+import { recordProbe } from '../../docker/probe.js';
 import { startFakeDaemon, type FakeDaemon } from '../../docker/fake-daemon.test-helper.js';
 import { seedOrg, seedServer, seedUser } from './test-utils.js';
 
@@ -323,6 +324,18 @@ describe('docker routes', () => {
       expect((await get(operator, `/api/docker/servers/${id}/containers`)).statusCode).toBe(200);
       expect(row(id).dockerDetectedSocketPath).toBe('/run/user/1000/docker.sock');
     });
+
+    it('drops a probe outcome for a socket path that changed while it ran', async () => {
+      const id = await withPassword(orgId, admin.userId, 'delta-2');
+      const found = (await send(admin, 'POST', `/api/docker/servers/${id}/probe`)).json();
+      expect(found.ok).toBe(true);
+      // The admin points the server elsewhere; a probe still running for the old path finishes after
+      await send(admin, 'PATCH', `/api/servers/${id}`, { dockerSocketPath: '/run/podman/podman.sock' });
+      recordProbe(id, found, null);
+      expect(row(id)).toMatchObject({ dockerSocketPath: '/run/podman/podman.sock', dockerTransport: null });
+      recordProbe(id, { ...found, socketPath: '/run/podman/podman.sock' }, '/run/podman/podman.sock');
+      expect(row(id).dockerDetectedSocketPath).toBe('/run/podman/podman.sock');
+    });
   });
 
   describe('pooled connections', () => {
@@ -474,6 +487,26 @@ describe('docker routes', () => {
       expect(refused.statusCode).toBe(429);
       for (const s of open) s.close();
       await until(() => activeDockerStreamCount(who.userId) === 0 && daemon.openStreams() === 0);
+    });
+
+    it('ends a member’s logs stream when they are demoted below operator', async () => {
+      const who = seedUser(orgId, 'operator');
+      const logs = await openStream(who, `/api/docker/servers/${serverA}/containers/web/logs?follow=1&tail=0`);
+      expect(await logs.next()).toMatchObject({ type: 'logs' });
+
+      const demoted = await app.inject({
+        method: 'PATCH',
+        url: `/api/team/members/${who.userId}`,
+        headers: admin.headers,
+        payload: { role: 'viewer' },
+      });
+      expect(demoted.statusCode).toBe(200);
+      let event = await logs.next();
+      while (event?.type === 'logs') event = await logs.next();
+      expect(event).toMatchObject({ type: 'error', status: 403 });
+      expect(await logs.next()).toBeNull();
+      await until(() => daemon.openStreams() === 0 && activeDockerStreamCount(who.userId) === 0);
+      expect((await get(who, `/api/docker/servers/${serverA}/containers/web/logs`)).statusCode).toBe(403);
     });
 
     it('ends streams and pooled connections when the user’s access is revoked', async () => {

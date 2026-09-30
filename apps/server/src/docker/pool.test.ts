@@ -107,6 +107,24 @@ describe('Docker connection pool', () => {
     expect(pooledConnectionCount()).toBeGreaterThan(0);
   });
 
+  it('keeps a newer connection evictable after a stale lease on an evicted one is released', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const key = poolKey('o7', 's1', 'u1');
+    const stale = await acquire(key, target, auth);
+    expect(evictServer('o7', 's1')).toBe(1);
+    await Promise.resolve();
+    // The request on the evicted connection finishes afterwards
+    stale.release();
+
+    const fresh = await acquire(key, target, auth);
+    vi.advanceTimersByTime(IDLE_TIMEOUT_MS * 2);
+    // The old connection's idle timer must not have dropped the new one from the pool
+    expect(evictServer('o7', 's1')).toBe(1);
+    await Promise.resolve();
+    expect((fresh.client as any).end).toHaveBeenCalled();
+    fresh.release();
+  });
+
   it('needs a credential', async () => {
     await expect(acquire(poolKey('o6', 's1', 'u1'), target, {})).rejects.toMatchObject({ statusCode: 400 });
   });

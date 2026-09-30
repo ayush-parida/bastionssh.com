@@ -17,6 +17,8 @@ export interface DemuxedChunk {
 
 const HEADER_BYTES = 8;
 const STREAMS: Record<number, DockerStreamType> = { 0: 'stdin', 1: 'stdout', 2: 'stderr' };
+/** Highest type byte in a header: 3 is the engine's own error stream ("systemerr"). */
+const MAX_STREAM_TYPE = 3;
 
 /**
  * Incremental frame parser: feed it bytes as they arrive, get back the
@@ -24,12 +26,24 @@ const STREAMS: Record<number, DockerStreamType> = { 0: 'stdin', 1: 'stdout', 2: 
  */
 export class Demuxer {
   private buffer: Buffer = Buffer.alloc(0);
+  /** Set once the bytes turned out not to be framed (see {@link push}). */
+  private raw = false;
 
   push(chunk: Buffer): DemuxedChunk[] {
+    if (this.raw) return chunk.length > 0 ? [{ stream: 'stdout', payload: chunk }] : [];
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
     const frames: DemuxedChunk[] = [];
     while (this.buffer.length >= HEADER_BYTES) {
       const type = this.buffer[0]!;
+      // Not a frame header (a TTY container's raw output, e.g. one recreated
+      // with a TTY since it was inspected): pass the bytes through as they
+      // are, rather than wait — and buffer — for a "length" read from text
+      if (type > MAX_STREAM_TYPE || this.buffer[1] !== 0 || this.buffer[2] !== 0 || this.buffer[3] !== 0) {
+        this.raw = true;
+        frames.push({ stream: 'stdout', payload: this.buffer });
+        this.buffer = Buffer.alloc(0);
+        break;
+      }
       const length = this.buffer.readUInt32BE(4);
       if (this.buffer.length < HEADER_BYTES + length) break;
       frames.push({

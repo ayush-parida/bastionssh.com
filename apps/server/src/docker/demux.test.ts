@@ -30,6 +30,13 @@ describe('Docker stream demultiplexing', () => {
     expect(demuxer.push(whole.subarray(10)).map((f) => f.payload.toString())).toEqual(['abcdef']);
   });
 
+  it('passes unframed bytes through instead of buffering for a length read from text', () => {
+    const demuxer = new Demuxer();
+    const out = [...demuxer.push(Buffer.from('hello world\n')), ...demuxer.push(Buffer.from('more\n'))];
+    expect(out.map((f) => `${f.stream}:${f.payload}`)).toEqual(['stdout:hello world\n', 'stdout:more\n']);
+    expect(demuxer.pending).toBe(0);
+  });
+
   it('works as an object-mode transform', async () => {
     const source = Readable.from([Buffer.concat([frame(2, 'a'), frame(1, 'b')])]);
     const chunks: DemuxedChunk[] = [];
