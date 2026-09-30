@@ -89,7 +89,16 @@ export default function RecordingPlayerPage() {
         <div className="mb-4 flex flex-wrap items-start gap-4">
           <div className="flex-1 min-w-0">
             <h1 className="text-xl font-bold truncate">
-              {rec.kind === 'exec' ? <span className="font-mono">{rec.command}</span> : 'Terminal session'}
+              {rec.kind === 'exec' ? (
+                <span className="font-mono">{rec.command}</span>
+              ) : rec.kind === 'container' ? (
+                <>
+                  Shell in container <span className="font-mono">{rec.container?.name ?? rec.command}</span>
+                  {rec.container && <span className="font-mono text-sm font-normal text-muted-foreground"> {rec.container.id}</span>}
+                </>
+              ) : (
+                'Terminal session'
+              )}
               <span className="text-muted-foreground font-normal"> · {rec.serverName ?? 'deleted server'}</span>
             </h1>
             <p className="text-sm text-muted-foreground">

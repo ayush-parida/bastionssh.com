@@ -2,7 +2,7 @@ import type { DockerImage, DockerNetwork, DockerVolume } from '@smt/shared';
 import { formatBytes, relativeTime } from '@/lib/utils.js';
 import { shortId } from '@/lib/docker.js';
 
-/** Images, volumes and networks on one server: read-only tables (actions arrive in a later phase). */
+/** Images, volumes and networks on one server. Images take row actions (remove) from the page. */
 
 function Table({ head, children, empty }: { head: string[]; children: React.ReactNode; empty: string | null }) {
   if (empty) return <p className="py-12 text-center text-sm text-muted-foreground">{empty}</p>;
@@ -26,10 +26,19 @@ function Table({ head, children, empty }: { head: string[]; children: React.Reac
 
 const badge = 'rounded px-1.5 py-0.5 text-xs';
 
-export function ImagesTable({ images, onSelect }: { images: DockerImage[]; onSelect?: (image: DockerImage) => void }) {
+export function ImagesTable({
+  images,
+  onSelect,
+  actions,
+}: {
+  images: DockerImage[];
+  onSelect?: (image: DockerImage) => void;
+  /** Row actions (remove), for those allowed. */
+  actions?: (image: DockerImage) => React.ReactNode;
+}) {
   const sorted = [...images].sort((a, b) => (a.repoTags[0] ?? '~').localeCompare(b.repoTags[0] ?? '~'));
   return (
-    <Table head={['Tag', 'Id', 'Size', 'Created', '']} empty={images.length === 0 ? 'No images.' : null}>
+    <Table head={['Tag', 'Id', 'Size', 'Created', '', ...(actions ? [' '] : [])]} empty={images.length === 0 ? 'No images.' : null}>
       {sorted.map((i) => (
         <tr key={i.id} onClick={() => onSelect?.(i)} className={onSelect ? 'cursor-pointer hover:bg-muted/50' : undefined}>
           <td className="px-4 py-2 font-mono text-xs">
@@ -42,6 +51,11 @@ export function ImagesTable({ images, onSelect }: { images: DockerImage[]; onSel
             {i.inUse && <span className={`${badge} bg-emerald-500/10 text-emerald-600 dark:text-emerald-400`}>in use</span>}
             {i.dangling && <span className={`${badge} ml-1 bg-muted text-muted-foreground`}>dangling</span>}
           </td>
+          {actions && (
+            <td className="px-4 py-2 text-right" onClick={(e) => e.stopPropagation()}>
+              {actions(i)}
+            </td>
+          )}
         </tr>
       ))}
     </Table>

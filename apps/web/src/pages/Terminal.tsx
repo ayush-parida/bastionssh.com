@@ -8,7 +8,7 @@ import XTerminal, {
   type XTerminalHandle,
 } from '@/components/terminal/XTerminal.js';
 import AISidebar from '@/components/ai/AISidebar.js';
-import { ArrowLeft, Bot, FolderOpen, Keyboard, Unplug } from 'lucide-react';
+import { ArrowLeft, Bot, Container, FolderOpen, Keyboard, Unplug } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { HostKeyMismatchNotice } from '@/components/servers/HostKey.js';
 import { DiagnoseButton } from '@/components/diagnostics/Diagnostics.js';
@@ -36,6 +36,10 @@ export default function TerminalPage() {
   const stateServerName: string | undefined = location.state?.serverName;
   /** Set when the org records this session; says whether keystrokes are captured too. */
   const recording: ActiveRecording | null | undefined = location.state?.recording;
+  /** Set for a shell inside a Docker container (kind `container`) rather than on the server itself. */
+  const container: { id: string; name: string } | undefined = location.state?.container;
+  // A container shell comes from, and returns to, the server's Docker page
+  const backTo = container ? `/servers/${id}/docker` : '/servers';
 
   const [aiOpen, setAiOpen] = useState(false);
   const [status, setStatus] = useState<TerminalConnectionStatus>('connecting');
@@ -104,7 +108,7 @@ export default function TerminalPage() {
 
   function handleBack() {
     void closeSession();
-    navigate('/servers');
+    navigate(backTo);
   }
 
   if (!sessionId) {
@@ -127,7 +131,7 @@ export default function TerminalPage() {
       <div className="flex items-center gap-3 px-4 h-10 bg-[#161b22] border-b border-[#30363d] shrink-0">
         <button
           onClick={handleBack}
-          title="Back to servers"
+          title={container ? 'Back to Docker' : 'Back to servers'}
           className="text-[#8b949e] hover:text-white transition-colors"
         >
           <ArrowLeft size={16} />
@@ -135,10 +139,23 @@ export default function TerminalPage() {
 
         {/* Server identity + connection state */}
         <div className="flex min-w-0 flex-1 items-center gap-3 font-mono text-sm">
-          <span className="truncate font-medium text-[#e6edf3]" title={serverName}>
-            {serverName}
-          </span>
-          {endpoint && (
+          {container ? (
+            <span
+              className="flex min-w-0 items-center gap-1.5 text-[#8b949e]"
+              title={`${container.name} (${container.id.slice(0, 12)}) on ${serverName}`}
+            >
+              <Container size={14} className="shrink-0 text-[#58a6ff]" aria-hidden="true" />
+              <span className="font-sans">container</span>
+              <span className="truncate font-medium text-[#e6edf3]">{container.name}</span>
+              <span className="font-sans">on</span>
+              <span className="truncate text-[#e6edf3]">{serverName}</span>
+            </span>
+          ) : (
+            <span className="truncate font-medium text-[#e6edf3]" title={serverName}>
+              {serverName}
+            </span>
+          )}
+          {endpoint && !container && (
             <span className="hidden truncate text-[#8b949e] sm:inline" title={endpoint}>
               {endpoint}
             </span>
@@ -175,26 +192,31 @@ export default function TerminalPage() {
           </span>
         )}
 
-        <button
-          onClick={() => navigate(`/servers/${id}/files`)}
-          title="Browse files over SFTP"
-          className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[#8b949e] transition-colors hover:bg-[#21262d] hover:text-white"
-        >
-          <FolderOpen size={13} />
-          Files
-        </button>
-        <button
-          onClick={() => setAiOpen((o) => !o)}
-          title="Toggle AI Assistant"
-          className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors ${
-            aiOpen
-              ? 'bg-[#58a6ff]/20 text-[#58a6ff]'
-              : 'text-[#8b949e] hover:text-white hover:bg-[#21262d]'
-          }`}
-        >
-          <Bot size={13} />
-          AI
-        </button>
+        {/* Files and the AI assistant work on the server itself, not inside a container */}
+        {!container && (
+          <>
+            <button
+              onClick={() => navigate(`/servers/${id}/files`)}
+              title="Browse files over SFTP"
+              className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[#8b949e] transition-colors hover:bg-[#21262d] hover:text-white"
+            >
+              <FolderOpen size={13} />
+              Files
+            </button>
+            <button
+              onClick={() => setAiOpen((o) => !o)}
+              title="Toggle AI Assistant"
+              className={`flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors ${
+                aiOpen
+                  ? 'bg-[#58a6ff]/20 text-[#58a6ff]'
+                  : 'text-[#8b949e] hover:text-white hover:bg-[#21262d]'
+              }`}
+            >
+              <Bot size={13} />
+              AI
+            </button>
+          </>
+        )}
         {status === 'disconnected' && id && !hostKeyMismatch && (
           // A session that failed to open, or dropped: say why, step by step
           <DiagnoseButton
@@ -204,17 +226,17 @@ export default function TerminalPage() {
         )}
         {status === 'disconnected' ? (
           <button
-            onClick={() => navigate('/servers')}
+            onClick={() => navigate(backTo)}
             className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[#8b949e] transition-colors hover:bg-[#21262d] hover:text-white"
           >
             <ArrowLeft size={13} />
-            Back to servers
+            {container ? 'Back to Docker' : 'Back to servers'}
           </button>
         ) : (
           <button
             onClick={() => void handleDisconnect()}
             disabled={disconnecting}
-            title="Close the SSH session"
+            title={container ? 'Close the shell in the container' : 'Close the SSH session'}
             className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[#f85149] transition-colors hover:bg-[#f85149]/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Unplug size={13} />
@@ -243,7 +265,7 @@ export default function TerminalPage() {
           )}
         </div>
 
-        {aiOpen && (
+        {aiOpen && !container && (
           <div className="flex-1 overflow-hidden">
             <AISidebar
               serverId={id}

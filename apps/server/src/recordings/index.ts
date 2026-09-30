@@ -5,7 +5,7 @@ import { createGunzip } from 'node:zlib';
 import { and, eq, inArray, isNotNull, isNull, lt } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { ExecResult } from '../ssh/broker.js';
-import type { RecordingCommandSource, RecordingSettings } from '@smt/shared';
+import type { RecordingCommandSource, RecordingKind, RecordingSettings } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { organizations, sessionRecordingCommands, sessionRecordings } from '../db/schema.js';
 import { config } from '../config/index.js';
@@ -68,7 +68,16 @@ interface RecordingContext {
 /** Insert the row and open its cast. Null when recording is off or cannot start. */
 function openRecording(
   ctx: RecordingContext,
-  row: { id?: string; kind: 'terminal' | 'exec'; source?: RecordingCommandSource; command?: string; inputRecorded: boolean; cols: number; rows: number },
+  row: {
+    id?: string;
+    kind: RecordingKind;
+    source?: RecordingCommandSource;
+    command?: string;
+    title?: string;
+    inputRecorded: boolean;
+    cols: number;
+    rows: number;
+  },
 ): { id: string; writer: CastWriter } | null {
   const id = row.id ?? nanoid();
   const relative = path.join(ctx.orgId, `${id}.cast`);
@@ -80,7 +89,7 @@ function openRecording(
         width: row.cols,
         height: row.rows,
         timestamp: Math.floor(Date.now() / 1000),
-        title: row.command ? `${ctx.serverName}: ${row.command}` : ctx.serverName,
+        title: row.title ?? (row.command ? `${ctx.serverName}: ${row.command}` : ctx.serverName),
         env: { TERM: 'xterm-256color' },
       },
       maxBytes: config.recordings.maxBytes,
@@ -148,15 +157,41 @@ export interface TerminalRecording {
   discard(): Promise<void>;
 }
 
-/** Start recording an interactive terminal, if the org records sessions. */
+/**
+ * How a container shell's recording names its container, in the `command`
+ * column: `web-1 (3f2a9c1b2d4e)`. Kept there rather than in a column of its
+ * own, and read back by {@link containerOfRecording}.
+ */
+export function containerLabel(container: { id: string; name: string }): string {
+  return `${container.name} (${container.id.slice(0, 12)})`;
+}
+
+const CONTAINER_LABEL = /^(.+) \(([0-9a-f]{12})\)$/;
+
+/** The container a `container` recording ran in, from its {@link containerLabel}. */
+export function containerOfRecording(row: Pick<RecordingRow, 'kind' | 'command'>): { id: string; name: string } | null {
+  if (row.kind !== 'container' || !row.command) return null;
+  const match = CONTAINER_LABEL.exec(row.command);
+  return match ? { name: match[1]!, id: match[2]! } : null;
+}
+
+/**
+ * Start recording an interactive terminal, if the org records sessions. With
+ * `container`, the terminal is a shell inside that container (Docker exec),
+ * recorded as kind `container` with the container named.
+ */
 export function startTerminalRecording(
-  ctx: RecordingContext & { cols: number; rows: number },
+  ctx: RecordingContext & { cols: number; rows: number; container?: { id: string; name: string } },
 ): TerminalRecording | null {
   const settings = recordingSettings(ctx.orgId);
   if (!settings.enabled) return null;
 
   const opened = openRecording(ctx, {
-    kind: 'terminal',
+    kind: ctx.container ? 'container' : 'terminal',
+    ...(ctx.container && {
+      command: containerLabel(ctx.container),
+      title: `${ctx.serverName} › ${ctx.container.name}`,
+    }),
     inputRecorded: settings.recordInput,
     cols: ctx.cols,
     rows: ctx.rows,

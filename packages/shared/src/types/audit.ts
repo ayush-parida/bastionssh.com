@@ -143,6 +143,19 @@ export type AuditAction =
   | 'audit.forwarding_test'
   | 'audit.forwarding_failed'
   | 'docker.probe'
+  | 'docker.container_start'
+  | 'docker.container_stop'
+  | 'docker.container_restart'
+  | 'docker.container_kill'
+  | 'docker.container_pause'
+  | 'docker.container_unpause'
+  | 'docker.container_remove'
+  | 'docker.image_pull'
+  | 'docker.image_remove'
+  | 'docker.prune'
+  | 'docker.env_reveal'
+  | 'docker.exec_start'
+  | 'docker.exec_end'
   | 'org.docker_settings';
 
 export interface AuditLogEntry {

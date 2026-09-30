@@ -1,5 +1,6 @@
 import { Client } from 'ssh2';
 import type { ClientChannel } from 'ssh2';
+import type { Duplex, Readable } from 'node:stream';
 import { vault } from '../vault/index.js';
 import type { WebSocket } from 'ws';
 import type { FastifyRequest } from 'fastify';
@@ -28,6 +29,8 @@ interface SessionMeta {
   rows: number;
   /** Receives the shell's output, input and resizes; finished when the session ends. */
   recording?: TerminalRecording | null;
+  /** Set for a shell inside a Docker container rather than on the server itself. */
+  container?: { id: string; name: string };
 }
 
 /** Who is asking for a session; it must match the creator. */
@@ -36,11 +39,23 @@ export interface SessionOwner {
   orgId: string;
 }
 
+/**
+ * What a session's terminal runs over: an SSH shell channel, or a shell in a
+ * container (docker/exec.ts) adapted to the same shape.
+ */
+export interface TerminalChannel extends Duplex {
+  stderr: Readable;
+  setWindow(rows: number, cols: number, height: number, width: number): void;
+}
+
 interface ActiveSession {
   meta: SessionMeta;
-  client: Client;
+  /** The SSH connection of a server shell; commands can run over it (`exec`). */
+  client?: Client;
+  /** Tears down whatever carries the terminal; called when the session ends. */
+  end: () => void;
   /** Resolves to the shell stream once SSH is ready */
-  streamPromise: Promise<ClientChannel>;
+  streamPromise: Promise<TerminalChannel>;
   socket?: WebSocket;
   /** Buffers output until a socket attaches */
   outputBuffer: Buffer[];
@@ -159,7 +174,7 @@ function destroy(sessionId: string) {
   if (session) {
     clearTimeout(session.reapTimer);
     endRecording(session);
-    session.client.end();
+    session.end();
     session.socket?.close();
     sessions.delete(sessionId);
   }
@@ -174,7 +189,7 @@ export function getSessionForUser(sessionId: string, userId: string, orgId: stri
   if (!session || session.meta.userId !== userId || session.meta.orgId !== orgId) {
     return undefined;
   }
-  return { id: sessionId, userId, orgId, server: session.meta.server };
+  return { id: sessionId, userId, orgId, server: session.meta.server, container: session.meta.container ?? null };
 }
 
 function ownedSession(sessionId: string, owner: SessionOwner) {
@@ -230,7 +245,37 @@ async function createSession(meta: SessionMeta): Promise<string> {
     connectSsh(client, meta.server, connectConfig, 'terminal', { actorUserId: meta.userId });
   });
 
-  const session: ActiveSession = { meta, client, streamPromise, outputBuffer: [] };
+  const session: ActiveSession = { meta, client, end: () => client.end(), streamPromise, outputBuffer: [] };
+  register(id, session);
+  return id;
+}
+
+/**
+ * Register a terminal that is already open elsewhere — a shell inside a
+ * container (docker/exec.ts) — as a session. It then behaves exactly like an
+ * SSH shell: the same WebSocket attach, output buffered while detached,
+ * reaping, recording, and closing on revocation. `end` tears down what
+ * carries it (called once, when the session ends).
+ */
+function adoptSession(meta: SessionMeta, channel: TerminalChannel, end: () => void): string {
+  const id = nanoid();
+  let ended = false;
+  const session: ActiveSession = {
+    meta,
+    end: () => {
+      if (ended) return;
+      ended = true;
+      end();
+    },
+    streamPromise: Promise.resolve(channel),
+    outputBuffer: [],
+  };
+  register(id, session);
+  return id;
+}
+
+function register(id: string, session: ActiveSession) {
+  const { meta, streamPromise } = session;
   sessions.set(id, session);
   // A session that is never attached must not live forever
   scheduleReap(id, session);
@@ -268,7 +313,7 @@ async function createSession(meta: SessionMeta): Promise<string> {
         clearTimeout(session.reapTimer);
         endRecording(session);
         session.socket?.close();
-        session.client.end();
+        session.end();
         sessions.delete(id);
       });
     })
@@ -280,8 +325,6 @@ async function createSession(meta: SessionMeta): Promise<string> {
       if (!session.failureReported) rememberFailure(id, meta, err);
       sessions.delete(id);
     });
-
-  return id;
 }
 
 async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest) {
@@ -305,7 +348,7 @@ async function attach(sessionId: string, socket: WebSocket, req: FastifyRequest)
   }
   session.socket = socket;
 
-  let stream: ClientChannel;
+  let stream: TerminalChannel;
   try {
     stream = await session.streamPromise;
   } catch (err: unknown) {
@@ -445,6 +488,35 @@ function closeForUser(userId: string, scope: RevokeScope = {}): number {
   return closed;
 }
 
+/** A live session, as {@link closeWhere} sees it. */
+export interface SessionInfo {
+  userId: string;
+  orgId: string;
+  serverId: string;
+  container: { id: string; name: string } | null;
+}
+
+/**
+ * Close every session `refuse` picks, the way a revocation does — e.g.
+ * container shells whose owner may no longer open them after a role or
+ * org setting changed. Returns how many were closed.
+ */
+function closeWhere(refuse: (session: SessionInfo) => boolean): number {
+  let closed = 0;
+  for (const [id, session] of [...sessions]) {
+    const { userId, orgId, server, container } = session.meta;
+    if (!refuse({ userId, orgId, serverId: server.id, container: container ?? null })) continue;
+    try {
+      session.socket?.close(4403, 'Access revoked');
+    } catch {
+      /* already closed */
+    }
+    destroy(id);
+    closed++;
+  }
+  return closed;
+}
+
 /**
  * Execute a command on an existing session's SSH connection (separate channel).
  * The interactive shell stream is unaffected.
@@ -458,6 +530,8 @@ async function exec(
 ): Promise<ExecResult> {
   const session = owner ? ownedSession(sessionId, owner) : sessions.get(sessionId);
   if (!session) throw new Error('Session not found');
+  // A container shell has no SSH connection of its own to run commands over
+  if (!session.client) throw new Error('Commands cannot run over a container shell');
 
   // Logged on the terminal's recording, so playback shows what ran behind the shell
   const recording = session.meta.recording;
@@ -582,4 +656,4 @@ export async function execOnServer(
   });
 }
 
-export const SSHBroker = { createSession, attach, close, closeForUser, exec, getSessionForUser };
+export const SSHBroker = { createSession, adoptSession, attach, close, closeForUser, closeWhere, exec, getSessionForUser };

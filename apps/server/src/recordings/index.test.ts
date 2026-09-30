@@ -11,6 +11,8 @@ import { getDb } from '../db/index.js';
 import { auditLog, organizations, sessionRecordingCommands, sessionRecordings } from '../db/schema.js';
 import { seedOrg, seedServer, seedUser } from '../api/routes/test-utils.js';
 import {
+  containerLabel,
+  containerOfRecording,
   pruneRecordings,
   recordingFile,
   recoverUnfinishedRecordings,
@@ -126,6 +128,22 @@ describe('terminal recordings', () => {
     } finally {
       recordingsConfig.dir = dir;
     }
+  });
+});
+
+describe('container shell recordings', () => {
+  it('are kind container and name the container, read back from the row', async () => {
+    const container = { id: 'f'.repeat(64), name: 'shop (web) 1' };
+    const rec = startTerminalRecording({ ...ctx(), container })!;
+    const saved = row(rec.id);
+    expect(saved).toMatchObject({ kind: 'container', command: `shop (web) 1 (${'f'.repeat(12)})` });
+    expect(containerOfRecording(saved)).toEqual({ id: 'f'.repeat(12), name: 'shop (web) 1' });
+    expect(containerLabel(container)).toBe(saved.command);
+    await rec.finish();
+    expect(castOf(rec.id).header).toMatchObject({ title: 'web-1 › shop (web) 1' });
+
+    expect(containerOfRecording({ kind: 'terminal', command: null })).toBeNull();
+    expect(containerOfRecording({ kind: 'container', command: 'garbled' })).toBeNull();
   });
 });
 

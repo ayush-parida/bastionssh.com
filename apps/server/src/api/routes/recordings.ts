@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { and, count, desc, eq, gte, inArray, lte, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, lte, sql, type SQL } from 'drizzle-orm';
 import type {
   RecordingCommandSource,
   RecordingKind,
@@ -16,6 +16,7 @@ import { getDb } from '../../db/index.js';
 import { organizations, sessionRecordingCommands, sessionRecordings, users } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import {
+  containerOfRecording,
   deleteRecordingFile,
   openCast,
   recordingFile,
@@ -31,12 +32,19 @@ const isoDate = z
 const listSchema = z.object({
   serverId: z.string().min(1).optional(),
   userId: z.string().min(1).optional(),
-  kind: z.enum(['terminal', 'exec']).optional(),
+  kind: z.enum(['terminal', 'exec', 'container']).optional(),
+  /** Container shells whose container name or id contains this. */
+  container: z.string().trim().min(1).max(255).optional(),
   from: isoDate.optional(),
   to: isoDate.optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+
+/** A LIKE pattern matching `text` anywhere, its own `%`, `_` and `\` taken literally (ESCAPE '\'). */
+function likeContains(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
 
 const settingsSchema = z
   .object({
@@ -79,6 +87,7 @@ function toRecording(row: RecordingRow, userEmail: string | null): SessionRecord
     userEmail,
     source: row.source as RecordingCommandSource | null,
     command: row.command,
+    container: containerOfRecording(row),
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     bytes: row.bytes,
@@ -126,14 +135,19 @@ export async function recordingRoutes(app: FastifyInstance) {
     return after;
   });
 
-  /** GET /api/recordings?serverId=&userId=&kind=&from=&to=&page=&limit= */
+  /** GET /api/recordings?serverId=&userId=&kind=&container=&from=&to=&page=&limit= */
   app.get('/', async (req) => {
     const q = listSchema.parse(req.query);
+    // Recordings name a container by its short id: a full id (`docker ps --no-trunc`) finds it too
+    const container = q.container && /^[0-9a-f]{13,64}$/.test(q.container) ? q.container.slice(0, 12) : q.container;
     const where = and(
       visibleTo(req),
       q.serverId ? eq(sessionRecordings.serverId, q.serverId) : undefined,
       q.userId ? eq(sessionRecordings.userId, q.userId) : undefined,
       q.kind ? eq(sessionRecordings.kind, q.kind) : undefined,
+      // The container is named in `command` (recordings/index.ts containerLabel)
+      container ? eq(sessionRecordings.kind, 'container') : undefined,
+      container ? sql`${sessionRecordings.command} LIKE ${likeContains(container)} ESCAPE '\\'` : undefined,
       q.from ? gte(sessionRecordings.startedAt, q.from) : undefined,
       q.to ? lte(sessionRecordings.startedAt, q.to) : undefined,
     );

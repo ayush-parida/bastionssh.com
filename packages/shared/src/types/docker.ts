@@ -286,6 +286,7 @@ export type DockerStreamEvent =
   | { type: 'logs'; lines: DockerLogLine[] }
   | { type: 'stats'; sample: DockerStatsSample }
   | { type: 'event'; event: DockerEngineEvent }
+  | { type: 'pull'; progress: DockerPullProgress }
   | { type: 'end' }
   | { type: 'error'; error: string; status?: number };
 
@@ -294,4 +295,126 @@ export interface UpdateServerDockerRequest {
   dockerMode?: DockerMode;
   /** null returns to detection. */
   dockerSocketPath?: string | null;
+}
+
+// ── Actions (D2) ─────────────────────────────────────────────────────────────
+
+/** Lifecycle actions on a container (`control` permission). */
+export type DockerContainerAction = 'start' | 'stop' | 'restart' | 'kill' | 'pause' | 'unpause';
+
+export const DOCKER_CONTAINER_ACTIONS: readonly DockerContainerAction[] = [
+  'start',
+  'stop',
+  'restart',
+  'kill',
+  'pause',
+  'unpause',
+];
+
+/** Body of `POST …/containers/:cid/:action`; every field is optional. */
+export interface DockerContainerActionRequest {
+  /** stop, restart: seconds to wait before killing (default: the container's own, usually 10). */
+  timeout?: number;
+  /** kill: the signal, e.g. `SIGTERM` (default SIGKILL). */
+  signal?: string;
+}
+
+export interface DockerActionResult {
+  /** false when the container already was in that state (start a running one, stop a stopped one). */
+  changed: boolean;
+}
+
+/** `POST …/images/pull` body: `image` may carry its tag or digest, or `tag` gives it. */
+export interface DockerPullRequest {
+  image: string;
+  tag?: string;
+}
+
+/** One line of pull progress, per layer (`id`) or for the whole pull. */
+export interface DockerPullProgress {
+  /** Layer id, when the line is about a layer. */
+  id: string | null;
+  /** `Pulling fs layer`, `Downloading`, `Pull complete`, `Status: Downloaded newer image for …` */
+  status: string;
+  current: number | null;
+  total: number | null;
+}
+
+/** What `DELETE …/images/:iid` removed. */
+export interface DockerImageRemoveResult {
+  untagged: string[];
+  deleted: string[];
+}
+
+/** What to prune. */
+export interface DockerPruneRequest {
+  containers?: boolean;
+  images?: boolean;
+  volumes?: boolean;
+  networks?: boolean;
+  /** Images: dangling only (default true), like `docker image prune` without `-a`; false prunes every unused image. */
+  dangling?: boolean;
+}
+
+export interface DockerPruneEstimate {
+  count: number;
+  /** Bytes; null where Docker does not measure it (networks). */
+  size: number | null;
+}
+
+/** Dry run: what a prune would remove, from `/system/df` and the network list. */
+export interface DockerPrunePreview {
+  /** Stopped containers. */
+  containers: DockerPruneEstimate;
+  danglingImages: DockerPruneEstimate;
+  /** Every image no container uses, dangling or tagged. */
+  unusedImages: DockerPruneEstimate;
+  /** Unused volumes: anonymous ones only on Docker 23+ (API 1.42), like `docker volume prune`. */
+  volumes: DockerPruneEstimate;
+  /** Older engines prune named volumes too — their data with them. */
+  volumesIncludeNamed: boolean;
+  /** Custom networks no container is attached to. */
+  networks: DockerPruneEstimate;
+}
+
+export interface DockerPruneResult {
+  containers: { deleted: number; reclaimed: number } | null;
+  images: { deleted: number; reclaimed: number } | null;
+  volumes: { deleted: number; reclaimed: number } | null;
+  networks: { deleted: number } | null;
+  /** Bytes reclaimed, all kinds together. */
+  reclaimed: number;
+}
+
+/** `POST …/containers/:cid/env/reveal` — admins, after a passkey step-up; audited. */
+export interface DockerEnvReveal {
+  env: string[];
+}
+
+// ── Exec (D3) ────────────────────────────────────────────────────────────────
+
+/** `POST …/containers/:cid/exec` body. */
+export interface DockerExecRequest {
+  /** The command, as argv (no shell parsing). Default: /bin/bash if the container has it, else /bin/sh. */
+  cmd?: string[];
+  /** `user`, `user:group`, `uid` or `uid:gid`; default the container's user. */
+  user?: string;
+  /** Default true. Without a TTY, stdout and stderr arrive separately and nothing can be resized. */
+  tty?: boolean;
+  cols?: number;
+  rows?: number;
+}
+
+/**
+ * A shell in a container, as a terminal session: attach to `wsUrl`, the same
+ * WebSocket path as SSH terminals (`/api/ssh-sessions/:id/ws`), and close it
+ * with `DELETE /api/ssh-sessions/:id`.
+ */
+export interface DockerExecSession {
+  sessionId: string;
+  wsUrl: string;
+  container: { id: string; name: string };
+  /** The command that runs, e.g. `["/bin/bash"]`. */
+  cmd: string[];
+  recording: { id: string; inputRecorded: boolean } | null;
 }

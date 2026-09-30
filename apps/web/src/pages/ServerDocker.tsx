@@ -9,7 +9,7 @@ import type {
   DockerServerStatus,
   DockerVolume,
 } from '@smt/shared';
-import { ArrowLeft, Container, Radar } from 'lucide-react';
+import { ArrowLeft, Container, Download, Eraser, Radar } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { dockerKeys, dockerPath, useDockerEvents } from '@/lib/docker.js';
@@ -18,6 +18,10 @@ import ContainersTable from '@/components/docker/ContainersTable.js';
 import ContainerDrawer from '@/components/docker/ContainerDrawer.js';
 import { ImagesTable, NetworksTable, VolumesTable } from '@/components/docker/ResourceTables.js';
 import { DetectDockerButton, DockerProblem, problemOf } from '@/components/docker/DetectDocker.js';
+import ContainerActions from '@/components/docker/ContainerActions.js';
+import ImageActions from '@/components/docker/ImageActions.js';
+import PullImageDialog from '@/components/docker/PullImageDialog.js';
+import PruneDialog from '@/components/docker/PruneDialog.js';
 
 type Tab = 'containers' | 'images' | 'volumes' | 'networks';
 const TABS: { id: Tab; label: string }[] = [
@@ -38,6 +42,7 @@ export default function ServerDockerPage() {
   const [tab, setTab] = useState<Tab>('containers');
   const [showAll, setShowAll] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<'pull' | 'prune' | null>(null);
 
   const status = useQuery<DockerServerStatus>({
     queryKey: dockerKeys.status(serverId),
@@ -146,6 +151,25 @@ export default function ServerDockerPage() {
                 )}
               </button>
             ))}
+            <div className="ml-auto flex items-center gap-2 pb-1">
+              {data.permissions.pull && (
+                <button
+                  onClick={() => setDialog('pull')}
+                  className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted"
+                >
+                  <Download size={14} /> Pull image
+                </button>
+              )}
+              {data.permissions.prune && (
+                <button
+                  onClick={() => setDialog('prune')}
+                  title="Remove stopped containers, unused images, volumes and networks — with a dry run first"
+                  className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted"
+                >
+                  <Eraser size={14} /> Prune…
+                </button>
+              )}
+            </div>
           </div>
 
           {tab === 'containers' && (
@@ -155,13 +179,25 @@ export default function ServerDockerPage() {
               onShowAll={setShowAll}
               onSelect={(c) => setSelected(c.id)}
               selectedId={selected}
+              actions={(c) => (
+                <ContainerActions
+                  serverId={serverId}
+                  serverName={data.serverName}
+                  container={c}
+                  permissions={data.permissions}
+                  compact
+                />
+              )}
             />
           )}
           {tab === 'images' &&
             (images.error ? (
               <DockerProblem {...problemOf(images.error)} />
             ) : images.data ? (
-              <ImagesTable images={images.data} />
+              <ImagesTable
+                images={images.data}
+                actions={data.permissions.remove ? (image) => <ImageActions serverId={serverId} image={image} /> : undefined}
+              />
             ) : (
               <p className="text-sm text-muted-foreground">Loading…</p>
             ))}
@@ -190,8 +226,19 @@ export default function ServerDockerPage() {
           container={current}
           permissions={data.permissions}
           onClose={() => setSelected(null)}
+          actions={
+            <ContainerActions
+              serverId={serverId}
+              serverName={data.serverName}
+              container={current}
+              permissions={data.permissions}
+              onRemoved={() => setSelected(null)}
+            />
+          }
         />
       )}
+      {dialog === 'pull' && <PullImageDialog serverId={serverId} onClose={() => setDialog(null)} />}
+      {dialog === 'prune' && <PruneDialog serverId={serverId} onClose={() => setDialog(null)} />}
     </div>
   );
 }

@@ -9,6 +9,7 @@ import { StateBadge } from './ContainersTable.js';
 import ContainerLogs from './ContainerLogs.js';
 import ContainerStats from './ContainerStats.js';
 import JsonViewer from './JsonViewer.js';
+import EnvReveal from './EnvReveal.js';
 
 type Tab = 'overview' | 'logs' | 'stats' | 'env' | 'inspect';
 
@@ -192,22 +193,24 @@ export default function ContainerDrawer({
                 <p className="mb-3 text-xs text-muted-foreground">
                   Values are hidden: environment variables are where containers keep their secrets.
                 </p>
-                <div className="space-y-0.5 rounded-md border border-border bg-muted/30 p-3 font-mono text-xs">
-                  {(inspect.data?.Config?.Env ?? []).length === 0 && <p className="text-muted-foreground">No variables.</p>}
-                  {(inspect.data?.Config?.Env ?? []).map((e, i) => {
-                    const eq = e.indexOf('=');
-                    return (
-                      <div key={i} className="break-all">
-                        {eq === -1 ? e : (
-                          <>
-                            {e.slice(0, eq)}
-                            <span className="text-muted-foreground">{e.slice(eq)}</span>
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+                <EnvReveal serverId={serverId} containerId={container.id} canReveal={permissions.revealEnv}>
+                  <div className="space-y-0.5 rounded-md border border-border bg-muted/30 p-3 font-mono text-xs">
+                    {(inspect.data?.Config?.Env ?? []).length === 0 && <p className="text-muted-foreground">No variables.</p>}
+                    {(inspect.data?.Config?.Env ?? []).map((e, i) => {
+                      const eq = e.indexOf('=');
+                      return (
+                        <div key={i} className="break-all">
+                          {eq === -1 ? e : (
+                            <>
+                              {e.slice(0, eq)}
+                              <span className="text-muted-foreground">{e.slice(eq)}</span>
+                            </>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </EnvReveal>
               </div>
             ))}
           {tab === 'inspect' &&
