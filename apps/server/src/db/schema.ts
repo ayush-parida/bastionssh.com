@@ -239,6 +239,8 @@ export const organizations = sqliteTable('organizations', {
   auditRetentionDays: integer('audit_retention_days').notNull().default(365),
   // A backup-code sign-in may only enroll a passkey until it verifies with one
   backupCodeRecoveryOnly: integer('backup_code_recovery_only', { mode: 'boolean' }).notNull().default(true),
+  // Docker permissions JSON {operatorsCanExec, operatorsCanRemove, allowPrune}; null = defaults (docker/settings.ts)
+  dockerSettings: text('docker_settings'),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -508,6 +510,16 @@ export const servers = sqliteTable(
     // Reached through this agent's tunnel (to its loopback, on `port`) instead
     // of a direct TCP connection to `host`.
     agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    // Docker over the SSH connection (see docker/). 'off' hides it and refuses
+    // its routes. The socket path is an admin override; the rest is what the
+    // last successful probe found, cleared when the override changes.
+    dockerMode: text('docker_mode').notNull().default('auto'), // auto | off
+    dockerSocketPath: text('docker_socket_path'),
+    dockerTransport: text('docker_transport'), // streamlocal | dial-stdio
+    dockerDetectedSocketPath: text('docker_detected_socket_path'),
+    dockerDetectedAt: text('docker_detected_at'),
+    dockerVersion: text('docker_version'),
+    dockerApiVersion: text('docker_api_version'),
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at')
       .notNull()

@@ -19,7 +19,7 @@ const fake = vi.hoisted(() => {
   return {
     nextChallenge: () => `challenge-${++n}`,
     verifyCalls: [] as { requireUserVerification?: boolean; expectedOrigin: unknown; expectedRPID: unknown }[],
-    revokeLiveAccess: vi.fn((_userId: string, _scope?: { orgId?: string }) => ({ terminals: 1, sftp: 0, agents: 0 })),
+    revokeLiveAccess: vi.fn((_userId: string, _scope?: { orgId?: string }) => ({ terminals: 1, sftp: 0, docker: 0, agents: 0 })),
     sendEmail: vi.fn(async (_msg: { to: string[]; subject: string; text: string }) => {}),
   };
 });

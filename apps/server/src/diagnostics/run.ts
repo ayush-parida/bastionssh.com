@@ -34,7 +34,8 @@ import {
 
 /**
  * Runs the steps in order — DNS, TCP, the protocol's own first words (and TLS
- * where it applies), the host key, and authentication only when asked — each
+ * where it applies), the host key, authentication only when asked, and then
+ * Docker for a server that has it on — each
  * with its own budget and timing. Once a step fails, the ones after it are
  * reported as skipped rather than run against a connection that cannot work.
  */
@@ -49,6 +50,8 @@ export interface DiagnosticPlan {
   hostKey?: { pinned: string | null; pinnedType?: string | null; revealPresented: boolean };
   /** Log in with stored credentials. Undefined when not requested. */
   authenticate?: () => Promise<StepOutcome>;
+  /** Servers with Docker on, when logging in was requested: find the daemon. Runs after a successful login. */
+  docker?: () => Promise<StepOutcome>;
 }
 
 export interface RunOptions {
@@ -63,6 +66,7 @@ const LABELS: Record<DiagnosticStepId, string> = {
   banner: 'Protocol banner',
   host_key: 'Host key',
   auth: 'Authentication',
+  docker: 'Docker',
 };
 
 const BANNER_LABEL: Record<DiagnosticService, string> = {
@@ -237,6 +241,13 @@ export async function runDiagnostics(
     } else {
       const authenticate = plan.authenticate;
       push(await timed('auth', LABELS.auth, () => withTimeout(authenticate(), STEP_TIMEOUTS.auth + 5_000)));
+    }
+
+    // ── Docker ──
+    if (plan.docker) {
+      const docker = plan.docker;
+      if (blocked) push(skipped('docker', LABELS.docker, blocked));
+      else push(await timed('docker', LABELS.docker, () => withTimeout(docker(), STEP_TIMEOUTS.docker)));
     }
   } finally {
     for (const s of sockets) s.destroy();

@@ -1,6 +1,7 @@
 /** Connectivity diagnostics: why a server, file or storage connection cannot be reached. */
 
-export type DiagnosticStepId = 'dns' | 'tcp' | 'tls' | 'banner' | 'host_key' | 'auth';
+/** `docker` runs for servers with Docker on, after a successful login; its problems are warnings. */
+export type DiagnosticStepId = 'dns' | 'tcp' | 'tls' | 'banner' | 'host_key' | 'auth' | 'docker';
 
 /**
  * `skipped` means the step did not run — an earlier step failed, it does not

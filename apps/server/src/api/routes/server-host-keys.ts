@@ -8,6 +8,7 @@ import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import { evictServer } from '../../ssh/sftp.js';
+import { evictDockerServer } from '../../docker/index.js';
 import { forgetHostKey, hostKeyView, pinHostKey } from '../../ssh/host-keys.js';
 import { scanServerHostKey, serversBehind } from '../../ssh/jump.js';
 
@@ -46,11 +47,14 @@ export async function hostKeyRoutes(app: FastifyInstance) {
   });
 
   /**
-   * Pooled SFTP connections to this server, and to every server that jumps
-   * through it, were verified against the old key.
+   * Pooled SFTP and Docker connections to this server, and to every server
+   * that jumps through it, were verified against the old key.
    */
   function evict(orgId: string, serverId: string) {
-    for (const id of [serverId, ...serversBehind(orgId, serverId)]) evictServer(orgId, id);
+    for (const id of [serverId, ...serversBehind(orgId, serverId)]) {
+      evictServer(orgId, id);
+      evictDockerServer(orgId, id);
+    }
   }
 
   /**

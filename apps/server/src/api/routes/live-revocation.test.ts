@@ -2,13 +2,15 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 
 /**
  * Revoking access must also end what is already open: terminals, pooled SFTP
- * connections and AI agent streams. The three closers are spied on here; their
- * own behaviour is covered in ssh/broker.test.ts, ssh/sftp-pool.test.ts and
- * ai/streams.test.ts.
+ * and Docker connections (and Docker streams), and AI agent streams. The
+ * closers are spied on here; their own behaviour is covered in
+ * ssh/broker.test.ts, ssh/sftp-pool.test.ts, docker/pool.test.ts,
+ * api/routes/docker.test.ts and ai/streams.test.ts.
  */
 const closers = vi.hoisted(() => ({
   terminals: vi.fn(() => 0),
   sftp: vi.fn(() => 0),
+  docker: vi.fn(() => 0),
   agents: vi.fn(() => 0),
 }));
 
@@ -19,6 +21,10 @@ vi.mock('../../ssh/broker.js', async (importOriginal) => {
 vi.mock('../../ssh/sftp.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../ssh/sftp.js')>();
   return { ...actual, evictUser: closers.sftp };
+});
+vi.mock('../../docker/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../docker/index.js')>();
+  return { ...actual, closeDockerForUser: closers.docker };
 });
 vi.mock('../../ai/streams.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../ai/streams.js')>();
@@ -46,6 +52,7 @@ describe('live access revocation', () => {
       keepServerIds: scope.keepServerIds,
     });
     expect(closers.sftp).toHaveBeenCalledWith(userId, { orgId: scope.orgId, keepServerIds: scope.keepServerIds });
+    expect(closers.docker).toHaveBeenCalledWith(userId, { orgId: scope.orgId, keepServerIds: scope.keepServerIds });
     expect(closers.agents).toHaveBeenCalledWith(userId, { orgId: scope.orgId });
   }
 

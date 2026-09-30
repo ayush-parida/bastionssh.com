@@ -459,6 +459,50 @@ REST surface, all under `/api/ftp`:
   account (host, port, user — behind an agent, the agent stands in for the host) with the
   old key share its authorized_keys, so the old line is left there and the key not retired.
 
+### 4.15 Docker (`/server/docker`, `api/routes/docker.ts`)
+
+Design: `docs/superpowers/specs/2026-09-30-docker-management-design.md`. Phase D1 (read)
+is in place; actions, exec, Compose and the fleet view build on the same pieces.
+
+- **Transport** (`transport.ts`): no Docker client library and no second SSH path. Over a
+  pooled ssh2 connection built with `sshConnectConfig` + `connectSsh` (so host keys, jump
+  hosts and agents apply), each HTTP connection to the daemon gets a fresh
+  `direct-streamlocal@openssh.com` channel to the socket, or an exec channel running
+  `docker --host unix://<socket> system dial-stdio` where sshd refuses socket forwarding.
+  The dial-stdio stream reports the CLI's stderr when it exits early.
+- **Pool** (`pool.ts`): one SSH connection per (org, server, user), closed after 2 idle
+  minutes, evicted by `revokeLiveAccess` (with the user's Docker event streams) and when a
+  server is edited, deleted, its host key changes or its key is rotated.
+- **Client** (`client.ts`): `http.request` with an `Agent` whose `createConnection` opens
+  the stream; JSON calls with a timeout and body cap, streaming calls (logs, stats,
+  events), and hijacked calls (`Upgrade: tcp`, for exec). Paths are versioned with the
+  API version negotiated from `/version` — the newest both sides speak, 1.25 to 1.47 —
+  and pinned on the server row.
+- **Detection** (`probe.ts`): on demand only (an admin's probe, or the first request for a
+  server not yet detected). Streamlocal to the configured or default socket first; if that
+  fails, one POSIX script (run via `sh -c`, arguments quoted) reports the CLI, the runtime
+  directory and which candidate sockets exist and are usable — default, rootless
+  (`$XDG_RUNTIME_DIR/docker.sock`), Podman (`/run/podman/podman.sock`, and the rootless
+  one). A usable socket that sshd will not open a channel to means forwarding is off
+  (OpenSSH answers a bare "open failed" under `AllowTcpForwarding no` too), and dial-stdio
+  is tried. The result — transport, socket, engine and API version — is stored on
+  `servers` (`docker_*` columns); a failure clears it and names the problem and fix.
+  The Diagnose flow runs the same probe (without recording) after a successful login.
+- **Routes** (`/api/docker`): `withDockerClient(req, serverId, fn)` (`service.ts`) is the
+  only way in — per-server access (404), Docker off (400), lease, lazy detection, client.
+  Read routes: containers, inspect (Env values redacted by `redact.ts`), top, images,
+  image inspect, volumes, networks, info + `/system/df`, and SSE streams for logs (demuxed
+  by `demux.ts`, tail ≤ 10 000, plus a streamed plain-text download), stats and engine
+  events. Streams follow the AI chat's conventions (`sse.ts`): heartbeats, the daemon
+  request aborted when the browser leaves, backpressure, at most 8 per user, ended with
+  an `error` event on revocation. Ids and image references are validated
+  (`validation.ts`) and path segments encoded.
+- **Permissions** (`permissions.ts`, matrix in `@smt/shared` `dockerPermissions`):
+  viewers list; operators also read logs, stats, top and inspect; exec and removal for
+  operators follow the org's `docker_settings`; prune, env reveal and per-server settings
+  are admin. Org settings are read by any member and changed by admins
+  (`org.docker_settings`); probes are audited as `docker.probe`, reads are not.
+
 ---
 
 ## 5. Data Model (Logical)
@@ -615,6 +659,9 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | FTP list / download         | viewer   | —           |
 | FTP upload / mkdir / rename / delete | — | operator |
 | AI chat                     | —        | operator    |
+| Docker lists, info, events  | viewer   | —           |
+| Docker logs, stats, top, inspect | operator | —      |
+| Docker org settings, server probe | viewer (settings) | admin |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
 

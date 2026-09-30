@@ -881,3 +881,64 @@ describe('migration 0020 (backup-code recovery sessions)', () => {
     expect(columns('sessions')).toContain('recovery_only');
   });
 });
+
+const DOCKER_TAG = '0021_docker';
+
+describe('migration 0021 (docker)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(DOCKER_TAG);
+  });
+
+  it('leaves existing servers on auto with nothing detected, and orgs on the default settings', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < DOCKER_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, port, username, tags, host_key_fingerprint, created_by, created_at, updated_at)
+        VALUES ('s1', 'o1', 'web', '10.0.0.1', 22, 'root', '[]', 'SHA256:x', 'u1', 'now', 'now');
+    `);
+
+    apply(db, [DOCKER_TAG]);
+
+    expect(
+      db
+        .prepare(
+          `SELECT id, host_key_fingerprint, docker_mode, docker_socket_path, docker_transport,
+             docker_detected_socket_path, docker_detected_at, docker_version, docker_api_version
+           FROM servers`,
+        )
+        .get(),
+    ).toEqual({
+      id: 's1',
+      host_key_fingerprint: 'SHA256:x',
+      docker_mode: 'auto',
+      docker_socket_path: null,
+      docker_transport: null,
+      docker_detected_socket_path: null,
+      docker_detected_at: null,
+      docker_version: null,
+      docker_api_version: null,
+    });
+    expect(db.prepare('SELECT id, docker_settings FROM organizations').get()).toEqual({ id: 'o1', docker_settings: null });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (table: string) =>
+      (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns('servers')).toEqual(
+      expect.arrayContaining([
+        'docker_mode',
+        'docker_socket_path',
+        'docker_transport',
+        'docker_detected_socket_path',
+        'docker_detected_at',
+        'docker_version',
+        'docker_api_version',
+      ]),
+    );
+    expect(columns('organizations')).toContain('docker_settings');
+  });
+});

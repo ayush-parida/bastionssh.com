@@ -33,6 +33,24 @@ describe('runDiagnostics', () => {
     expect(sockets.every((s) => s.destroyed)).toBe(true);
   });
 
+  it('checks Docker after a successful login, and skips it when the login failed', async () => {
+    const greeting = { kind: 'connect', greeting: 'SSH-2.0-OpenSSH_9.6\r\n' } as const;
+    const docker = async () => ({ status: 'warn' as const, detail: 'Docker does not appear to be installed.' });
+    const ran = await runDiagnostics(sshPlan({ authenticate: async () => ({ status: 'ok', detail: 'in' }), docker }), {
+      deps: fakeDeps({ connect: fakeConnect(greeting).connect }),
+      egress: egress(null),
+    });
+    expect(statuses(ran.steps)).toEqual(['dns:ok', 'tcp:ok', 'banner:ok', 'host_key:ok', 'auth:ok', 'docker:warn']);
+    // Docker being absent is not a connectivity failure
+    expect(ran.ok).toBe(true);
+
+    const blocked = await runDiagnostics(
+      sshPlan({ authenticate: async () => ({ status: 'fail', detail: 'denied' }), docker }),
+      { deps: fakeDeps({ connect: fakeConnect(greeting).connect }), egress: egress(null) },
+    );
+    expect(statuses(blocked.steps).slice(-2)).toEqual(['auth:fail', 'docker:skipped']);
+  });
+
   it('stops at NXDOMAIN and skips everything after it', async () => {
     const deps = fakeDeps({
       lookup: () => Promise.reject(codedError('ENOTFOUND')),

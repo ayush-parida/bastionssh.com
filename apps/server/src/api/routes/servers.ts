@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import type { CloudProvider, CloudServerState, Server } from '@smt/shared';
+import type { CloudProvider, CloudServerState, DockerMode, DockerTransport, Server } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
 import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
@@ -10,6 +10,9 @@ import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
 import { evictServer } from '../../ssh/sftp.js';
+import { evictDockerServer } from '../../docker/index.js';
+import { clearedDetection } from '../../docker/probe.js';
+import { isValidSocketPath } from '../../docker/validation.js';
 import { clearedColumns, hostKeyStatus, pinnedColumns } from '../../ssh/host-keys.js';
 import { jumpHostProblem, serversBehind } from '../../ssh/jump.js';
 import { resolveHostKeyAlert } from '../../monitoring/alerts.js';
@@ -31,6 +34,16 @@ const createServerSchema = z.object({
   jumpServerId: z.string().min(1).nullable().optional(),
   /** Reach the server through this connectivity agent (to its loopback, on `port`); null = directly. */
   agentId: z.string().min(1).nullable().optional(),
+  /** Docker for this server: 'off' hides it and refuses its routes. */
+  dockerMode: z.enum(['auto', 'off']).optional(),
+  /** Docker socket override (rootless Docker, Podman); null returns to detection. */
+  dockerSocketPath: z
+    .string()
+    .trim()
+    .refine(isValidSocketPath, 'must be an absolute path to a Unix socket')
+    .nullable()
+    .optional()
+    .transform((v) => (v === '' ? null : v)),
 });
 
 /** Strip encryptedPassword and return safe server object */
@@ -61,6 +74,13 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
     hostKeyMismatchFingerprint,
     hostKeyMismatchType,
     hostKeyMismatchAt,
+    dockerMode,
+    dockerSocketPath,
+    dockerTransport,
+    dockerDetectedSocketPath,
+    dockerDetectedAt,
+    dockerVersion,
+    dockerApiVersion,
     ...safe
   } = row;
   return {
@@ -81,15 +101,28 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
             syncedAt: cloudSyncedAt,
           }
         : null,
+    docker: {
+      mode: dockerMode as DockerMode,
+      socketPath: dockerSocketPath,
+      transport: dockerTransport as DockerTransport | null,
+      detectedSocketPath: dockerDetectedSocketPath,
+      detectedAt: dockerDetectedAt,
+      version: dockerVersion,
+      apiVersion: dockerApiVersion,
+    },
   };
 }
 
 /**
- * Drop pooled SFTP connections to a server and to every server reached through
- * it — theirs run over a tunnel built with this server's old settings.
+ * Drop pooled SFTP and Docker connections to a server and to every server
+ * reached through it — theirs run over a tunnel built with this server's old
+ * settings.
  */
 function evictWithDependents(orgId: string, serverId: string) {
-  for (const id of [serverId, ...serversBehind(orgId, serverId)]) evictServer(orgId, id);
+  for (const id of [serverId, ...serversBehind(orgId, serverId)]) {
+    evictServer(orgId, id);
+    evictDockerServer(orgId, id);
+  }
 }
 
 /** A server may only point at a vaulted key from its own org that a rotation has not retired. */
@@ -172,6 +205,8 @@ export async function serverRoutes(app: FastifyInstance) {
         notes: body.notes,
         jumpServerId: body.jumpServerId ?? null,
         agentId: body.agentId ?? null,
+        ...(body.dockerMode && { dockerMode: body.dockerMode }),
+        ...(body.dockerSocketPath && { dockerSocketPath: body.dockerSocketPath }),
         ...(body.hostKeyFingerprint && pinnedColumns(body.hostKeyFingerprint, null, req.user.id)),
       })
       .run();
@@ -254,8 +289,17 @@ export async function serverRoutes(app: FastifyInstance) {
       ...(body.notes !== undefined && { notes: body.notes }),
       ...(jumpChanged && { jumpServerId: body.jumpServerId ?? null }),
       ...(body.agentId !== undefined && { agentId: body.agentId }),
+      ...(body.dockerMode !== undefined && { dockerMode: body.dockerMode }),
       updatedAt: new Date().toISOString(),
     };
+
+    // A different socket is a different daemon: what the last probe found no longer applies
+    const dockerSocketChanged =
+      body.dockerSocketPath !== undefined && (body.dockerSocketPath ?? null) !== existing.dockerSocketPath;
+    if (dockerSocketChanged) {
+      Object.assign(updateData, { dockerSocketPath: body.dockerSocketPath ?? null }, clearedDetection());
+    }
+    const dockerModeChanged = body.dockerMode !== undefined && body.dockerMode !== existing.dockerMode;
 
     // A new host or port is a different endpoint: the old key says nothing about
     // it. A new route is not: the agent is untrusted transport, so the pinned
@@ -282,7 +326,7 @@ export async function serverRoutes(app: FastifyInstance) {
     }
 
     db.update(servers).set(updateData).where(eq(servers.id, id)).run();
-    // Pooled SFTP channels hold the old host/credentials/route — force a reconnect
+    // Pooled SFTP and Docker connections hold the old host/credentials/route — force a reconnect
     evictWithDependents(req.orgId, id);
     await audit(
       req,
@@ -290,10 +334,14 @@ export async function serverRoutes(app: FastifyInstance) {
       'server',
       id,
       existing.name,
-      jumpChanged || agentChanged
+      jumpChanged || agentChanged || dockerModeChanged || dockerSocketChanged
         ? {
             ...(jumpChanged && { jumpServerId: { from: existing.jumpServerId, to: body.jumpServerId ?? null } }),
             ...(agentChanged && { agentId: { from: existing.agentId, to: body.agentId } }),
+            ...(dockerModeChanged && { dockerMode: { from: existing.dockerMode, to: body.dockerMode } }),
+            ...(dockerSocketChanged && {
+              dockerSocketPath: { from: existing.dockerSocketPath, to: body.dockerSocketPath ?? null },
+            }),
           }
         : undefined,
     );
@@ -331,7 +379,10 @@ export async function serverRoutes(app: FastifyInstance) {
     // Servers behind this one fall back to direct connections (ON DELETE SET NULL)
     const dependents = serversBehind(req.orgId, id);
     db.delete(servers).where(eq(servers.id, id)).run();
-    for (const serverId of [id, ...dependents]) evictServer(req.orgId, serverId);
+    for (const serverId of [id, ...dependents]) {
+      evictServer(req.orgId, serverId);
+      evictDockerServer(req.orgId, serverId);
+    }
     await audit(req, 'server.delete', 'server', id, existing.name);
     return reply.status(204).send();
   });

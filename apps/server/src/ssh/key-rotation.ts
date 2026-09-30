@@ -8,6 +8,7 @@ import { auditAs, type AuditActor } from '../audit/index.js';
 import { execOnServer } from './broker.js';
 import { generateKeyPair } from './keygen.js';
 import { evictServer } from './sftp.js';
+import { evictDockerServer } from '../docker/index.js';
 import { HostKeyMismatchError, type SshTarget } from './host-keys.js';
 import type { JumpOptions } from './jump.js';
 import logger from '../logger.js';
@@ -601,8 +602,9 @@ async function performRotation(
     });
     switched = true;
     update({ newKeyId });
-    // Pooled SFTP connections were opened with the old key
+    // Pooled SFTP and Docker connections were opened with the old key
     evictServer(initial.orgId, serverId);
+    evictDockerServer(initial.orgId, serverId);
 
     enter('remove_old');
     const sharing = sharedAccountServers(server, oldKey.id);
@@ -688,6 +690,7 @@ async function performRotation(
       return 'completed';
     }
     evictServer(initial.orgId, serverId);
+    evictDockerServer(initial.orgId, serverId);
     try {
       await removeKey(target, oldPrivate, newBlob, oldBlob, hop);
     } catch (err) {

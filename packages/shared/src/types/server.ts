@@ -1,5 +1,6 @@
 import type { ServerCloudInfo } from './cloud.js';
 import type { HostKeyStatus } from './host-key.js';
+import type { DockerMode, ServerDocker } from './docker.js';
 
 export interface Server {
   id: string;
@@ -21,6 +22,8 @@ export interface Server {
   jumpServerId: string | null;
   /** Reached through this connectivity agent instead of directly; null = direct. */
   agentId: string | null;
+  /** Docker on this server: whether it is on, and what the last probe found. */
+  docker: ServerDocker;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -42,6 +45,8 @@ export interface CreateServerRequest {
   jumpServerId?: string | null;
   /** Connect through this agent (to its loopback, on `port`); null or absent = directly to `host`. */
   agentId?: string | null;
+  dockerMode?: DockerMode;
+  dockerSocketPath?: string | null;
 }
 
 export interface UpdateServerRequest {
@@ -58,6 +63,10 @@ export interface UpdateServerRequest {
   /** null removes the jump host. */
   jumpServerId?: string | null;
   agentId?: string | null;
+  /** Admin only: `off` hides Docker for this server. */
+  dockerMode?: DockerMode;
+  /** Admin only: Docker socket override; null returns to detection. Clears the cached probe. */
+  dockerSocketPath?: string | null;
 }
 
 export interface ServerGroup {

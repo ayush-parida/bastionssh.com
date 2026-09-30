@@ -91,6 +91,18 @@ async function stream(path: string, body: unknown, init?: RequestInit): Promise<
   return res;
 }
 
+/** GET that hands back the raw Response, for server-sent event streams (Docker logs, stats, events). */
+async function getStream(path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'GET',
+    ...init,
+    headers: { Accept: 'text/event-stream', ...(init?.headers as Record<string, string>) },
+    credentials: 'include',
+  });
+  if (!res.ok) await fail(res, path);
+  return res;
+}
+
 /** Stream a raw file body to the server (SFTP and object-storage uploads). */
 async function upload<T = { path: string; size: number }>(path: string, file: Blob): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -130,6 +142,7 @@ export const api = {
   get: <T>(path: string) => request<T>(path, { method: 'GET' }),
   text,
   stream,
+  getStream,
   upload,
   download,
   post: <T>(path: string, body?: unknown) =>

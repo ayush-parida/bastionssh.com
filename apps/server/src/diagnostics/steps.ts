@@ -41,6 +41,7 @@ export const STEP_TIMEOUTS = {
   tls: 8_000,
   hostKey: 10_000,
   auth: 25_000,
+  docker: 45_000,
 } as const;
 
 export type StepOutcome = Pick<DiagnosticStep, 'status' | 'detail' | 'remediation' | 'data'>;

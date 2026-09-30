@@ -17,6 +17,7 @@ import { assertSafeHost, backendFor, resolveCredentials } from '../ftp/index.js'
 import { assertSafeEndpoint, ops, resolveConnection } from '../storage/index.js';
 import { STEP_TIMEOUTS, defaultDeps, type DiagnosticsDeps, type StepOutcome } from './steps.js';
 import { diagnose, type RunOptions } from './run.js';
+import { dockerDiagnosticStep } from '../docker/diagnose.js';
 import type { DiagnosticService } from './remediation.js';
 
 /**
@@ -180,6 +181,11 @@ export async function diagnoseServer(server: ServerRow, orgId: string, opts: Dia
           return sshAuthCheck(target, auth, undefined, jumpOptions);
         },
       }),
+      ...(opts.auth &&
+        server.dockerMode === 'auto' &&
+        opts.actorUserId && {
+          docker: () => dockerDiagnosticStep(server, orgId, opts.actorUserId!),
+        }),
     },
     runOpts,
   );

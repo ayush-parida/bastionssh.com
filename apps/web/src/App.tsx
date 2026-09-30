@@ -20,6 +20,7 @@ import TerminalPage from '@/pages/Terminal.js';
 import FilesPage from '@/pages/Files.js';
 import MonitoringPage from '@/pages/Monitoring.js';
 import ServerHealthPage from '@/pages/ServerHealth.js';
+import ServerDockerPage from '@/pages/ServerDocker.js';
 import StoragePage from '@/pages/Storage.js';
 import StorageBucketsPage from '@/pages/StorageBuckets.js';
 import StorageObjectsPage from '@/pages/StorageObjects.js';
@@ -78,6 +79,7 @@ export default function App() {
           <Route path="servers/:id/terminal" element={<TerminalPage />} />
           <Route path="servers/:id/files" element={<FilesPage />} />
           <Route path="servers/:id/health" element={<ServerHealthPage />} />
+          <Route path="servers/:id/docker" element={<ServerDockerPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="storage" element={<StoragePage />} />
           <Route path="storage/:id" element={<StorageBucketsPage />} />

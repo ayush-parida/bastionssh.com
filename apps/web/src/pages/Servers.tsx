@@ -8,13 +8,14 @@ import {
   HOST_KEY_FINGERPRINT_PATTERN,
   type ActiveRecording,
   type CreateServerRequest,
+  type DockerMode,
   type MonitoringOverview,
   type Server,
   type ServerCloudInfo,
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
+import { Activity, Container, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -27,6 +28,7 @@ import { RequestAccessDialog, useRequestableServers } from '@/components/access/
 import { KeyAgeBadge, RotationHistory, rotationRequestError } from '@/components/keys/KeyRotation.js';
 import { ROTATION_CONFIRM, rotateServerKey, rotateServerKeys, toastRotation } from '@/lib/key-rotation.js';
 import { useHasRole } from '@/store/auth.js';
+import ServerDockerFields from '@/components/docker/ServerDockerFields.js';
 
 interface ServerFormState {
   name: string;
@@ -43,9 +45,12 @@ interface ServerFormState {
   jumpServerId: string;
   /** Connectivity agent to go through; blank connects directly. */
   agentId: string;
+  dockerMode: DockerMode;
+  /** Docker socket override; blank detects. */
+  dockerSocketPath: string;
 }
 
-const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '', jumpServerId: '', agentId: '' };
+const empty: ServerFormState = { name: '', host: '', port: '22', username: 'root', authType: 'key', defaultKeyId: '', password: '', tags: '', hostKeyFingerprint: '', jumpServerId: '', agentId: '', dockerMode: 'auto', dockerSocketPath: '' };
 
 /** Tags are entered as a comma-separated list and stored as an array. */
 function splitTags(input: string): string[] {
@@ -228,6 +233,8 @@ export default function ServersPage() {
       hostKeyFingerprint: s.hostKeyFingerprint ?? '',
       jumpServerId: s.jumpServerId ?? '',
       agentId: s.agentId ?? '',
+      dockerMode: s.docker.mode,
+      dockerSocketPath: s.docker.socketPath ?? '',
     });
     setShowForm(true);
   }
@@ -281,6 +288,13 @@ export default function ServersPage() {
       ...(form.jumpServerId || editId ? { jumpServerId: form.jumpServerId || null } : {}),
       // Only when changed: a server keeps a revoked agent until an admin picks another
       ...(!editing || form.agentId !== (editing.agentId ?? '') ? { agentId: form.agentId || null } : {}),
+      // Admin only; a new server sends them only when set, an edit only when changed
+      ...(isAdmin && (editing ? form.dockerMode !== editing.docker.mode : form.dockerMode !== 'auto')
+        ? { dockerMode: form.dockerMode }
+        : {}),
+      ...(isAdmin && form.dockerSocketPath.trim() !== (editing?.docker.socketPath ?? '')
+        ? { dockerSocketPath: form.dockerSocketPath.trim() || null }
+        : {}),
     };
     if (editId) updateMutation.mutate({ id: editId, body });
     else createMutation.mutate(body);
@@ -506,6 +520,14 @@ export default function ServersPage() {
                 </p>
               )}
             </div>
+            {isAdmin && (
+              <ServerDockerFields
+                mode={form.dockerMode}
+                socketPath={form.dockerSocketPath}
+                onChange={(patch) => setForm((prev) => ({ ...prev, ...patch }))}
+                editing={editing}
+              />
+            )}
             <div className="col-span-2 flex gap-2">
               <button type="submit" className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
                 {editId ? 'Update' : 'Add'}
@@ -614,6 +636,11 @@ export default function ServersPage() {
                 <button onClick={() => navigate(`/servers/${s.id}/health`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Activity size={12} /> Health
                 </button>
+                {s.docker.mode === 'auto' && (s.docker.detectedAt || isAdmin) && (
+                  <button onClick={() => navigate(`/servers/${s.id}/docker`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
+                    <Container size={12} /> Docker
+                  </button>
+                )}
                 <DiagnoseButton target={{ kind: 'server', id: s.id, name: s.name }} onOpen={setDiagnosing} />
                 <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Pencil size={12} /> Edit

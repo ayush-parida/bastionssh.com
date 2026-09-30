@@ -39,7 +39,14 @@ import logger from '../logger.js';
  */
 
 /** Why a connection was opened — recorded with TOFU and mismatch audit rows. */
-export type HostKeyPurpose = 'terminal' | 'exec' | 'sftp' | 'health_check' | 'diagnostics' | 'host_key_scan';
+export type HostKeyPurpose =
+  | 'terminal'
+  | 'exec'
+  | 'sftp'
+  | 'docker'
+  | 'health_check'
+  | 'diagnostics'
+  | 'host_key_scan';
 
 export interface SshTarget {
   /** The servers row id — the pinned key is looked up by it. */

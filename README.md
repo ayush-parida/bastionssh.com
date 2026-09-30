@@ -31,6 +31,7 @@
   - Generate scripts on the fly
 - 🩺 **Connectivity Diagnostics** — One click walks DNS, TCP, TLS or the SSH banner, the host key and (optionally) a login for a server, FTP/SFTP or storage connection, says which step failed and what to fix, and shows the app's egress IP for firewall rules.
 - 🎥 **Session Recording** — Terminal sessions and one-shot command runs are recorded as asciicast and can be replayed in the browser or downloaded, with a searchable command log.
+- 🐳 **Docker** — Containers, images, volumes and networks per server with live status, logs, stats and redacted inspect, over the server's existing SSH connection — no agent, no exposed daemon port.
 - 🪜 **Jump Hosts & Private Networks** — Reach servers through one or more bastions (like `ssh -J`), or through a small outbound agent on a private network that needs no inbound port.
 - 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
 - 🔒 **Secure by Default** — All keys and credentials encrypted at rest. Self-hosted, no telemetry, no cloud lock-in.
@@ -305,6 +306,14 @@ Recordings are files under `SMT_RECORDINGS_DIR` (default `/data/recordings`, ins
 
 **Connectivity agents.** For servers with no inbound SSH reachable from the app, an admin creates an agent under **Agents**. The install command shown once installs a small Node.js (18+) service under systemd on a host in that network, which keeps an outbound WebSocket to `SMT_BASE_URL` open. It downloads the installer to a temporary file and runs it as root with the agent's token on stdin from a here-doc, so the token never appears in a process's arguments (`ps`); the installer writes it to `/etc/bastion-agent/agent.env` (root-only, mode 600), which the systemd unit loads with `EnvironmentFile=`. The installer refuses to be piped into `sh` and ignores a token in the environment. The here-doc is still saved in an interactive shell's history like any pasted command; to keep it out, run `sudo sh install.sh` on its own and paste the token at its prompt, which does not echo. Pick the agent as the server's route in the server form; the app then reaches the server's SSH port through the agent. The agent only ever dials its own loopback (`127.0.0.1`) on the ports listed in `BASTION_ALLOWED_PORTS` (default 22), and it is treated as untrusted transport: host keys are still verified end to end, so pin the server's fingerprint up front where you can. A server uses either a jump host or an agent, not both (a jump host may itself sit behind an agent). Revoking an agent drops its connection at once, and its servers fail closed rather than connecting directly. Agent connections live in the app process, so cron jobs run by a separate worker cannot use them.
 
+## 🐳 Docker on your servers
+
+**Docker** on a server card opens its containers, images, volumes and networks, with engine version, API version, disk usage and live status. Clicking a container opens its logs (follow, search, timestamps, download), live CPU and memory, its environment and the full inspect output. Lists update live from the engine's event stream while the page is open.
+
+Nothing is installed on the server and no port is opened: the app reaches the Docker socket through the server's own SSH connection — a forwarded Unix socket, or `docker system dial-stdio` over an exec channel when sshd does not allow socket forwarding (OpenSSH's `AllowStreamLocalForwarding` and `AllowTcpForwarding` both apply). Host key checks, jump hosts and agents work as for terminals. Docker is found on first use: the default `/var/run/docker.sock`, rootless Docker under `$XDG_RUNTIME_DIR`, then Podman's Docker-compatible socket; admins can set a socket path or turn Docker off per server in the server form, and **Detect Docker** probes again. When it cannot be reached the tab says why — not installed, daemon not running, forwarding disabled, or the SSH user not allowed on the socket (with the `usermod -aG docker <user>` fix). **Diagnose** with login checks Docker too.
+
+Access to the Docker socket is root-equivalent on the server, and the UI says so. Everyone who can access a server can list its containers; logs, stats, `top` and inspect need the operator role, since logs routinely carry tokens and personal data. Environment values in inspect output are always shown as `KEY=••••`. Owners and admins set, under **Settings → Docker**, whether operators may open shells in containers (default on) or remove containers and images (default off), and whether pruning is allowed (default on) — these apply as the actions arrive. Per-server access, suspensions and time-limited grants apply as everywhere else, and revoking access closes the member's Docker connections and streams at once. Each member may keep 8 log/stats/event streams open at a time; log tails are capped at 10 000 lines.
+
 ---
 
 ## 🔁 SSH key rotation
@@ -540,6 +549,8 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 - [x] SSH key rotation
 - [x] Audit log retention and forwarding (syslog, webhook)
 - [x] App database backups (scheduled, pre-migration, optional encrypted off-site copy)
+- [x] Docker: containers, images, volumes, networks, logs and stats (read)
+- [ ] Docker: container actions, exec shells, Compose, fleet view ([design](docs/superpowers/specs/2026-09-30-docker-management-design.md))
 - [ ] Short-lived SSH certificates ([design notes](docs/ssh-certificates.md))
 - [ ] Live shared terminal sessions
 - [ ] End-to-end encrypted secret sharing

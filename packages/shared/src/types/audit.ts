@@ -141,7 +141,9 @@ export type AuditAction =
   | 'audit.forwarding_update'
   | 'audit.forwarding_delete'
   | 'audit.forwarding_test'
-  | 'audit.forwarding_failed';
+  | 'audit.forwarding_failed'
+  | 'docker.probe'
+  | 'org.docker_settings';
 
 export interface AuditLogEntry {
   id: string;
