@@ -462,7 +462,7 @@ REST surface, all under `/api/ftp`:
 ### 4.15 Docker (`/server/docker`, `api/routes/docker.ts`)
 
 Design: `docs/superpowers/specs/2026-09-30-docker-management-design.md`. Phases D1 (read),
-D2 (actions) and D3 (exec) are in place; Compose and the fleet view build on the same pieces.
+D2 (actions), D3 (exec) and D4 (Compose) are in place; the fleet view builds on the same pieces.
 
 - **Transport** (`transport.ts`): no Docker client library and no second SSH path. Over a
   pooled ssh2 connection built with `sshConnectConfig` + `connectSsh` (so host keys, jump
@@ -529,6 +529,25 @@ D2 (actions) and D3 (exec) are in place; Compose and the fleet view build on the
   code (`docker.exec_start` / `docker.exec_end`). `closeDisallowedExecSessions` ends
   container shells whose owner lost `exec` (demotion, `operatorsCanExec` switched off); the
   WebSocket re-checks `exec` on re-attach.
+- **Compose** (`compose.ts`, `api/routes/docker-compose.ts`, phase D4): the Engine API has
+  no Compose endpoints. Projects are discovered from container labels
+  (`com.docker.compose.project`, `.service`, `.project.working_dir`,
+  `.project.config_files`, `.container-number`; one-off `run` containers skipped), so a
+  project taken `down` is no longer listed. Actions — only `up --detach`, `down`, `pull`,
+  `restart` — run the CLI on an exec channel of the caller's pooled connection:
+  `sh -c 'cd -- "$1" && shift && exec "$@"' sh <dir> env DOCKER_HOST=unix://<socket>
+  docker compose --ansi=never --project-name=… --project-directory=… --file=… <verb>`.
+  The script is constant; every label value is its own single-quoted argument
+  (`shell.ts`), flags take their value after `=` so nothing becomes an option, project
+  names must match Compose v2's pattern, and paths must be absolute with no control
+  characters — otherwise the project is listed with the reason and actions answer 409.
+  One action per (server, project) at a time. Output streams as SSE `logs` batches, then
+  `exit` (code, signal, duration, timed out after 15 min). An action keeps running when
+  the browser leaves; revocation evicts the connection and so ends it. Each is audited as
+  `docker.compose_<verb>` with project, working dir, files and exit code (`null` when cut
+  off). `GET compose/:project/logs` merges up to 32 containers' log streams into one SSE,
+  each line tagged `source: "<service>-<n>"`, optionally one `service`. Listing is `view`,
+  logs `inspect`, actions `pull` (operators and up).
 
 ---
 

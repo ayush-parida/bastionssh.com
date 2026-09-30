@@ -22,13 +22,15 @@ import ContainerActions from '@/components/docker/ContainerActions.js';
 import ImageActions from '@/components/docker/ImageActions.js';
 import PullImageDialog from '@/components/docker/PullImageDialog.js';
 import PruneDialog from '@/components/docker/PruneDialog.js';
+import ComposeProjects from '@/components/docker/ComposeProjects.js';
 
-type Tab = 'containers' | 'images' | 'volumes' | 'networks';
+type Tab = 'containers' | 'images' | 'volumes' | 'networks' | 'compose';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'containers', label: 'Containers' },
   { id: 'images', label: 'Images' },
   { id: 'volumes', label: 'Volumes' },
   { id: 'networks', label: 'Networks' },
+  { id: 'compose', label: 'Compose' },
 ];
 
 /**
@@ -217,6 +219,7 @@ export default function ServerDockerPage() {
             ) : (
               <p className="text-sm text-muted-foreground">Loading…</p>
             ))}
+          {tab === 'compose' && <ComposeProjects serverId={serverId} permissions={data.permissions} />}
         </>
       )}
 

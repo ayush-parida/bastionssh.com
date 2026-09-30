@@ -318,6 +318,8 @@ Access to the Docker socket is root-equivalent on the server, and the UI says so
 
 **Shells in containers.** **Open shell** starts `/bin/bash` in a running container, or `/bin/sh` when it has no bash, and opens it in the terminal (headed "container *name* on *server*"). It is a terminal session like any other: recorded under the org's recording settings (as a *container* recording naming the container — the Recordings page filters by container), closed when the tab is gone for a minute, and closed at once when the member's access is revoked, they are demoted, or the org stops letting operators open shells. Closing it sends ^C ^D so the shell exits rather than lingering in the container. Opening and closing are audited, with the exit code.
 
+The **Compose** tab lists Compose projects found from their containers' labels, with each service's containers and state. Operators and up can run `up -d`, `restart`, `pull` and `down` on a project (after a confirmation naming it) and watch the CLI's output live; logs of the whole project are merged with a `web-1 |` prefix per container. Actions run `docker compose` on the server, in the project's recorded working directory with its recorded compose files, so the Docker CLI with the Compose plugin must be installed there. Label values are never interpreted by the shell. An action keeps running if you close the dialog, and each one is audited with its exit code. A project taken down has no containers left, so it disappears from the list until it is started again on the server.
+
 ---
 
 ## 🔁 SSH key rotation

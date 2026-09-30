@@ -263,6 +263,8 @@ export interface DockerLogLine {
   /** RFC 3339 timestamp, when requested. */
   time?: string;
   text: string;
+  /** Which container the line came from, on merged streams (compose logs: `web-1`). */
+  source?: string;
 }
 
 /** An engine event, trimmed to what the UI reacts to. */
@@ -288,7 +290,53 @@ export type DockerStreamEvent =
   | { type: 'event'; event: DockerEngineEvent }
   | { type: 'pull'; progress: DockerPullProgress }
   | { type: 'end' }
-  | { type: 'error'; error: string; status?: number };
+  | { type: 'error'; error: string; status?: number }
+  /** A compose action finished; `exitCode` is null when the command was cut off (timeout, lost connection). */
+  | { type: 'exit'; exitCode: number | null; signal: string | null; durationMs: number; timedOut: boolean };
+
+// ── Compose (D4) ─────────────────────────────────────────────────────────────
+
+/** The only compose commands the app runs: `up -d`, `down`, `pull`, `restart`. */
+export type DockerComposeVerb = 'up' | 'down' | 'pull' | 'restart';
+
+export const DOCKER_COMPOSE_VERBS: readonly DockerComposeVerb[] = ['up', 'down', 'pull', 'restart'];
+
+export interface DockerComposeContainer {
+  id: string;
+  name: string;
+  image: string;
+  state: DockerContainerState;
+  status: string;
+  health: DockerHealth;
+  /** Replica number (`com.docker.compose.container-number`), when set. */
+  number: number | null;
+}
+
+export interface DockerComposeService {
+  name: string;
+  containers: DockerComposeContainer[];
+  running: number;
+}
+
+/**
+ * A compose project, discovered from its containers' labels — there is no
+ * other record of it, so a project whose containers were all removed
+ * (`down`) is no longer listed.
+ */
+export interface DockerComposeProject {
+  name: string;
+  /** Where compose ran (`com.docker.compose.project.working_dir`). */
+  workingDir: string | null;
+  /** Compose files used (`com.docker.compose.project.config_files`). */
+  configFiles: string[];
+  /** Why actions cannot run for this project (labels missing or unusable); null when they can. */
+  unmanageable: string | null;
+  services: DockerComposeService[];
+  running: number;
+  total: number;
+  /** `running`: every container up; `partial`: some; `stopped`: none. */
+  state: 'running' | 'partial' | 'stopped';
+}
 
 /** Update body for `PATCH /api/servers/:id`, Docker part. */
 export interface UpdateServerDockerRequest {

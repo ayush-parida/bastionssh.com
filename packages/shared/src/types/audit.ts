@@ -156,6 +156,10 @@ export type AuditAction =
   | 'docker.env_reveal'
   | 'docker.exec_start'
   | 'docker.exec_end'
+  | 'docker.compose_up'
+  | 'docker.compose_down'
+  | 'docker.compose_pull'
+  | 'docker.compose_restart'
   | 'org.docker_settings';
 
 export interface AuditLogEntry {

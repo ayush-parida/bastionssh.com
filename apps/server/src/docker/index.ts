@@ -12,6 +12,7 @@ import { abortDockerStreams } from './sse.js';
  * - permissions.ts / settings.ts — the role matrix and org settings
  * - sse.ts — event streams (caps, heartbeats, revocation)
  * - actions.ts, exec.ts — actions (D2) and shells in containers (D3)
+ * - compose.ts — Compose projects from labels, `docker compose` actions over SSH
  * - demux.ts, redact.ts, validation.ts, shell.ts, objects.ts, errors.ts — helpers
  */
 
