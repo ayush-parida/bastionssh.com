@@ -138,14 +138,16 @@ export async function recordingRoutes(app: FastifyInstance) {
   /** GET /api/recordings?serverId=&userId=&kind=&container=&from=&to=&page=&limit= */
   app.get('/', async (req) => {
     const q = listSchema.parse(req.query);
+    // Recordings name a container by its short id: a full id (`docker ps --no-trunc`) finds it too
+    const container = q.container && /^[0-9a-f]{13,64}$/.test(q.container) ? q.container.slice(0, 12) : q.container;
     const where = and(
       visibleTo(req),
       q.serverId ? eq(sessionRecordings.serverId, q.serverId) : undefined,
       q.userId ? eq(sessionRecordings.userId, q.userId) : undefined,
       q.kind ? eq(sessionRecordings.kind, q.kind) : undefined,
       // The container is named in `command` (recordings/index.ts containerLabel)
-      q.container ? eq(sessionRecordings.kind, 'container') : undefined,
-      q.container ? sql`${sessionRecordings.command} LIKE ${likeContains(q.container)} ESCAPE '\\'` : undefined,
+      container ? eq(sessionRecordings.kind, 'container') : undefined,
+      container ? sql`${sessionRecordings.command} LIKE ${likeContains(container)} ESCAPE '\\'` : undefined,
       q.from ? gte(sessionRecordings.startedAt, q.from) : undefined,
       q.to ? lte(sessionRecordings.startedAt, q.to) : undefined,
     );

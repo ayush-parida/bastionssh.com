@@ -58,6 +58,7 @@ export async function dockerExecRoutes(app: FastifyInstance) {
       const lease = await leaseSsh(req, server);
       let docker: DockerClient | undefined;
       let shell: ContainerShell | undefined;
+      let recording: ReturnType<typeof startTerminalRecording> = null;
       let handedOver = false;
       try {
         const { endpoint, apiVersion } = await ensureEndpoint(lease.client, server);
@@ -79,7 +80,7 @@ export async function dockerExecRoutes(app: FastifyInstance) {
           rows: body.rows,
         });
 
-        const recording = startTerminalRecording({
+        recording = startTerminalRecording({
           orgId: req.orgId,
           serverId: server.id,
           serverName: server.name,
@@ -142,9 +143,14 @@ export async function dockerExecRoutes(app: FastifyInstance) {
         return reply.status(201).send(result);
       } finally {
         if (!handedOver) {
-          shell?.channel.destroy();
-          docker?.close();
-          lease.release();
+          // A started shell is closed like any other (^C ^D, end of input):
+          // just dropping the attach would leave it running in the container
+          const closing = shell ? shell.close().catch(() => null) : Promise.resolve(null);
+          void closing.finally(() => {
+            docker?.close();
+            lease.release();
+          });
+          void recording?.discard().catch(() => {});
         }
       }
     } catch (err) {

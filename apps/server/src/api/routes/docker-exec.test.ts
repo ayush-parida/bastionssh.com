@@ -230,6 +230,9 @@ describe('docker exec', () => {
     expect(listed.json().items).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: session.recording!.id, container: { id: 'aaaaaaaaaaaa', name: 'web' } })]),
     );
+    // A full container id finds it too, though the recording keeps the short one
+    const byFullId = await app.inject({ method: 'GET', url: `/api/recordings?container=${'a'.repeat(64)}`, headers: admin.headers });
+    expect(byFullId.json().items.map((r: { id: string }) => r.id)).toContain(session.recording!.id);
     const none = await app.inject({ method: 'GET', url: '/api/recordings?container=w_b', headers: admin.headers });
     expect(none.json().items).toEqual([]);
   });
@@ -266,6 +269,30 @@ describe('docker exec', () => {
     expect(stopped.json().error).toBe('worker is not running');
     expect((await openShell(operator, 'nope')).statusCode).toBe(404);
     expect((await openShell(operator, '..%2Fetc')).statusCode).toBe(400);
+  });
+
+  it('closes a shell it started when handing it to the broker fails, and drops its recording', async () => {
+    const recordings = () =>
+      getDb()
+        .select()
+        .from(sessionRecordings)
+        .where(and(eq(sessionRecordings.kind, 'container'), eq(sessionRecordings.userId, operator.userId)))
+        .all().length;
+    const recordedBefore = recordings();
+    const startsBefore = audits('docker.exec_start').length;
+    const adopt = vi.spyOn(SSHBroker, 'adoptSession').mockImplementationOnce(() => {
+      throw new Error('broker unavailable');
+    });
+    try {
+      expect((await openShell(operator)).statusCode).toBe(500);
+    } finally {
+      adopt.mockRestore();
+    }
+    const exec = engine.execs.at(-1)!;
+    // Not left running in the container with nobody attached: it got ^C ^D and exited
+    await until(() => !exec.running && exec.socket === null);
+    await until(() => recordings() === recordedBefore);
+    expect(audits('docker.exec_start')).toHaveLength(startsBefore);
   });
 
   it('follows the role matrix and the org switch', async () => {
