@@ -277,9 +277,19 @@ export function runCompose(ssh: Client, command: string, opts: ComposeRunOptions
       let done = false;
       const timer = setTimeout(() => {
         timedOut = true;
+        // Closing the channel alone leaves compose running on the server (no
+        // pty, so no SIGHUP) with the project unclaimed here: ask sshd to stop it
+        try {
+          channel.signal('TERM');
+        } catch {
+          // channel already gone
+        }
         channel.close();
       }, opts.timeoutMs ?? COMPOSE_TIMEOUT_MS);
       timer.unref?.();
+      // Nothing is ever typed into compose: EOF on stdin, so a prompt (volume
+      // recreation, say) takes its default instead of waiting for the timeout
+      channel.end();
 
       const emit = (stream: 'stdout' | 'stderr', lines: string[]) => {
         if (lines.length > 0) opts.onLines(stream, lines);

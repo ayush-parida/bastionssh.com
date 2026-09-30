@@ -8,7 +8,12 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
  * hostile labels, audit rows with exit codes, and what happens to a running
  * action or a merged log stream when the browser leaves or access is revoked.
  */
-type ComposeChannel = import('node:stream').PassThrough & { stderr: import('node:stream').PassThrough; close: () => void };
+type ComposeChannel = import('node:stream').PassThrough & {
+  stderr: import('node:stream').PassThrough;
+  close: () => void;
+  /** The remote command's output ends (`end()` is the app closing stdin, as on ssh2). */
+  finish: () => void;
+};
 
 const fake = vi.hoisted(() => ({
   options: { daemonSocket: '', cli: true } as import('../../docker/fake-daemon.test-helper.js').FakeSshOptions,
@@ -16,6 +21,8 @@ const fake = vi.hoisted(() => ({
   clients: [] as { ended: boolean }[],
   /** Plays a `docker compose` run on its channel. */
   compose: null as null | ((command: string, channel: ComposeChannel) => void),
+  /** Commands whose stdin the app closed. */
+  stdinClosed: [] as string[],
 }));
 
 vi.mock('ssh2', async (importOriginal) => {
@@ -41,6 +48,13 @@ vi.mock('ssh2', async (importOriginal) => {
         const channel: ComposeChannel = Object.assign(new PassThrough(), {
           stderr: new PassThrough(),
           close: () => channel.destroy(),
+          signal: () => {},
+          finish: () => void Reflect.apply(PassThrough.prototype.end, channel, []),
+          // ssh2: EOF on the remote stdin; the channel stays open
+          end: () => {
+            fake.stdinClosed.push(command);
+            return channel;
+          },
         });
         track(channel);
         setImmediate(() => {
@@ -191,7 +205,7 @@ describe('docker compose routes', () => {
       setTimeout(() => {
         ch.emit('exit', code);
         ch.stderr.end();
-        ch.end();
+        ch.finish();
       }, 5);
     };
 
@@ -313,6 +327,8 @@ describe('docker compose routes', () => {
       const project = { name: 'blog', workingDir: '/srv/blog', configFiles: ['/srv/blog/compose.yaml'] };
       expect(fake.log.exec).toEqual([composeCommand({ project, socketPath: '/var/run/docker.sock' }, 'up')]);
       expect(fake.log.exec[0]).toContain(`'--project-name=blog' '--project-directory=/srv/blog' '--file=/srv/blog/compose.yaml' 'up' '--detach'`);
+      // Nothing is typed into compose: its stdin is closed as soon as it runs
+      expect(fake.stdinClosed).toContain(fake.log.exec[0]);
 
       const [row] = audits('docker.compose_up', serverA);
       expect(row).toMatchObject({ actorId: operator.userId, resourceType: 'server', resourceName: 'alpha' });
@@ -365,7 +381,7 @@ describe('docker compose routes', () => {
       fake.compose = (_c, ch) => {
         finish = () => {
           ch.emit('exit', 0);
-          ch.end();
+          ch.finish();
         };
       };
       const first = await openStream(operator, compose(serverA, '/blog/restart'), 'POST');
@@ -387,7 +403,7 @@ describe('docker compose routes', () => {
         ch.write('pulling\n');
         finish = () => {
           ch.emit('exit', 0);
-          ch.end();
+          ch.finish();
         };
       };
       const before = audits('docker.compose_up', serverB).length;

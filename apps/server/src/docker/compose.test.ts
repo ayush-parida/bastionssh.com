@@ -227,17 +227,28 @@ describe('runCompose', () => {
   /** An ssh2 client whose exec channel prints, exits with `code`, then closes. */
   function fakeSsh(script: (channel: PassThrough & { stderr: PassThrough }) => void) {
     const commands: string[] = [];
+    const signals: string[] = [];
+    const stdin = { ended: false };
     const client = {
       exec(command: string, cb: (err: Error | undefined, channel: unknown) => void) {
         commands.push(command);
-        const channel = Object.assign(new PassThrough(), { stderr: new PassThrough(), close: () => channel.emit('close') });
+        const channel = Object.assign(new PassThrough(), {
+          stderr: new PassThrough(),
+          close: () => channel.emit('close'),
+          signal: (name: string) => signals.push(name),
+          // ssh2: EOF on the remote stdin; the channel stays open
+          end: () => {
+            stdin.ended = true;
+            return channel;
+          },
+        });
         setImmediate(() => {
           cb(undefined, channel);
           script(channel);
         });
       },
     };
-    return { client: client as unknown as Client, commands };
+    return { client: client as unknown as Client, commands, signals, stdin };
   }
 
   it('streams lines per stream and resolves with the exit code', async () => {
@@ -259,10 +270,20 @@ describe('runCompose', () => {
     ]);
   });
 
-  it('closes the channel on timeout and reports no exit code', async () => {
-    const { client } = fakeSsh(() => {});
+  it('stops the command and closes the channel on timeout, reporting no exit code', async () => {
+    const { client, signals } = fakeSsh(() => {});
     const result = await runCompose(client, 'cmd', { onLines: () => {}, timeoutMs: 20 });
     expect(result).toMatchObject({ exitCode: null, timedOut: true });
+    expect(signals).toEqual(['TERM']);
+  });
+
+  it('closes stdin at once, so a prompt cannot hold the action open', async () => {
+    const { client, stdin } = fakeSsh((ch) => {
+      ch.emit('exit', 0);
+      ch.emit('close');
+    });
+    await runCompose(client, 'cmd', { onLines: () => {} });
+    expect(stdin.ended).toBe(true);
   });
 
   it('reports a channel that could not open', async () => {
