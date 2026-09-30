@@ -31,7 +31,7 @@
   - Generate scripts on the fly
 - 🩺 **Connectivity Diagnostics** — One click walks DNS, TCP, TLS or the SSH banner, the host key and (optionally) a login for a server, FTP/SFTP or storage connection, says which step failed and what to fix, and shows the app's egress IP for firewall rules.
 - 🎥 **Session Recording** — Terminal sessions and one-shot command runs are recorded as asciicast and can be replayed in the browser or downloaded, with a searchable command log.
-- 🐳 **Docker** — Containers, images, volumes and networks per server with live status, logs, stats and redacted inspect, over the server's existing SSH connection — no agent, no exposed daemon port.
+- 🐳 **Docker** — Containers, images, volumes and networks per server with live status, logs, stats and redacted inspect; container actions, pulls and prune, recorded shells in containers, Compose projects, a cross-server Containers view and opt-in container alerts — all over the server's existing SSH connection, no agent, no exposed daemon port.
 - 🪜 **Jump Hosts & Private Networks** — Reach servers through one or more bastions (like `ssh -J`), or through a small outbound agent on a private network that needs no inbound port.
 - 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
 - 🔒 **Secure by Default** — All keys and credentials encrypted at rest. Self-hosted, no telemetry, no cloud lock-in.
@@ -558,7 +558,7 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 - [x] Audit log retention and forwarding (syslog, webhook)
 - [x] App database backups (scheduled, pre-migration, optional encrypted off-site copy)
 - [x] Docker: containers, images, volumes, networks, logs and stats (read)
-- [ ] Docker: container actions, exec shells, Compose, fleet view ([design](docs/superpowers/specs/2026-09-30-docker-management-design.md))
+- [x] Docker: container actions, exec shells, Compose, fleet view, AI tools and container alerts ([design](docs/superpowers/specs/2026-09-30-docker-management-design.md))
 - [ ] Short-lived SSH certificates ([design notes](docs/ssh-certificates.md))
 - [ ] Live shared terminal sessions
 - [ ] End-to-end encrypted secret sharing
