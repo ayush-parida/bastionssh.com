@@ -143,6 +143,10 @@ export type AuditAction =
   | 'audit.forwarding_test'
   | 'audit.forwarding_failed'
   | 'docker.probe'
+  | 'docker.compose_up'
+  | 'docker.compose_down'
+  | 'docker.compose_pull'
+  | 'docker.compose_restart'
   | 'org.docker_settings';
 
 export interface AuditLogEntry {

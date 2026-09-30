@@ -314,6 +314,8 @@ Nothing is installed on the server and no port is opened: the app reaches the Do
 
 Access to the Docker socket is root-equivalent on the server, and the UI says so. Everyone who can access a server can list its containers; logs, stats, `top` and inspect need the operator role, since logs routinely carry tokens and personal data. Environment values in inspect output are always shown as `KEY=••••`. Owners and admins set, under **Settings → Docker**, whether operators may open shells in containers (default on) or remove containers and images (default off), and whether pruning is allowed (default on) — these apply as the actions arrive. Per-server access, suspensions and time-limited grants apply as everywhere else, and revoking access closes the member's Docker connections and streams at once. Each member may keep 8 log/stats/event streams open at a time; log tails are capped at 10 000 lines.
 
+The **Compose** tab lists Compose projects found from their containers' labels, with each service's containers and state. Operators and up can run `up -d`, `restart`, `pull` and `down` on a project (after a confirmation naming it) and watch the CLI's output live; logs of the whole project are merged with a `web-1 |` prefix per container. Actions run `docker compose` on the server, in the project's recorded working directory with its recorded compose files, so the Docker CLI with the Compose plugin must be installed there. Label values are never interpreted by the shell. An action keeps running if you close the dialog, and each one is audited with its exit code. A project taken down has no containers left, so it disappears from the list until it is started again on the server.
+
 ---
 
 ## 🔁 SSH key rotation

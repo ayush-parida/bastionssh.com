@@ -504,6 +504,25 @@ is in place; actions, exec, Compose and the fleet view build on the same pieces.
   operators follow the org's `docker_settings`; prune, env reveal and per-server settings
   are admin. Org settings are read by any member and changed by admins
   (`org.docker_settings`); probes are audited as `docker.probe`, reads are not.
+- **Compose** (`compose.ts`, `api/routes/docker-compose.ts`, phase D4): the Engine API has
+  no Compose endpoints. Projects are discovered from container labels
+  (`com.docker.compose.project`, `.service`, `.project.working_dir`,
+  `.project.config_files`, `.container-number`; one-off `run` containers skipped), so a
+  project taken `down` is no longer listed. Actions — only `up --detach`, `down`, `pull`,
+  `restart` — run the CLI on an exec channel of the caller's pooled connection:
+  `sh -c 'cd -- "$1" && shift && exec "$@"' sh <dir> env DOCKER_HOST=unix://<socket>
+  docker compose --ansi=never --project-name=… --project-directory=… --file=… <verb>`.
+  The script is constant; every label value is its own single-quoted argument
+  (`shell.ts`), flags take their value after `=` so nothing becomes an option, project
+  names must match Compose v2's pattern, and paths must be absolute with no control
+  characters — otherwise the project is listed with the reason and actions answer 409.
+  One action per (server, project) at a time. Output streams as SSE `logs` batches, then
+  `exit` (code, signal, duration, timed out after 15 min). An action keeps running when
+  the browser leaves; revocation evicts the connection and so ends it. Each is audited as
+  `docker.compose_<verb>` with project, working dir, files and exit code (`null` when cut
+  off). `GET compose/:project/logs` merges up to 32 containers' log streams into one SSE,
+  each line tagged `source: "<service>-<n>"`, optionally one `service`. Listing is `view`,
+  logs `inspect`, actions `pull` (operators and up).
 
 ---
 

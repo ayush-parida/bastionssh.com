@@ -31,6 +31,8 @@ export interface FakeContainer {
   Status: string;
   Tty?: boolean;
   Env?: string[];
+  /** Replaces the default compose labels (project `shop`, service = name). */
+  Labels?: Record<string, string>;
 }
 
 export interface FakeDaemon {
@@ -160,7 +162,7 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
             State: c.State,
             Status: c.Status,
             Ports: [{ PrivatePort: 80, PublicPort: 8080, Type: 'tcp', IP: '0.0.0.0' }],
-            Labels: { 'com.docker.compose.project': 'shop', 'com.docker.compose.service': c.Names[0]!.slice(1) },
+            Labels: c.Labels ?? { 'com.docker.compose.project': 'shop', 'com.docker.compose.service': c.Names[0]!.slice(1) },
             Mounts: [{ Type: 'volume', Name: 'data' }],
             NetworkSettings: { Networks: { bridge: {} } },
           })),

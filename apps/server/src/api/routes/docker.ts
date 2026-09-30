@@ -172,7 +172,7 @@ function imagePath(ref: string): string {
  * stderr (demux.ts); TTY ones send one raw stream. With timestamps, each line
  * starts with an RFC 3339 time and a space.
  */
-function logLineReader(tty: boolean, timestamps: boolean) {
+export function logLineReader(tty: boolean, timestamps: boolean) {
   const demuxer = new Demuxer();
   const splitters: Record<'stdout' | 'stderr', LineSplitter> = { stdout: new LineSplitter(), stderr: new LineSplitter() };
   const toLine = (stream: 'stdout' | 'stderr', raw: string): DockerLogLine => {

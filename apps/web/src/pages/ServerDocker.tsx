@@ -18,13 +18,15 @@ import ContainersTable from '@/components/docker/ContainersTable.js';
 import ContainerDrawer from '@/components/docker/ContainerDrawer.js';
 import { ImagesTable, NetworksTable, VolumesTable } from '@/components/docker/ResourceTables.js';
 import { DetectDockerButton, DockerProblem, problemOf } from '@/components/docker/DetectDocker.js';
+import ComposeProjects from '@/components/docker/ComposeProjects.js';
 
-type Tab = 'containers' | 'images' | 'volumes' | 'networks';
+type Tab = 'containers' | 'images' | 'volumes' | 'networks' | 'compose';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'containers', label: 'Containers' },
   { id: 'images', label: 'Images' },
   { id: 'volumes', label: 'Volumes' },
   { id: 'networks', label: 'Networks' },
+  { id: 'compose', label: 'Compose' },
 ];
 
 /**
@@ -181,6 +183,7 @@ export default function ServerDockerPage() {
             ) : (
               <p className="text-sm text-muted-foreground">Loading…</p>
             ))}
+          {tab === 'compose' && <ComposeProjects serverId={serverId} permissions={data.permissions} />}
         </>
       )}
 
