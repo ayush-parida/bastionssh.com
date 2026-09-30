@@ -239,7 +239,7 @@ export const organizations = sqliteTable('organizations', {
   auditRetentionDays: integer('audit_retention_days').notNull().default(365),
   // A backup-code sign-in may only enroll a passkey until it verifies with one
   backupCodeRecoveryOnly: integer('backup_code_recovery_only', { mode: 'boolean' }).notNull().default(true),
-  // Docker permissions JSON {operatorsCanExec, operatorsCanRemove, allowPrune}; null = defaults (docker/settings.ts)
+  // Docker permissions JSON {operatorsCanExec, operatorsCanRemove, allowPrune, containerAlerts}; null = defaults (docker/settings.ts)
   dockerSettings: text('docker_settings'),
   createdAt: text('created_at')
     .notNull()
@@ -784,7 +784,7 @@ export const serverAlerts = sqliteTable(
     serverId: text('server_id')
       .notNull()
       .references(() => servers.id, { onDelete: 'cascade' }),
-    type: text('type').notNull(), // offline | cpu_high | memory_high | disk_high | load_high | host_key_mismatch
+    type: text('type').notNull(), // offline | cpu_high | memory_high | disk_high | load_high | host_key_mismatch | container_unhealthy | container_restarting | container_exited
     severity: text('severity').notNull().default('warning'), // warning | critical
     message: text('message').notNull(),
     value: real('value'),

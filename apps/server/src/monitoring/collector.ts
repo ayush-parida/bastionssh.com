@@ -9,6 +9,7 @@ import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { cpuPercentBetween, ProbeError, round2, runProbe, type ProbeSample } from './probe.js';
 import { evaluateConditions, reconcileAlerts } from './alerts.js';
+import { applyContainerSample, reconcileContainerAlerts, sampleOverSsh, wantsContainerSample } from './containers.js';
 
 export interface CheckOutcome {
   serverId: string;
@@ -218,13 +219,18 @@ export async function checkServer(
 ): Promise<CheckOutcome> {
   try {
     const { auth } = await resolveServerAuth(server.orgId, server.id);
-    const { sample, latencyMs } = await runProbe(
+    // Containers are sampled on the same connection, only where the org asked for it
+    const containers = wantsContainerSample(server);
+    const { sample, latencyMs, extra } = await runProbe(
       { id: server.id, host: server.host, port: server.port, username: server.username },
       auth,
       config.monitoring.timeoutMs,
       { actorUserId },
+      containers ? (ssh) => sampleOverSsh(ssh, server) : undefined,
     );
-    return recordSuccess(server, sample, latencyMs);
+    const outcome = recordSuccess(server, sample, latencyMs);
+    applyContainerSample(server, containers, extra);
+    return outcome;
   } catch (err) {
     // A jump host's changed key: that server holds the mismatch and its alert;
     // this one is merely unreachable through it
@@ -280,6 +286,7 @@ export function pauseHealth(server: typeof servers.$inferSelect) {
   // A paused server should not keep firing alerts nobody is watching. Closing
   // them is bookkeeping, not an all-clear, so it goes out silently.
   reconcileAlerts(server.orgId, server.id, [], { notify: false });
+  reconcileContainerAlerts(server.orgId, server.id, [], { notify: false });
 }
 
 /**

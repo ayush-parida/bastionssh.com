@@ -11,6 +11,8 @@ import { abortDockerStreams } from './sse.js';
  * - service.ts — `withDockerClient`: access, lease, detection, client
  * - permissions.ts / settings.ts — the role matrix and org settings
  * - sse.ts — event streams (caps, heartbeats, revocation)
+ * - fleet.ts — containers across servers (fan-out, deadlines, partial results)
+ * - ai-tools.ts — what the AI assistant's read-only Docker tools return
  * - demux.ts, redact.ts, validation.ts, shell.ts, objects.ts, errors.ts — helpers
  */
 

@@ -14,7 +14,11 @@ export type AlertType =
   | 'memory_high'
   | 'disk_high'
   | 'load_high'
-  | 'host_key_mismatch';
+  | 'host_key_mismatch'
+  /** Docker containers (opt-in per org, `DockerSettings.containerAlerts`); one alert per container name. */
+  | 'container_unhealthy'
+  | 'container_restarting'
+  | 'container_exited';
 
 export type AlertSeverity = 'warning' | 'critical';
 

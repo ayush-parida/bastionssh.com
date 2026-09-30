@@ -37,12 +37,19 @@ export interface DockerSettings {
   operatorsCanRemove: boolean;
   /** Admins may prune unused containers, images, volumes and networks. */
   allowPrune: boolean;
+  /**
+   * The health check also samples containers on servers where Docker was
+   * detected, and raises `container_unhealthy` / `container_restarting` /
+   * `container_exited` alerts. Off by default to keep a first rollout quiet.
+   */
+  containerAlerts: boolean;
 }
 
 export const DEFAULT_DOCKER_SETTINGS: DockerSettings = {
   operatorsCanExec: true,
   operatorsCanRemove: false,
   allowPrune: true,
+  containerAlerts: false,
 };
 
 /**
@@ -294,4 +301,33 @@ export interface UpdateServerDockerRequest {
   dockerMode?: DockerMode;
   /** null returns to detection. */
   dockerSocketPath?: string | null;
+}
+
+// ── Fleet ────────────────────────────────────────────────────────────────────
+
+/** One server's answer in the fleet view: its containers, or why there are none. */
+export interface DockerFleetServer {
+  serverId: string;
+  serverName: string;
+  ok: boolean;
+  containers: DockerContainer[];
+  /** Why the server could not be listed (timed out, Docker not found, SSH failed…). */
+  error?: string;
+  /** `DOCKER_<PROBLEM>` for detection failures, like the per-server routes. */
+  code?: string;
+  durationMs: number;
+}
+
+/** A server the fleet view left out without asking it. */
+export interface DockerFleetSkipped {
+  serverId: string;
+  serverName: string;
+  /** `not_detected`: nobody opened its Docker tab yet; asking for it by id detects now. */
+  reason: 'off' | 'not_detected';
+}
+
+/** GET /api/docker/containers — containers across the servers the caller can access. */
+export interface DockerFleetResponse {
+  servers: DockerFleetServer[];
+  skipped: DockerFleetSkipped[];
 }

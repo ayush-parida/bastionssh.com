@@ -504,6 +504,32 @@ is in place; actions, exec, Compose and the fleet view build on the same pieces.
   operators follow the org's `docker_settings`; prune, env reveal and per-server settings
   are admin. Org settings are read by any member and changed by admins
   (`org.docker_settings`); probes are audited as `docker.probe`, reads are not.
+- **Fleet view** (`fleet.ts`, `api/routes/docker-fleet.ts`): `GET /api/docker/containers
+  ?serverIds&all` fans out over the accessible servers where Docker was detected (or the
+  ids asked for, which detects them), five at a time, 10 s each through
+  `withDockerClient`, and answers with partial results — one row per server, its error on
+  that row — plus the servers skipped (Docker off, never detected). Ids the caller cannot
+  access are left out silently. The browser leaving cancels requests in flight and the
+  servers not yet asked. Web: the **Containers** page.
+- **AI tools** (`ai-tools.ts`, `ai/tools.ts`): `docker_list_containers`,
+  `docker_container_logs` (tail ≤ 500, no follow, newest 64 KB kept) and `docker_inspect`
+  (always redacted) in `AGENT_TOOLS`, read-only, through `withDockerClient`; logs and
+  inspect need the `inspect` capability from the caller's membership role. The chat route
+  audits each call as `ai.docker_read` (tool, container, error — not the output), since it
+  goes to the AI provider. Mutations stay on `run_command` and its approval.
+- **Container alerts** (`monitoring/containers.ts`): opt-in per org
+  (`docker_settings.containerAlerts`, default off). The health probe runs a follow-up on
+  its own SSH connection (`runProbe(…, extra)`, 12 s, never fails the check) listing
+  containers on servers with `docker_mode = 'auto'` that were detected — the sweep never
+  detects. Only restarting, recently started and failed-exit containers are inspected
+  (≤ 20 per sweep; restart policies cached). `container_unhealthy`,
+  `container_restarting` (restart count +3 within 10 minutes, counted in memory across
+  sweeps) and `container_exited` (non-zero, restart policy not `no`, SIGTERM/non-OOM
+  SIGKILL ignored) are reconciled per (server, container name, type) — the name leads the
+  message, as `server_alerts` has no container column — and host reconciliation leaves
+  them alone. Notifications carry the container, so paging dedup keys are per container.
+  Turning the setting off, Docker off or pausing monitoring closes them silently; a sample
+  that fails leaves them as they are.
 
 ---
 
@@ -664,6 +690,8 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Docker lists, info, events  | viewer   | —           |
 | Docker logs, stats, top, inspect | operator | —      |
 | Docker org settings, server probe | viewer (settings) | admin |
+| Docker fleet view (Containers page) | viewer | —      |
+| AI Docker tools (list / logs, inspect) | operator (chat) | — |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
 

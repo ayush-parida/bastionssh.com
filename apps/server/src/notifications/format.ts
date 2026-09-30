@@ -31,6 +31,8 @@ export interface AlertEvent {
    * nothing is looked up in the servers table.
    */
   subject?: ServerRef;
+  /** The container a Docker container alert is about; alerts for different containers are separate incidents. */
+  container?: string;
 }
 
 /** Wrap a notice so the channel adapters can carry it. It names no server. */
@@ -69,6 +71,9 @@ export function alertLabel(type: AlertType | 'test' | 'notice'): string {
     disk_high: 'Disk high',
     load_high: 'Load high',
     host_key_mismatch: 'SSH host key changed',
+    container_unhealthy: 'Container unhealthy',
+    container_restarting: 'Container restarting',
+    container_exited: 'Container exited',
     test: 'Test notification',
     notice: 'Notice',
   };

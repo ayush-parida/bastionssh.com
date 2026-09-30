@@ -7,6 +7,7 @@ import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { notifyAlertsChanged, type AlertEvent } from '../notifications/index.js';
 import { round2, type ProbeSample } from './probe.js';
+import { isContainerAlert } from './containers.js';
 
 export interface AlertCondition {
   type: AlertType;
@@ -144,6 +145,9 @@ export interface ReconcileOptions {
  *
  * Notifications go out only on the transitions — open and resolve — so a
  * condition that stays true for an hour does not re-notify every sweep.
+ *
+ * Host alerts only: container alerts are keyed per container and reconciled
+ * on their own (monitoring/containers.ts).
  */
 export function reconcileAlerts(
   orgId: string,
@@ -158,7 +162,8 @@ export function reconcileAlerts(
     .select()
     .from(serverAlerts)
     .where(and(eq(serverAlerts.serverId, serverId), isNull(serverAlerts.resolvedAt)))
-    .all();
+    .all()
+    .filter((a) => !isContainerAlert(a.type));
 
   const openByType = new Map(open.map((a) => [a.type as AlertType, a]));
   const opened: AlertCondition[] = [];

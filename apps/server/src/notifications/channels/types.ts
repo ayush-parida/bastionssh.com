@@ -80,7 +80,7 @@ export function title(event: AlertEvent, server: ServerRef): string {
 export function dedupKey(event: AlertEvent, sentAt: string): string {
   if (event.kind === 'notice') return `smt:notice:${sentAt}`;
   if (event.kind === 'test') return `smt:test:${sentAt}`;
-  return `smt:${event.serverId}:${event.type}`;
+  return `smt:${event.serverId}:${event.type}${event.container ? `:${event.container}` : ''}`;
 }
 
 /** Three-way tone every adapter maps onto its own colour / priority scale. */

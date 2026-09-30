@@ -28,12 +28,14 @@ import {
   Sun,
   Moon,
   RadioTower,
+  Container,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme.js';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/servers', label: 'Servers', icon: Server },
+  { to: '/containers', label: 'Containers', icon: Container },
   { to: '/agents', label: 'Agents', icon: RadioTower },
   { to: '/storage', label: 'Object Storage', icon: HardDrive },
   { to: '/ftp', label: 'FTP', icon: FolderSync },

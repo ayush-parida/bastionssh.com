@@ -358,12 +358,38 @@ export async function aiRoutes(app: FastifyInstance) {
           }
         };
 
+        /**
+         * The read-only Docker tools. What they return goes to the AI provider,
+         * so each read is audited against its server, like a read-only
+         * run_command — the container, not the output.
+         */
+        const dockerRead = async (id: string, name: string, input: Record<string, unknown>) => {
+          const { serverId, serverName } = executor.resolveTarget(input);
+          const details = {
+            tool: name,
+            toolCallId: id,
+            ...(typeof input.container === 'string' && { container: input.container }),
+          };
+          try {
+            const output = await executor.execute(name, input);
+            await audit(req, 'ai.docker_read', 'server', serverId, serverName, details);
+            return output;
+          } catch (err) {
+            await audit(req, 'ai.docker_read', 'server', serverId, serverName, {
+              ...details,
+              error: err instanceof Error ? err.message : 'Docker read failed',
+            });
+            throw err;
+          }
+        };
+
         for await (const event of provider.agentLoop(
           messagesWithSystem,
           AGENT_TOOLS,
           (name, input, id) => {
             if (clientGone) throw new Error('Client disconnected');
             if (name === 'run_command') return runCommand(id, input);
+            if (name.startsWith('docker_')) return dockerRead(id, name, input);
             return executor.execute(name, input);
           },
         )) {

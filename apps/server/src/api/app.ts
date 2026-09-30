@@ -37,6 +37,7 @@ import { publicSsoRoutes, ssoSettingsRoutes } from './routes/sso.js';
 import { healthRoutes } from './routes/health.js';
 import { backupRoutes } from './routes/backups.js';
 import { dockerRoutes } from './routes/docker.js';
+import { dockerFleetRoutes } from './routes/docker-fleet.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
 import { HostKeyMismatchError } from '../ssh/host-keys.js';
 
@@ -108,6 +109,7 @@ export async function buildApp() {
   await app.register(diagnosticsRoutes, { prefix: '/api/diagnostics' });
   // Docker on managed servers; later phases add their route files under the same prefix
   await app.register(dockerRoutes, { prefix: '/api/docker' });
+  await app.register(dockerFleetRoutes, { prefix: '/api/docker' });
   await app.register(teamRoutes, { prefix: '/api/team' });
   await app.register(accessRequestRoutes, { prefix: '/api/access-requests' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });

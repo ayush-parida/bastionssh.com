@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type {
   DockerContainer,
   DockerEngineInfo,
@@ -37,7 +37,9 @@ export default function ServerDockerPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>('containers');
   const [showAll, setShowAll] = useState(true);
-  const [selected, setSelected] = useState<string | null>(null);
+  // `?container=<id>` opens that container's drawer (links from the Containers page)
+  const [params] = useSearchParams();
+  const [selected, setSelected] = useState<string | null>(params.get('container'));
 
   const status = useQuery<DockerServerStatus>({
     queryKey: dockerKeys.status(serverId),

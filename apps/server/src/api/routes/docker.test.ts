@@ -268,6 +268,7 @@ describe('docker routes', () => {
         operatorsCanExec: true,
         operatorsCanRemove: false,
         allowPrune: true,
+        containerAlerts: false,
       });
       expect((await send(orgOperator, 'PATCH', '/api/docker/settings', { allowPrune: false })).statusCode).toBe(403);
       expect((await send(orgAdmin, 'PATCH', '/api/docker/settings', { nope: true })).statusCode).toBe(400);
