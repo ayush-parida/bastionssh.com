@@ -226,6 +226,18 @@ describe('topology graph', () => {
     expect(edge(g3, 'HorizontalPodAutoscaler/shop/web', 'Deployment/shop/web')).toMatchObject({ broken: false });
   });
 
+  it('draws a claim that will get no storage red, and one still being provisioned amber', () => {
+    const claim = (name: string, storageClassName: string) =>
+      o({ kind: 'PersistentVolumeClaim', metadata: { name, namespace: 'shop' }, spec: { storageClassName }, status: { phase: 'Pending' } });
+    const objects: ObjectsByResource = {
+      persistentvolumeclaims: [claim('nowhere', 'fast'), claim('soon', 'standard')],
+      storageclasses: [o({ kind: 'StorageClass', metadata: { name: 'standard' }, volumeBindingMode: 'WaitForFirstConsumer' })],
+    };
+    const g = buildGraph({ namespace: 'shop', objects, diagnoses: diagnose(diagnosisInput(objects)) });
+    expect(g.nodes.find((n) => n.id === 'PersistentVolumeClaim/shop/nowhere')).toMatchObject({ health: 'failing', problems: 1 });
+    expect(g.nodes.find((n) => n.id === 'PersistentVolumeClaim/shop/soon')).toMatchObject({ health: 'warning', problems: 0 });
+  });
+
   it('stays readable with hundreds of pods: one ring per workload, capped', () => {
     const objects = shop();
     const many = Array.from({ length: 450 }, (_, i) => o(readyPod(`web-${i}`)));

@@ -3,11 +3,13 @@ import { z } from 'zod';
 import {
   KUBE_RESOURCES,
   type KubeAttentionList,
+  type KubeConfigView,
   type KubeDiagnosis,
   type KubeEventList,
   type KubeGraph,
   type KubeObjectInsight,
   type KubeResource,
+  type KubeStorageView,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { snapshotKube } from '../../kube/cache.js';
@@ -17,6 +19,7 @@ import { EventIndex, collapseEvents, groupEvents } from '../../kube/events.js';
 import { DIAGNOSIS_RESOURCES, GRAPH_RESOURCES, buildGraph, diagnosisInput, type ObjectsByResource } from '../../kube/graph.js';
 import { CRASH_NEXT_STEP_WITH_LOGS, diagnose, mergeByOwner, refKey, replicaSetsOf } from '../../kube/health.js';
 import { containerLanes, podLifecycle, rolloutOf } from '../../kube/insight.js';
+import { CONFIG_RESOURCES, STORAGE_RESOURCES, buildConfigView, buildStorageView } from '../../kube/inventory.js';
 import { requireKube } from '../../kube/permissions.js';
 import type { KubeContext } from '../../kube/service.js';
 import { withKubeClient } from '../../kube/service.js';
@@ -31,6 +34,7 @@ import { namespaceScopes } from './kube-views.js';
  * from the shared watch cache (kube/cache.ts) within the cluster's namespace
  * allowlist, so the views and their change feed (`…/stream?view=graph|
  * events|attention` in kube-views.ts) cost the cluster one watch per scope.
+ * The Storage and Config tabs (kube/inventory.ts) are read the same way.
  *
  * Nothing here returns a raw object: graph nodes, diagnoses and events carry
  * names, plain fields and words. Secrets appear by name (the cache holds them
@@ -218,6 +222,34 @@ export async function kubeGraphRoutes(app: FastifyInstance) {
           warnings,
           generatedAt: new Date().toISOString(),
         };
+      });
+    } catch (err) {
+      return sendKubeError(reply, err);
+    }
+  });
+
+  /** GET /clusters/:id/storage?namespace= — claims and their volumes, storage classes, and the pods that mount them. */
+  app.get('/clusters/:id/storage', { preHandler: requireKube('view') }, async (req, reply) => {
+    const { id } = clusterParams.parse(req.params);
+    const q = namespaceQuery.parse(req.query);
+    try {
+      return await withKubeClient(req, id, async (ctx): Promise<KubeStorageView> => {
+        const { objects, warnings } = await readObjects(ctx, STORAGE_RESOURCES, q.namespace);
+        return buildStorageView(objects, warnings, !q.namespace);
+      });
+    } catch (err) {
+      return sendKubeError(reply, err);
+    }
+  });
+
+  /** GET /clusters/:id/config?namespace= — ConfigMaps and Secrets by name and key (never a value), and who reads them. */
+  app.get('/clusters/:id/config', { preHandler: requireKube('view') }, async (req, reply) => {
+    const { id } = clusterParams.parse(req.params);
+    const q = namespaceQuery.parse(req.query);
+    try {
+      return await withKubeClient(req, id, async (ctx): Promise<KubeConfigView> => {
+        const { objects, warnings } = await readObjects(ctx, CONFIG_RESOURCES, q.namespace);
+        return buildConfigView(objects, warnings);
       });
     } catch (err) {
       return sendKubeError(reply, err);

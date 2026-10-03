@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import type { KubeAttentionList, KubeCluster, KubeDiagnosisId, KubeEventList, KubeGraph, KubeObjectInsight } from '@smt/shared';
+import type { KubeAttentionList, KubeCluster, KubeConfigView, KubeDiagnosisId, KubeEventList, KubeGraph, KubeObjectInsight, KubeStorageView } from '@smt/shared';
 import type { KubeClient, KubeObject } from './client.js';
 
 /**
@@ -261,7 +261,7 @@ describe.skipIf(!kubeconfigPath)('understanding a live k3s cluster', () => {
     expect(orphan.problems).toBeGreaterThan(0);
     expect(graph.edges.some((e) => e.source === orphan.id && e.broken)).toBe(true);
     // The claim for a StorageClass that does not exist: pending, amber, its problem counted
-    expect(node('PersistentVolumeClaim', 'data')).toMatchObject({ health: 'warning', summary: expect.stringMatching(/^Pending/), problems: 1 });
+    expect(node('PersistentVolumeClaim', 'data')).toMatchObject({ health: 'failing', summary: expect.stringMatching(/^Pending/), problems: 1 });
     // The stuck rollout counts its problem
     expect(node('Deployment', 'stuck')!.problems).toBeGreaterThan(0);
     expect(graph.warnings).toEqual([]);
@@ -290,6 +290,42 @@ describe.skipIf(!kubeconfigPath)('understanding a live k3s cluster', () => {
     expect(stuck.rollout!.revisions[0]!.images).toEqual(['busybox:smt-it-also-missing']);
     expect(stuck.rollout!.revisions[1]!.containers[0]).toMatchObject({ name: 'app', image: 'busybox:1.36' });
   }, 240_000);
+
+  it('lists the claim without storage and the config by key only — never a Secret value', async () => {
+    await client.create('secrets', NS, {
+      apiVersion: 'v1',
+      kind: 'Secret',
+      metadata: { name: 'shop-db', namespace: NS },
+      stringData: { password: 'smt-it-live-secret' },
+    } as unknown as KubeObject);
+    const storage = await eventually(
+      () => get<KubeStorageView>(viewer, cluster.id, `/storage?namespace=${NS}`),
+      (v) => !!v.claims.find((c) => c.ref.name === 'data')?.problem,
+      60_000,
+    );
+    expect(storage.claims.find((c) => c.ref.name === 'data')).toMatchObject({
+      phase: 'Pending',
+      storageClass: 'smt-it-missing',
+      volume: null,
+      problem: expect.objectContaining({ id: 'pvc-pending' }),
+    });
+    expect(storage.classes?.some((c) => c.isDefault)).toBe(true);
+
+    const res = await app.inject({ method: 'GET', url: `/api/kube/clusters/${cluster.id}/config?namespace=${NS}`, headers: viewer.headers });
+    expect(res.statusCode).toBe(200);
+    const config = await eventually(
+      async () => (await app.inject({ method: 'GET', url: `/api/kube/clusters/${cluster.id}/config?namespace=${NS}`, headers: viewer.headers })).json() as KubeConfigView,
+      (v) => v.secrets.some((x) => x.ref.name === 'shop-db'),
+      30_000,
+    );
+    expect(config.secrets.find((x) => x.ref.name === 'shop-db')).toMatchObject({ type: 'Opaque', keys: ['password'], usedBy: [] });
+    expect(config.configMaps.find((x) => x.ref.name === 'shop-config')).toMatchObject({
+      keys: ['MODE'],
+      usedBy: [{ ref: expect.objectContaining({ kind: 'Deployment', name: 'shop' }), how: ['env'] }],
+    });
+    expect(JSON.stringify(config)).not.toContain('smt-it-live-secret');
+    expect(JSON.stringify(config)).not.toContain(Buffer.from('smt-it-live-secret').toString('base64'));
+  }, 120_000);
 
   it('groups the events by object, warnings highlighted and repeats collapsed', async () => {
     const events = await eventually(

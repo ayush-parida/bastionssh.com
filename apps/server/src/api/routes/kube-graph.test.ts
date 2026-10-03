@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import type { IncomingMessage } from 'node:http';
-import type { KubeAttentionList, KubeCluster, KubeEventList, KubeGraph, KubeObjectInsight } from '@smt/shared';
+import type { KubeAttentionList, KubeCluster, KubeConfigView, KubeEventList, KubeGraph, KubeObjectInsight, KubeStorageView } from '@smt/shared';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
@@ -236,8 +236,107 @@ describe('kube graph routes', () => {
     }
   });
 
+  it('lists ConfigMaps and Secrets by key with who reads them — never a value', async () => {
+    api.add('configmaps', { kind: 'ConfigMap', metadata: { name: 'unused', namespace: 'shop' }, data: { LEVEL: 'debug' }, binaryData: { logo: 'AAAA' } });
+    let res = await get(viewer, c('/config?namespace=shop'));
+    // The cache picks the new ConfigMap up from its watch
+    for (let i = 0; i < 100 && !(res.json() as KubeConfigView).configMaps.length; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      res = await get(viewer, c('/config?namespace=shop'));
+    }
+    expect(res.statusCode).toBe(200);
+    const v = res.json() as KubeConfigView;
+    expect(v.secrets).toEqual([
+      expect.objectContaining({
+        ref: expect.objectContaining({ kind: 'Secret', namespace: 'shop', name: 'db' }),
+        type: 'Opaque',
+        keys: ['password'],
+        usedBy: [{ ref: expect.objectContaining({ kind: 'Deployment', name: 'web' }), how: ['env'] }],
+      }),
+    ]);
+    expect(v.configMaps).toEqual([expect.objectContaining({ keys: ['LEVEL', 'logo'], usedBy: [] })]);
+    // A reference to a ConfigMap that does not exist: the pods that need it cannot start
+    expect(v.missing).toEqual([
+      { kind: 'ConfigMap', namespace: 'shop', name: 'missing-flags', usedBy: [expect.objectContaining({ ref: expect.objectContaining({ name: 'web' }) })] },
+    ]);
+    // No value of either kind reaches the browser, not even masked
+    expect(res.body).not.toContain('aHVudGVyMg');
+    expect(res.body).not.toContain('debug');
+    expect(res.body).not.toContain('••••');
+  });
+
+  it('lists claims with their volume, class, users and why a pending one has no storage', async () => {
+    api.add('storageclasses', {
+      kind: 'StorageClass',
+      metadata: { name: 'standard', annotations: { 'storageclass.kubernetes.io/is-default-class': 'true' } },
+      provisioner: 'rancher.io/local-path',
+      reclaimPolicy: 'Delete',
+      volumeBindingMode: 'Immediate',
+    });
+    api.add('persistentvolumes', {
+      kind: 'PersistentVolume',
+      metadata: { name: 'pv-logs' },
+      spec: { capacity: { storage: '5Gi' }, persistentVolumeReclaimPolicy: 'Delete', claimRef: { namespace: 'shop', name: 'logs' } },
+      status: { phase: 'Bound' },
+    });
+    api.add('persistentvolumes', { kind: 'PersistentVolume', metadata: { name: 'pv-spare' }, spec: { capacity: { storage: '1Gi' } }, status: { phase: 'Available' } });
+    api.add('persistentvolumeclaims', {
+      kind: 'PersistentVolumeClaim',
+      metadata: { name: 'logs', namespace: 'shop' },
+      spec: { volumeName: 'pv-logs', accessModes: ['ReadWriteOnce'], resources: { requests: { storage: '5Gi' } } },
+      status: { phase: 'Bound', capacity: { storage: '5Gi' } },
+    });
+    api.add('persistentvolumeclaims', {
+      kind: 'PersistentVolumeClaim',
+      metadata: { name: 'data-db-0', namespace: 'shop' },
+      spec: { storageClassName: 'fast', resources: { requests: { storage: '10Gi' } } },
+      status: { phase: 'Pending' },
+    });
+    // A StatefulSet's per-pod claim is only on its pod: it counts towards the StatefulSet
+    api.add('statefulsets', {
+      kind: 'StatefulSet',
+      metadata: { name: 'db', namespace: 'shop' },
+      spec: { replicas: 1, template: { spec: { containers: [{ name: 'db', image: 'postgres' }] } } },
+      status: {},
+    });
+    const dbPod = pod('shop', 'db-0', { owner: { kind: 'StatefulSet', name: 'db' }, waiting: 'ContainerCreating' });
+    (dbPod.spec as any).volumes = [{ name: 'data', persistentVolumeClaim: { claimName: 'data-db-0' } }];
+    api.add('pods', dbPod);
+
+    let res = await get(viewer, c('/storage'));
+    // Everything added above has reached the cache (the pod comes last)
+    const settled = (v: KubeStorageView) => !!v.claims.find((cl) => cl.ref.name === 'data-db-0')?.usedBy.length && v.volumes.length > 0 && !!v.classes?.length;
+    for (let i = 0; i < 100 && !settled(res.json() as KubeStorageView); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      res = await get(viewer, c('/storage'));
+    }
+    expect(res.statusCode).toBe(200);
+    const v = res.json() as KubeStorageView;
+    const claim = (name: string) => v.claims.find((cl) => cl.ref.name === name)!;
+    expect(claim('logs')).toMatchObject({
+      phase: 'Bound',
+      capacity: '5Gi',
+      storageClass: null,
+      accessModes: ['ReadWriteOnce'],
+      volume: { name: 'pv-logs', phase: 'Bound', reclaimPolicy: 'Delete', exists: true },
+      problem: null,
+    });
+    expect(claim('data-db-0')).toMatchObject({
+      phase: 'Pending',
+      requested: '10Gi',
+      volume: null,
+      usedBy: [{ ref: expect.objectContaining({ kind: 'StatefulSet', name: 'db' }), how: ['mounts'] }],
+      problem: expect.objectContaining({ id: 'pvc-pending', cause: expect.stringContaining('no StorageClass `fast`') }),
+    });
+    // Volumes no claim holds; the bound one is listed under its claim
+    expect(v.volumes.map((pv) => pv.ref.name)).toEqual(['pv-spare']);
+    expect(v.classes).toEqual([expect.objectContaining({ name: 'standard', isDefault: true, bindingMode: 'Immediate', claims: 1 })]);
+    // A volume has no namespace: with one picked, unclaimed volumes are not listed
+    expect(((await get(viewer, c('/storage?namespace=shop'))).json() as KubeStorageView).volumes).toEqual([]);
+  });
+
   it('keeps everyone inside the allowlist, and members without the cluster out', async () => {
-    for (const path of ['/graph', '/events', '/attention', '/objects/pods/shop/web-1/insight']) {
+    for (const path of ['/graph', '/events', '/attention', '/storage', '/config', '/objects/pods/shop/web-1/insight']) {
       expect((await get(restricted, c(path))).statusCode).toBe(404);
     }
     await app.inject({ method: 'PATCH', url: c(), headers: admin.headers, payload: { namespacesAllowlist: ['shop'], defaultNamespace: 'shop' } });
@@ -245,6 +344,8 @@ describe('kube graph routes', () => {
       const all = (await get(viewer, c('/attention'))).json() as KubeAttentionList;
       expect(all.items.some((d) => d.subject.namespace === 'ops')).toBe(false);
       expect((await get(viewer, c('/graph?namespace=ops'))).statusCode).toBe(404);
+      expect((await get(viewer, c('/config?namespace=ops'))).statusCode).toBe(404);
+      expect((await get(viewer, c('/storage?namespace=ops'))).statusCode).toBe(404);
       expect((await get(viewer, c('/objects/pods/ops/tool/insight'))).statusCode).toBe(404);
     } finally {
       await app.inject({ method: 'PATCH', url: c(), headers: admin.headers, payload: { namespacesAllowlist: null } });

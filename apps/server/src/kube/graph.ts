@@ -108,7 +108,7 @@ export function diagnosisInput(objects: ObjectsByResource, podsCoverCluster = tr
   };
 }
 
-const WORKLOADS: { resource: KubeResource; kind: KubeWorkloadKind }[] = [
+export const WORKLOADS: { resource: KubeResource; kind: KubeWorkloadKind }[] = [
   { resource: 'deployments', kind: 'Deployment' },
   { resource: 'statefulsets', kind: 'StatefulSet' },
   { resource: 'daemonsets', kind: 'DaemonSet' },
@@ -178,7 +178,7 @@ export function podSpecRefs(spec: Json): Ref[] {
 }
 
 /** A workload's pod template spec and labels (a CronJob's through its job template). */
-function template(kind: string, w: KubeObject): { spec: Json; labels: Record<string, string> } {
+export function template(kind: string, w: KubeObject): { spec: Json; labels: Record<string, string> } {
   const spec = obj(w.spec);
   const tpl = kind === 'CronJob' ? obj(obj(obj(spec.jobTemplate).spec).template) : obj(spec.template);
   return { spec: obj(tpl.spec), labels: obj(obj(tpl.metadata).labels) as Record<string, string> };
@@ -391,6 +391,8 @@ export function buildGraph(input: GraphInput): KubeGraph {
 
   // Every claim (a pending one is often the problem), bound to its volume
   const volumes = o.persistentvolumes ?? null;
+  // A claim that will get no storage is as red as its diagnosis; one still being provisioned stays amber
+  const noStorage = new Set(input.diagnoses.filter((d) => d.id === 'pvc-pending' && d.severity === 'critical').map((d) => refKey(d.subject)));
   for (const claim of claims) {
     const ns = claim.metadata.namespace ?? null;
     const id = nodeId('PersistentVolumeClaim', ns, claim.metadata.name);
@@ -402,7 +404,7 @@ export function buildGraph(input: GraphInput): KubeGraph {
       name: claim.metadata.name,
       namespace: ns,
       ref: refOf('PersistentVolumeClaim', ns, claim.metadata.name),
-      health: phase === 'Bound' ? 'healthy' : phase === 'Lost' ? 'failing' : 'warning',
+      health: phase === 'Bound' ? 'healthy' : phase === 'Lost' || noStorage.has(id) ? 'failing' : 'warning',
       summary: `${phase}${size ? ` · ${size}` : ''}`,
     });
     const volumeName = str(obj(claim.spec).volumeName);
@@ -474,7 +476,7 @@ export function buildGraph(input: GraphInput): KubeGraph {
       summary,
     });
     if (!targets.size) {
-      const target = addMissing('Pods', ns, `${svc.metadata.name}-selector`, `No pods match ${selector}`);
+      const target = addMissing('Pods', ns, `${svc.metadata.name}-selector`, 'Traffic goes nowhere');
       nodes.get(target)!.name = `No pods match ${selector}`;
       addEdge(id, target, 'selects', true, `This Service selects \`${selector}\`, but no pod has these labels — traffic goes nowhere.`);
       continue;

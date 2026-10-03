@@ -433,9 +433,10 @@ export type KubeStreamEvent =
  * Views the change feed can follow: `overview` (nodes and pods), `workloads`
  * (`namespace` optional), `namespaces`, and `object` (`resource`,
  * `namespace`, `name` — the object and the pods around it). K2 adds
- * `graph`, `events` and `attention` (`namespace` optional).
+ * `graph`, `events` and `attention`, and the Storage and Config tabs
+ * `storage` and `config` (`namespace` optional).
  */
-export type KubeStreamView = 'overview' | 'workloads' | 'namespaces' | 'object' | 'graph' | 'events' | 'attention';
+export type KubeStreamView = 'overview' | 'workloads' | 'namespaces' | 'object' | 'graph' | 'events' | 'attention' | 'storage' | 'config';
 
 // ── Understanding (K2): topology, diagnoses, events, attention ──────────────
 
@@ -628,6 +629,93 @@ export interface KubeObjectInsight {
   rollout?: KubeRollout;
   lifecycle?: KubeLifecycleStep[];
   containers?: KubeContainerLane[];
+}
+
+// ── Storage and Config tabs ──────────────────────────────────────────────────
+
+/** What reads a ConfigMap, Secret or claim: a workload (through its pod template) or a pod no workload owns. */
+export interface KubeConsumer {
+  ref: KubeObjectRef;
+  /** `mounts`: as files in a volume; `env`: as environment variables. */
+  how: ('mounts' | 'env')[];
+}
+
+export interface KubeConfigItem {
+  ref: KubeObjectRef;
+  /** Secrets: their type (`Opaque`, `kubernetes.io/tls`…); null for ConfigMaps. */
+  type: string | null;
+  /** Key names only. Secret values never leave the server; a ConfigMap's values are on its YAML tab. */
+  keys: string[];
+  usedBy: KubeConsumer[];
+  createdAt: string | null;
+}
+
+/** A ConfigMap or Secret a workload reads that does not exist: its pods cannot start. */
+export interface KubeMissingConfig {
+  kind: 'ConfigMap' | 'Secret';
+  namespace: string | null;
+  name: string;
+  usedBy: KubeConsumer[];
+}
+
+/** GET /api/kube/clusters/:id/config?namespace= — ConfigMaps and Secrets (names and keys) and who reads them. */
+export interface KubeConfigView {
+  configMaps: KubeConfigItem[];
+  secrets: KubeConfigItem[];
+  missing: KubeMissingConfig[];
+  warnings: string[];
+  generatedAt: string;
+}
+
+export interface KubeClaimItem {
+  ref: KubeObjectRef;
+  /** `Pending`, `Bound` or `Lost`. */
+  phase: string;
+  /** Size asked for, and the size it got once bound. */
+  requested: string | null;
+  capacity: string | null;
+  /** The class it names; null when it names none (the cluster's default applies). */
+  storageClass: string | null;
+  accessModes: string[];
+  /** The volume it is bound to. */
+  volume: { name: string; phase: string | null; reclaimPolicy: string | null; exists: boolean } | null;
+  usedBy: KubeConsumer[];
+  /** Why it has no storage (spec §5.4), when that is a problem. */
+  problem: KubeDiagnosis | null;
+  createdAt: string | null;
+}
+
+/** A volume no visible claim is bound to (Available, Released, Failed). */
+export interface KubeVolumeItem {
+  ref: KubeObjectRef;
+  phase: string;
+  capacity: string | null;
+  storageClass: string | null;
+  reclaimPolicy: string | null;
+  /** The claim it was last bound to, for a Released volume. */
+  claim: { namespace: string | null; name: string } | null;
+}
+
+export interface KubeStorageClassItem {
+  name: string;
+  provisioner: string | null;
+  isDefault: boolean;
+  reclaimPolicy: string | null;
+  /** `Immediate`, or `WaitForFirstConsumer` (a claim stays Pending until a pod uses it). */
+  bindingMode: string | null;
+  /** Visible claims that use it (by name, or as the default). */
+  claims: number;
+}
+
+/** GET /api/kube/clusters/:id/storage?namespace= — claims, the volumes behind them, storage classes, and the pods that mount them. */
+export interface KubeStorageView {
+  claims: KubeClaimItem[];
+  /** Only without a namespace picked: a volume has no namespace of its own. */
+  volumes: KubeVolumeItem[];
+  /** Null when the credential may not list them. */
+  classes: KubeStorageClassItem[] | null;
+  warnings: string[];
+  generatedAt: string;
 }
 
 // ── Guided actions (K3) ──────────────────────────────────────────────────────

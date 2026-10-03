@@ -712,6 +712,14 @@ below.
   - `GET …/events?namespace=&since=` — Events grouped by involved object, newest first,
     repeats of one reason and message collapsed with summed counts (`series` and `count`
     understood); only plain fields leave the server.
+  - `GET …/storage?namespace=` and `GET …/config?namespace=` (`inventory.ts`, the Storage and
+    Config tabs) — claims with their volume, class, the §5.4 diagnosis of a pending one and
+    who mounts them (template refs plus running pods attributed to their owning workload,
+    so a StatefulSet's per-pod claims count towards it), storage classes, and volumes no
+    visible claim holds (only without a namespace — a volume has none); ConfigMaps and
+    Secrets as **key names only** with who reads them and how, plus required references
+    to ones that do not exist (never when the kind could not be listed). Both follow the
+    change feed (`view=storage|config`).
   - `GET …/objects/:resource/:ns/:name/insight` — the object's diagnoses (its own, its pods'
     through any controller, an Ingress's Services'), its events (a Deployment's include its
     ReplicaSets'), and the rollout timeline (Deployment: ReplicaSets as revisions with

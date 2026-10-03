@@ -22,7 +22,7 @@ function ReplicaBar({ replicas: r }: { replicas: KubeRollout['replicas'] }) {
   const total = Math.max(r.desired, r.updated, r.ready, 1);
   const available = Math.min(r.available, r.ready);
   const segments = [
-    { n: available, cls: 'bg-emerald-500', label: 'available' },
+    { n: available, cls: 'bg-emerald-500', label: 'available, serving' },
     { n: Math.max(0, r.ready - available), cls: 'bg-teal-400', label: 'ready, not yet available' },
     { n: Math.max(0, r.updated - r.ready), cls: 'bg-sky-400', label: 'updated, starting' },
     { n: Math.max(0, r.desired - Math.max(r.updated, r.ready)), cls: 'bg-zinc-300 dark:bg-zinc-600', label: 'still on the old version' },
@@ -36,6 +36,17 @@ function ReplicaBar({ replicas: r }: { replicas: KubeRollout['replicas'] }) {
       </div>
       <p className="text-xs tabular-nums text-muted-foreground">
         {r.desired} desired · {r.updated} updated · {r.ready} ready · {r.available} available
+      </p>
+      {/* What each colour of the bar is, for the parts it has */}
+      <p className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground" data-testid="rollout-legend">
+        {segments
+          .filter((s) => s.n)
+          .map((s) => (
+            <span key={s.label} className="flex items-center gap-1">
+              <span className={`size-2 rounded-full ${s.cls}`} />
+              {s.n} {s.label}
+            </span>
+          ))}
       </p>
     </div>
   );

@@ -22,6 +22,7 @@ import { snapshotKube, subscribeKube, type CacheSubscription, type ScopeSpec } f
 import type { KubeObject } from '../../kube/client.js';
 import { KubeError } from '../../kube/errors.js';
 import { DIAGNOSIS_RESOURCES, GRAPH_RESOURCES } from '../../kube/graph.js';
+import { CONFIG_RESOURCES, STORAGE_RESOURCES } from '../../kube/inventory.js';
 import { podHealth, workloadHealth } from '../../kube/health.js';
 import { nodeUsage } from '../../kube/metrics.js';
 import { requireKube } from '../../kube/permissions.js';
@@ -61,7 +62,7 @@ const workloadsQuery = z.object({
 const objectParams = clusterParams.extend({ resource: z.string(), ns: z.string(), name: z.string() });
 
 const streamQuery = z.object({
-  view: z.enum(['overview', 'workloads', 'namespaces', 'object', 'graph', 'events', 'attention']),
+  view: z.enum(['overview', 'workloads', 'namespaces', 'object', 'graph', 'events', 'attention', 'storage', 'config']),
   namespace: z.string().max(63).optional(),
   resource: z.string().max(64).optional(),
   name: z.string().max(253).optional(),
@@ -177,6 +178,10 @@ function streamScopes(ctx: KubeContext, q: z.infer<typeof streamQuery>): ScopeSp
       return namespaceScopes(ctx, 'events', q.namespace);
     case 'attention':
       return DIAGNOSIS_RESOURCES.flatMap((r) => namespaceScopes(ctx, r, q.namespace));
+    case 'storage':
+      return STORAGE_RESOURCES.flatMap((r) => namespaceScopes(ctx, r, q.namespace));
+    case 'config':
+      return CONFIG_RESOURCES.flatMap((r) => namespaceScopes(ctx, r, q.namespace));
   }
 }
 

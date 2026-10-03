@@ -96,7 +96,7 @@ const graph = {
     node('ConfigMap/shop/web-config', 'ConfigMap', 'web-config', 'healthy', '2 keys', { ref: ref('configmaps', 'ConfigMap', 'web-config') }),
     node('Secret/shop/db-creds', 'Secret', 'db-creds', 'healthy', 'Opaque · values never shown', { ref: ref('secrets', 'Secret', 'db-creds') }),
     node('missing:Service/shop/admin', 'Service', 'admin', 'missing', 'Does not exist'),
-    node('missing:Pods/shop/search-selector', 'Pods', 'No pods match app=serach', 'missing', 'No pods match app=serach'),
+    node('missing:Pods/shop/search-selector', 'Pods', 'No pods match app=serach', 'missing', 'Traffic goes nowhere'),
   ],
   edges: [
     edge('Ingress/shop/shop', 'Service/shop/web', 'routes', false, 'Routes shop.example.com/ to Service `web` port 80'),
@@ -143,7 +143,7 @@ const noEndpoints = {
 const deploymentDetail = {
   ref: ref('deployments', 'Deployment', 'web'),
   health: 'degraded',
-  facts: [{ label: 'Health', value: 'degraded — 2 of 3 ready' }],
+  facts: [{ label: 'Status', value: '2 of 3 ready' }],
   labels: { app: 'web' },
   related: [],
 };
@@ -181,6 +181,61 @@ const events = {
   generatedAt: now,
 };
 
+const storage = {
+  claims: [
+    {
+      ref: ref('persistentvolumeclaims', 'PersistentVolumeClaim', 'data-db-0'),
+      phase: 'Pending',
+      requested: '10Gi',
+      capacity: null,
+      storageClass: 'fast',
+      accessModes: ['ReadWriteOnce'],
+      volume: null,
+      usedBy: [{ ref: ref('statefulsets', 'StatefulSet', 'db'), how: ['mounts'] }],
+      problem: {
+        id: 'pvc-pending',
+        severity: 'critical',
+        subject: ref('persistentvolumeclaims', 'PersistentVolumeClaim', 'data-db-0'),
+        owner: null,
+        headline: 'Storage was requested but not provisioned — no StorageClass `fast` or no capacity.',
+        cause: 'There is no StorageClass `fast` in this cluster.',
+        nextStep: "Use one of the cluster's StorageClasses (or create `fast`), then recreate the claim.",
+        evidence: [],
+        affected: 1,
+        since: now,
+      },
+      createdAt: now,
+    },
+    {
+      ref: ref('persistentvolumeclaims', 'PersistentVolumeClaim', 'uploads'),
+      phase: 'Bound',
+      requested: '5Gi',
+      capacity: '5Gi',
+      storageClass: null,
+      accessModes: ['ReadWriteOnce'],
+      volume: { name: 'pvc-1234', phase: 'Bound', reclaimPolicy: 'Delete', exists: true },
+      usedBy: [{ ref: ref('deployments', 'Deployment', 'web'), how: ['mounts'] }],
+      problem: null,
+      createdAt: now,
+    },
+  ],
+  volumes: [{ ref: { resource: 'persistentvolumes', kind: 'PersistentVolume', namespace: null, name: 'pv-old' }, phase: 'Released', capacity: '1Gi', storageClass: null, reclaimPolicy: 'Retain', claim: { namespace: 'shop', name: 'gone' } }],
+  classes: [{ name: 'local-path', provisioner: 'rancher.io/local-path', isDefault: true, reclaimPolicy: 'Delete', bindingMode: 'WaitForFirstConsumer', claims: 1 }],
+  warnings: [],
+  generatedAt: now,
+};
+
+const config = {
+  configMaps: [
+    { ref: ref('configmaps', 'ConfigMap', 'web-config'), type: null, keys: ['LEVEL', 'PORT'], usedBy: [{ ref: ref('deployments', 'Deployment', 'web'), how: ['env'] }], createdAt: now },
+    { ref: ref('configmaps', 'ConfigMap', 'kube-root-ca.crt'), type: null, keys: ['ca.crt'], usedBy: [], createdAt: now },
+  ],
+  secrets: [{ ref: ref('secrets', 'Secret', 'db-creds'), type: 'Opaque', keys: ['password', 'user'], usedBy: [{ ref: ref('deployments', 'Deployment', 'web'), how: ['env', 'mounts'] }], createdAt: now }],
+  missing: [{ kind: 'ConfigMap', namespace: 'shop', name: 'feature-flags', usedBy: [{ ref: ref('deployments', 'Deployment', 'web'), how: ['env'] }] }],
+  warnings: [],
+  generatedAt: now,
+};
+
 async function stubKube(page: Page) {
   await page.route('**/api/kube/**', async (route: Route) => {
     const req = route.request();
@@ -197,6 +252,8 @@ async function stubKube(page: Page) {
     if (path === `${c}/graph`) return json(graph);
     if (path === `${c}/attention`) return json({ items: [crash, noEndpoints], warnings: [], generatedAt: now });
     if (path === `${c}/events`) return json(events);
+    if (path === `${c}/storage`) return json(storage);
+    if (path === `${c}/config`) return json(config);
     if (path === `${c}/overview`) {
       return json({ clusterId: CLUSTER, serverVersion: 'v1.31.5', metricsAvailable: false, namespaces: ['shop'], nodes: [], unscheduled: [], warnings: [], generatedAt: now });
     }
@@ -305,5 +362,37 @@ test.describe('Kubernetes topology and diagnoses', () => {
     await expect(backoff.getByTestId('event-count')).toHaveText('×37 in 20 min');
     await page.getByLabel('Warnings only').check();
     await expect(page.getByTestId('event-line')).toHaveCount(1);
+  });
+
+  test('draws storage as chains and lists config by key, never a value', async ({ page }) => {
+    await stubKube(page);
+    await signInWithPassword(page, viewer.email, viewer.password);
+    await page.goto(`/kubernetes/${CLUSTER}/storage`);
+
+    const claims = page.getByTestId('storage-claim');
+    await expect(claims).toHaveCount(2);
+    const pending = page.locator('[data-testid="storage-claim"][data-phase="Pending"]');
+    await expect(pending).toContainText('No storage');
+    await expect(pending).toContainText('No volume yet');
+    await expect(pending.getByRole('link', { name: /StatefulSet db/ })).toBeVisible();
+    await expect(pending.getByTestId('diagnosis-headline')).toContainText('no StorageClass fast or no capacity');
+    const bound = page.locator('[data-testid="storage-claim"][data-phase="Bound"]');
+    await expect(bound).toContainText('Has storage · 5Gi');
+    await expect(bound).toContainText('Data deleted with the claim');
+    await expect(page.getByTestId('storage-classes')).toContainText('creates storage when a pod first uses it');
+    await expect(page.getByTestId('storage-volumes')).toContainText('Its claim was deleted; the data is kept');
+    await snap(page, 'storage-tab');
+
+    await page.goto(`/kubernetes/${CLUSTER}/config`);
+    await expect(page.getByTestId('config-missing')).toContainText('feature-flags in shop does not exist');
+    // Kubernetes' own CA bundle is hidden until asked for
+    await expect(page.locator('[data-testid="config-item"][data-kind="ConfigMap"]')).toHaveCount(1);
+    await page.getByLabel(/made by Kubernetes or Helm/).check();
+    await expect(page.locator('[data-testid="config-item"][data-kind="ConfigMap"]')).toHaveCount(2);
+    const secret = page.locator('[data-testid="config-item"][data-kind="Secret"]');
+    await expect(secret).toContainText('password');
+    await expect(secret).toContainText('values are never shown');
+    await expect(secret).toContainText('as environment variables + as files');
+    await snap(page, 'config-tab');
   });
 });

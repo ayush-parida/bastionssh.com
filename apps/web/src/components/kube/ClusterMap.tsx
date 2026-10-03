@@ -18,6 +18,14 @@ import CordonToggle from './actions/CordonToggle.js';
 
 const STATUSES: KubePodTileStatus[] = ['running', 'pending', 'failing', 'completed', 'terminating'];
 
+/** What a node condition means for the pods on it. */
+const PRESSURE_HINT: Record<string, string> = {
+  MemoryPressure: 'The node is running low on memory; Kubernetes may evict pods to free some',
+  DiskPressure: 'The node is running low on disk; Kubernetes may evict pods and clean up images',
+  PIDPressure: 'The node is running too many processes; Kubernetes may evict pods',
+  NetworkUnavailable: 'The node’s network is not set up; its pods cannot be reached',
+};
+
 function Bar({
   icon: Icon,
   label,
@@ -129,14 +137,24 @@ function NodeCardView({
                 {r}
               </span>
             ))}
-            {!card.ready && <span className="rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-600">Not ready</span>}
+            {!card.ready && (
+              <span
+                className="rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-600"
+                title="Kubernetes has lost contact with this node or it reports a fault; its pods may be moved elsewhere"
+              >
+                Not ready
+              </span>
+            )}
             {card.unschedulable && (
-              <span className="flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600">
+              <span
+                className="flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600"
+                title="Cordoned: no new pods are placed here; the pods already here keep running"
+              >
                 <Ban size={10} /> Cordoned
               </span>
             )}
             {card.pressures.map((p) => (
-              <span key={p} className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600">
+              <span key={p} className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600" title={PRESSURE_HINT[p] ?? undefined}>
                 {p.replace('Pressure', ' pressure')}
               </span>
             ))}
@@ -227,6 +245,17 @@ export default function ClusterMap({ clusterId, overview, namespace }: { cluster
             {TILE_LABEL[s]} <span className="tabular-nums text-foreground">{counts[s]}</span>
           </span>
         ))}
+        <span className="flex items-center gap-1.5" title="A pod whose containers have restarted at least once">
+          <span className="size-3 rounded-[3px] border border-emerald-600 bg-emerald-500 ring-1 ring-amber-500 ring-offset-1 ring-offset-background" />
+          Restarted
+        </span>
+        <span className="flex items-center gap-1.5" title="CPU and memory bars: the wide pale bar is what pods reserved (requests); the thin bar inside is what they use now">
+          <span className="relative h-2 w-6 overflow-hidden rounded-full bg-muted">
+            <span className="absolute inset-y-0 left-0 w-4 rounded-full bg-sky-500 opacity-60" />
+            <span className="absolute left-0 top-1/4 h-1 w-2.5 rounded-full bg-sky-500" />
+          </span>
+          Reserved / used
+        </span>
         <span className="ml-auto">
           {overview.nodes.length} node{overview.nodes.length === 1 ? '' : 's'}
           {!overview.metricsAvailable && ' · live usage needs metrics-server'}

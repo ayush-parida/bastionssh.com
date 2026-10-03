@@ -286,7 +286,8 @@ export function objectFacts(o: KubeObject): KubeFact[] {
     case 'CronJob': {
       const kind = o.kind as KubeWorkloadKind;
       const h = workloadHealth(kind, o);
-      add('Health', `${h.health} — ${h.summary}`);
+      // The health itself is the panel's badge; this says what it rests on
+      add('Status', h.summary);
       if (kind === 'Deployment') add('Strategy', str(obj(spec.strategy).type));
       if (kind === 'CronJob') {
         add('Schedule', str(spec.schedule));

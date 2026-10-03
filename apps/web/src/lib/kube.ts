@@ -30,6 +30,8 @@ export const kubeKeys = {
   graph: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'graph', namespace ?? '*'] as const,
   events: (clusterId: string, namespace: string | null, since: string) => ['kube', clusterId, 'events', namespace ?? '*', since] as const,
   attention: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'attention', namespace ?? '*'] as const,
+  storage: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'storage', namespace ?? '*'] as const,
+  config: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'config', namespace ?? '*'] as const,
 };
 
 /** Cluster page tabs (spec §5.5), in order; each one's body lives in its own file under components/kube. */
@@ -195,7 +197,8 @@ export const HEALTH_DOT: Record<KubeWorkloadHealth | KubePodTileStatus, string> 
 export const HEALTH_LABEL: Record<KubeWorkloadHealth, string> = {
   healthy: 'Healthy',
   progressing: 'Updating',
-  degraded: 'Degraded',
+  // The graph's word for the same state (GRAPH_HEALTH_STYLE.warning)
+  degraded: 'Needs a look',
   failed: 'Failing',
   suspended: 'Suspended',
   completed: 'Completed',
