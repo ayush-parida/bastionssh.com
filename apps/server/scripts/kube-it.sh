@@ -9,9 +9,11 @@
 #   apps/server/scripts/kube-it.sh down    # removes everything it created
 set -euo pipefail
 
-NET=smt-kit-net
-K3S=smt-kit-k3s
-SSHD=smt-kit-sshd
+# SMT_KIT_PREFIX lets two runs side by side keep apart (with their own ports and dir)
+PREFIX=${SMT_KIT_PREFIX:-smt-kit}
+NET=$PREFIX-net
+K3S=$PREFIX-k3s
+SSHD=$PREFIX-sshd
 API_PORT=${SMT_KIT_API_PORT:-26443}
 SSH_PORT=${SMT_KIT_SSH_PORT:-22423}
 IMAGE=${SMT_KIT_K3S_IMAGE:-rancher/k3s:v1.31.5-k3s1}
@@ -108,6 +110,25 @@ spec:
       command: ["sleep", "3600"]
       resources: { requests: { cpu: "500" } }
 ---
+# Inside a pod (K4): an init step, a native sidecar, an app that prints a line a second
+apiVersion: v1
+kind: Pod
+metadata: { name: ticker, namespace: smt-it }
+spec:
+  initContainers:
+    - name: prepare
+      image: busybox:1.36
+      command: ["sh", "-c", "echo prepared"]
+    - name: proxy
+      image: busybox:1.36
+      restartPolicy: Always
+      command: ["sh", "-c", "while true; do sleep 3600; done"]
+  containers:
+    - name: ticker
+      image: busybox:1.36
+      command: ["sh", "-c", "i=0; while true; do i=$((i+1)); echo tick $i; sleep 1; done"]
+      resources: { requests: { cpu: 10m, memory: 8Mi }, limits: { cpu: 100m, memory: 32Mi } }
+---
 # Read-only, as the docs recommend for viewing (secrets: names only reach the browser)
 apiVersion: v1
 kind: ServiceAccount
@@ -136,6 +157,7 @@ YAML
   kc -n smt-it create token bastion-viewer --duration=2h >"$DIR/token"
   kc get configmap kube-root-ca.crt -n smt-it -o jsonpath='{.data.ca\.crt}' >"$DIR/ca.crt"
   kc -n smt-it rollout status deployment/web --timeout=180s >/dev/null
+  kc -n smt-it wait --for=condition=Ready pod/ticker --timeout=180s >/dev/null
 
   cat <<ENV
 SMT_TEST_KUBE_KUBECONFIG=$DIR/kubeconfig

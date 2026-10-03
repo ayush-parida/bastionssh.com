@@ -2,7 +2,9 @@ import http, { type IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { KUBE_RESOURCES, type KubeResource } from '@smt/shared';
 import { KubeError, fromApiStatus, fromTransportError } from './errors.js';
+import { execSession, type ExecSession } from './exec.js';
 import { resourcePath } from './validation.js';
+import { WebSocketConnection, acceptFor, websocketKey } from './websocket.js';
 
 /**
  * A small typed Kubernetes API client over Node's `http.request` (spec
@@ -18,7 +20,9 @@ import { resourcePath } from './validation.js';
  *   collection's `resourceVersion` (the cache watches from it);
  * - `watch` — a streaming `?watch=1` call, one parsed event per line;
  * - `patch` / `delete` / `create` — for the guided actions (K3);
- * - `logs` / `exec` — K4 (the interface is fixed here; they are not wired yet).
+ * - `logs` — a pod's log as a stream (kube/logs.ts reads it into lines);
+ * - `upgrade` / `exec` — a WebSocket on the same verified route, and a
+ *   process in a container over the exec subresource (kube/exec.ts).
  *
  * Paths are built from the resource allowlist and validated names
  * (validation.ts); a credential is sent as `Authorization: Bearer` (a client
@@ -121,7 +125,7 @@ export interface WatchOptions extends ListOptions {
   timeoutSeconds?: number;
 }
 
-/** K4: pod logs. */
+/** Pod logs (`GET …/pods/:name/log`). */
 export interface LogOptions {
   container?: string;
   previous?: boolean;
@@ -129,24 +133,34 @@ export interface LogOptions {
   tailLines?: number;
   sinceSeconds?: number;
   timestamps?: boolean;
+  /** The API server stops after this many bytes. */
+  limitBytes?: number;
   signal?: AbortSignal;
 }
 
-/** K4: a shell in a container over the exec subresource (WebSocket, `v5.channel.k8s.io` then `v4`). */
+/** A process in a container over the exec subresource (WebSocket, `v5.channel.k8s.io` then `v4`). */
 export interface ExecOptions {
   container: string;
   command: string[];
   tty: boolean;
+  /** Without a TTY, stdin is only attached when asked for. */
+  stdin?: boolean;
   signal?: AbortSignal;
 }
 
-export interface ExecSession {
-  stdin: NodeJS.WritableStream;
-  stdout: NodeJS.ReadableStream;
-  resize(cols: number, rows: number): void;
-  close(): void;
-  /** Resolves with the exit code when the process ends. */
-  exited: Promise<number | null>;
+export type { ExecSession };
+
+/** Exec protocols offered, best first: v5 can close stdin on its own; v4 is what older API servers speak. */
+export const EXEC_PROTOCOLS = ['v5.channel.k8s.io', 'v4.channel.k8s.io'] as const;
+/** How long the WebSocket handshake may take. */
+const UPGRADE_TIMEOUT_MS = 20_000;
+
+export interface UpgradeRequest {
+  /** Path with its query string already on it (exec repeats `command`). */
+  path: string;
+  protocols: readonly string[];
+  timeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export type PatchType = 'merge' | 'strategic' | 'json';
@@ -207,7 +221,7 @@ export class KubeClient {
   private readonly agent: ApiAgent;
 
   constructor(
-    openSocket: () => Promise<Duplex>,
+    private readonly openSocket: () => Promise<Duplex>,
     private readonly opts: KubeClientOptions,
   ) {
     this.agent = new ApiAgent(openSocket);
@@ -473,14 +487,111 @@ export class KubeClient {
     return this.json<T>({ ...req, path });
   }
 
-  /** K4: a pod's logs as a stream (`follow` keeps it open). */
-  logs(_namespace: string, _pod: string, _opts: LogOptions): Promise<IncomingMessage> {
-    return Promise.reject(new KubeError('Pod logs are not available yet', 501));
+  /** A pod's log as a stream (`follow` keeps it open until the container stops or `signal` aborts). */
+  logs(namespace: string, pod: string, opts: LogOptions = {}): Promise<IncomingMessage> {
+    return this.stream({
+      path: resourcePath('pods', { namespace, name: pod, subresource: 'log' }),
+      query: {
+        container: opts.container,
+        previous: opts.previous || undefined,
+        follow: opts.follow || undefined,
+        tailLines: opts.tailLines,
+        sinceSeconds: opts.sinceSeconds,
+        timestamps: opts.timestamps || undefined,
+        limitBytes: opts.limitBytes,
+      },
+      signal: opts.signal,
+    });
   }
 
-  /** K4: a shell in a container. */
-  exec(_namespace: string, _pod: string, _opts: ExecOptions): Promise<ExecSession> {
-    return Promise.reject(new KubeError('Pod shells are not available yet', 501));
+  /**
+   * Open a WebSocket to `path` over a fresh connection of its own (not the
+   * agent's: it outlives this client's requests), offering `protocols`.
+   * Resolves with the connection and the protocol the API server picked; a
+   * refusal (403, 404, 400 "container not found"…) throws the mapped error.
+   */
+  upgrade(req: UpgradeRequest): Promise<{ ws: WebSocketConnection; protocol: string }> {
+    return new Promise((resolve, reject) => {
+      const key = websocketKey();
+      const openSocket = this.openSocket;
+      const request = http.request({
+        method: 'GET',
+        path: `${this.opts.basePath ?? ''}${req.path}`,
+        headers: this.headers({
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Version': '13',
+          'Sec-WebSocket-Key': key,
+          'Sec-WebSocket-Protocol': req.protocols.join(', '),
+        }),
+        createConnection: ((_opts: unknown, oncreate: (err: Error | null, socket?: Duplex) => void) => {
+          openSocket().then(
+            (socket) => oncreate(null, socket),
+            (err: unknown) => oncreate(fromTransportError(err)),
+          );
+          return undefined;
+        }) as unknown as http.RequestOptions['createConnection'],
+      });
+      let settled = false;
+      const settle = (fn: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        req.signal?.removeEventListener('abort', onAbort);
+        fn();
+      };
+      const fail = (err: unknown) => settle(() => reject(fromTransportError(err)));
+      const onAbort = () => {
+        request.destroy();
+        fail(new KubeError('Request cancelled', 499));
+      };
+      const timer = setTimeout(() => {
+        request.destroy();
+        fail(new KubeError('The Kubernetes API did not answer in time', 504));
+      }, req.timeoutMs ?? UPGRADE_TIMEOUT_MS);
+      if (req.signal?.aborted) return onAbort();
+      req.signal?.addEventListener('abort', onAbort, { once: true });
+
+      request.on('upgrade', (res: IncomingMessage, socket: Duplex, head: Buffer) => {
+        const protocol = String(res.headers['sec-websocket-protocol'] ?? '');
+        if (res.headers['sec-websocket-accept'] !== acceptFor(key)) {
+          socket.destroy();
+          return fail(new KubeError('The Kubernetes API answered the WebSocket handshake wrongly', 502));
+        }
+        if (!req.protocols.includes(protocol)) {
+          socket.destroy();
+          return fail(new KubeError(`The Kubernetes API offered no supported exec protocol (${protocol || 'none'})`, 502));
+        }
+        settle(() => resolve({ ws: new WebSocketConnection(socket, head), protocol }));
+      });
+      request.on('response', (res) => {
+        // Not upgraded: the API server refused, with a Status saying why
+        void readBody(res, 64 * 1024)
+          .catch(() => '')
+          .then((body) => settle(() => reject(fromApiStatus(res.statusCode ?? 502, body))));
+      });
+      request.on('error', fail);
+      request.end();
+    });
+  }
+
+  /** Run `command` in a container of a pod over the exec subresource (kube/exec.ts reads the channels). */
+  async exec(namespace: string, pod: string, opts: ExecOptions): Promise<ExecSession> {
+    const params = new URLSearchParams();
+    for (const arg of opts.command) params.append('command', arg);
+    params.set('container', opts.container);
+    const stdin = opts.tty || !!opts.stdin;
+    if (stdin) params.set('stdin', 'true');
+    params.set('stdout', 'true');
+    // With a TTY the API server merges stderr into stdout and refuses a separate one
+    if (!opts.tty) params.set('stderr', 'true');
+    if (opts.tty) params.set('tty', 'true');
+    const { ws, protocol } = await this.upgrade({
+      path: `${resourcePath('pods', { namespace, name: pod, subresource: 'exec' })}?${params}`,
+      protocols: EXEC_PROTOCOLS,
+      signal: opts.signal,
+    });
+    return execSession(ws, protocol);
   }
 
   /** Close idle bookkeeping; open streams end with their requests. */

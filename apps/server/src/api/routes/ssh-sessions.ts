@@ -12,6 +12,8 @@ import { vault } from '../../vault/index.js';
 import { startTerminalRecording } from '../../recordings/index.js';
 import { RETIRED_KEY_MESSAGE } from '../../ssh/credentials.js';
 import { dockerCan } from '../../docker/permissions.js';
+import { canAccessCluster } from '../../auth/cluster-access.js';
+import { kubeCan } from '../../kube/permissions.js';
 
 const createSessionSchema = z.object({
   serverId: z.string(),
@@ -106,7 +108,10 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     // (e.g. after a page reload) must not outlive the grant.
     const owned = SSHBroker.getSessionForUser(id, req.user.id, req.orgId);
     // A shell in a container also needs the Docker exec permission still (role, org setting)
-    const refused = owned?.container && !dockerCan(req, 'exec');
+    // …and a shell in a pod the Kubernetes one, plus access to its cluster
+    const refused =
+      (owned?.container && !dockerCan(req, 'exec')) ||
+      (owned?.pod && (!kubeCan(req, 'exec') || !canAccessCluster(req, owned.pod.clusterId)));
     if ((owned?.server.id && !canAccessServer(req, owned.server.id)) || refused) {
       await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
       socket.close(4404, 'Session not found');

@@ -125,7 +125,7 @@ describe.skipIf(!kubeconfigPath)('kubernetes against a live k3s cluster', () => 
     const detail = (await api(viewer, 'GET', `/api/kube/clusters/${direct.id}/objects/deployments/smt-it/web`)).json() as KubeObjectDetail;
     expect(detail.health).toBe('healthy');
     expect(detail.related.filter((r) => r.kind === 'Pod')).toHaveLength(2);
-    expect(detail.yaml).toBeUndefined(); // viewers get no YAML
+    expect(detail).not.toHaveProperty('yaml'); // the YAML is its own endpoint (operators)
   });
 
   it('never sends a Secret’s values, nor a value an env var takes from it', async () => {
@@ -139,7 +139,9 @@ describe.skipIf(!kubeconfigPath)('kubernetes against a live k3s cluster', () => 
     const webPod = overview.nodes[0]!.pods.find((p) => p.owner?.kind === 'ReplicaSet' && p.namespace === 'smt-it')!;
     const pod = await api(admin, 'GET', `/api/kube/clusters/${direct.id}/objects/pods/smt-it/${webPod.name}`);
     expect(pod.body).not.toContain('hunter2');
-    expect((pod.json() as KubeObjectDetail).yaml).toContain('secretKeyRef');
+    const yaml = await api(admin, 'GET', `/api/kube/clusters/${direct.id}/objects/pods/smt-it/${webPod.name}/yaml`);
+    expect(yaml.body).not.toContain('hunter2');
+    expect(yaml.body).toContain('secretKeyRef');
   });
 
   it('follows the map’s change feed', async () => {

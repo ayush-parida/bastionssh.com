@@ -1,4 +1,5 @@
 import { dropClusterCache, dropIdentityCaches } from './cache.js';
+import { closeClusterShells } from './exec.js';
 import { abortClusterStreams, abortKubeStreams } from './sse.js';
 import { evictKubeServer } from './ssh-pool.js';
 
@@ -8,7 +9,9 @@ import { evictKubeServer } from './ssh-pool.js';
  * - kubeconfig.ts — uploaded kubeconfigs: contexts, refusals, credentials
  * - transport.ts — sockets to the API server (direct, SSH forwardOut, agent) + verified TLS
  * - ssh-pool.ts — the SSH connections clusters are reached through
- * - client.ts — the typed API client (get/list/watch/patch/delete; logs/exec in K4)
+ * - client.ts — the typed API client (get/list/watch/patch/delete/logs/exec)
+ * - websocket.ts / exec.ts — the exec subresource's WebSocket and pod shells (K4)
+ * - logs.ts / pods.ts — pod logs as events, and the pod panel (K4)
  * - cache.ts — the shared watch cache (refcounts, 410 relist, memory cap, idle stop)
  * - service.ts — `withKubeClient`: access, credential, impersonation, namespace rules
  * - connection-test.ts — "Test connection" steps and the credential's capabilities
@@ -30,10 +33,11 @@ export function closeKubeForUser(userId: string, scope: { orgId?: string; keepCl
   return abortKubeStreams(userId, { orgId: scope.orgId, keepClusterIds }) + dropIdentityCaches(userId, { orgId: scope.orgId, keepClusterIds });
 }
 
-/** A cluster was edited or removed: stop its watches and streams; viewers reconnect to the new settings. */
+/** A cluster was edited or removed: stop its watches, streams and shells; viewers reconnect to the new settings. */
 export function resetCluster(clusterId: string, why: string): void {
   dropClusterCache(clusterId, why);
   abortClusterStreams(clusterId, why);
+  closeClusterShells(clusterId);
 }
 
 /** Drop the SSH connection used to reach clusters through a server (edited, deleted, host key changed). */

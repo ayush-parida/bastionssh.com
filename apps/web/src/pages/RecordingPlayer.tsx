@@ -91,6 +91,12 @@ export default function RecordingPlayerPage() {
             <h1 className="text-xl font-bold truncate">
               {rec.kind === 'exec' ? (
                 <span className="font-mono">{rec.command}</span>
+              ) : rec.kind === 'pod' ? (
+                <>
+                  Shell in pod{' '}
+                  <span className="font-mono">{rec.pod ? `${rec.pod.namespace}/${rec.pod.name}` : rec.command}</span>
+                  {rec.pod && <span className="font-mono text-sm font-normal text-muted-foreground"> {rec.pod.container}</span>}
+                </>
               ) : rec.kind === 'container' ? (
                 <>
                   Shell in container <span className="font-mono">{rec.container?.name ?? rec.command}</span>
@@ -99,7 +105,10 @@ export default function RecordingPlayerPage() {
               ) : (
                 'Terminal session'
               )}
-              <span className="text-muted-foreground font-normal"> · {rec.serverName ?? 'deleted server'}</span>
+              <span className="text-muted-foreground font-normal">
+                {' '}
+                · {rec.kind === 'pod' ? `cluster ${rec.serverName ?? '(removed)'}` : (rec.serverName ?? 'deleted server')}
+              </span>
             </h1>
             <p className="text-sm text-muted-foreground">
               {rec.userEmail ?? rec.userId} · {new Date(rec.startedAt).toLocaleString()} · {recordingDuration(rec)} ·{' '}

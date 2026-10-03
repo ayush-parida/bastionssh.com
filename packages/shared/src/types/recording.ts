@@ -1,8 +1,9 @@
 /**
  * `terminal` is an interactive shell; `exec` a one-shot command (AI agent,
- * saved command); `container` a shell inside a Docker container.
+ * saved command); `container` a shell inside a Docker container; `pod` a
+ * shell inside a Kubernetes pod's container.
  */
-export type RecordingKind = 'terminal' | 'exec' | 'container';
+export type RecordingKind = 'terminal' | 'exec' | 'container' | 'pod';
 
 /** What ran a command that was logged against a recording. */
 export type RecordingCommandSource = 'ai' | 'saved_command';
@@ -22,6 +23,8 @@ export interface SessionRecording {
   command: string | null;
   /** For `container` recordings: the container the shell ran in. */
   container?: { id: string; name: string } | null;
+  /** For `pod` recordings: the pod and container (the cluster is `serverName`; `serverId` is null). */
+  pod?: { namespace: string; name: string; container: string } | null;
   startedAt: string;
   /** null while the session is still live. */
   endedAt: string | null;

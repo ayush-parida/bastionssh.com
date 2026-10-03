@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { OrgMember, Server, SessionRecording } from '@smt/shared';
-import { Container, Film, Keyboard, Scissors, Terminal as TerminalIcon, Zap } from 'lucide-react';
+import { Boxes, Container, Film, Keyboard, Scissors, Terminal as TerminalIcon, Zap } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { formatBytes, relativeTime } from '@/lib/utils.js';
 import { useHasRole } from '@/store/auth.js';
@@ -169,6 +169,16 @@ export default function RecordingsPage() {
                         {r.kind === 'terminal' ? (
                           <>
                             <TerminalIcon size={12} className="shrink-0 text-muted-foreground" /> Terminal
+                          </>
+                        ) : r.kind === 'pod' ? (
+                          <>
+                            <Boxes size={12} className="shrink-0 text-muted-foreground" />
+                            <span className="truncate max-w-xs" title={r.command ?? ''}>
+                              Shell in pod{' '}
+                              <span className="font-mono">
+                                {r.pod ? `${r.pod.namespace}/${r.pod.name} › ${r.pod.container}` : r.command}
+                              </span>
+                            </span>
                           </>
                         ) : r.kind === 'container' ? (
                           <>

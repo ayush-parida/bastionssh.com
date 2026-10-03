@@ -18,15 +18,19 @@ import RolloutTimeline from './RolloutTimeline.js';
  * that feed, so it also refreshes on a slow timer. When the guided actions
  * (K3) list a Deployment's revisions with their rollback buttons, the
  * rollout here keeps only its replica bar, so the revisions show once.
+ * Likewise `podOverview`: the pod panel's own overview (K4) already draws
+ * the lifecycle and container lanes, with usage, logs and shells.
  */
 export default function ObjectInsight({
   clusterId,
   objectRef,
   fromTab,
+  podOverview = false,
 }: {
   clusterId: string;
   objectRef: Pick<KubeObjectRef, 'resource' | 'namespace' | 'name'>;
   fromTab: KubeTab;
+  podOverview?: boolean;
 }) {
   const path = kubeObjectPath(objectRef);
   const insight = useQuery<KubeObjectInsight>({
@@ -57,13 +61,13 @@ export default function ObjectInsight({
           </p>
         )
       )}
-      {d.lifecycle && (
+      {d.lifecycle && !podOverview && (
         <div className="space-y-2">
           <p className="text-sm font-medium">Lifecycle</p>
           <LifecycleStrip steps={d.lifecycle} />
         </div>
       )}
-      {d.containers && d.containers.length > 0 && (
+      {!podOverview && d.containers && d.containers.length > 0 && (
         <div className="space-y-2">
           <p className="text-sm font-medium">Containers</p>
           <ContainerLanes lanes={d.containers} />

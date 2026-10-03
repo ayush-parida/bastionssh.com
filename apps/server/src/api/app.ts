@@ -45,6 +45,7 @@ import { kubeRoutes } from './routes/kube.js';
 import { kubeViewRoutes } from './routes/kube-views.js';
 import { kubeGraphRoutes } from './routes/kube-graph.js';
 import { kubeActionRoutes } from './routes/kube-actions.js';
+import { kubePodRoutes } from './routes/kube-pods.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
 import { HostKeyMismatchError } from '../ssh/host-keys.js';
 
@@ -124,6 +125,7 @@ export async function buildApp() {
   await app.register(kubeViewRoutes, { prefix: '/api/kube' });
   await app.register(kubeGraphRoutes, { prefix: '/api/kube' });
   await app.register(kubeActionRoutes, { prefix: '/api/kube' });
+  await app.register(kubePodRoutes, { prefix: '/api/kube' });
   await app.register(teamRoutes, { prefix: '/api/team' });
   await app.register(accessRequestRoutes, { prefix: '/api/access-requests' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });

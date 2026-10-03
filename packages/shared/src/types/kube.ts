@@ -416,8 +416,6 @@ export interface KubeObjectDetail {
   labels: Record<string, string>;
   /** Owner chain upwards, and what it owns or selects (pods of a workload, pods behind a service). */
   related: (KubeObjectRef & { relation: string })[];
-  /** Read-only YAML, Secret values and env values from secrets stripped; operators and up only. */
-  yaml?: string;
 }
 
 /**

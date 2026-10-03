@@ -480,7 +480,7 @@ describe('time-limited access', () => {
 
       // Only what is open on the expired server closes; the rest is kept
       const keep = expect.arrayContaining([serverA, serverC]);
-      expect(spies.terminals).toHaveBeenCalledWith(member.userId, { orgId, keepServerIds: keep });
+      expect(spies.terminals).toHaveBeenCalledWith(member.userId, expect.objectContaining({ orgId, keepServerIds: keep }));
       expect(spies.sftp).toHaveBeenCalledWith(member.userId, { orgId, keepServerIds: keep });
       expect(spies.agents).toHaveBeenCalledWith(member.userId, { orgId });
       const kept = (spies.terminals.mock.calls[0] as unknown as [string, { keepServerIds: string[] }])[1].keepServerIds;
@@ -527,7 +527,7 @@ describe('time-limited access', () => {
       sweepExpiredAccess(new Date(Date.now() + 6 * 60_000));
       expect(grantRow(member.userId, serverB)).toBeUndefined();
       expect(canAccessServer({ orgId, userId: member.userId }, serverB)).toBe(false);
-      expect(spies.terminals).toHaveBeenCalledWith(member.userId, { orgId, keepServerIds: [serverA] });
+      expect(spies.terminals).toHaveBeenCalledWith(member.userId, expect.objectContaining({ orgId, keepServerIds: [serverA] }));
     });
   });
 });

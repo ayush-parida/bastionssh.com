@@ -60,7 +60,8 @@ function relativeFile(abs: string): string {
 
 interface RecordingContext {
   orgId: string;
-  serverId: string;
+  /** null for a pod shell: `serverName` then names the cluster. */
+  serverId: string | null;
   serverName: string;
   userId: string;
 }
@@ -176,21 +177,51 @@ export function containerOfRecording(row: Pick<RecordingRow, 'kind' | 'command'>
 }
 
 /**
+ * How a pod shell's recording names its pod, in the `command` column:
+ * `shop/web-7d4-x2k/app` (namespace, pod, container — none can hold a `/`).
+ * The cluster is the recording's `serverName`. Read back by {@link podOfRecording}.
+ */
+export function podLabel(pod: { namespace: string; name: string; container: string }): string {
+  return `${pod.namespace}/${pod.name}/${pod.container}`;
+}
+
+const POD_LABEL = /^([^/]+)\/([^/]+)\/([^/]+)$/;
+
+/** The pod a `pod` recording ran in, from its {@link podLabel}. */
+export function podOfRecording(
+  row: Pick<RecordingRow, 'kind' | 'command'>,
+): { namespace: string; name: string; container: string } | null {
+  if (row.kind !== 'pod' || !row.command) return null;
+  const match = POD_LABEL.exec(row.command);
+  return match ? { namespace: match[1]!, name: match[2]!, container: match[3]! } : null;
+}
+
+/**
  * Start recording an interactive terminal, if the org records sessions. With
  * `container`, the terminal is a shell inside that container (Docker exec),
- * recorded as kind `container` with the container named.
+ * recorded as kind `container` with the container named; with `pod`, a shell
+ * in a Kubernetes pod's container, kind `pod`.
  */
 export function startTerminalRecording(
-  ctx: RecordingContext & { cols: number; rows: number; container?: { id: string; name: string } },
+  ctx: RecordingContext & {
+    cols: number;
+    rows: number;
+    container?: { id: string; name: string };
+    pod?: { namespace: string; name: string; container: string };
+  },
 ): TerminalRecording | null {
   const settings = recordingSettings(ctx.orgId);
   if (!settings.enabled) return null;
 
   const opened = openRecording(ctx, {
-    kind: ctx.container ? 'container' : 'terminal',
+    kind: ctx.pod ? 'pod' : ctx.container ? 'container' : 'terminal',
     ...(ctx.container && {
       command: containerLabel(ctx.container),
       title: `${ctx.serverName} › ${ctx.container.name}`,
+    }),
+    ...(ctx.pod && {
+      command: podLabel(ctx.pod),
+      title: `${ctx.serverName} › ${ctx.pod.namespace}/${ctx.pod.name} › ${ctx.pod.container}`,
     }),
     inputRecorded: settings.recordInput,
     cols: ctx.cols,

@@ -47,10 +47,14 @@ describe('live access revocation', () => {
   /** Every closer was called once for `userId` with this scope. */
   function expectRevoked(userId: string, scope: { orgId?: string; keepServerIds?: string[] }) {
     expect(closers.terminals).toHaveBeenCalledTimes(1);
-    expect(closers.terminals).toHaveBeenCalledWith(userId, {
-      orgId: scope.orgId,
-      keepServerIds: scope.keepServerIds,
-    });
+    // Terminals also get the clusters to keep, for pod shells
+    expect(closers.terminals).toHaveBeenCalledWith(
+      userId,
+      expect.objectContaining({
+        orgId: scope.orgId,
+        keepServerIds: scope.keepServerIds,
+      }),
+    );
     expect(closers.sftp).toHaveBeenCalledWith(userId, { orgId: scope.orgId, keepServerIds: scope.keepServerIds });
     expect(closers.docker).toHaveBeenCalledWith(userId, { orgId: scope.orgId, keepServerIds: scope.keepServerIds });
     expect(closers.agents).toHaveBeenCalledWith(userId, { orgId: scope.orgId });

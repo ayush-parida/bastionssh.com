@@ -37,6 +37,7 @@ import {
 } from '../../kube/kubeconfig.js';
 import { kubePermissionsFor, requireKube } from '../../kube/permissions.js';
 import { kubeSettings, updateKubeSettings } from '../../kube/settings.js';
+import { closeDisallowedPodShells } from '../../kube/exec.js';
 import { namespaceName } from '../../kube/validation.js';
 import {
   clientFor,
@@ -348,6 +349,8 @@ export async function kubeRoutes(app: FastifyInstance) {
     const body = settingsSchema.parse(req.body);
     const before = kubeSettings(req.orgId);
     const after = updateKubeSettings(req.orgId, body);
+    // Pod shells opened under the old rule end with it
+    if (before.operatorsCanExec && !after.operatorsCanExec) closeDisallowedPodShells(req.orgId);
     await audit(req, 'org.kube_settings', 'organization', req.orgId, undefined, { before, after });
     return after;
   });

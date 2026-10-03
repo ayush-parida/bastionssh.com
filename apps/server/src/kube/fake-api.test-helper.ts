@@ -1,6 +1,7 @@
 import https from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { Duplex } from 'node:stream';
 import type { TLSSocket } from 'node:tls';
 import { CA_CERT, SERVER_CERT, SERVER_KEY } from './test-certs.test-helper.js';
 
@@ -61,6 +62,13 @@ export interface FakeApi {
   rules: { verbs: string[]; apiGroups: string[]; resources: string[] }[];
   /** Close every open watch (as an API server restart would). */
   dropWatches(): void;
+  /**
+   * Extra endpoints (pod logs, …): consulted first, after authentication;
+   * true when it answered (fake-pod-api.test-helper.ts).
+   */
+  extra: ((req: IncomingMessage, res: ServerResponse, url: URL) => boolean) | null;
+  /** WebSocket upgrades (pod exec); unauthenticated ones are refused before this is called. */
+  onUpgrade: ((req: IncomingMessage, socket: Duplex, head: Buffer) => void) | null;
   close(): Promise<void>;
 }
 
@@ -226,6 +234,8 @@ export async function startFakeApi(opts: { token?: string; clientCa?: string } =
     forbid: (resource, on = true) => (on ? forbidden.add(resource) : forbidden.delete(resource)),
     metrics: null,
     rules: [{ verbs: ['get', 'list', 'watch'], apiGroups: ['*'], resources: ['*'] }],
+    extra: null,
+    onUpgrade: null,
     dropWatches: () => {
       for (const w of [...watchers]) w.res.destroy();
     },
@@ -249,6 +259,7 @@ export async function startFakeApi(opts: { token?: string; clientCa?: string } =
       return send(res, 200, { major: '1', minor: '31', gitVersion: 'v1.31.2+fake', platform: 'linux/arm64' });
     }
     if (!authorized(req)) return send(res, 401, status(401, 'Unauthorized', 'Unauthorized'));
+    if (api.extra?.(req, res, url)) return;
     if (url.pathname === '/api' || url.pathname === '/apis') return send(res, 200, { kind: 'APIVersions', versions: ['v1'] });
     if (url.pathname === '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews' && req.method === 'POST') {
       return send(res, 201, {
@@ -368,6 +379,14 @@ export async function startFakeApi(opts: { token?: string; clientCa?: string } =
     },
     handle,
   );
+  server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+    requests.push(`UPGRADE ${req.url ?? ''}`);
+    if (!authorized(req) || !api.onUpgrade) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n' + JSON.stringify(status(401, 'Unauthorized', 'Unauthorized')));
+      return;
+    }
+    api.onUpgrade(req, socket, head);
+  });
   server.on('secureConnection', (socket: TLSSocket) => {
     sni.push((socket as TLSSocket & { servername?: string | false }).servername || '');
   });

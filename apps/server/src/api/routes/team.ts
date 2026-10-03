@@ -45,6 +45,8 @@ import { audit } from '../../audit/index.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { abortDockerStreams } from '../../docker/sse.js';
 import { closeDisallowedExecSessions } from '../../docker/exec.js';
+import { closeDisallowedPodShells } from '../../kube/exec.js';
+import { abortKubeStreams } from '../../kube/sse.js';
 import { passkeyCount, requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { deleteBackupCodes } from '../../auth/backup-codes.js';
 import {
@@ -433,6 +435,9 @@ export async function teamRoutes(app: FastifyInstance) {
     if (rank(role) < rank(member.role as Role)) {
       abortDockerStreams(userId, { orgId: req.orgId });
       closeDisallowedExecSessions(req.orgId, userId);
+      // Likewise pod logs and shells (the cluster views reconnect on their own)
+      abortKubeStreams(userId, { orgId: req.orgId });
+      closeDisallowedPodShells(req.orgId, userId);
     }
 
     const target = db.select().from(users).where(eq(users.id, userId)).get();

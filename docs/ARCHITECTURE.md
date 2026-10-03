@@ -652,8 +652,8 @@ below.
   (Deployments, StatefulSets, DaemonSets, Jobs, CronJobs with a health word and one-line
   summary), and `…/objects/:resource/:ns/:name` (`_` for cluster-scoped) — a fresh `get`,
   redacted, with facts, labels, health, related objects (owner chain up to the Deployment,
-  owned ReplicaSets/Jobs, pods it owns, selects or runs) and, for operators and up,
-  read-only YAML. What the credential may not list is left out with a plain-words warning
+  owned ReplicaSets/Jobs, pods it owns, selects or runs); the read-only YAML is its own
+  endpoint (below). What the credential may not list is left out with a plain-words warning
   instead of failing the view. Resources come from a fixed allowlist (`KUBE_RESOURCES` in
   `@smt/shared`), names and namespaces are checked against DNS-1123 before a path is built
   (`validation.ts`). `kubeObjectPath` / `kubeObjectUrl` give every object one stable URL,
@@ -749,6 +749,38 @@ below.
   `kube.delete_pod`, `kube.cordon`, `kube.uncordon`, `kube.cronjob_suspend`,
   `kube.cronjob_resume`, `kube.cronjob_trigger`, against the cluster with namespace,
   kind, name and before/after. The web components live in `components/kube/actions/`.
+- **Inside a pod (K4, `api/routes/kube-pods.ts`).** `GET …/pods/:ns/:name` is the pod
+  panel (`pods.ts`): containers as lanes (init → native sidecars, i.e. init containers
+  with `restartPolicy: Always` → app → ephemeral) with state, restarts, last termination,
+  requests/limits and usage from `metrics.k8s.io` (feature-detected), and a lifecycle
+  strip from the pod's conditions. `GET …/logs` (operators, `logs.ts`) reads
+  `…/pods/:name/log` and sends `ready` / `logs` batches / `end` over `kubeSseRoute` (same
+  per-user cap and revocation as the change feed): one container at a time (the
+  `kubectl.kubernetes.io/default-container` annotation, else the first app container),
+  `previous` for the run before the last restart, tail capped at 10 000 lines, a followed
+  stream ended with `truncated` after 64 MiB, 100 ms / 1 000-line batches, the API stream
+  paused under browser backpressure; `…/logs/download` streams plain text (`limitBytes`
+  32 MiB). Logs are not redacted (operator+, like Docker). `GET
+  …/objects/:resource/:ns/:name/yaml` (operators) is the redacted YAML on its own, fetched
+  when the tab opens.
+- **Pod shells** (`websocket.ts`, `exec.ts`, `POST …/pods/:ns/:name/exec`): `client.upgrade`
+  does the RFC 6455 handshake over a fresh socket from the cluster's transport (verified
+  TLS, SNI, SSH `forwardOut` or agent tunnel — never the pooled agent's), offering
+  `v5.channel.k8s.io` then `v4.channel.k8s.io`; `websocket.ts` frames it (masked client
+  frames, fragments, ping/pong, close, 16 MiB message cap — no `ws` at runtime). Channels:
+  0 stdin, 1 stdout, 2 stderr, 3 status (a `metav1.Status` with the exit code), 4 resize
+  (`{"Width","Height"}`), 255 close (v5 only, ends stdin). The default command runs bash
+  if present, else sh, in one exec. `podShellChannel` shapes it like an ssh2 shell channel
+  and `SSHBroker.adoptSession` registers it with `pod: { clusterId, namespace, name,
+  container }` and no server, so the terminal WebSocket, buffering, reaping and recording
+  (kind `pod`, `serverId` null, `serverName` the cluster, `command`
+  `namespace/pod/container`) are the broker's, as for Docker container shells. Closing
+  writes ^C ^D, ends stdin (v5) and waits up to 3 s for the exit code
+  (`kube.exec_start` / `kube.exec_end`). `closeForUser` takes `keepClusterIds`, so
+  `revokeLiveAccess` keeps shells on clusters still granted; `closeDisallowedPodShells`
+  ends shells whose owner lost `exec` (demotion, `operatorsCanExec` off) or the cluster,
+  `closeClusterShells` those on an edited or removed cluster, and re-attaching to a
+  session re-checks the capability and the cluster grant.
 
 ---
 

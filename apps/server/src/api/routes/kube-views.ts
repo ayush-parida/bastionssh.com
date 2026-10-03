@@ -1,15 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { stringify as toYaml } from 'yaml';
 import {
   KUBE_RESOURCES,
   KUBE_WORKLOAD_KINDS,
   kubeResourceOfKind,
+  type KubeLogEvent,
   type KubeNamespace,
   type KubeObjectDetail,
   type KubeObjectRef,
   type KubeOverview,
   type KubeResource,
+  type KubeStreamEvent,
   type KubeStreamView,
   type KubeWorkload,
   type KubeWorkloadKind,
@@ -17,7 +18,6 @@ import {
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { canAccessCluster } from '../../auth/cluster-access.js';
-import { audit } from '../../audit/index.js';
 import { snapshotKube, subscribeKube, type CacheSubscription, type ScopeSpec } from '../../kube/cache.js';
 import type { KubeObject } from '../../kube/client.js';
 import { KubeError } from '../../kube/errors.js';
@@ -119,11 +119,11 @@ async function visibleNamespaces(ctx: KubeContext): Promise<{ namespaces: KubeNa
  * feeds it until the browser leaves. Errors before `open()` are answered as
  * JSON, after it as an `error` event; the stream is always ended.
  */
-export async function kubeSseRoute(
+export async function kubeSseRoute<E extends KubeLogEvent | KubeStreamEvent = KubeStreamEvent>(
   req: FastifyRequest,
   reply: FastifyReply,
   clusterId: string,
-  run: (ctx: KubeContext, open: () => KubeSse | null, signal: AbortSignal) => Promise<void>,
+  run: (ctx: KubeContext, open: () => KubeSse<E> | null, signal: AbortSignal) => Promise<void>,
 ) {
   // The cap counts every feature's streams (api/sse.ts)
   if (activeStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) {
@@ -132,22 +132,22 @@ export async function kubeSseRoute(
   const gone = new AbortController();
   reply.raw.on('close', () => gone.abort());
 
-  let sse: KubeSse | null = null;
+  let sse: KubeSse<E> | null = null;
   const open = () => {
     // Access may have been revoked while the view was being read; a stream registered after that would outlive it
     if (!canAccessCluster(req, clusterId)) throw new KubeError('Cluster not found', 404);
-    sse = openKubeSse(req, reply, clusterId);
+    sse = openKubeSse<E>(req, reply, clusterId);
     sse?.signal.addEventListener('abort', () => gone.abort(), { once: true });
     return sse;
   };
   try {
     await withKubeClient(req, clusterId, (ctx) => run(ctx, open, gone.signal));
   } catch (err) {
-    const stream = sse as KubeSse | null;
+    const stream = sse as KubeSse<E> | null;
     if (stream) stream.fail(err);
     else if (!reply.sent && !gone.signal.aborted) return sendKubeError(reply, err);
   } finally {
-    (sse as KubeSse | null)?.end();
+    (sse as KubeSse<E> | null)?.end();
   }
 }
 
@@ -277,8 +277,10 @@ export async function kubeViewRoutes(app: FastifyInstance) {
 
   /**
    * GET /clusters/:id/objects/:resource/:ns/:name — one object, redacted:
-   * facts, labels, health, what it is related to, and (operators and up)
-   * its read-only YAML. `_` stands for "no namespace" on cluster-scoped objects.
+   * facts, labels, health and what it is related to. The read-only YAML is
+   * its own endpoint (kube-pods.ts), fetched — and for a Secret audited —
+   * only when the YAML tab is opened. `_` stands for "no namespace" on
+   * cluster-scoped objects.
    */
   app.get('/clusters/:id/objects/:resource/:ns/:name', { preHandler: requireKube('view') }, async (req, reply) => {
     const params = objectParams.parse(req.params);
@@ -340,25 +342,12 @@ export async function kubeViewRoutes(app: FastifyInstance) {
               ? workloadHealth(kind as KubeWorkloadKind, object).health
               : null;
 
-        let yaml: string | undefined;
-        if (ctx.permissions.yaml) {
-          yaml = toYaml(object, { lineWidth: 0 });
-          // Values never leave the server, but someone looked: audited (spec §8.7)
-          if (kind === 'Secret') {
-            await audit(req, 'kube.secret_view', 'kube_cluster', ctx.cluster.id, ctx.cluster.name, {
-              namespace: ref.namespace,
-              name: ref.name,
-            });
-          }
-        }
-
         return {
           ref: { ...ref, kind },
           health,
           facts: objectFacts(object),
           labels: object.metadata.labels ?? {},
           related: rel,
-          ...(yaml !== undefined && { yaml }),
         };
       });
     } catch (err) {

@@ -178,6 +178,8 @@ export type AuditAction =
   | 'kube.cronjob_suspend'
   | 'kube.cronjob_resume'
   | 'kube.cronjob_trigger'
+  | 'kube.exec_start'
+  | 'kube.exec_end'
   | 'org.kube_settings';
 
 export interface AuditLogEntry {
