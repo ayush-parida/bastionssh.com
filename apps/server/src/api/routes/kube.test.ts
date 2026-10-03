@@ -263,14 +263,14 @@ describe('kube routes', () => {
       expect((await get(viewer, c('/workloads?kind=Bogus'))).statusCode).toBe(400);
     });
 
-    it('shows details redacted, YAML only to operators, and audits Secret views', async () => {
+    it('shows details redacted; the YAML (and its Secret audit) is its own endpoint', async () => {
       const asViewer = (await get(viewer, c('/objects/secrets/shop/db'))).json() as KubeObjectDetail;
-      expect(asViewer.yaml).toBeUndefined();
       expect(asViewer.facts).toContainEqual({ label: 'Keys', value: 'password' });
       const res = await get(operator, c('/objects/secrets/shop/db'));
       expect(res.body).not.toContain('aHVudGVyMg==');
-      expect((res.json() as KubeObjectDetail).yaml).toContain('password: ••••');
-      expect(audited('kube.secret_view')).toHaveLength(1);
+      // Opening a Secret's panel is not a YAML view: no YAML sent, nothing audited (kube-pods.ts has the YAML)
+      expect(res.json()).not.toHaveProperty('yaml');
+      expect(audited('kube.secret_view')).toHaveLength(0);
 
       const podDetail = (await get(viewer, c('/objects/pods/shop/web-1'))).json() as KubeObjectDetail;
       expect(podDetail.health).toBe('running');

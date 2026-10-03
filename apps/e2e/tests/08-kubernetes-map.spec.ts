@@ -124,7 +124,6 @@ const podDetail = {
   ],
   labels: { app: 'worker' },
   related: [{ resource: 'deployments', kind: 'Deployment', namespace: 'shop', name: 'worker', relation: 'owned by' }],
-  yaml: 'apiVersion: v1\nkind: Pod\n',
 };
 
 /** Answer the Kubernetes API; anything else under /api/kube is a 404 that names the path. */

@@ -114,7 +114,6 @@ const objectDetail = {
   facts: [{ label: 'Node', value: 'node-a' }],
   labels: { app: 'worker' },
   related: [],
-  yaml: 'apiVersion: v1\nkind: Pod\n',
 };
 
 const yaml = [

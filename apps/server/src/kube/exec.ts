@@ -94,12 +94,17 @@ export function execSession(ws: WebSocketConnection, protocol: string): ExecSess
   const frame = (channel: number, data: Buffer | string) =>
     ws.send(Buffer.concat([Buffer.from([channel]), typeof data === 'string' ? Buffer.from(data) : data]));
 
-  // Output the browser is not reading yet holds the socket back
+  // Output the browser is not reading yet holds the socket back. One chunk
+  // can carry many frames, so wait for each stream's drain only once.
+  const waiting = new Set<PassThrough>();
   const pushTo = (stream: PassThrough, data: Buffer) => {
-    if (!stream.write(data)) {
-      ws.pause();
-      stream.once('drain', () => ws.resume());
-    }
+    if (stream.write(data) || waiting.has(stream)) return;
+    waiting.add(stream);
+    ws.pause();
+    stream.once('drain', () => {
+      waiting.delete(stream);
+      if (!waiting.size) ws.resume();
+    });
   };
 
   ws.on('message', (message: Buffer) => {

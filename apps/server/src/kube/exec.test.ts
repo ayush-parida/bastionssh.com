@@ -42,7 +42,9 @@ import { evictKubeServer } from './ssh-pool.js';
 import { FAKE_TOKEN, startFakeApi, type FakeApi } from './fake-api.test-helper.js';
 import { fakePods, type FakePods } from './fake-pod-api.test-helper.js';
 import { CA_CERT } from './test-certs.test-helper.js';
-import { openPodShell, parseExecStatus } from './exec.js';
+import { execSession, openPodShell, parseExecStatus } from './exec.js';
+import type { WebSocketConnection } from './websocket.js';
+import { EventEmitter } from 'node:events';
 
 const until = async (check: () => boolean, ms = 3000) => {
   const started = Date.now();
@@ -65,6 +67,29 @@ describe('parseExecStatus', () => {
       message: 'no such file',
     });
     expect(parseExecStatus('plain text error')).toEqual({ exitCode: null, message: 'plain text error' });
+  });
+});
+
+describe('execSession backpressure', () => {
+  it('holds the socket back once per stream, however many frames arrive, and lets go when both drain', async () => {
+    const ws = Object.assign(new EventEmitter(), { paused: 0, resumed: 0, isOpen: true, send: () => true, close: () => {} });
+    Object.assign(ws, { pause: () => (ws.paused += 1), resume: () => (ws.resumed += 1) });
+    const session = execSession(ws as unknown as WebSocketConnection, 'v5.channel.k8s.io');
+    const frame = (channel: number) => Buffer.concat([Buffer.from([channel]), Buffer.alloc(64 * 1024, 0x61)]);
+    // Nobody reads yet: many stdout and stderr frames from one socket chunk
+    for (let i = 0; i < 40; i++) ws.emit('message', frame(1));
+    for (let i = 0; i < 40; i++) ws.emit('message', frame(2));
+    expect(session.stdout.listenerCount('drain')).toBe(1);
+    expect(session.stderr.listenerCount('drain')).toBe(1);
+    expect(ws.paused).toBe(2);
+
+    // stdout catching up is not enough while stderr is still full
+    session.stdout.resume();
+    await new Promise((r) => setImmediate(r));
+    expect(ws.resumed).toBe(0);
+    session.stderr.resume();
+    await new Promise((r) => setImmediate(r));
+    expect(ws.resumed).toBe(1);
   });
 });
 

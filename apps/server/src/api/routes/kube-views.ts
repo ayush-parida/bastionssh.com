@@ -1,6 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { stringify as toYaml } from 'yaml';
 import {
   KUBE_RESOURCES,
   KUBE_WORKLOAD_KINDS,
@@ -19,7 +18,6 @@ import {
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { canAccessCluster } from '../../auth/cluster-access.js';
-import { audit } from '../../audit/index.js';
 import { snapshotKube, subscribeKube, type CacheSubscription, type ScopeSpec } from '../../kube/cache.js';
 import type { KubeObject } from '../../kube/client.js';
 import { KubeError } from '../../kube/errors.js';
@@ -271,8 +269,10 @@ export async function kubeViewRoutes(app: FastifyInstance) {
 
   /**
    * GET /clusters/:id/objects/:resource/:ns/:name — one object, redacted:
-   * facts, labels, health, what it is related to, and (operators and up)
-   * its read-only YAML. `_` stands for "no namespace" on cluster-scoped objects.
+   * facts, labels, health and what it is related to. The read-only YAML is
+   * its own endpoint (kube-pods.ts), fetched — and for a Secret audited —
+   * only when the YAML tab is opened. `_` stands for "no namespace" on
+   * cluster-scoped objects.
    */
   app.get('/clusters/:id/objects/:resource/:ns/:name', { preHandler: requireKube('view') }, async (req, reply) => {
     const params = objectParams.parse(req.params);
@@ -334,25 +334,12 @@ export async function kubeViewRoutes(app: FastifyInstance) {
               ? workloadHealth(kind as KubeWorkloadKind, object).health
               : null;
 
-        let yaml: string | undefined;
-        if (ctx.permissions.yaml) {
-          yaml = toYaml(object, { lineWidth: 0 });
-          // Values never leave the server, but someone looked: audited (spec §8.7)
-          if (kind === 'Secret') {
-            await audit(req, 'kube.secret_view', 'kube_cluster', ctx.cluster.id, ctx.cluster.name, {
-              namespace: ref.namespace,
-              name: ref.name,
-            });
-          }
-        }
-
         return {
           ref: { ...ref, kind },
           health,
           facts: objectFacts(object),
           labels: object.metadata.labels ?? {},
           related: rel,
-          ...(yaml !== undefined && { yaml }),
         };
       });
     } catch (err) {

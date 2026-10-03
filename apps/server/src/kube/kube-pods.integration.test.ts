@@ -31,8 +31,8 @@ const { buildApp } = await import('../api/app.js');
 const { runMigrations } = await import('../db/migrate.js');
 const { seedOrg, seedUser } = await import('../api/routes/test-utils.js');
 const { getDb } = await import('../db/index.js');
-const { organizations, sessionRecordings } = await import('../db/schema.js');
-const { eq } = await import('drizzle-orm');
+const { auditLog, organizations, sessionRecordings } = await import('../db/schema.js');
+const { and, eq } = await import('drizzle-orm');
 
 async function until(check: () => boolean, ms = 20_000) {
   const started = Date.now();
@@ -137,7 +137,8 @@ describe.skipIf(!kubeconfigPath)('pods on a live k3s cluster', () => {
     }
     expect(previous[0]).toMatchObject({ type: 'ready', previous: true });
     expect(lines(previous), JSON.stringify(previous)).toContain('starting');
-  });
+    // On a fresh cluster the first restart can take a while; the loop above waits up to ~30 s
+  }, 60_000);
 
   it('shows the YAML with the Secret reference, never its value', async () => {
     const list = await api(operator, 'GET', c('/workloads?namespace=smt-it'));
@@ -184,6 +185,17 @@ describe.skipIf(!kubeconfigPath)('pods on a live k3s cluster', () => {
     await until(() => term.closed !== null);
     const row = getDb().select().from(sessionRecordings).where(eq(sessionRecordings.id, session.recording!.id)).get()!;
     expect(row).toMatchObject({ kind: 'pod', serverId: null, serverName: 'k3s-pods', command: 'smt-it/ticker/ticker' });
+    // The real API server's status channel carries the code (v5 or v4 alike)
+    const ended = () =>
+      getDb()
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.action, 'kube.exec_end'), eq(auditLog.resourceId, cluster.id)))
+        .all()
+        .map((r) => JSON.parse(r.metadata ?? '{}') as { sessionId?: string; exitCode?: number | null })
+        .find((m) => m.sessionId === session.sessionId);
+    await until(() => !!ended());
+    expect(ended()).toMatchObject({ exitCode: 3 });
   }, 60_000);
 
   it.skipIf(!sshHost || !innerUrl || !tokenFile || !caFile)(

@@ -652,8 +652,8 @@ below.
   (Deployments, StatefulSets, DaemonSets, Jobs, CronJobs with a health word and one-line
   summary), and `…/objects/:resource/:ns/:name` (`_` for cluster-scoped) — a fresh `get`,
   redacted, with facts, labels, health, related objects (owner chain up to the Deployment,
-  owned ReplicaSets/Jobs, pods it owns, selects or runs) and, for operators and up,
-  read-only YAML. What the credential may not list is left out with a plain-words warning
+  owned ReplicaSets/Jobs, pods it owns, selects or runs); the read-only YAML is its own
+  endpoint (below). What the credential may not list is left out with a plain-words warning
   instead of failing the view. Resources come from a fixed allowlist (`KUBE_RESOURCES` in
   `@smt/shared`), names and namespaces are checked against DNS-1123 before a path is built
   (`validation.ts`). `kubeObjectPath` / `kubeObjectUrl` give every object one stable URL,
