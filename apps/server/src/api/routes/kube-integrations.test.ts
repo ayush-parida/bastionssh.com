@@ -480,5 +480,31 @@ describe('kube integrations (K5)', () => {
       expect(openClusterAlerts(prod)).toEqual([]);
       expect(notify.events).toEqual([]);
     }, 20_000);
+
+    it('see a cluster that went away as unreachable, not as its last cached state', async () => {
+      const lost = await startFakeApi();
+      lost.add('nodes', node('only-1'));
+      let lostId = '';
+      try {
+        const created = await send(admin, 'POST', '/api/kube/clusters', { name: 'lost', kubeconfig: fakeKubeconfig(lost) });
+        expect(created.statusCode).toBe(201);
+        lostId = (created.json() as KubeCluster).id;
+        await send(owner, 'PATCH', '/api/kube/settings', { clusterAlerts: true });
+        await sweepClusterAlerts();
+        const before = (await get(operator, '/api/kube/overview')).json() as KubeFleetOverview;
+        expect(before.clusters.find((c) => c.clusterId === lostId)).toMatchObject({ ok: true, nodes: { total: 1, ready: 1 } });
+      } finally {
+        // The watch cache still holds its nodes and pods from here on
+        await lost.close();
+      }
+
+      const after = (await get(operator, '/api/kube/overview')).json() as KubeFleetOverview;
+      expect(after.clusters.find((c) => c.clusterId === lostId)).toMatchObject({ ok: false });
+      notify.events.length = 0;
+      for (let i = 0; i < 3; i++) await sweepClusterAlerts();
+      expect(openClusterAlerts(lostId).map((a) => a.type)).toEqual(['kube_cluster_unreachable']);
+      expect(notify.events).toContainEqual(expect.objectContaining({ kind: 'opened', serverId: lostId, type: 'kube_cluster_unreachable' }));
+      await send(owner, 'PATCH', '/api/kube/settings', { clusterAlerts: false });
+    }, 30_000);
   });
 });

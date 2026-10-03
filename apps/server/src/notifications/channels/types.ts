@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { NotificationChannelType, OpsgenieRegion } from '@smt/shared';
 import { eventLabel, maskUrl, subjectLabel, type AlertEvent, type ServerRef } from '../format.js';
 
@@ -76,11 +77,22 @@ export function title(event: AlertEvent, server: ServerRef): string {
   return `[${event.severity.toUpperCase()}] ${eventLabel(event)} on ${server.name}`;
 }
 
-/** Stable per-alert key so paging tools resolve the incident they opened. */
+/** PagerDuty's `dedup_key` limit (Opsgenie's `alias` allows 512). */
+export const MAX_DEDUP_KEY = 255;
+
+/**
+ * Stable per-alert key so paging tools resolve the incident they opened. A
+ * key over {@link MAX_DEDUP_KEY} (a Kubernetes object's namespace and name
+ * can reach ~320 characters) keeps its start and ends in a hash of the whole,
+ * so it stays stable and distinct instead of being refused.
+ */
 export function dedupKey(event: AlertEvent, sentAt: string): string {
   if (event.kind === 'notice') return `smt:notice:${sentAt}`;
   if (event.kind === 'test') return `smt:test:${sentAt}`;
-  return `smt:${event.serverId}:${event.type}${event.container ? `:${event.container}` : ''}`;
+  const key = `smt:${event.serverId}:${event.type}${event.container ? `:${event.container}` : ''}`;
+  if (key.length <= MAX_DEDUP_KEY) return key;
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return `${key.slice(0, MAX_DEDUP_KEY - hash.length - 1)}#${hash}`;
 }
 
 /** Three-way tone every adapter maps onto its own colour / priority scale. */

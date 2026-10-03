@@ -16,11 +16,12 @@ import { kubeClusters } from '../db/schema.js';
 import { mapPooled } from '../docker/fleet.js';
 import { openClusterAlerts } from './alerts.js';
 import { snapshotKube, type ScopeSpec } from './cache.js';
-import type { KubeObject } from './client.js';
+import type { KubeClient, KubeObject } from './client.js';
 import { KubeError } from './errors.js';
 import { workloadHealth } from './health.js';
 import { kubeSettings } from './settings.js';
 import { withKubeClient, type ClusterRow, type KubeContext } from './service.js';
+import { resourcePath } from './validation.js';
 import { toNodeCard, toPodTile } from './views.js';
 
 /**
@@ -135,6 +136,24 @@ export function fleetSpecs(allowlist: string[] | null): (ScopeSpec & { kind: Kub
 const isForbidden = (err: Error | null) => err instanceof KubeError && err.statusCode === 403;
 
 /**
+ * Ask the API server now, past the watch cache: once a scope has data, the
+ * cache keeps serving its last known objects while it retries a broken watch
+ * (cache.ts, rule 4), so a cluster that went away — or a credential that was
+ * revoked — would otherwise still read as healthy, from a stale picture. One
+ * object of the first scope is enough; a 403 still proves the API server and
+ * the credential answer (that scope is then left out, as on the map).
+ */
+export async function probeCluster(client: KubeClient, specs: ScopeSpec[], timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  const [first] = specs;
+  if (!first) return;
+  try {
+    await client.text({ path: resourcePath(first.resource, { namespace: first.namespace }), query: { limit: 1 }, timeoutMs, signal });
+  } catch (err) {
+    if (!isForbidden(err as Error)) throw err;
+  }
+}
+
+/**
  * Read a cluster's objects from a snapshot of {@link fleetSpecs}. Scopes the
  * credential may not list are left out with a warning; any other failure throws.
  */
@@ -203,7 +222,10 @@ async function readOne(req: Caller, row: ClusterRow, signal?: AbortSignal): Prom
     const summary = await Promise.race([
       withKubeClient(req, row.id, async (ctx: KubeContext) => {
         const specs = fleetSpecs(ctx.allowlist);
-        const snap = await snapshotKube(ctx.source, specs, kubeFleetLimits.timeoutMs);
+        const [snap] = await Promise.all([
+          snapshotKube(ctx.source, specs, kubeFleetLimits.timeoutMs),
+          probeCluster(ctx.client, specs, kubeFleetLimits.timeoutMs, signal),
+        ]);
         const objects = objectsOf(specs, snap, ctx.namespaceAllowed);
         return { ...summarizeCluster(objects), warnings: objects.warnings };
       }),

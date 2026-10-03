@@ -11,7 +11,7 @@ import { podHealth, workloadHealth } from './health.js';
 import { apiEndpoint } from './kubeconfig.js';
 import { kubeSettings } from './settings.js';
 import { clientFor, clusterCredential, parseAllowlist, type ClusterRow } from './service.js';
-import { fleetSpecs, objectsOf, type ClusterObjects } from './fleet.js';
+import { fleetSpecs, objectsOf, probeCluster, type ClusterObjects } from './fleet.js';
 
 /**
  * Cluster alerts (spec §13.4): when an org turns `clusterAlerts` on (off by
@@ -384,8 +384,18 @@ async function readForAlerts(row: ClusterRow): Promise<ClusterObjects | null> {
       timer = setTimeout(() => resolve(null), clusterAlertLimits.timeoutMs);
     });
     const read = (async () => {
-      const snap = await snapshotKube(await systemCacheSource(row), specs, clusterAlertLimits.timeoutMs);
-      return objectsOf(specs, snap, (ns) => !allowed || !ns || allowed.has(ns));
+      const source = await systemCacheSource(row);
+      // The cache alone would keep showing a cluster that went away as it last was
+      const client = source.client();
+      try {
+        const [snap] = await Promise.all([
+          snapshotKube(source, specs, clusterAlertLimits.timeoutMs),
+          probeCluster(client, specs, clusterAlertLimits.timeoutMs),
+        ]);
+        return objectsOf(specs, snap, (ns) => !allowed || !ns || allowed.has(ns));
+      } finally {
+        client.close();
+      }
     })();
     read.catch(() => {});
     return await Promise.race([read, timedOut]);
