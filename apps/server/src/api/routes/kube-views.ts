@@ -16,6 +16,7 @@ import {
   type KubeWorkloadList,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { canAccessCluster } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { snapshotKube, subscribeKube, type CacheSubscription, type ScopeSpec } from '../../kube/cache.js';
 import type { KubeObject } from '../../kube/client.js';
@@ -132,6 +133,8 @@ export async function kubeSseRoute(
 
   let sse: KubeSse | null = null;
   const open = () => {
+    // Access may have been revoked while the view was being read; a stream registered after that would outlive it
+    if (!canAccessCluster(req, clusterId)) throw new KubeError('Cluster not found', 404);
     sse = openKubeSse(req, reply, clusterId);
     sse?.signal.addEventListener('abort', () => gone.abort(), { once: true });
     return sse;
@@ -277,6 +280,11 @@ export async function kubeViewRoutes(app: FastifyInstance) {
         if (!ctx.namespaceAllowed(ref.namespace)) throw new KubeError('Not found', 404);
         if (ref.resource === 'namespaces' && !ctx.namespaceAllowed(ref.name)) throw new KubeError('Not found', 404);
         const raw = await ctx.client.get(ref.resource, ref.namespace, ref.name);
+        // A volume belongs to the namespace of the claim bound to it
+        const claimNamespace = (raw.spec as { claimRef?: { namespace?: unknown } } | undefined)?.claimRef?.namespace;
+        if (ref.resource === 'persistentvolumes' && typeof claimNamespace === 'string' && !ctx.namespaceAllowed(claimNamespace)) {
+          throw new KubeError('Not found', 404);
+        }
         const object = redactObject(
           { ...raw, kind: raw.kind ?? KUBE_RESOURCES[ref.resource].kind },
           { showConfigMapValues: ctx.settings.showConfigMapValues },

@@ -268,6 +268,11 @@ async function connectionFor(req: FastifyRequest, body: ClusterInput, existing: 
   const credential = resolved.credential ?? (existing ? await clusterCredential(existing) : undefined);
   if (!credential) throw new KubeError('A token or a client certificate is required (or upload a kubeconfig)', 400);
   const caData = resolved.caData !== undefined ? resolved.caData : (existing?.caData ?? null);
+  // The saved credential only ever goes to the API server it was saved for: pointing the cluster
+  // at another address (or trusting another CA) would hand it to whoever answers there
+  if (existing && !resolved.credential && (apiUrl !== existing.apiUrl || caData !== existing.caData)) {
+    throw new KubeError('Enter the token or client certificate again when changing the API server address or its CA', 400);
+  }
   const connectVia = (body.connectVia ?? existing?.connectVia ?? 'direct') as KubeConnectVia;
   const via = checkRoute(
     req.orgId,

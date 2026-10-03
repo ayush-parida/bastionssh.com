@@ -19,7 +19,7 @@ import { sweepExpiredAccess } from '../../auth/access-grants.js';
 import { resetKubeCache } from '../../kube/cache.js';
 import { activeKubeStreamCount } from '../../kube/sse.js';
 import { deployment, fakeKubeconfig, node, pod, startFakeApi, type FakeApi } from '../../kube/fake-api.test-helper.js';
-import { seedOrg, seedUser } from './test-utils.js';
+import { seedOrg, seedServer, seedUser } from './test-utils.js';
 
 /**
  * Kubernetes routes end to end against the in-process fake API server: the
@@ -287,6 +287,17 @@ describe('kube routes', () => {
       expect((await get(viewer, c('/objects/pods/shop/missing'))).statusCode).toBe(404);
     });
 
+    it('never sends the saved credential to a new address or CA', async () => {
+      const moved = await send(admin, 'PATCH', c(), { apiUrl: 'https://10.0.0.99:6443' });
+      expect(moved.statusCode).toBe(400);
+      expect(moved.json().error).toMatch(/token or client certificate again/);
+      const tested = await send(admin, 'POST', c('/test'), { apiUrl: 'https://10.0.0.99:6443' });
+      expect(tested.statusCode).toBe(400);
+      expect((await send(admin, 'PATCH', c(), { caData: '' })).statusCode).toBe(400);
+      // Unchanged address: the saved credential is used as before
+      expect((await send(admin, 'PATCH', c(), { apiUrl: api.url })).statusCode).toBe(200);
+    });
+
     it('keeps everyone inside the namespace allowlist', async () => {
       const patched = await send(admin, 'PATCH', c(), { namespacesAllowlist: ['shop'], defaultNamespace: 'shop' });
       expect(patched.statusCode).toBe(200);
@@ -295,6 +306,11 @@ describe('kube routes', () => {
         expect(overview.namespaces).toEqual(['shop']);
         expect(overview.nodes.flatMap((n) => n.pods.map((p) => p.namespace))).not.toContain('kube-system');
         expect((await get(viewer, c('/objects/pods/kube-system/coredns-1'))).statusCode).toBe(404);
+        // A volume bound to a claim outside the allowlist is outside it too
+        api.add('persistentvolumes', { kind: 'PersistentVolume', metadata: { name: 'pv-sys' }, spec: { claimRef: { namespace: 'kube-system', name: 'etcd' } } });
+        api.add('persistentvolumes', { kind: 'PersistentVolume', metadata: { name: 'pv-shop' }, spec: { claimRef: { namespace: 'shop', name: 'data' } } });
+        expect((await get(viewer, c('/objects/persistentvolumes/_/pv-sys'))).statusCode).toBe(404);
+        expect((await get(viewer, c('/objects/persistentvolumes/_/pv-shop'))).statusCode).toBe(200);
         expect((await get(viewer, c('/workloads?namespace=kube-system'))).statusCode).toBe(404);
         expect((await send(admin, 'PATCH', c(), { namespacesAllowlist: ['shop'], defaultNamespace: 'default' })).statusCode).toBe(400);
       } finally {
@@ -415,6 +431,39 @@ describe('kube routes', () => {
       ]);
       expect(result.steps.at(-1)!.detail).toMatch(/v1\.31\.2\+fake accepted the stored credential/);
       expect(audited('kube_cluster.diagnose')).toHaveLength(1);
+    });
+
+    it('does not show a member the steps of a server they cannot access', async () => {
+      const serverId = seedServer(orgId, admin.userId, 'bastion-hop');
+      const viaId = 'via-hidden-server';
+      getDb()
+        .insert(kubeClusters)
+        .values({
+          id: viaId,
+          orgId,
+          name: 'private',
+          apiUrl: 'https://kube.internal:6443',
+          connectVia: 'server',
+          viaServerId: serverId,
+          authType: 'token',
+          encryptedCredential: 'unused',
+          credentialHint: 'token ending …abcd',
+          createdBy: admin.userId,
+        })
+        .run();
+      try {
+        await send(admin, 'PUT', `/api/team/members/${restricted.userId}/access`, {
+          serverAccess: 'restricted',
+          serverIds: [],
+          clusterIds: [viaId],
+        });
+        const res = await send(restricted, 'POST', `/api/diagnostics/clusters/${viaId}`, { auth: false });
+        const result = res.json() as DiagnosticsResult;
+        expect(result.steps.map((s) => [s.id, s.status])).toEqual([['kube_api', 'skipped']]);
+        expect(JSON.stringify(result)).not.toContain('10.0.0.1');
+      } finally {
+        getDb().delete(kubeClusters).where(eq(kubeClusters.id, viaId)).run();
+      }
     });
   });
 

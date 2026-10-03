@@ -10,7 +10,7 @@ import type {
   KubeWorkload,
   KubeWorkloadKind,
 } from '@smt/shared';
-import { kubeResourceOfKind } from '@smt/shared';
+import { KUBE_RESOURCES, kubeResourceOfKind } from '@smt/shared';
 import type { KubeObject } from './client.js';
 import { isUnscheduled, podHealth, workloadHealth } from './health.js';
 import { bytes, cpuMillis, parseQuantity } from './quantity.js';
@@ -369,7 +369,8 @@ type Related = KubeObjectRef & { relation: string };
 function ref(kind: string, namespace: string | null, name: string, relation: string): Related | null {
   const resource = kubeResourceOfKind(kind);
   if (!resource) return null;
-  return { resource, kind, namespace, name, relation };
+  // A static pod is owned by its Node: cluster-scoped, whatever namespace the pod is in
+  return { resource, kind, namespace: KUBE_RESOURCES[resource].namespaced ? namespace : null, name, relation };
 }
 
 /** What an object points at by itself: owners, its node, volumes and env references, backends. */

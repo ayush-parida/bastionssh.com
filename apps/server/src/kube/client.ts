@@ -36,6 +36,10 @@ export const LIST_PAGE_SIZE = 500;
 const MAX_LIST_PAGES = 40;
 /** A single watch event line larger than this is dropped (and the watch restarts). */
 const MAX_WATCH_LINE = 8 * 1024 * 1024;
+export const watchLimits = {
+  /** How long past its `timeoutSeconds` a watch may stay open before the connection is taken for dead. */
+  graceMs: 30_000,
+};
 
 export type Json = Record<string, unknown>;
 export type QueryValue = string | number | boolean | undefined | null;
@@ -369,13 +373,14 @@ export class KubeClient {
     onEvent: (event: WatchEvent<T>) => void,
   ): Promise<void> {
     const kind = KUBE_RESOURCES[resource].kind;
+    const timeoutSeconds = opts.timeoutSeconds ?? 300;
     const res = await this.stream({
       path: resourcePath(resource, { namespace: opts.namespace }),
       query: {
         watch: 1,
         resourceVersion: opts.resourceVersion,
         allowWatchBookmarks: true,
-        timeoutSeconds: opts.timeoutSeconds ?? 300,
+        timeoutSeconds,
         labelSelector: opts.labelSelector,
         fieldSelector: opts.fieldSelector,
       },
@@ -383,6 +388,11 @@ export class KubeClient {
     });
     await new Promise<void>((resolve, reject) => {
       let buffer = '';
+      // The API server ends a watch after timeoutSeconds. One still open well past that sits on a
+      // dead connection (a dropped tunnel can stay half-open for hours): drop it so the cache resumes
+      const deadline = setTimeout(() => res.destroy(), timeoutSeconds * 1000 + watchLimits.graceMs);
+      deadline.unref?.();
+      res.once('close', () => clearTimeout(deadline));
       const handle = (line: string) => {
         if (!line.trim()) return;
         let event: WatchEvent<T>;

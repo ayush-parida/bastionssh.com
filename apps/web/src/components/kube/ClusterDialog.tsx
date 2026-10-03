@@ -290,7 +290,13 @@ export default function ClusterDialog({ cluster, onClose }: { cluster: KubeClust
               )}
               <div className="space-y-1">
                 <span className="text-sm font-medium">Credential</span>
-                {editing && <p className="text-xs text-muted-foreground">Saved: {cluster.credentialHint}. Enter a new one only to replace it.</p>}
+                {editing && (
+                  <p className="text-xs text-muted-foreground">
+                    {apiUrl.trim() !== cluster.apiUrl || replaceCa
+                      ? 'A new address or CA needs the credential again: the saved one is only sent to the server it was saved for.'
+                      : `Saved: ${cluster.credentialHint}. Enter a new one only to replace it.`}
+                  </p>
+                )}
                 <div className="flex gap-4 text-sm">
                   {(['token', 'cert'] as const).map((t) => (
                     <label key={t} className="flex items-center gap-1.5">

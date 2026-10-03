@@ -124,6 +124,12 @@ export interface WorkloadHealth {
   lastRunAt?: string | null;
 }
 
+/**
+ * `Progressing` reasons of a Deployment whose rollout has not finished yet;
+ * once it has, the reason is `NewReplicaSetAvailable`.
+ */
+const ROLLOUT_IN_PROGRESS = new Set(['NewReplicaSetCreated', 'FoundNewReplicaSet', 'ReplicaSetUpdated']);
+
 function replicaHealth(desired: number, ready: number, updated: number, available: number, stale: boolean, deadline: boolean): KubeWorkloadHealth {
   if (desired === 0) return 'idle';
   if (deadline) return 'failed';
@@ -149,9 +155,12 @@ export function workloadHealth(kind: KubeWorkloadKind, w: KubeObject): WorkloadH
       const available = kind === 'Deployment' ? num(status.availableReplicas) : num(status.availableReplicas, ready);
       const progressing = condition(status, 'Progressing');
       const deadline = str(progressing?.reason) === 'ProgressDeadlineExceeded';
+      // A rollout still within its deadline (a new Deployment pulling its image, too): starting, not failed
+      const rollingOut =
+        kind === 'Deployment' && progressing?.status === 'True' && ROLLOUT_IN_PROGRESS.has(str(progressing.reason) ?? '');
       const rolling =
         kind === 'StatefulSet' && str(status.updateRevision) !== null && str(status.currentRevision) !== str(status.updateRevision);
-      const health = replicaHealth(desired, ready, updated, available, stale || rolling, deadline);
+      const health = replicaHealth(desired, ready, updated, available, stale || rolling || rollingOut, deadline);
       const summary =
         desired === 0
           ? 'Scaled to zero'

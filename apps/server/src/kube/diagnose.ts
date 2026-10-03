@@ -3,6 +3,7 @@ import type { FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import type { DiagnosticsResult, KubeConnectVia, KubeTestResult } from '@smt/shared';
 import { openAgentTunnel } from '../agents/hub.js';
+import { canAccessServer } from '../auth/server-access.js';
 import { getDb } from '../db/index.js';
 import { servers } from '../db/schema.js';
 import { diagnose } from '../diagnostics/run.js';
@@ -97,6 +98,29 @@ export async function diagnoseCluster(row: ClusterRow, caller: Caller, opts: Dia
       .from(servers)
       .where(and(eq(servers.id, row.viaServerId), eq(servers.orgId, row.orgId)))
       .get();
+    if (server && !canAccessServer(caller, server.id)) {
+      // The hop is a server this member may not see: its address, host key and login are not theirs to read
+      const started = Date.now();
+      const step = kubeApi
+        ? { id: 'kube_api' as const, label: 'Kubernetes API', ...(await kubeApi()), durationMs: Date.now() - started }
+        : {
+            id: 'kube_api' as const,
+            label: 'Kubernetes API',
+            status: 'skipped' as const,
+            durationMs: 0,
+            detail: 'This cluster is reached through a server you do not have access to; include the login to test the Kubernetes API through it.',
+          };
+      const failed = step.status === 'fail';
+      return {
+        target,
+        ok: !failed,
+        failedStep: failed ? 'kube_api' : null,
+        steps: [step],
+        egressIp: null,
+        startedAt: new Date(started).toISOString(),
+        durationMs: Date.now() - started,
+      };
+    }
     if (server) {
       // The hop this app makes is the SSH login; Docker is not what is being diagnosed
       const hop = await diagnoseServer({ ...server, dockerMode: 'off' }, row.orgId, { ...opts, auth: true });

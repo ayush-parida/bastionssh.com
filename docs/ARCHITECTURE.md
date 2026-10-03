@@ -619,7 +619,9 @@ below.
   (`token`, or `{cert, key}` JSON) encrypted with the vault under the row id and never
   returned — the UI gets `credential_hint` (`token ending …abcd`, `client certificate
   CN=…`) — impersonation flag, default namespace, namespace allowlist, last health
-  (`last_status`, `last_error`, `last_checked_at`, `server_version`).
+  (`last_status`, `last_error`, `last_checked_at`, `server_version`). An edit (or test)
+  that changes `api_url` or `ca_data` must carry a new credential: the saved one is only
+  sent to the API server it was saved for.
 - **Access** (`auth/cluster-access.ts`, `service.ts`): clusters follow the per-server model.
   Owners and admins see every cluster; other members see every cluster unless their
   membership is `restricted`, then only the clusters in `member_cluster_access` (expiry

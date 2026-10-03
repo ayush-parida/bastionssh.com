@@ -63,6 +63,13 @@ describe('workload health', () => {
     const stuck = deployment('a', 'web', { replicas: 2, ready: 1 });
     (stuck.status as Record<string, unknown>).conditions = [{ type: 'Progressing', status: 'False', reason: 'ProgressDeadlineExceeded' }];
     expect(workloadHealth('Deployment', o(stuck))).toMatchObject({ health: 'failed', summary: expect.stringContaining('stuck') });
+    // A new Deployment still pulling its image is starting, not failing; after its deadline it is failing
+    const starting = deployment('a', 'web', { replicas: 2, ready: 0 });
+    (starting.status as Record<string, unknown>).conditions = [{ type: 'Progressing', status: 'True', reason: 'ReplicaSetUpdated' }];
+    expect(workloadHealth('Deployment', o(starting)).health).toBe('progressing');
+    const crashedLater = deployment('a', 'web', { replicas: 2, ready: 0 });
+    (crashedLater.status as Record<string, unknown>).conditions = [{ type: 'Progressing', status: 'True', reason: 'NewReplicaSetAvailable' }];
+    expect(workloadHealth('Deployment', o(crashedLater)).health).toBe('failed');
     const rolling = deployment('a', 'web');
     rolling.metadata.generation = 2;
     expect(workloadHealth('Deployment', o(rolling)).health).toBe('progressing');
@@ -120,6 +127,13 @@ describe('object detail', () => {
       ['runs on', 'Node', 'node-1'],
       ['reads env from', 'Secret', 'db'],
     ]);
+  });
+
+  it('links a static pod to its Node without a namespace (nodes are cluster-scoped)', () => {
+    const p = pod('kube-system', 'kube-apiserver-cp-1', { node: 'cp-1' }) as Record<string, unknown> & { metadata: Record<string, unknown> };
+    p.metadata.ownerReferences = [{ kind: 'Node', name: 'cp-1', controller: true }];
+    const owner = directRelations(o(p)).find((r) => r.relation === 'owned by');
+    expect(owner).toMatchObject({ resource: 'nodes', namespace: null, name: 'cp-1' });
   });
 
   it('describes a Secret without its values', () => {

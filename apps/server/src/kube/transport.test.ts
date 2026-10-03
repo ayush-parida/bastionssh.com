@@ -49,7 +49,7 @@ import { KubeError } from './errors.js';
 import { evictKubeServer } from './ssh-pool.js';
 import { FAKE_TOKEN, pod, startFakeApi, type FakeApi } from './fake-api.test-helper.js';
 import { CA_CERT, CLIENT_CERT, CLIENT_KEY, OTHER_CA } from './test-certs.test-helper.js';
-import type { WatchEvent } from './client.js';
+import { watchLimits, type WatchEvent } from './client.js';
 
 describe('kube transport and client', () => {
   let api: FakeApi;
@@ -179,5 +179,24 @@ describe('kube transport and client', () => {
       ['DELETED', 'p-0'],
     ]);
     client.close();
+  });
+
+  it('drops a watch that outlives its timeout, so a dead connection cannot freeze the cache', async () => {
+    const client = direct();
+    const grace = watchLimits.graceMs;
+    watchLimits.graceMs = 100;
+    try {
+      const { resourceVersion } = await client.list('pods', { namespace: 'quiet' });
+      const events: string[] = [];
+      const started = Date.now();
+      // The fake API never ends a watch by itself: only the client's deadline can
+      await client.watch('pods', { namespace: 'quiet', resourceVersion, timeoutSeconds: 0 }, (e) => events.push(e.type));
+      expect(events).toEqual(['BOOKMARK']);
+      expect(Date.now() - started).toBeLessThan(5_000);
+      await vi.waitFor(() => expect(api.watchers()).toBe(0));
+    } finally {
+      watchLimits.graceMs = grace;
+      client.close();
+    }
   });
 });
