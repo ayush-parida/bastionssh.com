@@ -32,6 +32,7 @@ import DnsLookupPage from '@/pages/DnsLookup.js';
 import AgentsPage from '@/pages/Agents.js';
 import KubernetesPage from '@/pages/Kubernetes.js';
 import KubeClusterPage from '@/pages/KubeCluster.js';
+import KubeOverviewPage from '@/pages/KubeOverview.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -85,6 +86,7 @@ export default function App() {
           <Route path="servers/:id/docker" element={<ServerDockerPage />} />
           <Route path="containers" element={<ContainersPage />} />
           <Route path="kubernetes" element={<KubernetesPage />} />
+          <Route path="kubernetes/overview" element={<KubeOverviewPage />} />
           <Route path="kubernetes/:clusterId" element={<KubeClusterPage />} />
           <Route path="kubernetes/:clusterId/shell" element={<TerminalPage />} />
           <Route path="kubernetes/:clusterId/:tab" element={<KubeClusterPage />} />

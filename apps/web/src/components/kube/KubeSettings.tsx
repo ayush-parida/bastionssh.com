@@ -35,7 +35,7 @@ const ROWS: { key: keyof Settings; title: string; detail: string; icon: typeof S
   {
     key: 'clusterAlerts',
     title: 'Alert on cluster problems',
-    detail: 'Alerts through your notification channels when a cluster is unreachable or unhealthy, once cluster alerts arrive. Off by default.',
+    detail: 'Alerts through your notification channels when a cluster is unreachable, a node is not ready, a workload has no ready replicas, or pods crash-loop or stay pending. Off by default.',
     icon: BellRing,
   },
 ];

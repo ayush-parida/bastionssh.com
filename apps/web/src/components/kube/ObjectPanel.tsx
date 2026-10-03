@@ -13,6 +13,7 @@ import ObjectActions from './actions/ObjectActions.js';
 import PodOverview from './pod/PodOverview.js';
 import PodLogs from './pod/PodLogs.js';
 import YamlView from './pod/YamlView.js';
+import ExplainButton from './ExplainButton.js';
 
 type Tab = 'overview' | 'logs' | 'yaml';
 
@@ -128,6 +129,7 @@ export default function ObjectPanel({
               )}
             </p>
           </div>
+          {d && <ExplainButton clusterId={clusterId} objectRef={objectRef} />}
           <button
             onClick={() => copy(window.location.origin + kubeObjectUrl(clusterId, objectRef), 'Link')}
             className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"

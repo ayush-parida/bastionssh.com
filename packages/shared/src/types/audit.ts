@@ -162,6 +162,8 @@ export type AuditAction =
   | 'docker.compose_restart'
   | 'org.docker_settings'
   | 'ai.docker_read'
+  | 'ai.kube_read'
+  | 'kube.ai_explain'
   | 'kube_cluster.create'
   | 'kube_cluster.update'
   | 'kube_cluster.delete'

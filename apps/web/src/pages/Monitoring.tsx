@@ -30,6 +30,11 @@ const ALERT_LABEL: Record<ServerAlert['type'], string> = {
   container_unhealthy: 'Container unhealthy',
   container_restarting: 'Container restarting',
   container_exited: 'Container exited',
+  kube_cluster_unreachable: 'Cluster unreachable',
+  kube_node_not_ready: 'Node not ready',
+  kube_workload_unavailable: 'Workload unavailable',
+  kube_pod_crashloop: 'Pods crash-looping',
+  kube_pod_pending: 'Pods stuck pending',
 };
 
 function SummaryTile({

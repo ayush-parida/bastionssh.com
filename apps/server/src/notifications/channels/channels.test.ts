@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { AlertWebhookPayload } from '@smt/shared';
 import type { AlertEvent, ServerRef } from '../format.js';
 import { getAdapter } from './index.js';
-import { dedupKey, title } from './types.js';
+import { MAX_DEDUP_KEY, dedupKey, title } from './types.js';
 
 export const SERVER: ServerRef = { id: 'srv1', name: 'web-01', host: '10.0.0.4' };
 export const NOW = '2026-09-13T10:00:00.000Z';
@@ -40,6 +40,19 @@ describe('shared helpers', () => {
     expect(dedupKey(opened, NOW)).toBe('smt:srv1:cpu_high');
     expect(dedupKey(resolved, NOW)).toBe('smt:srv1:cpu_high');
     expect(dedupKey(test, NOW)).toBe(`smt:test:${NOW}`);
+  });
+  it('keeps long per-object keys within the paging tools’ limit, stable and distinct', () => {
+    const long = (name: string): AlertEvent => ({
+      ...opened,
+      type: 'kube_workload_unavailable',
+      container: `${'n'.repeat(63)}/StatefulSet ${name}`,
+    });
+    const a = dedupKey(long('a'.repeat(253)), NOW);
+    const b = dedupKey(long(`${'a'.repeat(252)}b`), NOW);
+    expect(a.length).toBe(MAX_DEDUP_KEY);
+    expect(a).toBe(dedupKey(long('a'.repeat(253)), NOW));
+    expect(a).not.toBe(b);
+    expect(dedupKey({ ...opened, container: 'web' }, NOW)).toBe('smt:srv1:cpu_high:web');
   });
 });
 

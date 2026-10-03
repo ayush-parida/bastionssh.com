@@ -6,8 +6,9 @@ import {
   accessibleServerFilter,
   canAccessServer,
 } from '../../auth/server-access.js';
+import { canAccessCluster } from '../../auth/cluster-access.js';
 import { getDb } from '../../db/index.js';
-import { aiProviderConfigs, servers, savedCommands, cronJobs } from '../../db/schema.js';
+import { aiProviderConfigs, servers, savedCommands, cronJobs, kubeClusters } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { vault } from '../../vault/index.js';
@@ -18,6 +19,15 @@ import { resolveApproval, waitForApproval } from '../../ai/approvals.js';
 import { registerAgentStream } from '../../ai/streams.js';
 import { audit } from '../../audit/index.js';
 import type { AIAgentEvent } from '@smt/shared';
+
+/** A cluster's name for the audit log (the caller's access is checked first). */
+function kubeClusterName(orgId: string, clusterId: string): string | undefined {
+  return getDb()
+    .select({ name: kubeClusters.name })
+    .from(kubeClusters)
+    .where(and(eq(kubeClusters.id, clusterId), eq(kubeClusters.orgId, orgId)))
+    .get()?.name;
+}
 
 /** While a command waits for approval, keep proxies from closing the idle stream. */
 const APPROVAL_HEARTBEAT_MS = 15_000;
@@ -383,6 +393,35 @@ export async function aiRoutes(app: FastifyInstance) {
           }
         };
 
+        /**
+         * The read-only Kubernetes tools, audited against the cluster like the
+         * Docker reads: which object, never what came back.
+         */
+        const kubeRead = async (id: string, name: string, input: Record<string, unknown>) => {
+          const clusterId = typeof input.cluster_id === 'string' ? input.cluster_id : undefined;
+          const clusterName = clusterId && canAccessCluster(req, clusterId) ? kubeClusterName(req.orgId, clusterId) : undefined;
+          const details = {
+            tool: name,
+            toolCallId: id,
+            ...Object.fromEntries(
+              ['namespace', 'resource', 'name', 'pod', 'container']
+                .filter((k) => typeof input[k] === 'string')
+                .map((k) => [k, input[k]]),
+            ),
+          };
+          try {
+            const output = await executor.execute(name, input);
+            await audit(req, 'ai.kube_read', 'kube_cluster', clusterId, clusterName, details);
+            return output;
+          } catch (err) {
+            await audit(req, 'ai.kube_read', 'kube_cluster', clusterId, clusterName, {
+              ...details,
+              error: err instanceof Error ? err.message : 'Kubernetes read failed',
+            });
+            throw err;
+          }
+        };
+
         for await (const event of provider.agentLoop(
           messagesWithSystem,
           AGENT_TOOLS,
@@ -390,6 +429,7 @@ export async function aiRoutes(app: FastifyInstance) {
             if (clientGone) throw new Error('Client disconnected');
             if (name === 'run_command') return runCommand(id, input);
             if (name.startsWith('docker_')) return dockerRead(id, name, input);
+            if (name.startsWith('kube_')) return kubeRead(id, name, input);
             return executor.execute(name, input);
           },
         )) {

@@ -782,6 +782,45 @@ below.
   `closeClusterShells` those on an edited or removed cluster, and re-attaching to a
   session re-checks the capability and the cluster grant.
 
+**K5 — integrations** (AI, alerts, fleet overview):
+
+- **AI tools** (`ai-tools.ts`, `ai/tools.ts`): `kube_list_workloads`, `kube_describe`,
+  `kube_events`, `kube_pod_logs` — read-only, plain text, through `withKubeClient` like
+  every route (cluster access → "Cluster not found", the namespace allowlist, the §7
+  matrix: `kube_describe` needs `yaml`, `kube_pod_logs` needs `logs`, both operator+; the
+  chat itself is operator+). Objects go through `redactObject` and lose the last-applied
+  annotation; logs are a `tailLines` (≤ 500) read with `limitBytes`, newest lines kept
+  under the 64 KB cap. The system prompt lists the clusters the user may use. The chat
+  route audits each call as `ai.kube_read` against the cluster (tool, object — never the
+  output). The assistant never changes a cluster.
+- **Explain** (`POST /api/kube/clusters/:id/explain`, `api/routes/kube-ai.ts`): operator+,
+  rate-limited (10/min). `explainMaterial` gathers the redacted object (capped), its
+  health, events about it and its troubled pods, the state of a workload's troubled pods
+  and — with `logs` — a short tail of the first troubled container (the previous run for a
+  crash loop); it goes to the org's AI provider with a "you cannot act" system prompt, and
+  the answer streams back as `KubeExplainEvent`s (`context` says what was sent). The
+  stream is a `kube` stream in `api/sse.ts` (per-user cap, ends when access to the
+  cluster is revoked). Audited as `kube.ai_explain` with counts, not content.
+- **Fleet overview** (`GET /api/kube/overview`, `fleet.ts`, `api/routes/kube-fleet.ts`):
+  viewer; every accessible cluster through `withKubeClient` and the watch cache, five at
+  a time (Docker's `mapPooled`) with 10 s each; a cluster that fails or hangs is an
+  error row, never a failed page. Each row: nodes ready/cordoned, pods by tile colour,
+  replicated workloads by health, the worst problems (linked objects) and open alerts.
+- **Cluster alerts** (`alerts.ts`, opt-in `clusterAlerts`, off by default): after each
+  health sweep (`monitoring/scheduler.ts`) the clusters of opted-in orgs are read with
+  their own credential (no impersonation; the allowlist applies) from the shared cache.
+  Types: `kube_cluster_unreachable` (3 failed reads in a row; other alerts stay as they
+  were), `kube_node_not_ready`, `kube_workload_unavailable` (Deployment / StatefulSet /
+  DaemonSet health `failed`), `kube_pod_crashloop` (CrashLoopBackOff, or ≥ 3 restarts in
+  10 min, as for containers), `kube_pod_pending` (> 10 min). Pod alerts group by owning
+  workload; at most 25 per cluster. One open alert per (cluster, type, object),
+  notifications on open/resolve only through `notifyAlertsChanged` with the cluster as
+  `subject` and the object as `container`, so the channels' dedup key is
+  `smt:<cluster>:<type>:<object>`; a reopen within 30 min of resolving is quiet (and so
+  is its resolution). `server_alerts.server_id` is a foreign key to servers, so cluster
+  alert state is in memory: a restart re-announces alerts still firing under the same
+  dedup key.
+
 ---
 
 ## 5. Data Model (Logical)
@@ -957,6 +996,9 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Kubernetes delete pod (K3) | — | operator if `operatorsCanDeletePods`, else admin |
 | Kubernetes roll back, cordon / uncordon (K3) | — | admin |
 | Kubernetes pod logs / shell (K4) | operator (logs) | operator if `operatorsCanExec`, else admin |
+| Kubernetes fleet overview (K5) | viewer (granted clusters) | — |
+| Kubernetes AI tools and Explain (K5; describe needs YAML, logs need logs) | operator | — |
+| Kubernetes cluster alerts setting (K5) | viewer | admin |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
 
