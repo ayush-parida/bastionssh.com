@@ -5,11 +5,13 @@ import {
   KUBE_RESOURCES,
   KUBE_WORKLOAD_KINDS,
   kubeResourceOfKind,
+  type KubeLogEvent,
   type KubeNamespace,
   type KubeObjectDetail,
   type KubeObjectRef,
   type KubeOverview,
   type KubeResource,
+  type KubeStreamEvent,
   type KubeStreamView,
   type KubeWorkload,
   type KubeWorkloadKind,
@@ -118,11 +120,11 @@ async function visibleNamespaces(ctx: KubeContext): Promise<{ namespaces: KubeNa
  * feeds it until the browser leaves. Errors before `open()` are answered as
  * JSON, after it as an `error` event; the stream is always ended.
  */
-export async function kubeSseRoute(
+export async function kubeSseRoute<E extends KubeLogEvent | KubeStreamEvent = KubeStreamEvent>(
   req: FastifyRequest,
   reply: FastifyReply,
   clusterId: string,
-  run: (ctx: KubeContext, open: () => KubeSse | null, signal: AbortSignal) => Promise<void>,
+  run: (ctx: KubeContext, open: () => KubeSse<E> | null, signal: AbortSignal) => Promise<void>,
 ) {
   // The cap counts every feature's streams (api/sse.ts)
   if (activeStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) {
@@ -131,22 +133,22 @@ export async function kubeSseRoute(
   const gone = new AbortController();
   reply.raw.on('close', () => gone.abort());
 
-  let sse: KubeSse | null = null;
+  let sse: KubeSse<E> | null = null;
   const open = () => {
     // Access may have been revoked while the view was being read; a stream registered after that would outlive it
     if (!canAccessCluster(req, clusterId)) throw new KubeError('Cluster not found', 404);
-    sse = openKubeSse(req, reply, clusterId);
+    sse = openKubeSse<E>(req, reply, clusterId);
     sse?.signal.addEventListener('abort', () => gone.abort(), { once: true });
     return sse;
   };
   try {
     await withKubeClient(req, clusterId, (ctx) => run(ctx, open, gone.signal));
   } catch (err) {
-    const stream = sse as KubeSse | null;
+    const stream = sse as KubeSse<E> | null;
     if (stream) stream.fail(err);
     else if (!reply.sent && !gone.signal.aborted) return sendKubeError(reply, err);
   } finally {
-    (sse as KubeSse | null)?.end();
+    (sse as KubeSse<E> | null)?.end();
   }
 }
 

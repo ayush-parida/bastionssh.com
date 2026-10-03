@@ -31,6 +31,16 @@ interface SessionMeta {
   recording?: TerminalRecording | null;
   /** Set for a shell inside a Docker container rather than on the server itself. */
   container?: { id: string; name: string };
+  /** Set for a shell inside a Kubernetes pod's container (kube/exec.ts); `server.id` is '' then. */
+  pod?: PodTarget;
+}
+
+/** The pod container a Kubernetes shell runs in. */
+export interface PodTarget {
+  clusterId: string;
+  namespace: string;
+  name: string;
+  container: string;
 }
 
 /** Who is asking for a session; it must match the creator. */
@@ -41,7 +51,7 @@ export interface SessionOwner {
 
 /**
  * What a session's terminal runs over: an SSH shell channel, or a shell in a
- * container (docker/exec.ts) adapted to the same shape.
+ * container (docker/exec.ts) or a pod (kube/exec.ts) adapted to the same shape.
  */
 export interface TerminalChannel extends Duplex {
   stderr: Readable;
@@ -189,7 +199,14 @@ export function getSessionForUser(sessionId: string, userId: string, orgId: stri
   if (!session || session.meta.userId !== userId || session.meta.orgId !== orgId) {
     return undefined;
   }
-  return { id: sessionId, userId, orgId, server: session.meta.server, container: session.meta.container ?? null };
+  return {
+    id: sessionId,
+    userId,
+    orgId,
+    server: session.meta.server,
+    container: session.meta.container ?? null,
+    pod: session.meta.pod ?? null,
+  };
 }
 
 function ownedSession(sessionId: string, owner: SessionOwner) {
@@ -461,6 +478,8 @@ export interface RevokeScope {
   orgId?: string;
   /** Leave sessions on these servers open (the ones the user may still use). */
   keepServerIds?: Iterable<string>;
+  /** Leave pod shells on these clusters open; without it every pod shell in scope closes. */
+  keepClusterIds?: Iterable<string>;
 }
 
 /**
@@ -471,12 +490,13 @@ export interface RevokeScope {
  */
 function closeForUser(userId: string, scope: RevokeScope = {}): number {
   const keep = new Set(scope.keepServerIds ?? []);
+  const keepClusters = new Set(scope.keepClusterIds ?? []);
   let closed = 0;
   for (const [id, session] of [...sessions]) {
     if (session.meta.userId !== userId) continue;
     if (scope.orgId && session.meta.orgId !== scope.orgId) continue;
-    const serverId = session.meta.server.id;
-    if (serverId && keep.has(serverId)) continue;
+    const pod = session.meta.pod;
+    if (pod ? keepClusters.has(pod.clusterId) : session.meta.server.id && keep.has(session.meta.server.id)) continue;
     try {
       session.socket?.close(4403, 'Access revoked');
     } catch {
@@ -494,6 +514,7 @@ export interface SessionInfo {
   orgId: string;
   serverId: string;
   container: { id: string; name: string } | null;
+  pod: PodTarget | null;
 }
 
 /**
@@ -504,8 +525,8 @@ export interface SessionInfo {
 function closeWhere(refuse: (session: SessionInfo) => boolean): number {
   let closed = 0;
   for (const [id, session] of [...sessions]) {
-    const { userId, orgId, server, container } = session.meta;
-    if (!refuse({ userId, orgId, serverId: server.id, container: container ?? null })) continue;
+    const { userId, orgId, server, container, pod } = session.meta;
+    if (!refuse({ userId, orgId, serverId: server.id, container: container ?? null, pod: pod ?? null })) continue;
     try {
       session.socket?.close(4403, 'Access revoked');
     } catch {
@@ -530,7 +551,7 @@ async function exec(
 ): Promise<ExecResult> {
   const session = owner ? ownedSession(sessionId, owner) : sessions.get(sessionId);
   if (!session) throw new Error('Session not found');
-  // A container shell has no SSH connection of its own to run commands over
+  // A container or pod shell has no SSH connection of its own to run commands over
   if (!session.client) throw new Error('Commands cannot run over a container shell');
 
   // Logged on the terminal's recording, so playback shows what ran behind the shell

@@ -3,13 +3,18 @@ import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type { KubeObjectDetail, KubeObjectRef, KubeResource } from '@smt/shared';
 import { KUBE_CLUSTER_SCOPE, kubeObjectPath, kubeObjectUrl } from '@smt/shared';
-import { Copy, Link2, Loader2, X } from 'lucide-react';
+import { Link2, Loader2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
-import { HEALTH_DOT, healthLabel, kubeKeys, kubePath, useKubeChanges, type KubeObjectLinkState, type KubeTab } from '@/lib/kube.js';
+import { HEALTH_DOT, healthLabel, kubeKeys, kubePath, useKubeChanges, useKubeCluster, type KubeObjectLinkState, type KubeTab } from '@/lib/kube.js';
+import PodOverview from './pod/PodOverview.js';
+import PodLogs from './pod/PodLogs.js';
+import YamlView from './pod/YamlView.js';
 
-type Tab = 'overview' | 'yaml';
+type Tab = 'overview' | 'logs' | 'yaml';
+
+const TAB_LABEL: Record<Tab, string> = { overview: 'Overview', logs: 'Logs', yaml: 'YAML' };
 
 /** Related objects in reading order: what it belongs to, then what it runs or reaches. */
 const RELATION_ORDER = ['owned by', 'runs on', 'routes to', 'scales', 'bound to', 'mounts', 'reads env from', 'sends traffic to', 'owns', 'runs'];
@@ -36,8 +41,9 @@ async function copy(text: string, what: string) {
  * URL (`/kubernetes/<cluster>/objects/<resource>/<namespace>/<name>`): its
  * health in a word, key facts, labels, what it is related to (each a link to
  * that object's panel) and, for operators and up, read-only YAML with secret
- * values stripped by the server. Kept live by the change feed. Later phases
- * add the pod lifecycle, logs, shell and guided actions here.
+ * values stripped by the server. Kept live by the change feed. A pod adds
+ * its lifecycle, container lanes with usage, logs and "Open shell" (K4,
+ * components/kube/pod). Later phases add guided actions here.
  */
 export default function ObjectPanel({
   clusterId,
@@ -51,6 +57,10 @@ export default function ObjectPanel({
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<Tab>('overview');
+  /** Which container's logs the Logs tab opens on (a lane's "Logs" picks it); `n` reopens the same one. */
+  const [logTarget, setLogTarget] = useState<{ container?: string; previous: boolean; n: number }>({ previous: false, n: 0 });
+  const permissions = useKubeCluster(clusterId).data?.permissions;
+  const isPod = objectRef.resource === 'pods' && !!objectRef.namespace;
   const path = kubeObjectPath(objectRef);
   const detail = useQuery<KubeObjectDetail>({
     queryKey: kubeKeys.object(clusterId, path),
@@ -66,7 +76,10 @@ export default function ObjectPanel({
   );
 
   // Another object opened in the same panel starts on its overview
-  useEffect(() => setTab('overview'), [path]);
+  useEffect(() => {
+    setTab('overview');
+    setLogTarget({ previous: false, n: 0 });
+  }, [path]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
@@ -77,6 +90,15 @@ export default function ObjectPanel({
   const d = detail.data;
   const state: KubeObjectLinkState = { tab: fromTab };
   const kind = d?.ref.kind ?? objectRef.resource;
+  const tabs: Tab[] = [
+    'overview',
+    ...(isPod && permissions?.logs ? (['logs'] as const) : []),
+    ...(permissions?.yaml ? (['yaml'] as const) : []),
+  ];
+  const showLogs = (container: string, previous: boolean) => {
+    setLogTarget((t) => ({ container, previous, n: t.n + 1 }));
+    setTab('logs');
+  };
 
   return (
     <div className="fixed inset-0 z-40 flex justify-end bg-black/30" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -115,9 +137,9 @@ export default function ObjectPanel({
           </button>
         </div>
 
-        {d?.yaml !== undefined && (
+        {tabs.length > 1 && (
           <div className="flex gap-1 border-b border-border px-5">
-            {(['overview', 'yaml'] as Tab[]).map((t) => (
+            {tabs.map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -126,31 +148,43 @@ export default function ObjectPanel({
                   tab === t ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground',
                 )}
               >
-                {t === 'overview' ? 'Overview' : 'YAML'}
+                {TAB_LABEL[t]}
               </button>
             ))}
           </div>
         )}
 
-        <div className="flex-1 overflow-y-auto px-5 py-4">
-          {detail.isLoading ? (
+        <div className={cn('flex-1 px-5 py-4', tab === 'logs' ? 'flex min-h-0 flex-col' : 'overflow-y-auto')}>
+          {tab === 'logs' && isPod ? (
+            <PodLogs
+              key={`${path}:${logTarget.n}`}
+              clusterId={clusterId}
+              namespace={objectRef.namespace!}
+              name={objectRef.name}
+              initialContainer={logTarget.container}
+              initialPrevious={logTarget.previous}
+            />
+          ) : tab === 'yaml' && tabs.includes('yaml') ? (
+            <YamlView key={path} clusterId={clusterId} objectRef={objectRef} />
+          ) : detail.isLoading ? (
             <p className="flex items-center gap-2 text-sm text-muted-foreground">
               <Loader2 size={14} className="animate-spin" /> Loading…
             </p>
           ) : detail.error ? (
             <p className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{(detail.error as Error).message}</p>
-          ) : d && tab === 'yaml' && d.yaml !== undefined ? (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                <span>Read-only. Secret values and environment values taken from Secrets are removed.</span>
-                <button onClick={() => copy(d.yaml!, 'YAML')} className="flex items-center gap-1 hover:text-foreground">
-                  <Copy size={12} /> Copy
-                </button>
-              </div>
-              <pre className="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs leading-relaxed">{d.yaml}</pre>
-            </div>
           ) : d ? (
             <div className="space-y-6">
+              {isPod && (
+                <PodOverview
+                  clusterId={clusterId}
+                  namespace={objectRef.namespace!}
+                  name={objectRef.name}
+                  permissions={permissions}
+                  version={detail.dataUpdatedAt}
+                  onLogs={showLogs}
+                />
+              )}
+
               {d.facts.length > 0 && (
                 <dl className="divide-y divide-border rounded-md border border-border" data-testid="object-facts">
                   {d.facts.map((f) => (

@@ -339,6 +339,8 @@ The **Compose** tab lists Compose projects found from their containers' labels, 
 
 **Who sees what.** Everyone with access to a cluster sees the map, workloads and details. Secret values never leave the server: Secrets show their type and key names only, and environment variables that come from a Secret show the reference, not the value; opening a Secret's (redacted) YAML is audited. ConfigMap values are shown unless an owner or admin turns that off under **Settings → Kubernetes**, where they also choose whether operators may scale and restart workloads, delete pods and open shells (all on by default; these actions arrive in later phases). Restricted members see only the clusters granted to them in the Team **Access** dialog, permanently or for a time, like servers; a cluster's **namespace allowlist** limits what anyone sees on it. Revoking access closes a member's live views at once. The cluster's own credential bounds everything: BastionSSH roles decide what the UI offers, Kubernetes RBAC decides what is possible. With **impersonation** on (off by default), every request carries `Impersonate-User: bastion:<email>` and `Impersonate-Group: bastion:<role>`, so the cluster's RBAC and audit log see the real person — the credential needs the `impersonate` verb for that, and you bind roles to those users and groups. **Diagnose** on a cluster runs DNS, TCP and TLS checks on its route (or the SSH checks of the server it goes through) and then the connection test.
 
+**Inside a pod.** A pod's panel draws where it is in its life — **Scheduled → Initialized → Started → Ready**, with the step it is stuck at in red and the cluster's reason ("worker: CrashLoopBackOff") — and then its containers as **lanes** in the order they run: init steps one after another, native sidecars, the app containers, debug containers. Each lane shows the container's state in a word and a colour, its restarts, how its previous run ended (OOMKilled, exit 137…), and **CPU and memory bars**: live usage (with metrics-server) against its limit, a dashed tick at what it asked for, amber near the limit and red at it. Operators and up get a **Logs** tab — pick a container, follow new lines, switch to the **previous run** to see why it crashed, search (matches are marked), choose how much history, and download as text — and the read-only **YAML** with line numbers and search. **Open shell** (operators when the org allows it, admins always) starts a shell in a running container — bash if it has it, else sh — over the Kubernetes exec WebSocket on the same verified route as everything else. It opens in the terminal page like a server shell, resizes with the window, is recorded when the org records sessions (listed under **Recordings** as "Shell in pod" with the cluster, namespace, pod and container), audited when it starts and ends with its exit code, and closed as soon as the member loses the cluster, the role, or the org's **operators may open shells** switch. Logs are what the container printed and are not redacted, which is why they need the operator role.
+
 ### A least-privilege service account
 
 Give BastionSSH its own service account rather than an admin kubeconfig. A read-only ClusterRole is enough for everything available today:
@@ -404,6 +406,8 @@ metadata: { name: bastion-operate, namespace: shop }
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: bastion-operate }
 subjects: [{ kind: ServiceAccount, name: bastion-viewer, namespace: bastion }]
 ```
+
+Pod logs need `get` on `pods/log`, and shells `create` (and, on older clusters, `get`) on `pods/exec` — add them to this Role, or a separate one, where you want them. Note that `resources: ["*"]` with `get` in the viewing role above already covers `pods/exec`, and Kubernetes versions without the newer `create` check for WebSocket exec authorize a shell with `get` alone: if the credential must not open shells, list the viewing role's resources explicitly instead of `"*"`.
 
 Then collect the three things the **Add cluster** form needs:
 
@@ -659,6 +663,7 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 - [x] Docker: containers, images, volumes, networks, logs and stats (read)
 - [x] Docker: container actions, exec shells, Compose, fleet view, AI tools and container alerts ([design](docs/superpowers/specs/2026-09-30-docker-management-design.md))
 - [x] Kubernetes K1: connect clusters (direct, through a server, through an agent), live cluster map, workloads, redacted details ([design](docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md))
+- [x] Kubernetes K4: pod panel with container lanes, lifecycle and usage bars; logs (live, previous run, search, download); recorded shells over the exec WebSocket; read-only YAML
 - [ ] Kubernetes K2–K5: topology graph and diagnoses, guided actions, pod logs and shells, AI and cluster alerts
 - [ ] Short-lived SSH certificates ([design notes](docs/ssh-certificates.md))
 - [ ] Live shared terminal sessions

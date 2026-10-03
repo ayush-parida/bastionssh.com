@@ -86,6 +86,7 @@ export default function App() {
           <Route path="containers" element={<ContainersPage />} />
           <Route path="kubernetes" element={<KubernetesPage />} />
           <Route path="kubernetes/:clusterId" element={<KubeClusterPage />} />
+          <Route path="kubernetes/:clusterId/shell" element={<TerminalPage />} />
           <Route path="kubernetes/:clusterId/:tab" element={<KubeClusterPage />} />
           <Route path="kubernetes/:clusterId/objects/:resource/:ns/:name" element={<KubeClusterPage />} />
           <Route path="agents" element={<AgentsPage />} />

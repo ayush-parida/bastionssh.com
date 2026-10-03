@@ -21,7 +21,7 @@ export interface LiveAccessScope {
    */
   keepServerIds?: Iterable<string>;
   /**
-   * Keep Kubernetes streams on these clusters. Narrowing server access keeps
+   * Keep Kubernetes streams and pod shells on these clusters. Narrowing server access keeps
    * the clusters the member still has (and the other way round); omitted
    * together with `keepServerIds`, everything closes.
    */
@@ -42,7 +42,7 @@ export function revokeLiveAccess(userId: string, scope: LiveAccessScope = {}): L
   const keepServerIds = scope.keepServerIds ? [...scope.keepServerIds] : undefined;
   const keepClusterIds = scope.keepClusterIds ? [...scope.keepClusterIds] : undefined;
   return {
-    terminals: SSHBroker.closeForUser(userId, { orgId: scope.orgId, keepServerIds }),
+    terminals: SSHBroker.closeForUser(userId, { orgId: scope.orgId, keepServerIds, keepClusterIds }),
     sftp: evictUser(userId, { orgId: scope.orgId, keepServerIds }),
     docker: closeDockerForUser(userId, { orgId: scope.orgId, keepServerIds }),
     kube: closeKubeForUser(userId, { orgId: scope.orgId, keepClusterIds }),

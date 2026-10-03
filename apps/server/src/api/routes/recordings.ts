@@ -17,6 +17,7 @@ import { organizations, sessionRecordingCommands, sessionRecordings, users } fro
 import { audit } from '../../audit/index.js';
 import {
   containerOfRecording,
+  podOfRecording,
   deleteRecordingFile,
   openCast,
   recordingFile,
@@ -32,7 +33,7 @@ const isoDate = z
 const listSchema = z.object({
   serverId: z.string().min(1).optional(),
   userId: z.string().min(1).optional(),
-  kind: z.enum(['terminal', 'exec', 'container']).optional(),
+  kind: z.enum(['terminal', 'exec', 'container', 'pod']).optional(),
   /** Container shells whose container name or id contains this. */
   container: z.string().trim().min(1).max(255).optional(),
   from: isoDate.optional(),
@@ -88,6 +89,7 @@ function toRecording(row: RecordingRow, userEmail: string | null): SessionRecord
     source: row.source as RecordingCommandSource | null,
     command: row.command,
     container: containerOfRecording(row),
+    pod: podOfRecording(row),
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     bytes: row.bytes,

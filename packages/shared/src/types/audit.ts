@@ -169,6 +169,8 @@ export type AuditAction =
   | 'kube_cluster.diagnose'
   | 'kube_cluster.impersonation'
   | 'kube.secret_view'
+  | 'kube.exec_start'
+  | 'kube.exec_end'
   | 'org.kube_settings';
 
 export interface AuditLogEntry {
