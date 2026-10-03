@@ -18,7 +18,13 @@ export type AlertType =
   /** Docker containers (opt-in per org, `DockerSettings.containerAlerts`); one alert per container name. */
   | 'container_unhealthy'
   | 'container_restarting'
-  | 'container_exited';
+  | 'container_exited'
+  /** Kubernetes clusters (opt-in per org, `KubeSettings.clusterAlerts`); one alert per cluster, type and object. */
+  | 'kube_cluster_unreachable'
+  | 'kube_node_not_ready'
+  | 'kube_workload_unavailable'
+  | 'kube_pod_crashloop'
+  | 'kube_pod_pending';
 
 export type AlertSeverity = 'warning' | 'critical';
 

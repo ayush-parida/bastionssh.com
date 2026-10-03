@@ -1,5 +1,5 @@
 import type { NotificationChannelType, OpsgenieRegion } from '@smt/shared';
-import { eventLabel, maskUrl, type AlertEvent, type ServerRef } from '../format.js';
+import { eventLabel, maskUrl, subjectLabel, type AlertEvent, type ServerRef } from '../format.js';
 
 /** Bad channel input the caller can fix — maps to a 400. */
 export class ChannelInputError extends Error {}
@@ -96,7 +96,7 @@ export function tone(event: AlertEvent): Tone {
 /** Key/value lines shared by the richer payloads. */
 export function facts(event: AlertEvent, server: ServerRef, sentAt: string): [string, string][] {
   if (event.notice) return [...event.notice.details, ['Sent', sentAt]];
-  const out: [string, string][] = [['Server', `${server.name} (${server.host})`]];
+  const out: [string, string][] = [[subjectLabel(event), `${server.name} (${server.host})`]];
   if (event.kind !== 'test') {
     out.push(['Alert', eventLabel(event)], ['Severity', event.severity]);
   }

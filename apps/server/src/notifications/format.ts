@@ -31,7 +31,11 @@ export interface AlertEvent {
    * nothing is looked up in the servers table.
    */
   subject?: ServerRef;
-  /** The container a Docker container alert is about; alerts for different containers are separate incidents. */
+  /**
+   * The container a Docker container alert is about — or, for a cluster
+   * alert, the Kubernetes object (`shop/Deployment web`); alerts for
+   * different containers or objects are separate incidents.
+   */
   container?: string;
 }
 
@@ -74,6 +78,11 @@ export function alertLabel(type: AlertType | 'test' | 'notice'): string {
     container_unhealthy: 'Container unhealthy',
     container_restarting: 'Container restarting',
     container_exited: 'Container exited',
+    kube_cluster_unreachable: 'Cluster unreachable',
+    kube_node_not_ready: 'Node not ready',
+    kube_workload_unavailable: 'Workload unavailable',
+    kube_pod_crashloop: 'Pods crash-looping',
+    kube_pod_pending: 'Pods stuck pending',
     test: 'Test notification',
     notice: 'Notice',
   };
@@ -88,6 +97,11 @@ export function alertLabel(type: AlertType | 'test' | 'notice'): string {
 export function eventLabel(event: Pick<AlertEvent, 'type' | 'container'>): string {
   const label = alertLabel(event.type);
   return event.container ? `${label} (${event.container})` : label;
+}
+
+/** What the alert's subject is called in the details: a cluster for Kubernetes alerts, else a server. */
+export function subjectLabel(event: Pick<AlertEvent, 'type'>): string {
+  return event.type.startsWith('kube_') ? 'Cluster' : 'Server';
 }
 
 /**
@@ -156,7 +170,7 @@ export function emailBody(
 
 function alertDetails(event: AlertEvent, server: ServerRef, sentAt: string): string[] {
   return [
-    `Server: ${server.name} (${server.host})`,
+    `${subjectLabel(event)}: ${server.name} (${server.host})`,
     ...(event.kind !== 'test'
       ? [`Alert: ${eventLabel(event)}`, `Severity: ${event.severity}`]
       : []),

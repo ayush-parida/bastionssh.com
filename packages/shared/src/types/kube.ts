@@ -1,4 +1,5 @@
 import type { Role } from './auth.js';
+import type { AlertSeverity } from './monitoring.js';
 
 /**
  * Kubernetes clusters, understood visually: the app talks to the API server
@@ -436,3 +437,92 @@ export type KubeStreamEvent =
  * `namespace`, `name` — the object and the pods around it).
  */
 export type KubeStreamView = 'overview' | 'workloads' | 'namespaces' | 'object';
+
+// ── Integrations (K5): fleet overview, cluster alerts, AI explain ────────────
+
+/** Alert types raised for clusters (spec §13.4: opt-in per org, `clusterAlerts`). */
+export type KubeClusterAlertType =
+  | 'kube_cluster_unreachable'
+  | 'kube_node_not_ready'
+  | 'kube_workload_unavailable'
+  | 'kube_pod_crashloop'
+  | 'kube_pod_pending';
+
+/** An open cluster alert, as the fleet overview shows it. */
+export interface KubeClusterAlert {
+  type: KubeClusterAlertType;
+  severity: AlertSeverity;
+  /** What it is about: `Node worker-1`, `shop/Deployment web`, or the cluster itself. */
+  object: string;
+  message: string;
+  openedAt: string;
+}
+
+/** One thing wrong on a cluster, linked to its object (the fleet overview's short list). */
+export interface KubeFleetProblem {
+  ref: KubeObjectRef;
+  severity: AlertSeverity;
+  /** CrashLoopBackOff, NotReady, Unschedulable, "0 of 3 ready"… */
+  reason: string;
+}
+
+/** One cluster on the fleet overview: health in numbers, or why it could not be read. */
+export interface KubeFleetCluster {
+  clusterId: string;
+  name: string;
+  ok: boolean;
+  /** Why the cluster could not be read in time (only when `ok` is false). */
+  error?: string;
+  code?: string;
+  durationMs: number;
+  serverVersion: string | null;
+  nodes: { total: number; ready: number; cordoned: number };
+  /** Pods by tile colour (spec §5.1). */
+  pods: Record<KubePodTileStatus, number>;
+  /** Deployments, StatefulSets and DaemonSets by health. */
+  workloads: Partial<Record<KubeWorkloadHealth, number>>;
+  /** The worst few problems, most severe first. */
+  problems: KubeFleetProblem[];
+  /** Open cluster alerts (when the org has them on). */
+  alerts: KubeClusterAlert[];
+  /** What this credential could not list, in plain words. */
+  warnings: string[];
+}
+
+/** GET /api/kube/overview — every cluster the caller may use, read a few at a time; partial results. */
+export interface KubeFleetOverview {
+  clusters: KubeFleetCluster[];
+  /** The org's `clusterAlerts` setting. */
+  alertsEnabled: boolean;
+  generatedAt: string;
+}
+
+/** Body of `POST /api/kube/clusters/:id/explain`. */
+export interface KubeExplainRequest {
+  resource: KubeResource;
+  /** null (or omitted) for cluster-scoped objects. */
+  namespace?: string | null;
+  name: string;
+  /** An AI provider of the org; the default one when omitted. */
+  providerId?: string;
+}
+
+/** What an explanation was given, so the person sees what left for the AI provider (never a Secret value). */
+export interface KubeExplainContext {
+  ref: KubeObjectRef;
+  /** Events about the object (and its pods) included. */
+  events: number;
+  /** Log lines included (operators and up, pods only); 0 when none. */
+  logLines: number;
+  /** Pods of a workload whose status was included. */
+  pods: number;
+  /** The AI provider's name. */
+  provider: string;
+}
+
+/** Events on the explain stream. */
+export type KubeExplainEvent =
+  | { type: 'context'; context: KubeExplainContext }
+  | { type: 'delta'; content: string }
+  | { type: 'done' }
+  | { type: 'error'; error: string; status?: number };

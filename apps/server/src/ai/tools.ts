@@ -1,5 +1,5 @@
 import { getDb } from '../db/index.js';
-import { servers, savedCommands, cronJobs, auditLog, memberships } from '../db/schema.js';
+import { servers, savedCommands, cronJobs, auditLog, memberships, users, kubeClusters } from '../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { SSHBroker, execOnServer } from '../ssh/broker.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
@@ -13,6 +13,8 @@ import { rank } from '../auth/middleware.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
 import { dockerSettings } from '../docker/settings.js';
 import { aiContainerLogs, aiInspect, aiListContainers } from '../docker/ai-tools.js';
+import { filterAccessibleClusters } from '../auth/cluster-access.js';
+import { aiDescribe, aiEvents, aiListWorkloads, aiPodLogs } from '../kube/ai-tools.js';
 import { dockerPermissions, type AITool, type DockerCapability, type HostKeyStatus, type Role } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
@@ -124,6 +126,119 @@ export const AGENT_TOOLS: AITool[] = [
     },
   },
   {
+    name: 'kube_list_workloads',
+    description:
+      'List the workloads of a Kubernetes cluster (Deployments, StatefulSets, DaemonSets, Jobs, CronJobs) with their health ("2 of 3 ready"), and the pods that are failing or pending with their reason (CrashLoopBackOff, ImagePullBackOff, Unschedulable…). Read-only. Start here to find the exact names to describe or read logs of.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cluster_id: {
+          type: 'string',
+          description: 'ID of the cluster, from the Kubernetes Clusters list in the system prompt.',
+        },
+        namespace: {
+          type: 'string',
+          description: 'Only this namespace (optional; default every namespace you may see).',
+        },
+      },
+      required: ['cluster_id'],
+    },
+  },
+  {
+    name: 'kube_describe',
+    description:
+      'Read one Kubernetes object as YAML with its health on top: spec, status, conditions, container states and restart reasons. Read-only. Secret values are always removed (shown as ••••); do not ask for them.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cluster_id: {
+          type: 'string',
+          description: 'ID of the cluster.',
+        },
+        resource: {
+          type: 'string',
+          description:
+            'The resource, plural: pods, deployments, statefulsets, daemonsets, replicasets, jobs, cronjobs, services, endpoints, ingresses, configmaps, secrets, persistentvolumeclaims, persistentvolumes, storageclasses, horizontalpodautoscalers, nodes, namespaces.',
+        },
+        namespace: {
+          type: 'string',
+          description: 'The namespace; leave out for nodes, namespaces, persistentvolumes and storageclasses.',
+        },
+        name: {
+          type: 'string',
+          description: 'The object name.',
+        },
+      },
+      required: ['cluster_id', 'resource', 'name'],
+    },
+  },
+  {
+    name: 'kube_events',
+    description:
+      'Recent Kubernetes events, newest first (scheduling failures, image pull errors, back-offs, probe failures, OOM kills…): for a namespace, or for one object when resource and name are given. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cluster_id: {
+          type: 'string',
+          description: 'ID of the cluster.',
+        },
+        namespace: {
+          type: 'string',
+          description: 'The namespace (optional; default every namespace you may see).',
+        },
+        resource: {
+          type: 'string',
+          description: 'With name: only events about this object (plural resource, e.g. pods).',
+        },
+        name: {
+          type: 'string',
+          description: 'The object name (optional).',
+        },
+        limit: {
+          type: 'number',
+          description: 'Most events to return (default 50, max 200).',
+        },
+      },
+      required: ['cluster_id'],
+    },
+  },
+  {
+    name: 'kube_pod_logs',
+    description:
+      'Read the most recent log lines of a container in a Kubernetes pod. Read-only. At most 500 lines, and long output is truncated from the oldest end. Set previous to true to read the run before the last restart (why a crash-looping container died).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        cluster_id: {
+          type: 'string',
+          description: 'ID of the cluster.',
+        },
+        namespace: {
+          type: 'string',
+          description: 'The pod’s namespace.',
+        },
+        pod: {
+          type: 'string',
+          description: 'The pod name, as kube_list_workloads shows it.',
+        },
+        container: {
+          type: 'string',
+          description: 'The container (optional when the pod has only one).',
+        },
+        tail: {
+          type: 'number',
+          description: 'Number of lines from the end (default 100, max 500).',
+        },
+        previous: {
+          type: 'boolean',
+          description: 'Read the previous, crashed run instead of the current one (default false).',
+        },
+      },
+      required: ['cluster_id', 'namespace', 'pod'],
+    },
+  },
+  {
     name: 'get_recent_audit',
     description:
       'Retrieve recent audit log entries to understand what actions have been performed.',
@@ -171,6 +286,23 @@ export class ToolExecutor {
         });
       case 'docker_inspect':
         return aiInspect(this.requester(), this.dockerTarget(input, 'inspect'), input.container);
+      case 'kube_list_workloads':
+        return aiListWorkloads(this.kubeRequester(), this.kubeTarget(input), input.namespace);
+      case 'kube_describe':
+        return aiDescribe(this.kubeRequester(), this.kubeTarget(input), input.resource, input.namespace, input.name);
+      case 'kube_events':
+        return aiEvents(this.kubeRequester(), this.kubeTarget(input), {
+          namespace: input.namespace,
+          resource: input.resource,
+          name: input.name,
+          limit: input.limit,
+        });
+      case 'kube_pod_logs':
+        return aiPodLogs(this.kubeRequester(), this.kubeTarget(input), input.namespace, input.pod, {
+          container: input.container,
+          previous: input.previous,
+          tail: input.tail,
+        });
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -294,6 +426,29 @@ export class ToolExecutor {
       throw new Error('Your role does not allow reading container logs or details');
     }
     return serverId;
+  }
+
+  /**
+   * The user the agent acts for, as the Kubernetes service takes them: their
+   * role (the §7 matrix; read from the membership on every call) and email
+   * (a cluster with impersonation on is told who is asking).
+   */
+  private kubeRequester() {
+    const email = getDb().select({ email: users.email }).from(users).where(eq(users.id, this.userId)).get()?.email ?? '';
+    const role = (this.memberRole() ?? 'viewer') as Role;
+    return { orgId: this.orgId, user: { id: this.userId, email }, role } as Parameters<typeof aiListWorkloads>[0];
+  }
+
+  /**
+   * The cluster a Kubernetes tool reads from. There is no "current" cluster,
+   * so `cluster_id` is required; cluster access, the namespace allowlist and
+   * the role checks are the Kubernetes service's own (a cluster the user
+   * cannot use is "not found").
+   */
+  private kubeTarget(input: Record<string, unknown>): string {
+    const clusterId = input.cluster_id;
+    if (typeof clusterId !== 'string' || !clusterId) throw new Error('No cluster specified: pass cluster_id');
+    return clusterId;
   }
 
   private memberRole(): string | undefined {
@@ -461,6 +616,22 @@ export function buildSystemPrompt(opts: {
           .join('\n')
       : '  (none)';
 
+  const clusters = filterAccessibleClusters(
+    who,
+    db
+      .select({ id: kubeClusters.id, name: kubeClusters.name, serverVersion: kubeClusters.serverVersion })
+      .from(kubeClusters)
+      .where(eq(kubeClusters.orgId, opts.orgId))
+      .all(),
+    (c) => c.id,
+  );
+  const clusterList =
+    clusters.length > 0
+      ? clusters
+          .map((c) => `  - ${c.name} (id: ${c.id})${c.serverVersion ? ` — Kubernetes ${c.serverVersion}` : ''}`)
+          .join('\n')
+      : '  (none)';
+
   const lines = [
     'You are BastionSSH AI Assistant, an expert DevOps engineer helping manage Linux servers.',
     'You have access to tools that let you run commands on servers and inspect the infrastructure.',
@@ -469,6 +640,7 @@ export function buildSystemPrompt(opts: {
     'Read-only commands run immediately. Any command that could change a server (restarts, installs, edits, deletes, writes to files, sudo, and anything not recognised as read-only) is shown to the user, who must approve it before it runs — you do not need to ask for confirmation in chat first, but do say what the change will do.',
     'Repository config can make git run programs, so most git commands need approval. To inspect a repository without it, use `git diff --no-ext-diff --no-textconv …`, or put `--no-ext-diff --no-textconv --no-show-signature` plus an explicit format such as `--oneline` right after `git log` / `git show`.',
     'For Docker, read with docker_list_containers, docker_container_logs and docker_inspect (environment values stay redacted). Changes such as `docker restart <name>` go through run_command and need approval like any other change.',
+    'For Kubernetes, read with kube_list_workloads, kube_describe, kube_events and kube_pod_logs (Secret values stay redacted). You cannot change a cluster: point the user to the guided buttons on the cluster page (scale, restart rollout, roll back, delete pod, cordon) instead.',
     'If the user declines a command, or the approval expires, do not retry the same command or a variation of it. Explain what you would have done and ask how they want to proceed.',
     '',
     '## Registered Servers',
@@ -479,6 +651,9 @@ export function buildSystemPrompt(opts: {
     '',
     '## Cron Jobs',
     cronList,
+    '',
+    '## Kubernetes Clusters',
+    clusterList,
   ];
 
   if (opts.terminalOutput) {

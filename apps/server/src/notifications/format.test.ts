@@ -142,6 +142,24 @@ describe('summarize', () => {
     };
     expect(discord.embeds[0]!.title).toContain('(api)');
   });
+
+  it('calls a cluster alert’s subject a cluster, and names the object', () => {
+    const cluster: ServerRef = { id: 'kc1', name: 'prod', host: 'k8s.example.com:6443' };
+    const event: AlertEvent = {
+      kind: 'opened',
+      orgId: 'org1',
+      serverId: 'kc1',
+      type: 'kube_pod_crashloop',
+      severity: 'critical',
+      message: 'shop/Deployment web: 2 pods crash-looping',
+      container: 'shop/Deployment web',
+      subject: cluster,
+    };
+    const { text } = emailBody(event, cluster, NOW);
+    expect(text).toContain('Cluster: prod (k8s.example.com:6443)');
+    expect(text).toContain('Alert: Pods crash-looping (shop/Deployment web)');
+    expect(emailBody(opened, SERVER, NOW).text).toContain('Server: web-01 (10.0.0.4)');
+  });
 });
 
 describe('discord payload', () => {

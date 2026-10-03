@@ -18,6 +18,9 @@ import { evictKubeServer } from './ssh-pool.js';
  * - sse.ts — event streams (caps, heartbeats, revocation)
  * - redact.ts, validation.ts, errors.ts — helpers
  * - diagnose.ts — the "Kubernetes API" Diagnose step
+ * - ai-tools.ts — what the AI sees: read-only tools and the "Explain" material (K5)
+ * - fleet.ts — the overview across clusters (K5)
+ * - alerts.ts — opt-in cluster alerts after each health sweep (K5)
  */
 
 /**

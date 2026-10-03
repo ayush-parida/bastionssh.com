@@ -4,6 +4,7 @@ import { serverHealth, servers } from '../db/schema.js';
 import { config } from '../config/index.js';
 import logger from '../logger.js';
 import { checkServer, pauseHealth, pruneMetrics, type CheckOutcome } from './collector.js';
+import { sweepClusterAlerts } from '../kube/alerts.js';
 
 /**
  * The monitor runs in-process on a plain interval rather than through BullMQ.
@@ -93,6 +94,8 @@ async function tick() {
   sweeping = true;
   try {
     await runSweep();
+    // Kubernetes clusters of orgs that turned cluster alerts on (kube/alerts.ts)
+    await sweepClusterAlerts().catch((err) => logger.error({ err }, 'Cluster alert sweep failed'));
 
     if (Date.now() - lastPruneAt > PRUNE_INTERVAL_MS) {
       lastPruneAt = Date.now();

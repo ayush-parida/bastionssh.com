@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { HEALTH_DOT, healthLabel, kubeKeys, kubePath, useKubeChanges, type KubeObjectLinkState, type KubeTab } from '@/lib/kube.js';
+import ExplainButton from './ExplainButton.js';
 
 type Tab = 'overview' | 'yaml';
 
@@ -103,6 +104,7 @@ export default function ObjectPanel({
               )}
             </p>
           </div>
+          {d && <ExplainButton clusterId={clusterId} objectRef={objectRef} />}
           <button
             onClick={() => copy(window.location.origin + kubeObjectUrl(clusterId, objectRef), 'Link')}
             className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
