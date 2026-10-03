@@ -436,3 +436,203 @@ export type KubeStreamEvent =
  * `namespace`, `name` — the object and the pods around it).
  */
 export type KubeStreamView = 'overview' | 'workloads' | 'namespaces' | 'object';
+
+// ── Guided actions (K3) ──────────────────────────────────────────────────────
+
+/**
+ * The guided actions (spec §6), by their route name:
+ * `POST /api/kube/clusters/:id/actions/<action>`.
+ */
+export type KubeActionId =
+  | 'scale'
+  | 'restart'
+  | 'rollback'
+  | 'delete-pod'
+  | 'cordon'
+  | 'uncordon'
+  | 'suspend-cronjob'
+  | 'trigger-cronjob';
+
+export const KUBE_ACTIONS: readonly KubeActionId[] = [
+  'scale',
+  'restart',
+  'rollback',
+  'delete-pod',
+  'cordon',
+  'uncordon',
+  'suspend-cronjob',
+  'trigger-cronjob',
+];
+
+/** The capability each action needs (spec §7). */
+export const KUBE_ACTION_CAPABILITY: Record<KubeActionId, KubeCapability> = {
+  scale: 'scale',
+  restart: 'scale',
+  rollback: 'rollback',
+  'delete-pod': 'deletePod',
+  cordon: 'cordon',
+  uncordon: 'cordon',
+  'suspend-cronjob': 'scale',
+  'trigger-cronjob': 'scale',
+};
+
+/** Workloads that can be scaled (through their `scale` subresource). */
+export type KubeScalableKind = 'Deployment' | 'StatefulSet';
+export const KUBE_SCALABLE_KINDS: readonly KubeScalableKind[] = ['Deployment', 'StatefulSet'];
+
+/** Workloads whose rollout can be restarted. */
+export type KubeRestartableKind = 'Deployment' | 'StatefulSet' | 'DaemonSet';
+export const KUBE_RESTARTABLE_KINDS: readonly KubeRestartableKind[] = ['Deployment', 'StatefulSet', 'DaemonSet'];
+
+/** Most replicas the scale slider and route accept. */
+export const KUBE_MAX_REPLICAS = 1000;
+
+/** Body of `POST …/actions/scale`. */
+export interface KubeScaleRequest {
+  kind: KubeScalableKind;
+  namespace: string;
+  name: string;
+  replicas: number;
+}
+
+/** Body of `POST …/actions/restart`. */
+export interface KubeRestartRequest {
+  kind: KubeRestartableKind;
+  namespace: string;
+  name: string;
+}
+
+/** Body of `POST …/actions/rollback`: a Deployment back to one of its revisions. */
+export interface KubeRollbackRequest {
+  namespace: string;
+  name: string;
+  revision: number;
+}
+
+/** Body of `POST …/actions/delete-pod`. */
+export interface KubeDeletePodRequest {
+  namespace: string;
+  name: string;
+}
+
+/** Body of `POST …/actions/cordon` and `…/uncordon`. */
+export interface KubeNodeActionRequest {
+  name: string;
+}
+
+/** Body of `POST …/actions/suspend-cronjob`: `suspend: false` resumes it. */
+export interface KubeSuspendCronJobRequest {
+  namespace: string;
+  name: string;
+  suspend: boolean;
+}
+
+/** Body of `POST …/actions/trigger-cronjob`. */
+export interface KubeTriggerCronJobRequest {
+  namespace: string;
+  name: string;
+}
+
+/** What an action did. `changed: false` when the object already was that way (nothing was sent). */
+export interface KubeActionResult {
+  action: KubeActionId;
+  ref: KubeObjectRef;
+  changed: boolean;
+  /** The fields the action touches, before and after — the same values the audit log records. */
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  /** One line for a toast: "Scaled web from 2 to 3 replicas". */
+  message: string;
+  /** An object the action created (the Job a CronJob trigger starts). */
+  created?: KubeObjectRef;
+}
+
+/** A container of a pod template, for comparing revisions: env var names only, never values. */
+export interface KubeTemplateContainer {
+  name: string;
+  image: string;
+  envNames: string[];
+}
+
+/** One revision of a Deployment: a ReplicaSet it owns. */
+export interface KubeRevision {
+  revision: number;
+  replicaSet: string;
+  createdAt: string | null;
+  /** The `kubernetes.io/change-cause` annotation, when someone set it. */
+  changeCause: string | null;
+  containers: KubeTemplateContainer[];
+  /** Pods this revision runs now. */
+  replicas: number;
+  /** The revision the Deployment's template is on. */
+  current: boolean;
+}
+
+/**
+ * GET /api/kube/clusters/:id/actions/preview/:resource/:namespace/:name —
+ * what the action panels show before anything is done: the object's current
+ * state, and which actions the caller may take on it. Never a Secret value
+ * or an env value.
+ */
+export interface KubeActionPreview {
+  ref: KubeObjectRef;
+  /** Actions for this object that the caller's role and the org settings allow. */
+  actions: KubeActionId[];
+  /** Deployments, StatefulSets and DaemonSets (desired = scheduled for a DaemonSet). */
+  replicas?: { desired: number; ready: number; updated: number; available: number };
+  /** An autoscaler that controls the replicas: scaling by hand is undone by it. */
+  hpa?: { name: string; minReplicas: number; maxReplicas: number } | null;
+  /** A paused Deployment can be neither restarted nor rolled back. */
+  paused?: boolean;
+  /** Deployments: their revisions, newest first. */
+  revisions?: KubeRevision[];
+  /** Pods: who recreates it when deleted (null: a bare pod — nothing will). */
+  pod?: { owner: { kind: string; name: string } | null; nodeName: string | null; phase: string };
+  /** Nodes: whether cordoned, and what runs there. */
+  node?: { unschedulable: boolean; pods: number; daemonSetPods: number };
+  /** CronJobs. */
+  cronJob?: { suspended: boolean; schedule: string; lastScheduleTime: string | null; active: number };
+}
+
+/** The object an action takes: its kind, namespace (`null` for nodes) and name. */
+export interface KubeActionTarget {
+  kind: string;
+  namespace: string | null;
+  name: string;
+}
+
+/** Quote a shell argument when it needs it (display only). */
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The kubectl command an action is equivalent to, for the "What this does"
+ * panel (spec §2.2) — for learning and auditing; nothing ever runs it.
+ */
+export function kubeActionCommand(
+  action: KubeActionId,
+  target: KubeActionTarget,
+  opts: { replicas?: number; revision?: number; suspend?: boolean; jobName?: string } = {},
+): string {
+  const ns = target.namespace ? ` -n ${shellArg(target.namespace)}` : '';
+  const obj = `${target.kind.toLowerCase()}/${shellArg(target.name)}`;
+  switch (action) {
+    case 'scale':
+      return `kubectl scale ${obj} --replicas=${opts.replicas ?? 0}${ns}`;
+    case 'restart':
+      return `kubectl rollout restart ${obj}${ns}`;
+    case 'rollback':
+      return `kubectl rollout undo ${obj}${opts.revision ? ` --to-revision=${opts.revision}` : ''}${ns}`;
+    case 'delete-pod':
+      return `kubectl delete pod ${shellArg(target.name)}${ns}`;
+    case 'cordon':
+      return `kubectl cordon ${shellArg(target.name)}`;
+    case 'uncordon':
+      return `kubectl uncordon ${shellArg(target.name)}`;
+    case 'suspend-cronjob':
+      return `kubectl patch cronjob/${shellArg(target.name)}${ns} -p '${JSON.stringify({ spec: { suspend: opts.suspend ?? true } })}'`;
+    case 'trigger-cronjob':
+      return `kubectl create job ${shellArg(opts.jobName ?? `${target.name}-manual`)} --from=cronjob/${shellArg(target.name)}${ns}`;
+  }
+}

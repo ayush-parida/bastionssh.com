@@ -10,7 +10,9 @@ import { CA_CERT, SERVER_CERT, SERVER_KEY } from './test-certs.test-helper.js';
  * just enough of the API for the client, cache and views — list (with
  * `limit`/`continue`, label and field selectors), get, watch (with
  * `resourceVersion`, bookmarks, and `410 Gone` once history is compacted),
- * `/version`, `/api`, metrics on demand and SelfSubjectRulesReview.
+ * `/version`, `/api`, metrics on demand and SelfSubjectRulesReview — and,
+ * for the guided actions, patch (merge, strategic as merge, JSON patch), the
+ * `scale` subresource, delete and create, each recorded in `writes`.
  *
  * It records each TLS connection's SNI so tests can assert what the client
  * sent, whatever route the bytes took.
@@ -42,6 +44,8 @@ export interface FakeApi {
   sni: string[];
   /** Request paths with their query, in order. */
   requests: string[];
+  /** Every PATCH, DELETE and create, with its content type and parsed body. */
+  writes: FakeWrite[];
   /** Watches open right now. */
   watchers(): number;
   add(resource: string, object: Obj): Obj;
@@ -60,20 +64,27 @@ export interface FakeApi {
   close(): Promise<void>;
 }
 
+export interface FakeWrite {
+  method: string;
+  path: string;
+  contentType: string | null;
+  body: unknown;
+}
+
 const key = (o: Obj) => `${o.metadata.namespace ?? ''}/${o.metadata.name}`;
 
 /** `/api/v1/namespaces/shop/pods/web` → its parts; null for paths that are not resource paths. */
-function parsePath(path: string): { resource: string; namespace: string | null; name: string | null } | null {
+function parsePath(path: string): { resource: string; namespace: string | null; name: string | null; subresource: string | null } | null {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   let rest: string[];
   if (parts[0] === 'api' && parts[1] === 'v1') rest = parts.slice(2);
   else if (parts[0] === 'apis' && parts.length >= 3) rest = parts.slice(3);
   else return null;
   if (rest[0] === 'namespaces' && rest.length >= 3) {
-    return { namespace: rest[1]!, resource: rest[2]!, name: rest[3] ?? null };
+    return { namespace: rest[1]!, resource: rest[2]!, name: rest[3] ?? null, subresource: rest[4] ?? null };
   }
   if (!rest.length) return null;
-  return { namespace: null, resource: rest[0]!, name: rest[1] ?? null };
+  return { namespace: null, resource: rest[0]!, name: rest[1] ?? null, subresource: rest[2] ?? null };
 }
 
 function matchesLabels(o: Obj, selector: string | null): boolean {
@@ -105,6 +116,53 @@ function status(code: number, reason: string, message: string) {
   return { kind: 'Status', apiVersion: 'v1', status: 'Failure', message, reason, code };
 }
 
+const isPlain = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/** RFC 7386 merge patch (the fake applies strategic merge patches the same way). */
+function mergePatch(target: unknown, patch: unknown): unknown {
+  if (!isPlain(patch)) return patch;
+  const out: Record<string, unknown> = isPlain(target) ? { ...target } : {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) delete out[k];
+    else out[k] = mergePatch(out[k], v);
+  }
+  return out;
+}
+
+/** RFC 6902 JSON patch: `test`, `add`, `replace`, `remove` on object members. Throws on a failed test. */
+function jsonPatch(target: Obj, ops: { op: string; path: string; value?: unknown }[]): Obj {
+  const doc = structuredClone(target) as Record<string, unknown>;
+  for (const op of ops) {
+    const parts = op.path.split('/').slice(1).map((p) => p.replace(/~1/g, '/').replace(/~0/g, '~'));
+    const last = parts.pop()!;
+    let parent: Record<string, unknown> = doc;
+    for (const p of parts) {
+      if (!isPlain(parent[p])) parent[p] = {};
+      parent = parent[p] as Record<string, unknown>;
+    }
+    if (op.op === 'test') {
+      if (JSON.stringify(parent[last]) !== JSON.stringify(op.value)) throw new Error(`test failed for ${op.path}`);
+    } else if (op.op === 'remove') delete parent[last];
+    else if (op.op === 'replace' && !(last in parent)) throw new Error(`replace of missing ${op.path}`);
+    else parent[last] = structuredClone(op.value);
+  }
+  return doc as Obj;
+}
+
+function readJson(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      try {
+        resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
 export async function startFakeApi(opts: { token?: string; clientCa?: string } = {}): Promise<FakeApi> {
   const token = opts.token ?? FAKE_TOKEN;
   const store = new Map<string, Map<string, Obj>>();
@@ -115,6 +173,7 @@ export async function startFakeApi(opts: { token?: string; clientCa?: string } =
   const watchers = new Set<Watcher>();
   const sni: string[] = [];
   const requests: string[] = [];
+  const writes: FakeWrite[] = [];
 
   const table = (resource: string) => {
     let t = store.get(resource);
@@ -147,6 +206,7 @@ export async function startFakeApi(opts: { token?: string; clientCa?: string } =
     url: '',
     sni,
     requests,
+    writes,
     watchers: () => watchers.size,
     add: (resource, object) => write(resource, object, 'ADDED'),
     modify: (resource, object) => write(resource, object, 'MODIFIED'),
@@ -215,9 +275,49 @@ export async function startFakeApi(opts: { token?: string; clientCa?: string } =
     }
     const t = table(resource);
 
+    if (req.method === 'PATCH' || req.method === 'DELETE' || (req.method === 'POST' && !name)) {
+      void readJson(req).then((body) => {
+        writes.push({ method: req.method!, path: url.pathname, contentType: req.headers['content-type'] ?? null, body });
+        const k = `${namespace ?? ''}/${name}`;
+        if (req.method === 'POST') {
+          const object = body as Obj;
+          if (t.has(`${namespace ?? ''}/${object.metadata.name}`)) {
+            return send(res, 409, status(409, 'AlreadyExists', `${resource} "${object.metadata.name}" already exists`));
+          }
+          return send(res, 201, write(resource, { ...object, metadata: { ...object.metadata, ...(namespace && { namespace }) } }, 'ADDED'));
+        }
+        const existing = t.get(k);
+        if (!existing) return send(res, 404, status(404, 'NotFound', `${resource} "${name}" not found`));
+        if (req.method === 'DELETE') {
+          api.remove(resource, namespace, name!);
+          return send(res, 200, existing);
+        }
+        if (parsed.subresource === 'scale') {
+          const replicas = (body as { spec?: { replicas?: number } } | null)?.spec?.replicas;
+          const updated = write(resource, { ...existing, spec: { ...(existing.spec as object), replicas } }, 'MODIFIED');
+          return send(res, 200, { kind: 'Scale', metadata: { name, namespace }, spec: { replicas: (updated.spec as { replicas?: number }).replicas } });
+        }
+        let next: Obj;
+        try {
+          next =
+            req.headers['content-type'] === 'application/json-patch+json'
+              ? jsonPatch(existing, body as { op: string; path: string; value?: unknown }[])
+              : (mergePatch(existing, body) as Obj);
+        } catch (err) {
+          return send(res, 422, status(422, 'Invalid', (err as Error).message));
+        }
+        return send(res, 200, write(resource, next, 'MODIFIED'));
+      });
+      return;
+    }
+
     if (name) {
       const object = t.get(`${namespace ?? ''}/${name}`);
       if (!object) return send(res, 404, status(404, 'NotFound', `${resource} "${name}" not found`));
+      if (parsed.subresource === 'scale') {
+        const replicas = (object.spec as { replicas?: number } | undefined)?.replicas ?? 1;
+        return send(res, 200, { kind: 'Scale', metadata: { name, namespace }, spec: { replicas }, status: { replicas } });
+      }
       return send(res, 200, object);
     }
 
