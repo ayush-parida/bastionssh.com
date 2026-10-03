@@ -315,6 +315,38 @@ describe('diagnoses (spec §5.4)', () => {
     ]);
   });
 
+  it('says nothing it cannot know: unlistable pods, partial capacity, old OOMs, an unreadable default class', () => {
+    // Pods not listable: no Service is called empty
+    const svc = o({ kind: 'Service', metadata: { name: 'web', namespace: 'shop' }, spec: { selector: { app: 'web' } } });
+    expect(run({ services: [svc], podsListed: false })).toEqual([]);
+
+    // Pods of one namespace only: other namespaces' pods use the nodes too, so no "largest free"
+    const big = webPod('big', { unschedulable: '0/1 nodes are available: 1 Insufficient cpu.', cpu: '2' });
+    const nodes = [o(node('worker-1', { cpu: '4' }))];
+    expect(only(run({ pods: [o(big)], nodes, podsCoverCluster: false })).headline).toBe('No node has room: needs 2 CPU.');
+    // …unless the cluster's pods are given for counting
+    const elsewhere = pod('ops', 'hog', { node: 'worker-1', cpu: '3500m' });
+    expect(only(run({ pods: [o(big)], nodes, podsCoverCluster: false, capacityPods: [o(big), o(elsewhere)] })).headline).toBe(
+      'No node has room: needs 2 CPU, largest free is 0.5 CPU.',
+    );
+    // A count that contradicts the scheduler is not shown
+    const d = only(run({ pods: [o(big)], nodes }));
+    expect(d.headline).toBe('No node has room: needs 2 CPU.');
+    expect(d.evidence.some((e) => e.label.startsWith('Node '))).toBe(false);
+
+    // An OOM long ago is not why a running container is unready now
+    const old = webPod('web-2', { ready: false });
+    old.status.containerStatuses[0].state = { running: { startedAt: '2026-10-03T11:58:00Z' } };
+    old.status.containerStatuses[0].lastState = { terminated: { reason: 'OOMKilled', exitCode: 137, finishedAt: '2026-10-01T00:00:00Z' } };
+    expect(run({ pods: [o(old)] }).some((x) => x.id === 'oom-killed')).toBe(false);
+
+    // StorageClasses not listable: the default is unknown, not absent
+    const claim = o({ kind: 'PersistentVolumeClaim', metadata: { name: 'data', namespace: 'shop' }, spec: {}, status: { phase: 'Pending' } });
+    expect(only(run({ claims: [claim], storageClasses: null })).cause).toBe(
+      'It names no StorageClass, and the cluster credential may not read which one is the default.',
+    );
+  });
+
   it('a healthy namespace has nothing to say', () => {
     const ok = webPod('web-1');
     ok.status.conditions = [{ type: 'Ready', status: 'True' }];

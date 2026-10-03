@@ -259,6 +259,16 @@ export function workloadHealth(kind: KubeWorkloadKind, w: KubeObject): WorkloadH
 
 export interface DiagnosisInput {
   pods: KubeObject[];
+  /** False when the credential may not list pods: no Service is then called empty. */
+  podsListed?: boolean;
+  /**
+   * False when `pods` are only some of the cluster's (one namespace, or the
+   * allowlist): a node's free capacity is then unknown, since other
+   * namespaces' pods use it too.
+   */
+  podsCoverCluster?: boolean;
+  /** Every pod of the cluster, when `pods` are not: what the nodes' free capacity is counted from. */
+  capacityPods?: KubeObject[];
   /** Null when the credential may not list nodes (the scheduling rule then names no free capacity). */
   nodes: KubeObject[] | null;
   events: KubeObject[];
@@ -451,7 +461,8 @@ function podDiagnosis(pod: KubeObject, ctx: PodContext): KubeDiagnosis | null {
     if (!oom) continue;
     const finished = str(oom.finishedAt);
     const recent = !finished || ctx.now - (Date.parse(finished) || 0) < 60 * 60 * 1000;
-    if (c.ready === true && !recent) continue;
+    // Long ago and not what it is in now: history, whatever else keeps it unready
+    if (!recent && oom !== current) continue;
     const cname = str(c.name) ?? '?';
     const limit = str(obj(obj(specContainers.get(cname)?.resources).limits).memory);
     const restarts = num(c.restartCount);
@@ -529,11 +540,14 @@ function podDiagnosis(pod: KubeObject, ctx: PodContext): KubeDiagnosis | null {
         ? ctx.free.reduce((best, n) => ((cpu ? n.cpuMillis > best.cpuMillis : n.memoryBytes > best.memoryBytes) ? n : best))
         : null;
       const needs = cpu ? formatCores(req.cpuMillis) : `${formatMemoryAmount(req.memoryBytes)} memory`;
-      const room = largest
-        ? cpu
-          ? formatCores(Math.max(0, largest.cpuMillis))
-          : formatMemoryAmount(Math.max(0, largest.memoryBytes))
-        : null;
+      // More room than it needs contradicts the scheduler: what we counted is not the whole picture, so say nothing
+      const fits = largest && (cpu ? largest.cpuMillis >= req.cpuMillis : largest.memoryBytes >= req.memoryBytes);
+      const room =
+        largest && !fits
+          ? cpu
+            ? formatCores(Math.max(0, largest.cpuMillis))
+            : formatMemoryAmount(Math.max(0, largest.memoryBytes))
+          : null;
       return diagnosis(
         'unschedulable-resources',
         'critical',
@@ -546,7 +560,7 @@ function podDiagnosis(pod: KubeObject, ctx: PodContext): KubeDiagnosis | null {
         },
         [
           evidenceOf.fact('Requests', `${formatCores(req.cpuMillis)}, ${formatMemoryAmount(req.memoryBytes)} memory`),
-          largest ? evidenceOf.object(refOf('Node', null, largest.name), `Node ${largest.name}`, `${room} free, the most of any node`) : null,
+          largest && room ? evidenceOf.object(refOf('Node', null, largest.name), `Node ${largest.name}`, `${room} free, the most of any node`) : null,
           ...evidence,
         ],
         since,
@@ -702,6 +716,7 @@ function claimDiagnosis(claim: KubeObject, classes: KubeObject[] | null, events:
   else if (failed?.message) cause = failed.message;
   else if (asked === '') cause = 'It asks for no StorageClass, so it waits for a matching PersistentVolume to be created by hand.';
   else if (className) cause = `The provisioner for \`${className}\` has not created a volume for it yet.`;
+  else if (classes === null) cause = 'It names no StorageClass, and the cluster credential may not read which one is the default.';
   else cause = 'It names no StorageClass and the cluster has no default one, so nothing provisions it.';
   return diagnosis(
     'pvc-pending',
@@ -834,7 +849,13 @@ export function diagnose(input: DiagnosisInput): KubeDiagnosis[] {
   const ctx: PodContext = {
     events,
     ownerOf: ownerResolver(input.replicaSets, input.jobs),
-    free: input.nodes ? freeCapacity(input.nodes, input.pods) : null,
+    free: !input.nodes
+      ? null
+      : input.capacityPods
+        ? freeCapacity(input.nodes, input.capacityPods)
+        : input.podsCoverCluster !== false && input.podsListed !== false
+          ? freeCapacity(input.nodes, input.pods)
+          : null,
     now: input.now ?? Date.now(),
   };
   const out: KubeDiagnosis[] = [];
@@ -843,7 +864,7 @@ export function diagnose(input: DiagnosisInput): KubeDiagnosis[] {
   };
   for (const node of input.nodes ?? []) push(nodeDiagnosis(node, events));
   for (const dep of input.deployments ?? []) push(rolloutDiagnosis(dep, input.replicaSets ?? [], events));
-  for (const svc of input.services ?? []) push(serviceDiagnosis(svc, input.pods));
+  if (input.podsListed !== false) for (const svc of input.services ?? []) push(serviceDiagnosis(svc, input.pods));
   for (const claim of input.claims ?? []) push(claimDiagnosis(claim, input.storageClasses ?? null, events));
   for (const pod of input.pods) push(podDiagnosis(pod, ctx));
   return rankDiagnoses(out);

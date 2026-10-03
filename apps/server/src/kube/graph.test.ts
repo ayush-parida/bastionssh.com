@@ -196,6 +196,36 @@ describe('topology graph', () => {
     expect(edge(g, 'Deployment/shop/web', 'ConfigMap/shop/feature-flags')!.broken).toBe(false);
   });
 
+  it('calls nothing broken or missing that the credential could not list', () => {
+    // Pods not listable: Services link through templates, never "traffic goes nowhere"
+    const noPods = shop();
+    noPods.pods = null;
+    const g1 = graphOf(noPods);
+    expect(edge(g1, 'Service/shop/web', 'Deployment/shop/web')).toMatchObject({ broken: false });
+    expect(g1.nodes.find((n) => n.id === 'Service/shop/web')!.health).toBe('idle');
+    expect(g1.nodes.some((n) => n.id === 'missing:Pods/shop/search-selector')).toBe(false);
+    expect(g1.edges.some((e) => e.relation === 'selects' && e.broken)).toBe(false);
+
+    // Services not listable: the Ingress's backends are unknown, not missing
+    const noServices = shop();
+    noServices.services = null;
+    const g2 = graphOf(noServices);
+    expect(edge(g2, 'Ingress/shop/shop', 'Service/shop/admin')).toMatchObject({ broken: false });
+    expect(g2.nodes.find((n) => n.id === 'Service/shop/admin')).toMatchObject({ health: 'idle', summary: 'Not listable with this credential' });
+    expect(g2.nodes.find((n) => n.id === 'Ingress/shop/shop')!.health).not.toBe('failing');
+
+    // An autoscaler of a kind the graph does not draw, or of one it could not list
+    const other = shop();
+    other.deployments = null;
+    other.horizontalpodautoscalers = [
+      o({ kind: 'HorizontalPodAutoscaler', metadata: { name: 'roll', namespace: 'shop' }, spec: { scaleTargetRef: { kind: 'Rollout', name: 'web' }, maxReplicas: 4 }, status: {} }),
+      o({ kind: 'HorizontalPodAutoscaler', metadata: { name: 'web', namespace: 'shop' }, spec: { scaleTargetRef: { kind: 'Deployment', name: 'web' }, maxReplicas: 4 }, status: {} }),
+    ];
+    const g3 = graphOf(other);
+    expect(g3.nodes.some((n) => n.health === 'missing' && (n.kind === 'Rollout' || n.kind === 'Deployment'))).toBe(false);
+    expect(edge(g3, 'HorizontalPodAutoscaler/shop/web', 'Deployment/shop/web')).toMatchObject({ broken: false });
+  });
+
   it('stays readable with hundreds of pods: one ring per workload, capped', () => {
     const objects = shop();
     const many = Array.from({ length: 450 }, (_, i) => o(readyPod(`web-${i}`)));

@@ -32,7 +32,7 @@ Out of scope (each its own spec): creating/editing arbitrary resources or YAML, 
 8. **Secrets are never displayed.** `Secret` objects show names, types and keys only; `data`/`stringData` values are stripped server-side before anything reaches the browser or the AI. Env values that come from `secretKeyRef` show the reference, not the value. ConfigMap values are shown (they are not secret by contract) but can be hidden per org.
 9. **Live by watching, not polling.** The server keeps one watch per (cluster, resource kind, namespace scope) that at least one browser is viewing, maintains an in-memory cache (informer-style, resuming from `resourceVersion`, relisting on `410 Gone`), and fans out changes over SSE. Watches stop 2 minutes after the last viewer leaves.
 10. **Reuse from Docker:** SSE conventions and per-user stream caps (`docker/sse.ts` pattern), the permission-matrix pattern, the exec terminal + recording machinery, redaction helpers, fleet fan-out. Pod exec uses the Kubernetes exec subresource over WebSocket (`v5.channel.k8s.io`, falling back to `v4`).
-11. **Graph rendering:** `@xyflow/react` (React Flow) for interactive nodes/edges and `elkjs` for automatic layered layout — both MIT, actively maintained. Charts stay hand-rolled SVG like the Docker stats chart.
+11. **Graph rendering:** `@xyflow/react` (React Flow) for interactive nodes/edges and `elkjs` for automatic layered layout — actively maintained (React Flow is MIT, elkjs EPL-2.0; elkjs loads only in the lazily loaded graph chunk). Charts stay hand-rolled SVG like the Docker stats chart.
 12. **Next migration is 0022.**
 
 ## 3. Data model (migration `0022_kubernetes`)

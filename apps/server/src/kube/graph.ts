@@ -87,10 +87,16 @@ export const DIAGNOSIS_RESOURCES: KubeResource[] = [
 /** Lists by resource; null where the credential may not list it. */
 export type ObjectsByResource = Partial<Record<KubeResource, KubeObject[] | null>>;
 
-/** Diagnosis input from lists read for a view. */
-export function diagnosisInput(objects: ObjectsByResource): DiagnosisInput {
+/**
+ * Diagnosis input from lists read for a view. `podsCoverCluster`: the pods
+ * are every pod of the cluster (no namespace picked, no allowlist), so the
+ * nodes' free capacity can be counted.
+ */
+export function diagnosisInput(objects: ObjectsByResource, podsCoverCluster = true): DiagnosisInput {
   return {
     pods: objects.pods ?? [],
+    podsListed: objects.pods !== null,
+    podsCoverCluster,
     nodes: objects.nodes ?? null,
     events: objects.events ?? [],
     services: objects.services ?? [],
@@ -423,6 +429,7 @@ export function buildGraph(input: GraphInput): KubeGraph {
 
   // Services → the workloads whose pods they select
   const pods = list('pods');
+  const podsListed = o.pods !== null;
   const serviceBroken = new Map<string, boolean>();
   for (const svc of list('services')) {
     const ns = svc.metadata.namespace ?? null;
@@ -447,6 +454,13 @@ export function buildGraph(input: GraphInput): KubeGraph {
     for (const [wid, w] of workloadIds) {
       if ((w.metadata.namespace ?? null) !== ns || !nodes.has(wid)) continue;
       if (selectorMatches(spec.selector, template(nodes.get(wid)!.kind, w).labels)) targets.add(wid);
+    }
+    if (!podsListed) {
+      // Which pods answer is unknown: link what the templates say, call nothing broken
+      serviceBroken.set(id, false);
+      addNode({ id, kind: 'Service', name: svc.metadata.name, namespace: ns, ref: refOf('Service', ns, svc.metadata.name), health: 'idle', summary });
+      for (const target of targets) addEdge(id, target, 'selects', false, `Sends traffic to the pods labelled \`${selector}\``);
+      continue;
     }
     const anyReady = matched.some(podReady);
     serviceBroken.set(id, !anyReady);
@@ -499,6 +513,10 @@ export function buildGraph(input: GraphInput): KubeGraph {
     const links: [string, boolean, string][] = [];
     for (const r of routes) {
       const target = nodeId('Service', ns, r.service);
+      if (!nodes.has(target) && o.services === null) {
+        // Not listable: never called missing
+        addNode({ id: target, kind: 'Service', name: r.service, namespace: ns, ref: refOf('Service', ns, r.service), health: 'idle', summary: 'Not listable with this credential' });
+      }
       if (!nodes.has(target)) {
         missing = true;
         const m = addMissing('Service', ns, r.service, 'Does not exist');
@@ -542,8 +560,22 @@ export function buildGraph(input: GraphInput): KubeGraph {
     const name = str(target.name);
     if (!kind || !name) continue;
     const wid = nodeId(kind, ns, name);
-    if (nodes.has(wid)) addEdge(id, wid, 'scales', false, `Scales ${kind} \`${name}\` between ${num(spec.minReplicas, 1)} and ${num(spec.maxReplicas)} replicas`);
-    else addEdge(id, addMissing(kind, ns, name, 'Does not exist'), 'scales', true, `Scales ${kind} \`${name}\`, which does not exist.`);
+    const scales = `Scales ${kind} \`${name}\` between ${num(spec.minReplicas, 1)} and ${num(spec.maxReplicas)} replicas`;
+    if (nodes.has(wid)) {
+      addEdge(id, wid, 'scales', false, scales);
+      continue;
+    }
+    // Only a kind this graph lists, and could list, is known to be missing; anything else (a custom resource) is just not drawn
+    const workload = WORKLOADS.find((w) => w.kind === kind) ?? (kind === 'ReplicaSet' ? { resource: 'replicasets' as const, kind } : null);
+    if (!workload) continue;
+    if (o[workload.resource] === null || o[workload.resource] === undefined) {
+      addNode({ id: wid, kind, name, namespace: ns, ref: refOf(kind, ns, name), health: 'idle', summary: 'Not listable with this credential' });
+      addEdge(id, wid, 'scales', false, scales);
+      continue;
+    }
+    // Exists but folded away (a Deployment's ReplicaSet)
+    if (o[workload.resource]!.some((w) => w.metadata.name === name && (w.metadata.namespace ?? null) === ns)) continue;
+    addEdge(id, addMissing(kind, ns, name, 'Does not exist'), 'scales', true, `Scales ${kind} \`${name}\`, which does not exist.`);
   }
 
   return {

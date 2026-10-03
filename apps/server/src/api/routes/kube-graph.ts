@@ -109,6 +109,21 @@ export async function readObjects(
   return { objects, warnings: [...warnings] };
 }
 
+/**
+ * The diagnoses of objects read for a view. "No node has room … largest
+ * free is X" counts every pod on the nodes: when the view read one
+ * namespace, the cluster's pods are read too (only when a pod needs it, and
+ * never past an allowlist — then the free figure is left out).
+ */
+async function diagnoseIn(ctx: KubeContext, objects: ObjectsByResource, namespace: string | null | undefined): Promise<KubeDiagnosis[]> {
+  const coversCluster = !namespace && !ctx.allowlist;
+  const first = diagnose(diagnosisInput(objects, coversCluster));
+  if (coversCluster || ctx.allowlist || !objects.nodes || !first.some((d) => d.id === 'unschedulable-resources')) return first;
+  const snap = await snapshotKube(ctx.source, [{ resource: 'pods', namespace: null }]);
+  const all = snap.items[0];
+  return all ? diagnose({ ...diagnosisInput(objects, false), capacityPods: all }) : first;
+}
+
 /** The last lines of a container's previous run; null when they cannot be read (logs not available, timed out…). */
 async function logTail(client: KubeClient, namespace: string, pod: string, container: string): Promise<string[] | null> {
   const abort = new AbortController();
@@ -164,7 +179,7 @@ export async function kubeGraphRoutes(app: FastifyInstance) {
     try {
       return await withKubeClient(req, id, async (ctx): Promise<KubeGraph> => {
         const { objects, warnings } = await readObjects(ctx, GRAPH_RESOURCES, q.namespace);
-        const diagnoses = diagnose(diagnosisInput(objects));
+        const diagnoses = await diagnoseIn(ctx, objects, q.namespace);
         return buildGraph({ namespace: q.namespace ?? null, objects, diagnoses, warnings });
       });
     } catch (err) {
@@ -199,7 +214,7 @@ export async function kubeGraphRoutes(app: FastifyInstance) {
       return await withKubeClient(req, id, async (ctx): Promise<KubeAttentionList> => {
         const { objects, warnings } = await readObjects(ctx, DIAGNOSIS_RESOURCES, q.namespace);
         return {
-          items: mergeByOwner(diagnose(diagnosisInput(objects))).slice(0, MAX_ATTENTION),
+          items: mergeByOwner(await diagnoseIn(ctx, objects, q.namespace)).slice(0, MAX_ATTENTION),
           warnings,
           generatedAt: new Date().toISOString(),
         };
@@ -224,7 +239,8 @@ export async function kubeGraphRoutes(app: FastifyInstance) {
         if (ref.resource === 'namespaces' && !ctx.namespaceAllowed(ref.name)) throw new KubeError('Not found', 404);
         const kind = KUBE_RESOURCES[ref.resource].kind;
         const resources = [...new Set<KubeResource>([...DIAGNOSIS_RESOURCES, ref.resource, ...(kind === 'Ingress' ? (['services'] as const) : [])])];
-        const { objects } = await readObjects(ctx, resources, ref.namespace ?? (ref.resource === 'namespaces' ? ref.name : null));
+        const scope = ref.namespace ?? (ref.resource === 'namespaces' ? ref.name : null);
+        const { objects } = await readObjects(ctx, resources, scope);
         const object: KubeObject =
           (objects[ref.resource] ?? []).find((o) => o.metadata.name === ref.name && (o.metadata.namespace ?? null) === ref.namespace) ??
           // Just created, or a list this credential may not read: ask for the object itself (404s propagate)
@@ -248,7 +264,7 @@ export async function kubeGraphRoutes(app: FastifyInstance) {
           const names = [spec.defaultBackend?.service?.name, ...(spec.rules ?? []).flatMap((r) => (r.http?.paths ?? []).map((p) => p.backend?.service?.name))];
           for (const n of names) if (n) backends.add(refKey({ kind: 'Service', namespace: ref.namespace, name: n }));
         }
-        const mine = diagnose(diagnosisInput(objects)).filter(
+        const mine = (await diagnoseIn(ctx, objects, scope)).filter(
           (d) =>
             refKey(d.subject) === key ||
             (d.owner && refKey(d.owner) === key) ||

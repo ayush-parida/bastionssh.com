@@ -168,6 +168,29 @@ describe('kube graph routes', () => {
     expect((await get(viewer, c('/attention?namespace=shop'))).json().items).toHaveLength(2);
   });
 
+  it('counts free node capacity from every namespace, even when one is picked', async () => {
+    api.add('pods', pod('ops', 'hog', { node: 'worker-1', cpu: '3500m' }));
+    api.add('pods', pod('shop', 'big', { unschedulable: '0/1 nodes are available: 1 Insufficient cpu.', cpu: '2' }));
+    try {
+      let items: KubeAttentionList['items'] = [];
+      for (let i = 0; i < 100 && !items.some((d) => d.id === 'unschedulable-resources'); i++) {
+        items = ((await get(viewer, c('/attention?namespace=shop'))).json() as KubeAttentionList).items;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      // worker-1: 4 CPU, 3.8 requested across shop and ops — not the 3.8 free that shop alone suggests
+      expect(items.find((d) => d.id === 'unschedulable-resources')!.headline).toBe('No node has room: needs 2 CPU, largest free is 0.2 CPU.');
+    } finally {
+      api.remove('pods', 'ops', 'hog');
+      api.remove('pods', 'shop', 'big');
+      // Let the cache catch up before the next test reads it
+      for (let i = 0; i < 100; i++) {
+        const left = ((await get(viewer, c('/attention'))).json() as KubeAttentionList).items;
+        if (!left.some((d) => d.id === 'unschedulable-resources')) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+  });
+
   it('explains one object: diagnoses, events, rollout, lifecycle', async () => {
     const dep = (await get(viewer, c('/objects/deployments/shop/web/insight'))).json() as KubeObjectInsight;
     expect(dep.diagnoses.map((d) => d.id)).toEqual(['crash-loop']);
