@@ -5,6 +5,7 @@ import { kubeObjectUrl } from '@smt/shared';
 import { AlertTriangle, Ban, Cpu, Hourglass, MemoryStick, Server } from 'lucide-react';
 import { cn } from '@/lib/utils.js';
 import { TILE_LABEL, TILE_STYLE, formatCpu, formatMemory, percent, type KubeObjectLinkState } from '@/lib/kube.js';
+import CordonToggle from './actions/CordonToggle.js';
 
 /**
  * The cluster map (spec §5.1): one card per node with its CPU and memory —
@@ -145,6 +146,7 @@ function NodeCardView({
           {live}
           {card.allocatable.pods ? ` / ${card.allocatable.pods}` : ''} pods
         </span>
+        <CordonToggle clusterId={clusterId} node={card.name} unschedulable={card.unschedulable} pods={live} compact />
       </div>
       {known ? (
         <div className="space-y-2">

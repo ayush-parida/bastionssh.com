@@ -722,6 +722,33 @@ below.
     `ObjectInsight` sits in the object panel; `AttentionList` heads the Map tab.
 - **Audit**: `kube_cluster.create/update/delete/test`, `kube_cluster.impersonation`,
   `org.kube_settings`, `kube.secret_view` (a Secret's redacted YAML was opened).
+- **Guided actions (K3)** (`actions.ts`, `api/routes/kube-actions.ts`,
+  `POST …/clusters/:id/actions/{scale,restart,rollback,delete-pod,cordon,uncordon,
+  suspend-cronjob,trigger-cronjob}`): each a minimal, well-defined request — a merge patch
+  of `{spec:{replicas}}` on the `scale` subresource; a strategic merge patch of the
+  pod-template annotation `kubectl.kubernetes.io/restartedAt`; for a rollback a JSON patch
+  that replaces `spec.template` with the revision's ReplicaSet template minus its
+  `pod-template-hash` label and sets the annotations as `kubectl rollout undo` does,
+  guarded by a `test` of the `resourceVersion` it read; `DELETE` of the pod; a merge patch
+  of `spec.unschedulable` / `spec.suspend`; and for "run now" a Job created from the
+  CronJob's `jobTemplate`, owned by it (`controller`, `blockOwnerDeletion`), marked
+  `cronjob.kubernetes.io/instantiate: manual`, named `<cronjob>-manual-<5 hex>` (≤ 63).
+  The patch bodies are pure functions with their own tests. Guards: the capability
+  (`KUBE_ACTION_CAPABILITY` → `requireKube`, 403), then cluster access (404), name checks
+  (400) and the namespace allowlist (404) before anything is sent. An object already in
+  the asked state is answered `changed: false` with no write (audited with `changed: false`).
+  A rollback refused by its `test` (the Deployment changed meanwhile) is a 409.
+  `GET …/actions/preview/:resource/:ns/:name` gives the panels the current state —
+  replicas, the HPA whose `scaleTargetRef` names the workload, the update strategy (so a
+  restart of a `Recreate` / `OnDelete` workload is not described as one-by-one), a
+  Deployment's revisions (image and env var *names* per container, never values), a pod's
+  owner and whether deleting it brings a fresh one (not for a finished Job's), a node's pod
+  count within the allowlist, a CronJob's schedule — and the actions the caller may take.
+  `kubeActionCommand` (shared) renders the equivalent kubectl command for the "What this
+  does" panel; nothing runs it. Audit: `kube.scale`, `kube.restart`, `kube.rollback`,
+  `kube.delete_pod`, `kube.cordon`, `kube.uncordon`, `kube.cronjob_suspend`,
+  `kube.cronjob_resume`, `kube.cronjob_trigger`, against the cluster with namespace,
+  kind, name and before/after. The web components live in `components/kube/actions/`.
 
 ---
 

@@ -169,6 +169,15 @@ export type AuditAction =
   | 'kube_cluster.diagnose'
   | 'kube_cluster.impersonation'
   | 'kube.secret_view'
+  | 'kube.scale'
+  | 'kube.restart'
+  | 'kube.rollback'
+  | 'kube.delete_pod'
+  | 'kube.cordon'
+  | 'kube.uncordon'
+  | 'kube.cronjob_suspend'
+  | 'kube.cronjob_resume'
+  | 'kube.cronjob_trigger'
   | 'org.kube_settings';
 
 export interface AuditLogEntry {

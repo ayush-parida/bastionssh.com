@@ -4,6 +4,7 @@ import { kubeObjectPath } from '@smt/shared';
 import { CheckCircle2 } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { kubeKeys, kubePath, type KubeTab } from '@/lib/kube.js';
+import { useActionPreview, useKubePermissions } from '@/lib/kube-actions.js';
 import DiagnosisCard from './DiagnosisCard.js';
 import { EventLines } from './EventsTimeline.js';
 import { ContainerLanes, LifecycleStrip } from './PodLifecycle.js';
@@ -14,7 +15,9 @@ import RolloutTimeline from './RolloutTimeline.js';
  * plain words (diagnoses with evidence), its rollout timeline or its pod
  * lifecycle and containers, and its events. Its query sits under the
  * object's key, so the panel's change feed refreshes it; events are not on
- * that feed, so it also refreshes on a slow timer.
+ * that feed, so it also refreshes on a slow timer. When the guided actions
+ * (K3) list a Deployment's revisions with their rollback buttons, the
+ * rollout here keeps only its replica bar, so the revisions show once.
  */
 export default function ObjectInsight({
   clusterId,
@@ -32,6 +35,9 @@ export default function ObjectInsight({
     retry: false,
     refetchInterval: 20_000,
   });
+  const permissions = useKubePermissions(clusterId);
+  // The same query (and cache entry) the actions section below reads.
+  const preview = useActionPreview(clusterId, objectRef, objectRef.resource === 'deployments' && !!permissions);
   const d = insight.data;
   if (!d) return null;
   const healthy = !d.diagnoses.length && ['pods', 'deployments', 'statefulsets', 'daemonsets', 'services', 'nodes', 'persistentvolumeclaims'].includes(objectRef.resource);
@@ -63,7 +69,7 @@ export default function ObjectInsight({
           <ContainerLanes lanes={d.containers} />
         </div>
       )}
-      {d.rollout && <RolloutTimeline rollout={d.rollout} />}
+      {d.rollout && <RolloutTimeline rollout={d.rollout} showRevisions={!preview.data?.revisions?.length} />}
       <div className="space-y-2">
         <p className="text-sm font-medium">Events</p>
         <EventLines events={d.events} />

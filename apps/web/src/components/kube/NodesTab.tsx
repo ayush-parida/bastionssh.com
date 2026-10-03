@@ -5,10 +5,11 @@ import { kubeObjectUrl } from '@smt/shared';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { formatCpu, formatMemory, kubeKeys, kubePath, percent, useKubeChanges, type KubeObjectLinkState } from '@/lib/kube.js';
+import CordonToggle from './actions/CordonToggle.js';
 
 /**
  * Nodes as a table: the same data as the map, sorted for comparing capacity.
- * K3 adds cordon / uncordon here and on the map's node cards.
+ * Admins cordon / uncordon from the switch beside each node's status.
  */
 export default function NodesTab({ clusterId }: { clusterId: string; namespace: string }) {
   const overview = useQuery<KubeOverview>({
@@ -51,6 +52,9 @@ export default function NodesTab({ clusterId }: { clusterId: string; namespace: 
                   {n.ready ? 'Ready' : 'Not ready'}
                 </span>
                 {n.unschedulable && <span className="ml-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600">Cordoned</span>}
+                <span className="ml-1 inline-flex align-middle">
+                  <CordonToggle clusterId={clusterId} node={n.name} unschedulable={n.unschedulable} pods={n.pods.filter((p) => p.status !== 'completed').length} compact />
+                </span>
               </td>
               <td className="px-4 py-2 tabular-nums">
                 {formatCpu(n.requested.cpuMillis)} / {formatCpu(n.allocatable.cpuMillis)}{' '}

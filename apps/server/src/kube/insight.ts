@@ -1,5 +1,6 @@
 import type { KubeContainerLane, KubeLifecycleStep, KubeRevision, KubeRollout } from '@smt/shared';
 import type { KubeObject } from './client.js';
+import { templateContainers } from './actions.js';
 import type { EventIndex } from './events.js';
 import { FAILING_WAITING_REASONS, REVISION_ANNOTATION, replicaSetsOf, workloadHealth } from './health.js';
 
@@ -38,6 +39,7 @@ export function rolloutOf(dep: KubeObject, replicaSets: KubeObject[]): KubeRollo
         revision,
         replicaSet: rs.metadata.name,
         images: [...new Set(containers.map((c) => str(c.image)).filter((i): i is string => !!i))],
+        containers: templateContainers(obj(rs.spec).template),
         changeCause: rs.metadata.annotations?.[CHANGE_CAUSE] ?? null,
         createdAt: rs.metadata.creationTimestamp ?? null,
         replicas: num(obj(rs.spec).replicas),

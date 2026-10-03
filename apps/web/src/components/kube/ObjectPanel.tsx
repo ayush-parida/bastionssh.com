@@ -9,6 +9,7 @@ import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { HEALTH_DOT, healthLabel, kubeKeys, kubePath, useKubeChanges, type KubeObjectLinkState, type KubeTab } from '@/lib/kube.js';
 import ObjectInsight from './ObjectInsight.js';
+import ObjectActions from './actions/ObjectActions.js';
 
 type Tab = 'overview' | 'yaml';
 
@@ -153,6 +154,7 @@ export default function ObjectPanel({
           ) : d ? (
             <div className="space-y-6">
               <ObjectInsight clusterId={clusterId} objectRef={objectRef} fromTab={fromTab} />
+              <ObjectActions clusterId={clusterId} objectRef={objectRef} onGone={onClose} />
               {d.facts.length > 0 && (
                 <dl className="divide-y divide-border rounded-md border border-border" data-testid="object-facts">
                   {d.facts.map((f) => (

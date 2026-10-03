@@ -8,7 +8,9 @@ import { ago } from '@/lib/kube.js';
  * oldest left — what image each ran, when, and the change-cause annotation —
  * with the current one highlighted; during a rollout, desired / updated /
  * ready / available replicas as one stacked bar. `action` lets a later phase
- * put a "Roll back to this revision" button on past entries (K3).
+ * put a "Roll back to this revision" button on past entries;
+ * `showRevisions={false}` keeps only the bar, for when the guided actions'
+ * revision list (with its rollback buttons, K3) shows them instead.
  */
 
 /** `registry/shop/web:1.4.2` → `web:1.4.2`. */
@@ -39,7 +41,15 @@ function ReplicaBar({ replicas: r }: { replicas: KubeRollout['replicas'] }) {
   );
 }
 
-export default function RolloutTimeline({ rollout, action }: { rollout: KubeRollout; action?: (revision: KubeRevision) => ReactNode }) {
+export default function RolloutTimeline({
+  rollout,
+  action,
+  showRevisions = true,
+}: {
+  rollout: KubeRollout;
+  action?: (revision: KubeRevision) => ReactNode;
+  showRevisions?: boolean;
+}) {
   const revisions = [...rollout.revisions].reverse();
   return (
     <div className="space-y-3" data-testid="rollout-timeline">
@@ -48,7 +58,7 @@ export default function RolloutTimeline({ rollout, action }: { rollout: KubeRoll
         {rollout.inProgress && <span className="rounded-full bg-sky-500/15 px-2 text-xs text-sky-700 dark:text-sky-400">rolling out</span>}
       </div>
       <ReplicaBar replicas={rollout.replicas} />
-      {revisions.length > 0 && (
+      {showRevisions && revisions.length > 0 && (
         <ol className="flex gap-0 overflow-x-auto pb-1">
           {revisions.map((r, i) => (
             <li key={r.replicaSet} className="relative flex min-w-[9.5rem] flex-1 flex-col items-start" data-testid="revision" data-current={r.current}>
