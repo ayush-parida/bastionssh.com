@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, test } from './fixtures.js';
+import { createMember, expect, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The K2 views against a stubbed Kubernetes API: the topology graph (node
@@ -158,8 +158,8 @@ const deploymentInsight = {
     inProgress: false,
     replicas: { desired: 3, updated: 3, ready: 2, available: 2 },
     revisions: [
-      { revision: 2, replicaSet: 'web-7d4', images: ['shop/web:1.4.2'], changeCause: 'release 1.4.2', createdAt: now, replicas: 3, readyReplicas: 2, current: true },
-      { revision: 1, replicaSet: 'web-5c8', images: ['shop/web:1.4.1'], changeCause: null, createdAt: now, replicas: 0, readyReplicas: 0, current: false },
+      { revision: 2, replicaSet: 'web-7d4', images: ['shop/web:1.4.2'], containers: [{ name: 'app', image: 'shop/web:1.4.2', envNames: [] }], changeCause: 'release 1.4.2', createdAt: now, replicas: 3, readyReplicas: 2, current: true },
+      { revision: 1, replicaSet: 'web-5c8', images: ['shop/web:1.4.1'], containers: [{ name: 'app', image: 'shop/web:1.4.1', envNames: [] }], changeCause: null, createdAt: now, replicas: 0, readyReplicas: 0, current: false },
     ],
   },
 };
@@ -253,6 +253,7 @@ test.describe('Kubernetes topology and diagnoses', () => {
     await expect(ring).toHaveAttribute('data-expanded', 'true');
     await expect(ring.getByTestId('ring-pod')).toHaveCount(3);
     await expect(ring.locator('[data-testid="ring-pod"][data-status="failing"]')).toHaveClass(/bg-red-500/);
+    await snap(page, 'topology-graph');
   });
 
   test('opens an object from the graph with its diagnosis, rollout and events', async ({ page }) => {
@@ -276,6 +277,7 @@ test.describe('Kubernetes topology and diagnoses', () => {
     await expect(panel.locator('[data-testid="revision"][data-current="true"]')).toContainText('web:1.4.2');
     await expect(panel.getByTestId('rollout-bar')).toContainText('3 desired · 3 updated · 2 ready · 2 available');
     await expect(panel.getByTestId('object-events')).toContainText('ScalingReplicaSet');
+    await snap(page, 'diagnosis-panel');
 
     // Closing returns to the graph
     await page.keyboard.press('Escape');

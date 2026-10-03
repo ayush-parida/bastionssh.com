@@ -46,8 +46,8 @@ async function copy(text: string, what: string) {
  * that object's panel) and, for operators and up, read-only YAML with secret
  * values stripped by the server. Kept live by the change feed. A pod adds
  * its lifecycle, container lanes with usage, logs and "Open shell" (K4,
- * components/kube/pod). Below come what is wrong with it and its events
- * (`ObjectInsight`, K2) and the guided actions it allows (`ObjectActions`, K3).
+ * components/kube/pod). Below come what is wrong with it (`ObjectInsight`,
+ * K2), the guided actions it allows (`ObjectActions`, K3), then its events.
  */
 export default function ObjectPanel({
   clusterId,
@@ -189,8 +189,13 @@ export default function ObjectPanel({
                   onLogs={showLogs}
                 />
               )}
-              <ObjectInsight clusterId={clusterId} objectRef={objectRef} fromTab={fromTab} podOverview={isPod} />
-              <ObjectActions clusterId={clusterId} objectRef={objectRef} onGone={onClose} />
+              <ObjectInsight
+                clusterId={clusterId}
+                objectRef={objectRef}
+                fromTab={fromTab}
+                podOverview={isPod}
+                actions={<ObjectActions clusterId={clusterId} objectRef={objectRef} onGone={onClose} />}
+              />
 
               {d.facts.length > 0 && (
                 <dl className="divide-y divide-border rounded-md border border-border" data-testid="object-facts">

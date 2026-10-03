@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, test } from './fixtures.js';
+import { createMember, expect, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The Kubernetes pages (K1) against a stubbed Kubernetes API, like the Docker
@@ -211,6 +211,7 @@ test.describe('Kubernetes cluster map', () => {
     await expect(tip).toContainText('namespace shop');
     await expect(tip).toContainText('CrashLoopBackOff');
     await expect(tip).toContainText('37 restarts');
+    await snap(page, 'cluster-map');
   });
 
   test('dims pods outside the picked namespace and opens a pod at its own URL', async ({ page }) => {

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { KubeObjectInsight, KubeObjectRef } from '@smt/shared';
 import { kubeObjectPath } from '@smt/shared';
@@ -20,17 +21,21 @@ import RolloutTimeline from './RolloutTimeline.js';
  * rollout here keeps only its replica bar, so the revisions show once.
  * Likewise `podOverview`: the pod panel's own overview (K4) already draws
  * the lifecycle and container lanes, with usage, logs and shells.
+ * `actions` (the guided actions) sit between what is wrong and the events:
+ * diagnose, then act — and they show on their own while there is no insight.
  */
 export default function ObjectInsight({
   clusterId,
   objectRef,
   fromTab,
   podOverview = false,
+  actions,
 }: {
   clusterId: string;
   objectRef: Pick<KubeObjectRef, 'resource' | 'namespace' | 'name'>;
   fromTab: KubeTab;
   podOverview?: boolean;
+  actions?: ReactNode;
 }) {
   const path = kubeObjectPath(objectRef);
   const insight = useQuery<KubeObjectInsight>({
@@ -43,7 +48,7 @@ export default function ObjectInsight({
   // The same query (and cache entry) the actions section below reads.
   const preview = useActionPreview(clusterId, objectRef, objectRef.resource === 'deployments' && !!permissions);
   const d = insight.data;
-  if (!d) return null;
+  if (!d) return <>{actions}</>;
   const healthy = !d.diagnoses.length && ['pods', 'deployments', 'statefulsets', 'daemonsets', 'services', 'nodes', 'persistentvolumeclaims'].includes(objectRef.resource);
   return (
     <div className="space-y-6" data-testid="object-insight">
@@ -74,6 +79,7 @@ export default function ObjectInsight({
         </div>
       )}
       {d.rollout && <RolloutTimeline rollout={d.rollout} showRevisions={!preview.data?.revisions?.length} />}
+      {actions}
       <div className="space-y-2">
         <p className="text-sm font-medium">Events</p>
         <EventLines events={d.events} />

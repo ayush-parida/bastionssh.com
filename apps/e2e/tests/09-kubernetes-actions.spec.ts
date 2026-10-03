@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, test } from './fixtures.js';
+import { createMember, expect, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The guided actions (K3) against a stubbed Kubernetes API: the scale
@@ -60,8 +60,10 @@ const revisions = [
     replicaSet: 'web-7d9f',
     createdAt: new Date(Date.now() - 3600_000).toISOString(),
     changeCause: 'release 2.0',
+    images: ['shop/web:2.0'],
     containers: [{ name: 'app', image: 'shop/web:2.0', envNames: ['MODE', 'NEW'] }],
     replicas: 2,
+    readyReplicas: 2,
     current: true,
   },
   {
@@ -69,8 +71,10 @@ const revisions = [
     replicaSet: 'web-5c4b',
     createdAt: new Date(Date.now() - 86400_000).toISOString(),
     changeCause: 'release 1.0',
+    images: ['shop/web:1.0'],
     containers: [{ name: 'app', image: 'shop/web:1.0', envNames: ['MODE'] }],
     replicas: 0,
+    readyReplicas: 0,
     current: false,
   },
 ];
@@ -131,6 +135,14 @@ async function stubKube(page: Page) {
     }
     const object = path.match(new RegExp(`^/clusters/${CLUSTER}/objects/deployments/shop/(\\w+)$`));
     if (object) return json(detail(object[1]!));
+    // What is wrong with it (K2): the rollout, whose revisions the actions' timeline shows instead
+    if (path === `/clusters/${CLUSTER}/objects/deployments/shop/web/insight`) {
+      return json({
+        diagnoses: [],
+        events: [],
+        rollout: { current: 2, inProgress: false, replicas: { desired: 2, updated: 2, ready: 2, available: 2 }, revisions },
+      });
+    }
     const preview = path.match(new RegExp(`^/clusters/${CLUSTER}/actions/preview/deployments/shop/(\\w+)$`));
     if (preview && previews[preview[1]!]) return json(previews[preview[1]!]);
     if (req.method() === 'POST' && path === `/clusters/${CLUSTER}/actions/scale`) {
@@ -175,6 +187,7 @@ test.describe('Kubernetes guided actions', () => {
     // The slider follows the number
     await expect(scale.getByRole('slider', { name: 'Replicas' })).toHaveValue('5');
     await expect(scale.getByTestId('hpa-warning')).toHaveCount(0);
+    await snap(page, 'scale-panel');
 
     // Cancelling sends nothing
     await scale.getByRole('button', { name: 'Scale…' }).click();
@@ -191,6 +204,7 @@ test.describe('Kubernetes guided actions', () => {
     await expect(dialog.getByTestId('action-command')).toBeHidden();
     await dialog.getByText('What this does').click();
     await expect(dialog.getByTestId('action-command')).toHaveText('kubectl scale deployment/web --replicas=5 -n shop');
+    await snap(page, 'scale-confirm');
 
     await dialog.getByRole('button', { name: 'Scale web to 5' }).click();
     await expect(page.getByRole('alertdialog')).toHaveCount(0);
@@ -238,5 +252,27 @@ test.describe('Kubernetes guided actions', () => {
     await expect(dialog.getByRole('button', { name: 'Restart batch' })).toHaveClass(/bg-red-600/);
     await dialog.getByRole('button', { name: 'Cancel' }).click();
     expect(posted).toEqual([]);
+  });
+
+  test('a Deployment panel shows what is wrong, then its actions and events, with its revisions once', async ({ page }) => {
+    await stubKube(page);
+    await signInWithPassword(page, operator.email, operator.password);
+    await page.goto(`/kubernetes/${CLUSTER}/objects/deployments/shop/web`);
+
+    const panel = page.getByTestId('kube-object-panel');
+    await expect(panel.getByTestId('object-insight')).toContainText('No known problems.');
+    await expect(panel.getByTestId('rollout-bar')).toContainText('2 desired · 2 updated · 2 ready · 2 available');
+    await expect(panel.getByTestId('revision-timeline').getByTestId('revision')).toHaveCount(2);
+    // The rollout keeps only its bar: the revisions are not listed twice
+    await expect(panel.getByTestId('rollout-timeline').getByTestId('revision')).toHaveCount(0);
+    await expect(panel.getByTestId('revision')).toHaveCount(2);
+    // Diagnose, then act: the rollout, the actions, then the events
+    const [rollout, actions, events] = await Promise.all([
+      panel.getByTestId('rollout-bar').boundingBox(),
+      panel.getByTestId('object-actions').boundingBox(),
+      panel.getByText('No recent events.', { exact: false }).boundingBox(),
+    ]);
+    expect(rollout!.y).toBeLessThan(actions!.y);
+    expect(actions!.y).toBeLessThan(events!.y);
   });
 });

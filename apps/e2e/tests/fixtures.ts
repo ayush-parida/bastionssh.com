@@ -1,4 +1,5 @@
 import { randomInt } from 'node:crypto';
+import { resolve } from 'node:path';
 import {
   test as base,
   expect,
@@ -128,4 +129,14 @@ export async function disablePasskeyAutofill(page: Page): Promise<void> {
   await page.addInitScript(() => {
     PublicKeyCredential.isConditionalMediationAvailable = async () => false;
   });
+}
+
+/**
+ * With `E2E_SCREENSHOTS` set to a directory, save what the page shows there
+ * as `<name>.png` (the pictures in the docs); otherwise do nothing.
+ */
+export async function snap(page: Page, name: string): Promise<void> {
+  const dir = process.env.E2E_SCREENSHOTS;
+  if (!dir) return;
+  await page.screenshot({ path: resolve(dir, `${name}.png`) });
 }
