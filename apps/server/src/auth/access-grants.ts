@@ -1,16 +1,18 @@
 import { and, eq, inArray, isNotNull, lte } from 'drizzle-orm';
 import type { ServerGrant } from '@smt/shared';
 import { getDb } from '../db/index.js';
-import { accessRequests, memberServerAccess, users } from '../db/schema.js';
+import { accessRequests, memberClusterAccess, memberServerAccess, users } from '../db/schema.js';
 import { auditSystem } from '../audit/index.js';
 import logger from '../logger.js';
 import { activeGrantFilter, serverScope } from './server-access.js';
+import { clusterScope } from './cluster-access.js';
 import { revokeLiveAccess } from './revoke.js';
 
 /**
  * Time-bound server grants. `member_server_access.expires_at` null means
  * permanent; a grant past its expiry stops counting in `serverScope` at once,
  * and the sweep here deletes it and closes what is still open on the server.
+ * Kubernetes cluster grants (`member_cluster_access`) expire the same way.
  */
 
 /** Longest time-bound grant an admin may give directly: a year. Anything longer should be permanent. */
@@ -98,7 +100,7 @@ export function cancelPendingAccessRequests(
 }
 
 export interface ExpirySweepResult {
-  /** Grants removed because their time was up. */
+  /** Grants removed because their time was up (servers and clusters). */
   grants: number;
   /** Pending requests nobody decided in time. */
   requests: number;
@@ -125,13 +127,25 @@ export function sweepExpiredAccess(now: Date = new Date()): ExpirySweepResult {
     })
     .all();
 
-  const byMember = new Map<string, { orgId: string; userId: string; serverIds: string[] }>();
-  for (const row of expired) {
-    const key = `${row.orgId}\u0000${row.userId}`;
-    const entry = byMember.get(key) ?? { orgId: row.orgId, userId: row.userId, serverIds: [] };
-    entry.serverIds.push(row.serverId);
+  const expiredClusters = db
+    .delete(memberClusterAccess)
+    .where(and(isNotNull(memberClusterAccess.expiresAt), lte(memberClusterAccess.expiresAt, nowIso)))
+    .returning({
+      orgId: memberClusterAccess.orgId,
+      userId: memberClusterAccess.userId,
+      clusterId: memberClusterAccess.clusterId,
+    })
+    .all();
+
+  const byMember = new Map<string, { orgId: string; userId: string; serverIds: string[]; clusterIds: string[] }>();
+  const entryFor = (orgId: string, userId: string) => {
+    const key = `${orgId}\u0000${userId}`;
+    const entry = byMember.get(key) ?? { orgId, userId, serverIds: [], clusterIds: [] };
     byMember.set(key, entry);
-  }
+    return entry;
+  };
+  for (const row of expired) entryFor(row.orgId, row.userId).serverIds.push(row.serverId);
+  for (const row of expiredClusters) entryFor(row.orgId, row.userId).clusterIds.push(row.clusterId);
 
   const emails = new Map(
     byMember.size
@@ -144,12 +158,18 @@ export function sweepExpiredAccess(now: Date = new Date()): ExpirySweepResult {
       : [],
   );
 
-  for (const { orgId, userId, serverIds } of byMember.values()) {
-    // Someone who (now) sees every server lost nothing usable
+  for (const { orgId, userId, serverIds, clusterIds } of byMember.values()) {
+    // Someone who (now) sees every server and cluster lost nothing usable
     const scope = serverScope({ orgId, userId });
-    const live = scope.all ? undefined : revokeLiveAccess(userId, { orgId, keepServerIds: scope.serverIds });
+    const clusters = clusterScope({ orgId, userId });
+    // (Both scopes come from the same membership: restricted for both, or for neither)
+    const live =
+      scope.all || clusters.all
+        ? undefined
+        : revokeLiveAccess(userId, { orgId, keepServerIds: scope.serverIds, keepClusterIds: clusters.clusterIds });
     auditSystem(orgId, 'member.access_expired', 'member', userId, emails.get(userId), {
       servers: serverIds,
+      ...(clusterIds.length && { clusters: clusterIds }),
       ...(live && { live }),
     });
   }
@@ -160,7 +180,7 @@ export function sweepExpiredAccess(now: Date = new Date()): ExpirySweepResult {
     .where(and(eq(accessRequests.status, 'pending'), lte(accessRequests.expiresAt, nowIso)))
     .run().changes;
 
-  return { grants: expired.length, requests: lapsed };
+  return { grants: expired.length + expiredClusters.length, requests: lapsed };
 }
 
 let timer: NodeJS.Timeout | null = null;

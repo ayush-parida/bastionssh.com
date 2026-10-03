@@ -46,9 +46,10 @@ import {
   volumesInUse,
 } from '../../docker/objects.js';
 import { dockerServer, leaseSsh, runProbe, withDockerClient, type DockerContext } from '../../docker/service.js';
+import { activeStreamCount } from '../sse.js';
 import {
   MAX_STREAMS_PER_USER,
-  activeDockerStreamCount,
+  TOO_MANY_STREAMS,
   openDockerSse,
   pipeToSse,
   type DockerSse,
@@ -131,10 +132,9 @@ export async function dockerSseRoute(
   run: (ctx: DockerContext, open: () => DockerSse | null, signal: AbortSignal) => Promise<void>,
 ) {
   // Refuse before opening anything; openDockerSse checks again when it starts
-  if (activeDockerStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) {
-    return reply
-      .status(429)
-      .send({ error: `Too many open Docker streams (at most ${MAX_STREAMS_PER_USER}); close a log or stats view first` });
+  // The cap counts every feature's streams (api/sse.ts)
+  if (activeStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) {
+    return reply.status(429).send({ error: TOO_MANY_STREAMS });
   }
   // The browser leaving before the stream opens cancels the daemon request too
   const gone = new AbortController();

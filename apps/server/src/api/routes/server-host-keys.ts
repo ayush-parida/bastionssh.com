@@ -9,6 +9,7 @@ import { servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import { evictServer } from '../../ssh/sftp.js';
 import { evictDockerServer } from '../../docker/index.js';
+import { evictKubeServer } from '../../kube/index.js';
 import { forgetHostKey, hostKeyView, pinHostKey } from '../../ssh/host-keys.js';
 import { scanServerHostKey, serversBehind } from '../../ssh/jump.js';
 
@@ -54,6 +55,7 @@ export async function hostKeyRoutes(app: FastifyInstance) {
     for (const id of [serverId, ...serversBehind(orgId, serverId)]) {
       evictServer(orgId, id);
       evictDockerServer(orgId, id);
+      evictKubeServer(orgId, id);
     }
   }
 

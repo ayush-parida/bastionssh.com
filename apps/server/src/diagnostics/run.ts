@@ -35,7 +35,7 @@ import {
 /**
  * Runs the steps in order — DNS, TCP, the protocol's own first words (and TLS
  * where it applies), the host key, authentication only when asked, and then
- * Docker for a server that has it on — each
+ * Docker for a server that has it on, or the Kubernetes API for a cluster — each
  * with its own budget and timing. Once a step fails, the ones after it are
  * reported as skipped rather than run against a connection that cannot work.
  */
@@ -52,6 +52,10 @@ export interface DiagnosticPlan {
   authenticate?: () => Promise<StepOutcome>;
   /** Servers with Docker on, when logging in was requested: find the daemon. Runs after a successful login. */
   docker?: () => Promise<StepOutcome>;
+  /** A pinned CA (PEM) the TLS step verifies against instead of the system store: a Kubernetes cluster's own CA. */
+  ca?: string | null;
+  /** Kubernetes clusters: the credential, `/version` and what it may do, over the cluster's own route. Runs last. */
+  kubeApi?: () => Promise<StepOutcome>;
 }
 
 export interface RunOptions {
@@ -67,6 +71,7 @@ const LABELS: Record<DiagnosticStepId, string> = {
   host_key: 'Host key',
   auth: 'Authentication',
   docker: 'Docker',
+  kube_api: 'Kubernetes API',
 };
 
 const BANNER_LABEL: Record<DiagnosticService, string> = {
@@ -179,7 +184,10 @@ export async function runDiagnostics(
             const upgrade = await requestAuthTls(raw);
             if (!upgrade.ok) return upgrade.outcome;
           }
-          const result = await checkTls({ socket: raw, host: plan.host, service: plan.service, verify: plan.verifyTls }, deps);
+          const result = await checkTls(
+            { socket: raw, host: plan.host, service: plan.service, verify: plan.verifyTls, ca: plan.ca },
+            deps,
+          );
           if (result.socket) {
             socket = result.socket;
             sockets.push(result.socket);
@@ -248,6 +256,13 @@ export async function runDiagnostics(
       const docker = plan.docker;
       if (blocked) push(skipped('docker', LABELS.docker, blocked));
       else push(await timed('docker', LABELS.docker, () => withTimeout(docker(), STEP_TIMEOUTS.docker)));
+    }
+
+    // ── Kubernetes API ──
+    if (plan.kubeApi) {
+      const kubeApi = plan.kubeApi;
+      if (blocked) push(skipped('kube_api', LABELS.kube_api, blocked));
+      else push(await timed('kube_api', LABELS.kube_api, () => withTimeout(kubeApi(), STEP_TIMEOUTS.kubeApi)));
     }
   } finally {
     for (const s of sockets) s.destroy();

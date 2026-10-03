@@ -37,6 +37,16 @@ export interface MemberServerAccess {
   serverIds: string[];
   /** The same grants with their details; `expiresAt` null means permanent. */
   grants?: ServerGrant[];
+  /** Kubernetes clusters granted to a restricted member (expired grants never appear). */
+  clusterIds?: string[];
+  clusterGrants?: ClusterGrant[];
+}
+
+export interface ClusterGrant {
+  clusterId: string;
+  expiresAt: string | null;
+  grantedBy: string | null;
+  reason: string | null;
 }
 
 export interface ServerGrant {
@@ -55,6 +65,13 @@ export interface UpdateMemberServerAccess {
   serverAccess: ServerAccessMode;
   serverIds: string[];
   expiresInMinutes?: Record<string, number | null>;
+  /**
+   * Kubernetes clusters a restricted member may use, replaced wholesale; left
+   * out, cluster grants stay as they are. `clusterExpiresInMinutes` works like
+   * `expiresInMinutes`.
+   */
+  clusterIds?: string[];
+  clusterExpiresInMinutes?: Record<string, number | null>;
 }
 
 export type AccessRequestStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';

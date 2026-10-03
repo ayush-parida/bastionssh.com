@@ -7,6 +7,7 @@ import { useAuthStore, useHasRole } from '@/store/auth.js';
 import type {
   OrgMember,
   Invite,
+  KubeCluster,
   CreatedInvite,
   MemberServerAccess,
   PasswordResetLink,
@@ -118,14 +119,91 @@ function accessSummary(m: OrgMember): string {
 /** How long a grant lasts, as picked in the dialog: as it is now, forever, or minutes from now. */
 type GrantChoice = 'keep' | 'permanent' | number;
 
-/** Pick which servers a restricted member may use, and for how long. */
+/**
+ * Checkboxes for what a restricted member is granted, each with how long it
+ * lasts. Servers and Kubernetes clusters use the same rows.
+ */
+function GrantList({
+  items,
+  empty,
+  selected,
+  expiry,
+  choiceFor,
+  onToggle,
+  onChoose,
+}: {
+  items: { id: string; name: string; detail: string }[];
+  empty: string;
+  selected: Set<string>;
+  expiry: Map<string, string | null>;
+  choiceFor: (id: string) => GrantChoice;
+  onToggle: (id: string) => void;
+  onChoose: (id: string, choice: GrantChoice) => void;
+}) {
+  return (
+    <div className="rounded-md border border-border divide-y divide-border">
+      {!items.length ? (
+        <p className="px-3 py-4 text-sm text-muted-foreground">{empty}</p>
+      ) : (
+        items.map((item) => {
+          const checked = selected.has(item.id);
+          const expiresAt = expiry.get(item.id);
+          const choice = choiceFor(item.id);
+          return (
+            <div key={item.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
+              <label className="flex flex-1 min-w-0 items-center gap-2">
+                <input type="checkbox" checked={checked} onChange={() => onToggle(item.id)} />
+                <span className="truncate">{item.name}</span>
+                <span className="text-xs text-muted-foreground font-mono truncate">{item.detail}</span>
+              </label>
+              {checked && expiresAt && choice === 'keep' && <ExpiryBadge expiresAt={expiresAt} />}
+              {checked && (
+                <select
+                  value={String(choice)}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    onChoose(item.id, v === 'keep' || v === 'permanent' ? v : Number(v));
+                  }}
+                  title="How long this access lasts"
+                  className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+                >
+                  {expiresAt && <option value="keep">Keep expiry</option>}
+                  <option value="permanent">Permanent</option>
+                  {DURATION_OPTIONS.map((o) => (
+                    <option key={o.minutes} value={o.minutes}>For {o.label}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+/** Only what changed: a grant left out keeps the expiry it has. */
+function expiryChanges(ids: string[], choiceFor: (id: string) => GrantChoice, current: Map<string, string | null>) {
+  const out: Record<string, number | null> = {};
+  for (const id of ids) {
+    const choice = choiceFor(id);
+    if (typeof choice === 'number') out[id] = choice;
+    else if (choice === 'permanent' && current.get(id)) out[id] = null;
+  }
+  return out;
+}
+
+/** Pick which servers and Kubernetes clusters a restricted member may use, and for how long. */
 function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: () => void }) {
   const qc = useQueryClient();
   const [mode, setMode] = useState<MemberServerAccess['serverAccess'] | null>(null);
   const [selected, setSelected] = useState<Set<string> | null>(null);
   const [durations, setDurations] = useState<Record<string, GrantChoice>>({});
+  const [selectedClusters, setSelectedClusters] = useState<Set<string> | null>(null);
+  const [clusterDurations, setClusterDurations] = useState<Record<string, GrantChoice>>({});
 
   const { data: servers } = useQuery<Server[]>({ queryKey: ['servers'], queryFn: () => api.get('/servers') });
+  const { data: clusters } = useQuery<KubeCluster[]>({ queryKey: ['kube', 'clusters'], queryFn: () => api.get('/kube/clusters') });
   const { data: access, isLoading } = useQuery<MemberServerAccess>({
     queryKey: ['member-access', member.userId],
     queryFn: () => api.get(`/team/members/${member.userId}/access`),
@@ -135,32 +213,36 @@ function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: (
   const effectiveMode = mode ?? access?.serverAccess ?? 'all';
   const effectiveSelected = selected ?? new Set(access?.serverIds ?? []);
   const currentExpiry = new Map((access?.grants ?? []).map((g) => [g.serverId, g.expiresAt]));
+  const effectiveClusters = selectedClusters ?? new Set(access?.clusterIds ?? []);
+  const currentClusterExpiry = new Map((access?.clusterGrants ?? []).map((g) => [g.clusterId, g.expiresAt]));
 
   /** A time-bound grant starts on "keep"; anything else on "permanent". */
   function choiceFor(serverId: string): GrantChoice {
     return durations[serverId] ?? (currentExpiry.get(serverId) ? 'keep' : 'permanent');
   }
+  function clusterChoiceFor(clusterId: string): GrantChoice {
+    return clusterDurations[clusterId] ?? (currentClusterExpiry.get(clusterId) ? 'keep' : 'permanent');
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => {
       const serverIds = [...effectiveSelected];
-      // Only what changed is sent; a server left out keeps the expiry it has
-      const expiresInMinutes: Record<string, number | null> = {};
-      for (const id of serverIds) {
-        const choice = choiceFor(id);
-        if (typeof choice === 'number') expiresInMinutes[id] = choice;
-        else if (choice === 'permanent' && currentExpiry.get(id)) expiresInMinutes[id] = null;
-      }
+      const clusterIds = [...effectiveClusters];
       return api.put<MemberServerAccess>(`/team/members/${member.userId}/access`, {
         serverAccess: effectiveMode,
         serverIds,
-        expiresInMinutes,
+        expiresInMinutes: expiryChanges(serverIds, choiceFor, currentExpiry),
+        // Cluster grants are only replaced once the list of clusters is known
+        ...(clusters && {
+          clusterIds,
+          clusterExpiresInMinutes: expiryChanges(clusterIds, clusterChoiceFor, currentClusterExpiry),
+        }),
       } satisfies UpdateMemberServerAccess);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['team-members'] });
       qc.invalidateQueries({ queryKey: ['member-access', member.userId] });
-      toast.success('Server access updated');
+      toast.success('Access updated');
       onClose();
     },
     onError: (err: Error) => toast.error(err.message),
@@ -172,6 +254,12 @@ function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: (
     else next.add(id);
     setSelected(next);
   }
+  function toggleCluster(id: string) {
+    const next = new Set(effectiveClusters);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setSelectedClusters(next);
+  }
 
   return (
     <div
@@ -181,7 +269,7 @@ function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: (
       <div className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
         <div className="flex items-center gap-3 border-b border-border px-4 py-3">
           <ServerCog size={16} className="text-primary shrink-0" />
-          <span className="flex-1 truncate text-sm font-semibold">Server access — {member.displayName}</span>
+          <span className="flex-1 truncate text-sm font-semibold">Access — {member.displayName}</span>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X size={14} />
           </button>
@@ -213,49 +301,37 @@ function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: (
                 <span>
                   <span className="font-medium">Only selected servers</span>
                   <span className="block text-xs text-muted-foreground">
-                    Other servers are hidden everywhere — lists, terminals, files, commands, cron and monitoring.
+                    Other servers and Kubernetes clusters are hidden everywhere — lists, terminals, files, commands, cron,
+                    monitoring and cluster views.
                   </span>
                 </span>
               </label>
               {effectiveMode === 'restricted' && (
-                <div className="rounded-md border border-border divide-y divide-border">
-                  {!servers?.length ? (
-                    <p className="px-3 py-4 text-sm text-muted-foreground">No servers yet.</p>
-                  ) : (
-                    servers.map((srv) => {
-                      const checked = effectiveSelected.has(srv.id);
-                      const expiresAt = currentExpiry.get(srv.id);
-                      const choice = choiceFor(srv.id);
-                      return (
-                        <div key={srv.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
-                          <label className="flex flex-1 min-w-0 items-center gap-2">
-                            <input type="checkbox" checked={checked} onChange={() => toggle(srv.id)} />
-                            <span className="truncate">{srv.name}</span>
-                            <span className="text-xs text-muted-foreground font-mono truncate">{srv.host}</span>
-                          </label>
-                          {checked && expiresAt && choice === 'keep' && <ExpiryBadge expiresAt={expiresAt} />}
-                          {checked && (
-                            <select
-                              value={String(choice)}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                setDurations({ ...durations, [srv.id]: v === 'keep' || v === 'permanent' ? v : Number(v) });
-                              }}
-                              title="How long this access lasts"
-                              className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
-                            >
-                              {expiresAt && <option value="keep">Keep expiry</option>}
-                              <option value="permanent">Permanent</option>
-                              {DURATION_OPTIONS.map((o) => (
-                                <option key={o.minutes} value={o.minutes}>For {o.label}</option>
-                              ))}
-                            </select>
-                          )}
-                        </div>
-                      );
-                    })
+                <>
+                  <GrantList
+                    items={(servers ?? []).map((srv) => ({ id: srv.id, name: srv.name, detail: srv.host }))}
+                    empty="No servers yet."
+                    selected={effectiveSelected}
+                    expiry={currentExpiry}
+                    choiceFor={choiceFor}
+                    onToggle={toggle}
+                    onChoose={(id, choice) => setDurations({ ...durations, [id]: choice })}
+                  />
+                  {!!clusters?.length && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium">Kubernetes clusters</p>
+                      <GrantList
+                        items={clusters.map((c) => ({ id: c.id, name: c.name, detail: c.apiUrl }))}
+                        empty=""
+                        selected={effectiveClusters}
+                        expiry={currentClusterExpiry}
+                        choiceFor={clusterChoiceFor}
+                        onToggle={toggleCluster}
+                        onChoose={(id, choice) => setClusterDurations({ ...clusterDurations, [id]: choice })}
+                      />
+                    </div>
                   )}
-                </div>
+                </>
               )}
             </>
           )}

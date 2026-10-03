@@ -1,7 +1,11 @@
 /** Connectivity diagnostics: why a server, file or storage connection cannot be reached. */
 
-/** `docker` runs for servers with Docker on, after a successful login; its problems are warnings. */
-export type DiagnosticStepId = 'dns' | 'tcp' | 'tls' | 'banner' | 'host_key' | 'auth' | 'docker';
+/**
+ * `docker` runs for servers with Docker on, after a successful login; its
+ * problems are warnings. `kube_api` runs for Kubernetes clusters: credentials,
+ * `/version` and what the credential may do, over the cluster's own route.
+ */
+export type DiagnosticStepId = 'dns' | 'tcp' | 'tls' | 'banner' | 'host_key' | 'auth' | 'docker' | 'kube_api';
 
 /**
  * `skipped` means the step did not run — an earlier step failed, it does not
@@ -23,7 +27,7 @@ export interface DiagnosticStep {
   data?: Record<string, unknown>;
 }
 
-export type DiagnosticTargetKind = 'server' | 'ftp_connection' | 'storage_connection';
+export type DiagnosticTargetKind = 'server' | 'ftp_connection' | 'storage_connection' | 'kube_cluster';
 
 export interface DiagnosticsTarget {
   kind: DiagnosticTargetKind;

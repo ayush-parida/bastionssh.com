@@ -159,14 +159,15 @@ function revokeNonSsoLiveAccess(provider: SsoProvider, exceptUserId: string) {
       ),
     )
     .all();
-  const total = { members: 0, terminals: 0, sftp: 0, docker: 0, agents: 0 };
+  const total = { members: 0, terminals: 0, sftp: 0, docker: 0, kube: 0, agents: 0 };
   for (const { userId } of members) {
     const r = revokeLiveAccess(userId, { orgId: provider.orgId });
-    if (r.terminals + r.sftp + r.docker + r.agents === 0) continue;
+    if (r.terminals + r.sftp + r.docker + r.kube + r.agents === 0) continue;
     total.members++;
     total.terminals += r.terminals;
     total.sftp += r.sftp;
     total.docker += r.docker;
+    total.kube += r.kube;
     total.agents += r.agents;
   }
   return total;

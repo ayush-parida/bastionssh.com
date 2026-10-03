@@ -21,4 +21,5 @@ export * from './types/backup.js';
 export * from './types/audit.js';
 export * from './types/recording.js';
 export * from './types/docker.js';
+export * from './types/kube.js';
 export * from './types/pagination.js';

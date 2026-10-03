@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils.js';
 import { dockerKeys } from '@/lib/docker.js';
 import { useHasRole } from '@/store/auth.js';
 
-function Switch({ on, disabled, onToggle }: { on: boolean; disabled?: boolean; onToggle: () => void }) {
+export function Switch({ on, disabled, onToggle }: { on: boolean; disabled?: boolean; onToggle: () => void }) {
   return (
     <button
       role="switch"

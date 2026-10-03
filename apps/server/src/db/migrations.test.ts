@@ -942,3 +942,66 @@ describe('migration 0021 (docker)', () => {
     expect(columns('organizations')).toContain('docker_settings');
   });
 });
+
+const KUBE_TAG = '0022_kubernetes';
+
+describe('migration 0022 (kubernetes)', () => {
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(KUBE_TAG);
+  });
+
+  it('leaves existing orgs on the default settings and adds the cluster tables', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < KUBE_TAG));
+    db.exec(`
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x.test', 'A', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, joined_at, server_access) VALUES ('u1', 'o1', 'operator', 'now', 'restricted');
+      INSERT INTO servers (id, org_id, name, host, port, username, tags, created_by, created_at, updated_at)
+        VALUES ('s1', 'o1', 'bastion', '10.0.0.1', 22, 'root', '[]', 'u1', 'now', 'now');
+      INSERT INTO member_server_access (org_id, user_id, server_id, created_at) VALUES ('o1', 'u1', 's1', 'now');
+    `);
+
+    apply(db, [KUBE_TAG]);
+
+    expect(db.prepare('SELECT id, docker_settings, kube_settings FROM organizations').get()).toEqual({
+      id: 'o1',
+      docker_settings: null,
+      kube_settings: null,
+    });
+    // Existing server grants are untouched; nobody has cluster grants yet
+    expect(db.prepare('SELECT count(*) AS n FROM member_server_access').get()).toEqual({ n: 1 });
+    expect(db.prepare('SELECT count(*) AS n FROM member_cluster_access').get()).toEqual({ n: 0 });
+
+    db.exec(`
+      INSERT INTO kube_clusters (id, org_id, name, api_url, connect_via, via_server_id, auth_type, encrypted_credential,
+        credential_hint, created_by, created_at, updated_at)
+        VALUES ('k1', 'o1', 'prod', 'https://10.0.0.5:6443', 'server', 's1', 'token', 'x', 'token ending …abcd', 'u1', 'now', 'now');
+      INSERT INTO member_cluster_access (org_id, user_id, cluster_id, expires_at, created_at) VALUES ('o1', 'u1', 'k1', '2999-01-01T00:00:00.000Z', 'now');
+    `);
+    expect(db.prepare('SELECT impersonate, default_namespace, namespaces_allowlist, last_status FROM kube_clusters').get()).toEqual({
+      impersonate: 0,
+      default_namespace: 'default',
+      namespaces_allowlist: null,
+      last_status: null,
+    });
+    // Deleting the server it was reached through keeps the cluster, without a route
+    db.exec("DELETE FROM servers WHERE id = 's1'");
+    expect(db.prepare('SELECT connect_via, via_server_id FROM kube_clusters').get()).toEqual({ connect_via: 'server', via_server_id: null });
+    // Grants go with their cluster
+    db.exec("DELETE FROM kube_clusters WHERE id = 'k1'");
+    expect(db.prepare('SELECT count(*) AS n FROM member_cluster_access').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (table: string) =>
+      (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns('kube_clusters')).toEqual(
+      expect.arrayContaining(['api_url', 'connect_via', 'via_server_id', 'via_agent_id', 'ca_data', 'encrypted_credential', 'impersonate']),
+    );
+    expect(columns('member_cluster_access')).toEqual(expect.arrayContaining(['cluster_id', 'expires_at', 'granted_by']));
+    expect(columns('organizations')).toContain('kube_settings');
+  });
+});

@@ -31,6 +31,7 @@
   - Generate scripts on the fly
 - 🩺 **Connectivity Diagnostics** — One click walks DNS, TCP, TLS or the SSH banner, the host key and (optionally) a login for a server, FTP/SFTP or storage connection, says which step failed and what to fix, and shows the app's egress IP for firewall rules.
 - 🎥 **Session Recording** — Terminal sessions and one-shot command runs are recorded as asciicast and can be replayed in the browser or downloaded, with a searchable command log.
+- ☸️ **Kubernetes** — See a cluster at a glance: nodes with their pods as coloured tiles, pods waiting for a node and why, workloads with their health and redacted details, all live — no kubectl. Clusters are reached directly, through a managed server's SSH connection or through an agent, with TLS always verified and Secret values never leaving the server.
 - 🐳 **Docker** — Containers, images, volumes and networks per server with live status, logs, stats and redacted inspect; container actions, pulls and prune, recorded shells in containers, Compose projects, a cross-server Containers view and opt-in container alerts — all over the server's existing SSH connection, no agent, no exposed daemon port.
 - 🪜 **Jump Hosts & Private Networks** — Reach servers through one or more bastions (like `ssh -J`), or through a small outbound agent on a private network that needs no inbound port.
 - 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
@@ -324,6 +325,104 @@ The **Compose** tab lists Compose projects found from their containers' labels, 
 
 ---
 
+## ☸️ Kubernetes
+
+**Kubernetes** in the sidebar lists your clusters, each with a health dot from its last test or use. A cluster opens on its **map**: one card per node with its role, whether it is ready or cordoned, any memory/disk/PID pressure, CPU and memory bars (what pods asked for, and what they really use when the cluster has metrics-server), and the node's pods as small tiles — green running, amber pending or starting, red failing (CrashLoopBackOff, Error, OOMKilled…), grey completed, purple terminating. Hover a tile for the pod's name, namespace, restarts and reason; click it for the pod's panel. Pods no node can take wait in a separate **Waiting for a node** lane with the scheduler's reason ("0/3 nodes are available: Insufficient cpu"). Picking a namespace dims everything outside it, and the choice is remembered per cluster. **Workloads** lists Deployments, StatefulSets, DaemonSets, Jobs and CronJobs with a health dot and a one-line summary ("2 of 3 ready"). Every object has its own panel — health, key facts, labels and what it is connected to (its owner, the pods it runs or sends traffic to), each a link — at a stable URL you can share. Operators and up also get a read-only YAML view. Everything updates live while the page is open; nothing needs `kubectl`. (The app topology graph, plain-language diagnoses, events, guided actions, logs and shells follow in later phases; see the [design](docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md).)
+
+**Adding a cluster** (admins): upload a kubeconfig and pick a context, or enter the API server URL, its CA and a service account token (or a client certificate and key). Then choose how BastionSSH reaches the API server:
+
+- **Directly** — the API server URL must be reachable from the BastionSSH host (private addresses are fine; cloud metadata and link-local addresses are refused).
+- **Through a server** — for private clusters: BastionSSH opens an SSH connection to a server you already manage (host key checks, jump hosts and agents apply) and tunnels to the API server from there. The server's sshd must allow TCP forwarding (`AllowTcpForwarding yes`, the OpenSSH default). Use the API server's address as that server sees it.
+- **Through an agent** — when a connectivity agent runs on a control-plane node: add the API port (usually 6443) to the agent's `BASTION_ALLOWED_PORTS`, and use an API server URL whose name is on the certificate (e.g. `https://kubernetes.default.svc:6443` or the node's name).
+
+**Test connection** checks each step in turn — reach the port, TLS, the credential, `/version` — and then asks the cluster what the credential may do (see pods, follow changes, read logs, scale, delete pods, open a shell, cordon nodes, impersonate…), so you see at once whether the map will be empty. TLS is always verified against the cluster's CA (or the system trust store for clusters with a public certificate), with the API server's name checked even through a tunnel; `insecure-skip-tls-verify` is refused. Kubeconfig entries that would run a program on the BastionSSH host — `exec` plugins (`aws eks get-token`, `gke-gcloud-auth-plugin`, `kubelogin`) and `auth-provider` — are refused too: create a service account token instead (below). Files referenced by path must be embedded (`kubectl config view --minify --flatten --context <name>`). The credential is encrypted and never shown again; the UI shows "token ending …abcd" or the certificate's name.
+
+**Who sees what.** Everyone with access to a cluster sees the map, workloads and details. Secret values never leave the server: Secrets show their type and key names only, and environment variables that come from a Secret show the reference, not the value; opening a Secret's (redacted) YAML is audited. ConfigMap values are shown unless an owner or admin turns that off under **Settings → Kubernetes**, where they also choose whether operators may scale and restart workloads, delete pods and open shells (all on by default; these actions arrive in later phases). Restricted members see only the clusters granted to them in the Team **Access** dialog, permanently or for a time, like servers; a cluster's **namespace allowlist** limits what anyone sees on it. Revoking access closes a member's live views at once. The cluster's own credential bounds everything: BastionSSH roles decide what the UI offers, Kubernetes RBAC decides what is possible. With **impersonation** on (off by default), every request carries `Impersonate-User: bastion:<email>` and `Impersonate-Group: bastion:<role>`, so the cluster's RBAC and audit log see the real person — the credential needs the `impersonate` verb for that, and you bind roles to those users and groups. **Diagnose** on a cluster runs DNS, TCP and TLS checks on its route (or the SSH checks of the server it goes through) and then the connection test.
+
+### A least-privilege service account
+
+Give BastionSSH its own service account rather than an admin kubeconfig. A read-only ClusterRole is enough for everything available today:
+
+```yaml
+# bastion-viewer.yaml — kubectl apply -f bastion-viewer.yaml
+apiVersion: v1
+kind: Namespace
+metadata: { name: bastion }
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: bastion-viewer, namespace: bastion }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: bastion-viewer }
+rules:
+  - apiGroups: ["", "apps", "batch", "networking.k8s.io", "storage.k8s.io", "autoscaling"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: bastion-viewer }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: bastion-viewer }
+subjects: [{ kind: ServiceAccount, name: bastion-viewer, namespace: bastion }]
+---
+# A token that does not expire (delete the Secret to revoke it). For a token that
+# expires instead: kubectl -n bastion create token bastion-viewer --duration=8760h
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bastion-viewer-token
+  namespace: bastion
+  annotations: { kubernetes.io/service-account.name: bastion-viewer }
+type: kubernetes.io/service-account-token
+```
+
+Secrets are readable by this role so their names and keys can be listed; BastionSSH strips the values before anything reaches a browser. To keep even that away from it, replace `"*"` in the first rule with an explicit list of resources that leaves out `secrets`. For the guided actions of later phases, bind a separate Role per namespace you want them in (scale, restart, roll back, delete pods, CronJobs):
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: bastion-operate, namespace: shop }
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "deployments/scale", "statefulsets/scale"]
+    verbs: ["patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs", "jobs"]
+    verbs: ["patch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: bastion-operate, namespace: shop }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: bastion-operate }
+subjects: [{ kind: ServiceAccount, name: bastion-viewer, namespace: bastion }]
+```
+
+Then collect the three things the **Add cluster** form needs:
+
+```bash
+TOKEN=$(kubectl -n bastion get secret bastion-viewer-token -o jsonpath='{.data.token}' | base64 -d)
+kubectl -n bastion get secret bastion-viewer-token -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'   # the API server URL
+```
+
+Per platform:
+
+- **EKS** — your kubeconfig uses `aws eks get-token` (an exec plugin), so apply the YAML above with it and use the service account token; EKS accepts Kubernetes service account tokens. The URL and CA are also in `aws eks describe-cluster --name <c> --query 'cluster.[endpoint,certificateAuthority.data]'` (the CA is base64). For a private endpoint, connect through a server or bastion inside the VPC.
+- **GKE** — the kubeconfig uses `gke-gcloud-auth-plugin`; same approach. URL and CA: `gcloud container clusters describe <c> --format 'value(endpoint,masterAuth.clusterCaCertificate)'` (prefix the endpoint with `https://`; the CA is base64). Private clusters: through a server or bastion with access to the control plane.
+- **AKS** — Entra ID kubeconfigs use `kubelogin` (an exec plugin); use the service account token. The URL and CA are in `az aks get-credentials --file -` output (`server`, `certificate-authority-data`). For a private cluster, connect through a server in the cluster's VNet.
+- **k3s** — `/etc/rancher/k3s/k3s.yaml` on the server node embeds a client certificate and works as is (it is cluster-admin, so prefer the token above); replace `https://127.0.0.1:6443` with the node's address, or connect **through** that node as a managed server and keep `https://127.0.0.1:6443`. When adding names or IPs, start k3s with `--tls-san` for them so the certificate covers the URL you use.
+- **kind** — `kind get kubeconfig --name <c>` embeds a client certificate and points at `https://127.0.0.1:<port>` on the host running Docker; use it directly when BastionSSH runs on that host, or through that host as a managed server.
+
+---
+
 ## 🔁 SSH key rotation
 
 **Rotate** on a server (or several at once from **SSH Keys**) generates a new key, adds it to `~/.ssh/authorized_keys` keeping the old line's options, proves a login with it, switches the server over, and removes the old key — rolling back at whichever step fails. A key still used by other servers on the same account, a cloud account or an SFTP connection is left in place and not retired; otherwise it is retired and refused from then on. Rotation is admin-only, needs a passkey confirmation when the admin has one, and every step is recorded in the rotation history and the audit log. Keys older than 180 days are flagged in the UI. Short-lived SSH certificates are not supported yet; see [docs/ssh-certificates.md](docs/ssh-certificates.md).
@@ -559,6 +658,8 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 - [x] App database backups (scheduled, pre-migration, optional encrypted off-site copy)
 - [x] Docker: containers, images, volumes, networks, logs and stats (read)
 - [x] Docker: container actions, exec shells, Compose, fleet view, AI tools and container alerts ([design](docs/superpowers/specs/2026-09-30-docker-management-design.md))
+- [x] Kubernetes K1: connect clusters (direct, through a server, through an agent), live cluster map, workloads, redacted details ([design](docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md))
+- [ ] Kubernetes K2–K5: topology graph and diagnoses, guided actions, pod logs and shells, AI and cluster alerts
 - [ ] Short-lived SSH certificates ([design notes](docs/ssh-certificates.md))
 - [ ] Live shared terminal sessions
 - [ ] End-to-end encrypted secret sharing
@@ -592,7 +693,7 @@ pnpm test:e2e      # Playwright browser tests (below)
 
 ### Browser tests
 
-`pnpm test:e2e` builds the server and web app, starts the built server on `http://localhost:18473` against a throwaway SQLite database (`NODE_ENV=test`, a fixed `SMT_ADMIN_PASSWORD`, monitoring and cloud sync off), serves the web build from it, and runs the Playwright suite in `apps/e2e` with Chromium. It covers password sign-in, passkey registration and sign-in (through Chrome's virtual WebAuthn authenticator), backup codes, the team invite flow, the AI command-approval card (against a stub OpenAI-compatible provider the test starts), the FTP form's SFTP option, and the Docker pages against a stubbed Docker API (confirmations for container actions and prune, container shells, Compose actions, the Containers fleet view).
+`pnpm test:e2e` builds the server and web app, starts the built server on `http://localhost:18473` against a throwaway SQLite database (`NODE_ENV=test`, a fixed `SMT_ADMIN_PASSWORD`, monitoring and cloud sync off), serves the web build from it, and runs the Playwright suite in `apps/e2e` with Chromium. It covers password sign-in, passkey registration and sign-in (through Chrome's virtual WebAuthn authenticator), backup codes, the team invite flow, the AI command-approval card (against a stub OpenAI-compatible provider the test starts), the FTP form's SFTP option, and the Docker pages against a stubbed Docker API (confirmations for container actions and prune, container shells, Compose actions, the Containers fleet view), and the Kubernetes cluster list, cluster map and pod panel against a stubbed Kubernetes API.
 
 - First time only: `pnpm --filter @smt/e2e exec playwright install chromium`
 - Another port: `E2E_PORT=19000 pnpm test:e2e`

@@ -30,6 +30,8 @@ import FtpFilesPage from '@/pages/FtpFiles.js';
 import CloudAccountsPage from '@/pages/CloudAccounts.js';
 import DnsLookupPage from '@/pages/DnsLookup.js';
 import AgentsPage from '@/pages/Agents.js';
+import KubernetesPage from '@/pages/Kubernetes.js';
+import KubeClusterPage from '@/pages/KubeCluster.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -82,6 +84,10 @@ export default function App() {
           <Route path="servers/:id/health" element={<ServerHealthPage />} />
           <Route path="servers/:id/docker" element={<ServerDockerPage />} />
           <Route path="containers" element={<ContainersPage />} />
+          <Route path="kubernetes" element={<KubernetesPage />} />
+          <Route path="kubernetes/:clusterId" element={<KubeClusterPage />} />
+          <Route path="kubernetes/:clusterId/:tab" element={<KubeClusterPage />} />
+          <Route path="kubernetes/:clusterId/objects/:resource/:ns/:name" element={<KubeClusterPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="storage" element={<StoragePage />} />
           <Route path="storage/:id" element={<StorageBucketsPage />} />

@@ -18,7 +18,7 @@ const fake = vi.hoisted(() => {
   };
 });
 
-vi.mock('../../auth/revoke.js', () => ({ revokeLiveAccess: () => ({ terminals: 0, sftp: 0, docker: 0, agents: 0 }) }));
+vi.mock('../../auth/revoke.js', () => ({ revokeLiveAccess: () => ({ terminals: 0, sftp: 0, docker: 0, kube: 0, agents: 0 }) }));
 
 vi.mock('../../notifications/email.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../notifications/email.js')>()),

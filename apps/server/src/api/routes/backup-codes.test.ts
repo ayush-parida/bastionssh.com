@@ -18,7 +18,7 @@ const fake = vi.hoisted(() => {
     sendEmail: vi.fn(async (_msg: { to: string[]; subject: string; text: string }) => {}),
     /** The credential the next registration verifies as; null fails it. */
     registration: null as { id: string } | null,
-    revokeLiveAccess: vi.fn((_userId: string, _scope?: unknown) => ({ terminals: 1, sftp: 0, docker: 0, agents: 0 })),
+    revokeLiveAccess: vi.fn((_userId: string, _scope?: unknown) => ({ terminals: 1, sftp: 0, docker: 0, kube: 0, agents: 0 })),
   };
 });
 
@@ -621,7 +621,7 @@ describe('backup codes', () => {
       const audits = getDb().select().from(auditLog).where(eq(auditLog.resourceId, org)).all();
       expect(JSON.parse(audits.filter((a) => a.action === 'org.backup_code_policy').at(-1)!.metadata!)).toEqual({
         backupCodeRecoveryOnly: true,
-        live: { members: 1, terminals: 1, sftp: 0, docker: 0, agents: 0 },
+        live: { members: 1, terminals: 1, sftp: 0, docker: 0, kube: 0, agents: 0 },
       });
     });
 

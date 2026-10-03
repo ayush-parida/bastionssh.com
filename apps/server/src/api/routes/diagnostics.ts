@@ -3,11 +3,13 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
 import { canAccessServer } from '../../auth/server-access.js';
+import { canAccessCluster } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
-import { ftpConnections, servers, storageConnections } from '../../db/schema.js';
+import { ftpConnections, kubeClusters, servers, storageConnections } from '../../db/schema.js';
 import { boolQuery } from '../query.js';
 import { diagnoseFtp, diagnoseServer, diagnoseStorage, getEgressIp } from '../../diagnostics/index.js';
+import { diagnoseCluster } from '../../kube/diagnose.js';
 
 const bodySchema = z.object({ auth: z.boolean().default(false) });
 const egressQuery = z.object({ refresh: boolQuery });
@@ -98,6 +100,28 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
 
     const result = await diagnoseStorage(connection, req.orgId, opts);
     await audit(req, 'storage_connection.diagnose', 'storage_connection', connection.id, connection.name, {
+      auth: opts.auth,
+      ok: result.ok,
+      failedStep: result.failedStep,
+    });
+    return result;
+  });
+
+  /** POST /api/diagnostics/clusters/:id {auth?} — a Kubernetes cluster; `auth` adds the Kubernetes API step */
+  app.post('/clusters/:id', DIAGNOSE_RATE_LIMIT, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const opts = optionsFor(req);
+    // Not granted reads as not found, as for servers
+    if (!canAccessCluster(req, id)) return reply.status(404).send({ error: 'Not found' });
+    const cluster = getDb()
+      .select()
+      .from(kubeClusters)
+      .where(and(eq(kubeClusters.id, id), eq(kubeClusters.orgId, req.orgId)))
+      .get();
+    if (!cluster) return reply.status(404).send({ error: 'Not found' });
+
+    const result = await diagnoseCluster(cluster, req, opts);
+    await audit(req, 'kube_cluster.diagnose', 'kube_cluster', cluster.id, cluster.name, {
       auth: opts.auth,
       ok: result.ok,
       failedStep: result.failedStep,

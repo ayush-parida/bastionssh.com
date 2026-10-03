@@ -578,6 +578,111 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
   Turning the setting off, Docker off or pausing monitoring closes them silently; a sample
   that fails leaves them as they are.
 
+### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
+
+Design: `docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md`. Phase K1 (connect
+and see: cluster map, namespaces, workloads, read-only details) is in place; K2–K5 (topology
+graph and diagnoses, guided actions, logs and shells, AI and alerts) build on the helpers
+below.
+
+- **No kubectl, no client library.** The app speaks HTTP/1.1 to the API server itself
+  (`client.ts`): `http.request` with an `Agent` whose `createConnection` hands every
+  request a fresh, already verified TLS socket from `transport.ts`. Typed calls: `version`,
+  `get`, `list` (follows `continue` tokens, 500 per page, capped), `watch` (newline-delimited
+  events, `410 Gone` either as a thrown error or an `ERROR` event), `patch` (merge,
+  strategic, JSON), `create`, `delete`, and `raw` for discovery, reviews and metrics. The
+  `logs` and `exec` signatures are fixed for K4 and answer 501 until then. API errors keep
+  the server's `Status.message`; 401 (credential refused) becomes a 502 naming the
+  credential, 403 stays 403 (RBAC on the cluster said no), 429 becomes 503 (`errors.ts`).
+- **Reaching the API server** (`transport.ts`), one of three routes per cluster:
+  `direct` — the host is resolved here, every address checked with `blockedReason` (private
+  ranges allowed as for servers; metadata and link-local refused) and the checked address
+  dialled; `server` — `forwardOut` on a pooled SSH connection to a managed server
+  (`ssh-pool.ts`: `sshConnectConfig` + `connectSsh`, so host keys, jump hosts and agents
+  apply; one connection per (org, server), 2 idle minutes, evicted with the server's Docker
+  and SFTP connections when it is edited, deleted, its host key changes or its key is
+  rotated); `agent` — the connectivity agent's tunnel to a port on its own loopback (the
+  agent must run on a control-plane node with the API port in `BASTION_ALLOWED_PORTS`).
+  TLS then always runs end to end from this process: `tls.connect` over the raw stream with
+  the cluster CA (or the system store), `rejectUnauthorized: true`, TLS 1.2+, the identity
+  check and SNI against the API URL's host whatever the route (no SNI for IP literals, as
+  TLS requires). A client certificate, when that is the credential, is presented here.
+- **Kubeconfigs** (`kubeconfig.ts`, parsed with `yaml`, aliases capped): a context gives
+  the server URL (https only, no credentials or query in it), the embedded CA, and a token
+  or an embedded client certificate + key. Refused with a reason and what to do instead:
+  `exec` and `auth-provider` users (they would run programs on the app host — the README
+  shows how to create a service account token), `insecure-skip-tls-verify`, file paths
+  (`certificate-authority`, `client-key`, `token-file`; flatten the file), basic auth,
+  `proxy-url` and `tls-server-name`. `POST /api/kube/kubeconfig/contexts` lists the
+  contexts with their problems for the picker; nothing is stored.
+- **Storage** (`kube_clusters`, migration 0022): route, CA, `auth_type`, the credential
+  (`token`, or `{cert, key}` JSON) encrypted with the vault under the row id and never
+  returned — the UI gets `credential_hint` (`token ending …abcd`, `client certificate
+  CN=…`) — impersonation flag, default namespace, namespace allowlist, last health
+  (`last_status`, `last_error`, `last_checked_at`, `server_version`).
+- **Access** (`auth/cluster-access.ts`, `service.ts`): clusters follow the per-server model.
+  Owners and admins see every cluster; other members see every cluster unless their
+  membership is `restricted`, then only the clusters in `member_cluster_access` (expiry
+  respected at once, rows swept by the access-grant expiry job, which also ends what is
+  open). `withKubeClient(req, clusterId, fn)` is the only way a route reaches a cluster: 404
+  for a cluster outside the caller's org or grants, decrypts the credential, builds the
+  client (with `Impersonate-User: bastion:<email>` / `Impersonate-Group: bastion:<role>` when
+  the cluster has impersonation on), and passes the caller's permissions, org settings and
+  the namespace allowlist (anything outside it is a 404). Grants are edited in the Team
+  access dialog (`clusterIds`, `clusterExpiresInMinutes` on `PUT /api/team/members/:id/access`).
+- **Watch cache** (`cache.ts`), informer-style: one list + watch per (cluster, resource,
+  namespace scope) that someone is viewing, shared by all viewers (`subscribeKube` returns
+  a refcounted subscription; `snapshotKube` reads several scopes for a JSON view). Watches
+  resume from the last `resourceVersion` (bookmarks on), relist on `410 Gone`, keep the
+  last objects and retry with backoff on other errors, and stop 2 minutes after the last
+  viewer leaves. Objects are trimmed on the way in (no `managedFields`; Secrets stored
+  already redacted). Each cluster is capped at 96 MB of cached objects; past it the
+  least-viewed scope is dropped and its viewers told to narrow the namespace. With
+  impersonation on the cache is per user and role, and `revokeLiveAccess` drops that
+  user's caches as well as their streams. Editing or removing a cluster drops its caches
+  and ends its streams (`resetCluster`).
+- **Views** (`views.ts`, `health.ts`, `quantity.ts`, `metrics.ts`): `GET …/overview` is the
+  cluster map — node cards (roles, Ready, cordoned, pressure conditions, allocatable vs
+  summed pod requests, live usage from `metrics.k8s.io` when it answers — detected per
+  cluster, remembered 5 minutes) with their pods as tiles (`running`, `pending`, `failing`,
+  `completed`, `terminating`, with the most telling reason and restarts), and pods no node
+  has taken with the scheduler's message. `…/namespaces`, `…/workloads?namespace&kind`
+  (Deployments, StatefulSets, DaemonSets, Jobs, CronJobs with a health word and one-line
+  summary), and `…/objects/:resource/:ns/:name` (`_` for cluster-scoped) — a fresh `get`,
+  redacted, with facts, labels, health, related objects (owner chain up to the Deployment,
+  owned ReplicaSets/Jobs, pods it owns, selects or runs) and, for operators and up,
+  read-only YAML. What the credential may not list is left out with a plain-words warning
+  instead of failing the view. Resources come from a fixed allowlist (`KUBE_RESOURCES` in
+  `@smt/shared`), names and namespaces are checked against DNS-1123 before a path is built
+  (`validation.ts`). `kubeObjectPath` / `kubeObjectUrl` give every object one stable URL,
+  the same in the API and the web app.
+- **Change feed** (`GET …/stream?view=overview|workloads|namespaces|object`, `sse.ts`,
+  `api/sse.ts`): subscribes the view's scopes and sends `ready`, then `changed` (coalesced
+  to one per 400 ms) — the browser refetches the view's JSON, so nothing large is pushed.
+  Streams share Docker's machinery, now in `api/sse.ts`: heartbeats, cancellation when the
+  browser leaves, at most 8 open streams per user across Docker and Kubernetes, and an
+  `error` event + end on revocation. `kubeSseRoute` is the helper later phases (logs) use.
+- **Redaction** (`redact.ts`): Secret `data`/`stringData` values become `••••` and the
+  last-applied annotation (a copy of the manifest) is dropped, also inside `…List` objects;
+  env vars from `secretKeyRef` show the reference only; ConfigMap values are shown unless
+  the org turns `showConfigMapValues` off. Everything that leaves the server — details,
+  YAML, and later AI context — goes through `redactObject`.
+- **Permissions** (`permissions.ts`, matrix in `@smt/shared` `kubePermissions`, settings
+  in `organizations.kube_settings`, defaults in `DEFAULT_KUBE_SETTINGS`): see the table in
+  §7. `requireKube(capability)` is the route guard.
+- **Test connection** (`connection-test.ts`, `POST …/clusters/test` before saving and
+  `…/clusters/:id/test`): reach the port over the route → TLS → credential (`/api`) →
+  `/version` → a `SelfSubjectRulesReview` in the default namespace summarized as the
+  things BastionSSH uses (see pods, follow changes, read logs, scale, delete pods, exec,
+  cordon, impersonate…). Admin only, rate-limited, audited (`kube_cluster.test`); a saved
+  cluster's result sets its health dot.
+- **Diagnose** (`diagnose.ts`): direct and agent routes run DNS, TCP and TLS (against the
+  cluster CA) through the same diagnostics steps as servers; a server route runs the
+  managed server's own steps (that is the hop the app makes). With login checks on, a
+  final **Kubernetes API** step runs the connection test with the stored credential.
+- **Audit**: `kube_cluster.create/update/delete/test`, `kube_cluster.impersonation`,
+  `org.kube_settings`, `kube.secret_view` (a Secret's redacted YAML was opened).
+
 ---
 
 ## 5. Data Model (Logical)
@@ -622,10 +727,11 @@ User         1───* APIToken
 - **api_tokens** — programmatic access tokens, scoped + hashed.
 - **sso_providers** — one OIDC provider per org: `issuer`, `client_id`, `encrypted_client_secret`, allowed domains, default role, auto-provision / enforce / trust-IdP-MFA flags, groups claim + role mappings.
 - **user_identities** — `(provider_id, subject)` unique → `user_id`; **sso_login_states** — pending sign-ins (state hash, encrypted PKCE verifier, nonce), 10-minute lifetime.
+- **kube_clusters** — `name`, `api_url`, `connect_via` (`direct | server | agent`), `via_server_id` / `via_agent_id`, `ca_data`, `auth_type` (`token | cert`), `encrypted_credential`, `credential_hint`, `impersonate`, `default_namespace`, `namespaces_allowlist`, last health. **member_cluster_access** — `(org_id, user_id, cluster_id)` grants for restricted members, with `expires_at`. **organizations.kube_settings** — JSON, see §4.16.
 
 ### Encrypted columns
 
-`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key`, `storage_connections.encrypted_secret_access_key`, `ftp_connections.encrypted_password` and `sso_providers.encrypted_client_secret` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
+`ssh_keys.encrypted_private_key`, `ai_provider_configs.encrypted_api_key`, `storage_connections.encrypted_secret_access_key`, `ftp_connections.encrypted_password`, `sso_providers.encrypted_client_secret` and `kube_clusters.encrypted_credential` are encrypted with the vault. Plaintext exists only transiently in process memory during use.
 
 ---
 
@@ -744,6 +850,14 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Docker env reveal          | —        | admin + passkey step-up |
 | Docker fleet view (Containers page) | viewer | —      |
 | AI Docker tools (list / logs, inspect) | operator (chat) | — |
+| Kubernetes clusters list, map, namespaces, workloads, redacted details, change feed | viewer (granted clusters) | — |
+| Kubernetes read-only YAML (Secret values stripped) | operator | — |
+| Kubernetes org settings | viewer | admin |
+| Kubernetes clusters add / edit / remove / test, impersonation | — | admin |
+| Kubernetes scale, restart rollout, CronJob suspend / trigger (K3) | — | operator if `operatorsCanScale`, else admin |
+| Kubernetes delete pod (K3) | — | operator if `operatorsCanDeletePods`, else admin |
+| Kubernetes roll back, cordon / uncordon (K3) | — | admin |
+| Kubernetes pod logs / shell (K4) | operator (logs) | operator if `operatorsCanExec`, else admin |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
 

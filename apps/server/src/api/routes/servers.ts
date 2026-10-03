@@ -11,6 +11,7 @@ import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
 import { evictServer } from '../../ssh/sftp.js';
 import { evictDockerServer } from '../../docker/index.js';
+import { evictKubeServer } from '../../kube/index.js';
 import { clearedDetection } from '../../docker/probe.js';
 import { isValidSocketPath } from '../../docker/validation.js';
 import { clearedColumns, hostKeyStatus, pinnedColumns } from '../../ssh/host-keys.js';
@@ -122,6 +123,7 @@ function evictWithDependents(orgId: string, serverId: string) {
   for (const id of [serverId, ...serversBehind(orgId, serverId)]) {
     evictServer(orgId, id);
     evictDockerServer(orgId, id);
+    evictKubeServer(orgId, id);
   }
 }
 
@@ -382,6 +384,7 @@ export async function serverRoutes(app: FastifyInstance) {
     for (const serverId of [id, ...dependents]) {
       evictServer(req.orgId, serverId);
       evictDockerServer(req.orgId, serverId);
+      evictKubeServer(req.orgId, serverId);
     }
     await audit(req, 'server.delete', 'server', id, existing.name);
     return reply.status(204).send();

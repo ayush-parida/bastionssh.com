@@ -161,7 +161,15 @@ export type AuditAction =
   | 'docker.compose_pull'
   | 'docker.compose_restart'
   | 'org.docker_settings'
-  | 'ai.docker_read';
+  | 'ai.docker_read'
+  | 'kube_cluster.create'
+  | 'kube_cluster.update'
+  | 'kube_cluster.delete'
+  | 'kube_cluster.test'
+  | 'kube_cluster.diagnose'
+  | 'kube_cluster.impersonation'
+  | 'kube.secret_view'
+  | 'org.kube_settings';
 
 export interface AuditLogEntry {
   id: string;

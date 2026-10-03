@@ -7,6 +7,8 @@ import { rank, requireAuth, requireRole, ROLES, type Role } from '../../auth/mid
 import { getDb } from '../../db/index.js';
 import {
   invites,
+  kubeClusters,
+  memberClusterAccess,
   memberServerAccess,
   memberships,
   organizations,
@@ -59,6 +61,7 @@ import {
 import { config } from '../../config/index.js';
 import { activeGrantFilter } from '../../auth/server-access.js';
 import { activeGrants, cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
+import { activeClusterGrants } from '../../auth/cluster-access.js';
 
 const roleSchema = z.enum(ROLES);
 
@@ -95,6 +98,11 @@ const serverAccessSchema = z.object({
   // Per server: minutes from now for a time-bound grant, null for permanent.
   // A server left out keeps the expiry it already has; a new one is permanent.
   expiresInMinutes: z
+    .record(z.string(), z.number().int().min(1).max(MAX_GRANT_MINUTES).nullable())
+    .default({}),
+  // Kubernetes clusters, the same way; left out, cluster grants stay as they are
+  clusterIds: z.array(z.string().min(1)).max(1000).optional(),
+  clusterExpiresInMinutes: z
     .record(z.string(), z.number().int().min(1).max(MAX_GRANT_MINUTES).nullable())
     .default({}),
 });
@@ -240,14 +248,15 @@ function revokeMembersLiveAccess(orgId: string, exceptUserId: string, condition:
       ),
     )
     .all();
-  const total = { members: 0, terminals: 0, sftp: 0, docker: 0, agents: 0 };
+  const total = { members: 0, terminals: 0, sftp: 0, docker: 0, kube: 0, agents: 0 };
   for (const { userId } of members) {
     const r = revokeLiveAccess(userId, { orgId });
-    if (r.terminals + r.sftp + r.docker + r.agents === 0) continue;
+    if (r.terminals + r.sftp + r.docker + r.kube + r.agents === 0) continue;
     total.members++;
     total.terminals += r.terminals;
     total.sftp += r.sftp;
     total.docker += r.docker;
+    total.kube += r.kube;
     total.agents += r.agents;
   }
   return total;
@@ -532,10 +541,13 @@ export async function teamRoutes(app: FastifyInstance) {
 
     // Expired grants are gone as far as anyone is concerned, even before the sweep deletes them
     const grants = activeGrants(req.orgId, userId);
+    const clusterGrants = activeClusterGrants(req.orgId, userId);
     return {
       serverAccess: member.serverAccess === 'restricted' ? 'restricted' : 'all',
       serverIds: grants.map((g) => g.serverId),
       grants,
+      clusterIds: clusterGrants.map((g) => g.clusterId),
+      clusterGrants,
     } satisfies MemberServerAccess;
   });
 
@@ -564,6 +576,17 @@ export async function teamRoutes(app: FastifyInstance) {
         return reply.status(400).send({ error: 'Unknown server in serverIds' });
       }
     }
+    const clusterIds = body.clusterIds ? [...new Set(body.clusterIds)] : null;
+    if (clusterIds?.length) {
+      const known = db
+        .select({ id: kubeClusters.id })
+        .from(kubeClusters)
+        .where(and(eq(kubeClusters.orgId, req.orgId), inArray(kubeClusters.id, clusterIds)))
+        .all();
+      if (known.length !== clusterIds.length) {
+        return reply.status(400).send({ error: 'Unknown cluster in clusterIds' });
+      }
+    }
 
     const memberGrants = and(eq(memberServerAccess.userId, userId), eq(memberServerAccess.orgId, req.orgId));
     // Existing rows, expired or not: a grant that lapses while the dialog is
@@ -587,6 +610,26 @@ export async function teamRoutes(app: FastifyInstance) {
       };
     });
 
+    // Cluster grants follow the same rules, when the caller sent them
+    const memberClusterGrants = and(eq(memberClusterAccess.userId, userId), eq(memberClusterAccess.orgId, req.orgId));
+    const existingClusters = new Map(
+      db.select().from(memberClusterAccess).where(memberClusterGrants).all().map((g) => [g.clusterId, g]),
+    );
+    const clusterRows = (clusterIds ?? []).map((clusterId) => {
+      const minutes = body.clusterExpiresInMinutes[clusterId];
+      const prior = existingClusters.get(clusterId);
+      if (minutes === undefined && prior) {
+        return { clusterId, expiresAt: prior.expiresAt, grantedBy: prior.grantedBy, reason: prior.reason, createdAt: prior.createdAt };
+      }
+      return {
+        clusterId,
+        expiresAt: minutes == null ? null : minutesFromNow(minutes, now),
+        grantedBy: req.user.id,
+        reason: null,
+        createdAt: new Date(now).toISOString(),
+      };
+    });
+
     db.transaction(() => {
       db.update(memberships)
         .set({ serverAccess: body.serverAccess })
@@ -596,15 +639,23 @@ export async function teamRoutes(app: FastifyInstance) {
       for (const row of rows) {
         db.insert(memberServerAccess).values({ orgId: req.orgId, userId, ...row }).run();
       }
+      if (clusterIds) {
+        db.delete(memberClusterAccess).where(memberClusterGrants).run();
+        for (const row of clusterRows) {
+          db.insert(memberClusterAccess).values({ orgId: req.orgId, userId, ...row }).run();
+        }
+      }
     });
 
     const nowIso = new Date(now).toISOString();
     const grants = rows.filter((r) => r.expiresAt === null || r.expiresAt > nowIso);
     const grantedIds = grants.map((g) => g.serverId);
-    // Narrowed: anything already open on a server no longer granted closes now
+    const clusterGrants = activeClusterGrants(req.orgId, userId);
+    const grantedClusterIds = clusterGrants.map((g) => g.clusterId);
+    // Narrowed: anything already open on a server or cluster no longer granted closes now
     const live =
       body.serverAccess === 'restricted'
-        ? revokeLiveAccess(userId, { orgId: req.orgId, keepServerIds: grantedIds })
+        ? revokeLiveAccess(userId, { orgId: req.orgId, keepServerIds: grantedIds, keepClusterIds: grantedClusterIds })
         : undefined;
 
     await audit(req, 'member.access_change', 'member', userId, userEmail(userId), {
@@ -612,12 +663,15 @@ export async function teamRoutes(app: FastifyInstance) {
       to: body.serverAccess,
       servers: grantedIds.length,
       timeBound: grants.filter((g) => g.expiresAt !== null).length,
+      ...(clusterIds && { clusters: grantedClusterIds.length }),
       ...(live && { live }),
     });
     return {
       serverAccess: body.serverAccess,
       serverIds: grantedIds,
       grants: grants.map(({ serverId, expiresAt, grantedBy, reason }) => ({ serverId, expiresAt, grantedBy, reason })),
+      clusterIds: grantedClusterIds,
+      clusterGrants,
     } satisfies MemberServerAccess;
   });
 

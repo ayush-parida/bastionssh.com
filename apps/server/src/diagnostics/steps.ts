@@ -42,6 +42,7 @@ export const STEP_TIMEOUTS = {
   hostKey: 10_000,
   auth: 25_000,
   docker: 45_000,
+  kubeApi: 60_000,
 } as const;
 
 export type StepOutcome = Pick<DiagnosticStep, 'status' | 'detail' | 'remediation' | 'data'>;
@@ -584,11 +585,11 @@ function certName(fields: Record<string, unknown> | undefined): string | null {
  * hostname check is Node's own (it runs whether or not we reject).
  */
 export function checkTls(
-  opts: { socket: Socket; host: string; service: DiagnosticService; verify: boolean },
+  opts: { socket: Socket; host: string; service: DiagnosticService; verify: boolean; ca?: string | null },
   deps: DiagnosticsDeps,
   timeoutMs: number = STEP_TIMEOUTS.tls,
 ): Promise<TlsResult> {
-  const { socket, host, service, verify } = opts;
+  const { socket, host, service, verify, ca } = opts;
   return new Promise((resolve) => {
     let settled = false;
     let secure: TLSSocket;
@@ -621,6 +622,8 @@ export function checkTls(
         socket,
         host,
         ...(isIP(host) === 0 && { servername: host }),
+        // A Kubernetes cluster's own CA, when it has one
+        ...(ca && { ca }),
         // Judged below, so the reason can be reported rather than just refused
         rejectUnauthorized: false,
       });

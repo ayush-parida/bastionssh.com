@@ -44,6 +44,7 @@ export type HostKeyPurpose =
   | 'exec'
   | 'sftp'
   | 'docker'
+  | 'kube'
   | 'health_check'
   | 'diagnostics'
   | 'host_key_scan';

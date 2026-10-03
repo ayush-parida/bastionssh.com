@@ -241,6 +241,8 @@ export const organizations = sqliteTable('organizations', {
   backupCodeRecoveryOnly: integer('backup_code_recovery_only', { mode: 'boolean' }).notNull().default(true),
   // Docker permissions JSON {operatorsCanExec, operatorsCanRemove, allowPrune, containerAlerts}; null = defaults (docker/settings.ts)
   dockerSettings: text('docker_settings'),
+  // Kubernetes permissions JSON {operatorsCanExec, operatorsCanDeletePods, operatorsCanScale, showConfigMapValues, clusterAlerts}; null = defaults (kube/settings.ts)
+  kubeSettings: text('kube_settings'),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -559,6 +561,81 @@ export const memberServerAccess = sqliteTable(
     memberServerIdx: uniqueIndex('member_server_access_idx').on(t.orgId, t.userId, t.serverId),
     serverIdx: index('member_server_access_server_idx').on(t.serverId),
     expiresIdx: index('member_server_access_expires_idx').on(t.expiresAt),
+  }),
+);
+
+// ── Kubernetes ────────────────────────────────────────────────────────────────
+
+/**
+ * A Kubernetes cluster, reached over HTTPS at `apiUrl` — directly, through a
+ * managed server's SSH connection, or through a connectivity agent on a
+ * control-plane node (see kube/). The credential (a bearer token, or a client
+ * certificate and key as JSON) is vault-encrypted with the cluster id and is
+ * never returned; `credentialHint` is what the UI shows.
+ */
+export const kubeClusters = sqliteTable(
+  'kube_clusters',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    apiUrl: text('api_url').notNull(),
+    connectVia: text('connect_via').notNull().default('direct'), // direct | server | agent
+    // Deleting the server or agent leaves the cluster unreachable until an admin picks another route
+    viaServerId: text('via_server_id').references(() => servers.id, { onDelete: 'set null' }),
+    viaAgentId: text('via_agent_id').references(() => agents.id, { onDelete: 'set null' }),
+    caData: text('ca_data'), // PEM; null = the system trust store
+    authType: text('auth_type').notNull(), // token | cert
+    encryptedCredential: text('encrypted_credential').notNull(),
+    credentialHint: text('credential_hint').notNull(),
+    impersonate: integer('impersonate', { mode: 'boolean' }).notNull().default(false),
+    defaultNamespace: text('default_namespace').notNull().default('default'),
+    namespacesAllowlist: text('namespaces_allowlist'), // JSON array; null = all
+    lastStatus: text('last_status'), // ok | error
+    lastError: text('last_error'),
+    lastCheckedAt: text('last_checked_at'),
+    serverVersion: text('server_version'),
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text('updated_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    orgIdx: index('kube_clusters_org_idx').on(t.orgId),
+    viaServerIdx: index('kube_clusters_via_server_idx').on(t.viaServerId),
+  }),
+);
+
+/** Clusters a `restricted` member may use, with optional expiry — the counterpart of member_server_access. */
+export const memberClusterAccess = sqliteTable(
+  'member_cluster_access',
+  {
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    clusterId: text('cluster_id')
+      .notNull()
+      .references(() => kubeClusters.id, { onDelete: 'cascade' }),
+    // Null = permanent. Past = no longer counts; the expiry sweep deletes it.
+    expiresAt: text('expires_at'),
+    grantedBy: text('granted_by'),
+    reason: text('reason'),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    memberClusterIdx: uniqueIndex('member_cluster_access_idx').on(t.orgId, t.userId, t.clusterId),
+    clusterIdx: index('member_cluster_access_cluster_idx').on(t.clusterId),
+    expiresIdx: index('member_cluster_access_expires_idx').on(t.expiresAt),
   }),
 );
 

@@ -13,6 +13,7 @@ import ApiTokens from '@/components/settings/ApiTokens.js';
 import { EgressIpSection } from '@/components/diagnostics/Diagnostics.js';
 import DatabaseBackups from '@/components/settings/DatabaseBackups.js';
 import DockerSettings from '@/components/docker/DockerSettings.js';
+import KubeSettings from '@/components/kube/KubeSettings.js';
 import { useAuthStore } from '@/store/auth.js';
 
 interface ProviderForm {
@@ -195,6 +196,7 @@ export default function SettingsPage() {
       <ApiTokens />
       <EgressIpSection />
       <DockerSettings />
+      <KubeSettings />
       <DatabaseBackups />
     </div>
   );

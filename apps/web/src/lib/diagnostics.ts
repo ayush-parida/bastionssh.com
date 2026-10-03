@@ -11,6 +11,7 @@ const ROUTE: Record<DiagnosticTargetKind, string> = {
   server: 'servers',
   ftp_connection: 'ftp',
   storage_connection: 'storage',
+  kube_cluster: 'clusters',
 };
 
 export function diagnosticsPath(target: Pick<DiagnoseTarget, 'kind' | 'id'>): string {
