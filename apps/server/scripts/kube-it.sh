@@ -22,7 +22,8 @@ DIR=${SMT_KIT_DIR:-${TMPDIR:-/tmp}/smt-kube-it}
 kc() { docker exec -i "$K3S" kubectl "$@"; }
 
 down() {
-  docker rm -f "$SSHD" "$K3S" >/dev/null 2>&1 || true
+  # -v: the k3s and openssh-server images declare anonymous volumes
+  docker rm -f -v "$SSHD" "$K3S" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
   rm -rf "$DIR"
 }
