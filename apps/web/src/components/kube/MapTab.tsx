@@ -5,6 +5,7 @@ import { Radar } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { kubeKeys, kubePath, useKubeChanges } from '@/lib/kube.js';
 import ClusterMap from './ClusterMap.js';
+import AttentionList from './AttentionList.js';
 
 /** Map: the cluster map, kept live by the change feed. */
 export default function MapTab({ clusterId, namespace }: { clusterId: string; namespace: string }) {
@@ -36,5 +37,10 @@ export default function MapTab({ clusterId, namespace }: { clusterId: string; na
   if (overview.error) {
     return <p className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{(overview.error as Error).message}</p>;
   }
-  return overview.data ? <ClusterMap clusterId={clusterId} overview={overview.data} namespace={namespace} /> : null;
+  return overview.data ? (
+    <div className="space-y-4">
+      <AttentionList clusterId={clusterId} namespace={namespace} fromTab="map" />
+      <ClusterMap clusterId={clusterId} overview={overview.data} namespace={namespace} />
+    </div>
+  ) : null;
 }
