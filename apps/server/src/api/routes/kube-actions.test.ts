@@ -161,11 +161,19 @@ describe('kube action routes', () => {
       expect(entry!.metadata).toEqual({ namespace: 'shop', kind: 'Deployment', name: 'web', before: { replicas: 2 }, after: { replicas: 4 } });
     });
 
-    it('scales StatefulSets too, and sends nothing when the count is unchanged', async () => {
+    it('scales StatefulSets too, and sends nothing when the count is unchanged (still audited)', async () => {
       const writes = api.writes.length;
       const same = (await act(operator, 'scale', { kind: 'StatefulSet', namespace: 'shop', name: 'db', replicas: 1 })).json() as KubeActionResult;
       expect(same.changed).toBe(false);
       expect(api.writes.length).toBe(writes);
+      expect(audited('kube.scale').at(-1)!.metadata).toEqual({
+        namespace: 'shop',
+        kind: 'StatefulSet',
+        name: 'db',
+        before: { replicas: 1 },
+        after: { replicas: 1 },
+        changed: false,
+      });
       const res = await act(operator, 'scale', { kind: 'StatefulSet', namespace: 'shop', name: 'db', replicas: 0 });
       expect(res.json()).toMatchObject({ changed: true, before: { replicas: 1 }, after: { replicas: 0 } });
       expect(lastWrite().path).toBe('/apis/apps/v1/namespaces/shop/statefulsets/db/scale');
@@ -215,6 +223,29 @@ describe('kube action routes', () => {
         expect((res.json() as KubeActionResult).after).toEqual({ restartedAt: at });
       }
       expect(audited('kube.restart').map((e) => e.metadata!.kind)).toEqual(['Deployment', 'StatefulSet', 'DaemonSet']);
+    });
+
+    it('tells Recreate and OnDelete workloads apart from one-by-one rollouts', async () => {
+      const recreate = deployment('shop', 'batch', { replicas: 2 });
+      (recreate.spec as Record<string, unknown>).strategy = { type: 'Recreate' };
+      api.add('deployments', recreate);
+      api.add('statefulsets', {
+        kind: 'StatefulSet',
+        metadata: { name: 'legacy', namespace: 'shop' },
+        spec: { replicas: 2, updateStrategy: { type: 'OnDelete' }, template: {} },
+        status: {},
+      });
+      const preview = (path: string) => get(admin, `/api/kube/clusters/${clusterId}/actions/preview/${path}`).then((r) => r.json() as KubeActionPreview);
+      expect((await preview('deployments/shop/batch')).strategy).toBe('Recreate');
+      expect((await preview('statefulsets/shop/legacy')).strategy).toBe('OnDelete');
+      expect((await preview('deployments/shop/api')).strategy).toBe('RollingUpdate');
+      expect((await preview('daemonsets/shop/agent')).strategy).toBe('RollingUpdate');
+
+      const recreated = (await act(admin, 'restart', { kind: 'Deployment', namespace: 'shop', name: 'batch' })).json() as KubeActionResult;
+      expect(recreated.message).toBe('Restarting batch: all its pods stop, then new ones start');
+      const onDelete = (await act(admin, 'restart', { kind: 'StatefulSet', namespace: 'shop', name: 'legacy' })).json() as KubeActionResult;
+      expect(onDelete.message).toContain('only when it is deleted');
+      expect(onDelete.message).not.toContain('one by one');
     });
 
     it('refuses a paused Deployment', async () => {
@@ -293,10 +324,21 @@ describe('kube action routes', () => {
 
     it('warns that a bare pod is not recreated', async () => {
       const preview = (await get(operator, `/api/kube/clusters/${clusterId}/actions/preview/pods/shop/debug`)).json() as KubeActionPreview;
-      expect(preview.pod).toEqual({ owner: null, nodeName: 'worker-1', phase: 'Running' });
+      expect(preview.pod).toEqual({ owner: null, recreated: false, nodeName: 'worker-1', phase: 'Running' });
       expect(preview.actions).toEqual(['delete-pod']);
       const res = await act(operator, 'delete-pod', { namespace: 'shop', name: 'debug' });
       expect((res.json() as KubeActionResult).message).toContain('nothing recreates it');
+    });
+
+    it('does not promise a replacement for the pod of a Job that already finished', async () => {
+      api.add('pods', pod('shop', 'report-done', { node: 'worker-2', phase: 'Succeeded', owner: { kind: 'Job', name: 'report' } }));
+      api.add('pods', pod('shop', 'report-running', { node: 'worker-2', owner: { kind: 'Job', name: 'report2' } }));
+      const done = (await get(operator, `/api/kube/clusters/${clusterId}/actions/preview/pods/shop/report-done`)).json() as KubeActionPreview;
+      expect(done.pod).toMatchObject({ owner: { kind: 'Job', name: 'report' }, recreated: false });
+      const running = (await get(operator, `/api/kube/clusters/${clusterId}/actions/preview/pods/shop/report-running`)).json() as KubeActionPreview;
+      expect(running.pod).toMatchObject({ recreated: true });
+      const res = await act(operator, 'delete-pod', { namespace: 'shop', name: 'report-done' });
+      expect((res.json() as KubeActionResult).message).toBe('Deleted report-done; its Job had finished, so nothing recreates it');
     });
   });
 
@@ -317,14 +359,14 @@ describe('kube action routes', () => {
       const after = (await get(admin, `/api/kube/clusters/${clusterId}/actions/preview/nodes/_/worker-1`)).json() as KubeActionPreview;
       expect(after.actions).toEqual(['uncordon']);
 
-      // Already cordoned: nothing sent, nothing audited
+      // Already cordoned: nothing sent, but the attempt is still audited (spec §6: every action)
       const writes = api.writes.length;
       expect((await act(admin, 'cordon', { name: 'worker-1' })).json()).toMatchObject({ changed: false });
       expect(api.writes.length).toBe(writes);
 
       expect((await act(admin, 'uncordon', { name: 'worker-1' })).json()).toMatchObject({ changed: true, after: { unschedulable: false } });
       expect(lastWrite().body).toEqual({ spec: { unschedulable: false } });
-      expect(audited('kube.cordon')).toHaveLength(1);
+      expect(audited('kube.cordon').map((e) => e.metadata!.changed)).toEqual([undefined, false]);
       expect(audited('kube.uncordon')).toHaveLength(1);
     });
   });
@@ -358,6 +400,15 @@ describe('kube action routes', () => {
       });
       expect(job.spec).toEqual({ template: { spec: { restartPolicy: 'Never', containers: [{ name: 'r', image: 'report:1' }] } } });
       expect(audited('kube.cronjob_trigger')[0]!.metadata).toMatchObject({ kind: 'CronJob', name: 'nightly', created: { kind: 'Job', name: result.created!.name } });
+    });
+  });
+
+  describe('preview', () => {
+    it('refuses resources without guided actions before reading them (no Secret is fetched)', async () => {
+      const before = api.requests.length;
+      const res = await get(admin, `/api/kube/clusters/${clusterId}/actions/preview/secrets/shop/web-secret`);
+      expect(res.statusCode).toBe(400);
+      expect(api.requests.slice(before).some((r) => r.includes('/secrets'))).toBe(false);
     });
   });
 

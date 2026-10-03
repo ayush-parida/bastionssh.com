@@ -49,7 +49,7 @@ export default function ObjectActions({
     parts.push(<ScaleSlider key="scale" clusterId={clusterId} kind={kind} namespace={namespace} name={name} replicas={p.replicas} hpa={p.hpa ?? null} />);
   }
   if (kind && can('restart')) {
-    parts.push(<RestartRollout key="restart" clusterId={clusterId} kind={kind} namespace={namespace} name={name} replicas={p.replicas} paused={p.paused} />);
+    parts.push(<RestartRollout key="restart" clusterId={clusterId} kind={kind} namespace={namespace} name={name} replicas={p.replicas} paused={p.paused} strategy={p.strategy} />);
   }
   if (p.revisions?.length) {
     parts.push(
@@ -61,6 +61,7 @@ export default function ObjectActions({
         revisions={p.revisions}
         canRollback={can('rollback')}
         paused={p.paused}
+        strategy={p.strategy}
       />,
     );
   }

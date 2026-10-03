@@ -42,8 +42,8 @@ import { clusterParams, sendKubeError } from './kube.js';
  * minimal patch (kube/actions.ts); the cluster credential's RBAC may still
  * refuse it (403 with the API server's reason).
  *
- * Every change is audited against the cluster with namespace, kind, name and
- * the before/after of what it touched. UI actions do not go through AI
+ * Every action is audited against the cluster with namespace, kind, name and
+ * the before/after of what it touched (`changed: false` when nothing was sent). UI actions do not go through AI
  * command approval (like Docker's), and the AI never performs them.
  */
 
@@ -85,9 +85,12 @@ function allowedNamespace(ctx: KubeContext, value: string): string {
   return namespace;
 }
 
-/** Audit what an action changed; nothing for an action that found the object already that way. */
+/**
+ * Audit an action (spec §6: all of them), with what it changed; one that
+ * found the object already that way is recorded with `changed: false`, as
+ * Docker's actions are.
+ */
 async function auditAction(req: FastifyRequest, ctx: KubeContext, action: AuditAction, result: KubeActionResult) {
-  if (!result.changed) return;
   await audit(req, action, 'kube_cluster', ctx.cluster.id, ctx.cluster.name, {
     namespace: result.ref.namespace,
     kind: result.ref.kind,
@@ -95,6 +98,7 @@ async function auditAction(req: FastifyRequest, ctx: KubeContext, action: AuditA
     before: result.before,
     after: result.after,
     ...(result.created && { created: { kind: result.created.kind, name: result.created.name } }),
+    ...(!result.changed && { changed: false }),
   });
 }
 

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { KubeRevision } from '@smt/shared';
+import type { KubeRevision, KubeUpdateStrategy } from '@smt/shared';
 import { kubeActionCommand } from '@smt/shared';
 import { History, Undo2 } from 'lucide-react';
 import { cn, relativeTime } from '@/lib/utils.js';
@@ -61,6 +61,7 @@ export default function RollbackPicker({
   revisions,
   canRollback,
   paused,
+  strategy = 'RollingUpdate',
 }: {
   clusterId: string;
   namespace: string;
@@ -68,6 +69,7 @@ export default function RollbackPicker({
   revisions: KubeRevision[];
   canRollback: boolean;
   paused?: boolean;
+  strategy?: KubeUpdateStrategy;
 }) {
   const run = useKubeAction(clusterId);
   const [target, setTarget] = useState<KubeRevision | null>(null);
@@ -131,7 +133,12 @@ export default function RollbackPicker({
         >
           <p>
             From {current ? `revision ${current.revision}` : 'the running version'} back to <span className="font-medium">revision {target.revision}</span>
-            {target.changeCause ? ` (${target.changeCause})` : ''}. Pods are replaced one by one.
+            {target.changeCause ? ` (${target.changeCause})` : ''}.{' '}
+            {strategy === 'Recreate' ? (
+              <span className="text-red-600">Its update strategy is Recreate: every pod stops before the new ones start, so the app is down in between.</span>
+            ) : (
+              'Pods are replaced one by one.'
+            )}
           </p>
           <RevisionDiffView diff={revisionDiff(current?.containers ?? [], target.containers)} />
           <p className="text-xs text-muted-foreground">Only names are compared; values stay on the cluster.</p>

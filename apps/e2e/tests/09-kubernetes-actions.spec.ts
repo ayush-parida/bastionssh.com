@@ -92,6 +92,15 @@ const previews: Record<string, unknown> = {
     paused: false,
     revisions: [],
   },
+  batch: {
+    ref: { resource: 'deployments', kind: 'Deployment', namespace: 'shop', name: 'batch' },
+    actions: ['scale', 'restart'],
+    replicas: { desired: 2, ready: 2, updated: 2, available: 2 },
+    hpa: null,
+    paused: false,
+    strategy: 'Recreate',
+    revisions: [],
+  },
 };
 
 /** Answer the Kubernetes API and record the actions posted. */
@@ -213,5 +222,21 @@ test.describe('Kubernetes guided actions', () => {
     await expect(dialog.getByTestId('hpa-warning')).toBeVisible();
     await expect(dialog).toContainText('nothing runs');
     await expect(dialog.getByRole('button', { name: 'Scale api to 0' })).toHaveClass(/bg-red-600/);
+  });
+
+  test('a restart of a Recreate Deployment says the app goes down, not "one by one"', async ({ page }) => {
+    const posted = await stubKube(page);
+    await signInWithPassword(page, operator.email, operator.password);
+    await page.goto(`/kubernetes/${CLUSTER}/objects/deployments/shop/batch`);
+
+    const restart = page.getByTestId('restart-rollout');
+    await expect(restart).toContainText('the app is down in between');
+    await restart.getByRole('button', { name: 'Restart…' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog.getByTestId('restart-strategy-warning')).toContainText('will all be stopped first');
+    await expect(dialog).not.toContainText('one by one');
+    await expect(dialog.getByRole('button', { name: 'Restart batch' })).toHaveClass(/bg-red-600/);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    expect(posted).toEqual([]);
   });
 });

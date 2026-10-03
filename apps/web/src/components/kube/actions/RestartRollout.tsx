@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { KubeActionPreview, KubeRestartableKind } from '@smt/shared';
+import type { KubeActionPreview, KubeRestartableKind, KubeUpdateStrategy } from '@smt/shared';
 import { kubeActionCommand } from '@smt/shared';
 import { AlertTriangle, RotateCw } from 'lucide-react';
 import { useKubeAction } from '@/lib/kube-actions.js';
@@ -29,9 +29,11 @@ function ReplaceStrip({ count }: { count: number }) {
 
 /**
  * Restart a rollout (spec §6): every pod is replaced following the
- * workload's update strategy — one by one, so with more than one replica the
- * app stays up. Sent as the `kubectl.kubernetes.io/restartedAt` pod-template
- * annotation, as `kubectl rollout restart` does.
+ * workload's update strategy — one by one for the usual `RollingUpdate`, so
+ * with more than one replica the app stays up; all at once for a
+ * Deployment's `Recreate`; and not until each pod is deleted for `OnDelete`
+ * — the panel says which. Sent as the `kubectl.kubernetes.io/restartedAt`
+ * pod-template annotation, as `kubectl rollout restart` does.
  */
 export default function RestartRollout({
   clusterId,
@@ -40,6 +42,7 @@ export default function RestartRollout({
   name,
   replicas,
   paused,
+  strategy = 'RollingUpdate',
 }: {
   clusterId: string;
   kind: KubeRestartableKind;
@@ -47,11 +50,19 @@ export default function RestartRollout({
   name: string;
   replicas: KubeActionPreview['replicas'];
   paused?: boolean;
+  strategy?: KubeUpdateStrategy;
 }) {
   const run = useKubeAction(clusterId);
   const [confirming, setConfirming] = useState(false);
   const count = replicas?.desired ?? 0;
-  const single = kind !== 'DaemonSet' && count <= 1;
+  const single = strategy === 'RollingUpdate' && kind !== 'DaemonSet' && count <= 1;
+  const pods = kind === 'DaemonSet' ? `The pod on each of its ${count} node${count === 1 ? '' : 's'}` : `Its ${count} pod${count === 1 ? '' : 's'}`;
+  const summary =
+    strategy === 'Recreate'
+      ? 'Stops every pod, then starts fresh ones: the app is down in between.'
+      : strategy === 'OnDelete'
+        ? 'Marks the pods for replacement; each is replaced only when it is deleted.'
+        : 'Replaces every pod with a fresh one, one by one.';
 
   return (
     <div className="space-y-2" data-testid="restart-rollout">
@@ -61,7 +72,7 @@ export default function RestartRollout({
             <RotateCw size={14} /> Restart rollout
           </p>
           <p className="text-xs text-muted-foreground">
-            {paused ? 'The rollout is paused; resume it before restarting.' : 'Replaces every pod with a fresh one, one by one.'}
+            {paused ? 'The rollout is paused; resume it before restarting.' : summary}
           </p>
         </div>
         <button
@@ -79,15 +90,24 @@ export default function RestartRollout({
           title={`Restart ${kind}`}
           subject={`${kind.toLowerCase()}/${name} in ${namespace}`}
           confirmLabel={`Restart ${name}`}
-          danger={false}
+          danger={strategy === 'Recreate' && count > 0}
           onConfirm={() => run('restart', { kind, namespace, name })}
           onClose={() => setConfirming(false)}
         >
           <ReplaceStrip count={count} />
-          <p>
-            {kind === 'DaemonSet' ? `The pod on each of its ${count} node${count === 1 ? '' : 's'}` : `Its ${count} pod${count === 1 ? '' : 's'}`} will be
-            replaced one by one; each new pod must be ready before the next old one stops.
-          </p>
+          {strategy === 'Recreate' ? (
+            <p className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600" data-testid="restart-strategy-warning">
+              {pods} will all be stopped first, and only then are new ones started (its update strategy is Recreate): the app is unavailable until they
+              are ready.
+            </p>
+          ) : strategy === 'OnDelete' ? (
+            <p className="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400" data-testid="restart-strategy-warning">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+              Its update strategy is OnDelete: nothing is replaced now. Each pod picks up the restart only when it is deleted (use Restart this pod on each).
+            </p>
+          ) : (
+            <p>{pods} will be replaced one by one; each new pod must be ready before the next old one stops.</p>
+          )}
           {single && (
             <p className="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
               <AlertTriangle size={13} className="mt-0.5 shrink-0" />

@@ -484,6 +484,9 @@ export const KUBE_SCALABLE_KINDS: readonly KubeScalableKind[] = ['Deployment', '
 export type KubeRestartableKind = 'Deployment' | 'StatefulSet' | 'DaemonSet';
 export const KUBE_RESTARTABLE_KINDS: readonly KubeRestartableKind[] = ['Deployment', 'StatefulSet', 'DaemonSet'];
 
+/** A workload's update strategy (`spec.strategy.type` / `spec.updateStrategy.type`). */
+export type KubeUpdateStrategy = 'RollingUpdate' | 'Recreate' | 'OnDelete';
+
 /** Most replicas the scale slider and route accept. */
 export const KUBE_MAX_REPLICAS = 1000;
 
@@ -584,10 +587,19 @@ export interface KubeActionPreview {
   hpa?: { name: string; minReplicas: number; maxReplicas: number } | null;
   /** A paused Deployment can be neither restarted nor rolled back. */
   paused?: boolean;
+  /**
+   * How a restart or rollback replaces the pods: `RollingUpdate` one by one,
+   * `Recreate` (Deployments) all at once — the app is down meanwhile —
+   * `OnDelete` (StatefulSets, DaemonSets) only as each pod is deleted.
+   */
+  strategy?: KubeUpdateStrategy;
   /** Deployments: their revisions, newest first. */
   revisions?: KubeRevision[];
-  /** Pods: who recreates it when deleted (null: a bare pod — nothing will). */
-  pod?: { owner: { kind: string; name: string } | null; nodeName: string | null; phase: string };
+  /**
+   * Pods: who owns it (null: a bare pod), and whether deleting it brings a
+   * fresh one — not for a bare pod, nor for one whose Job already finished.
+   */
+  pod?: { owner: { kind: string; name: string } | null; recreated: boolean; nodeName: string | null; phase: string };
   /** Nodes: whether cordoned, and what runs there. */
   node?: { unschedulable: boolean; pods: number; daemonSetPods: number };
   /** CronJobs. */

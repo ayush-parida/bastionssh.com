@@ -12,6 +12,7 @@ import {
   type KubeRevision,
   type KubeScalableKind,
   type KubeTemplateContainer,
+  type KubeUpdateStrategy,
 } from '@smt/shared';
 import type { KubeClient, KubeObject } from './client.js';
 import { KubeError } from './errors.js';
@@ -295,6 +296,37 @@ function controllerOf(o: KubeObject): { kind: string; name: string } | null {
   return ref ? { kind: ref.kind, name: ref.name } : null;
 }
 
+/**
+ * Whether deleting `pod` brings a fresh one: its owner must exist, and a
+ * Job's pod that already finished is not run again.
+ */
+export function podIsRecreated(pod: KubeObject): boolean {
+  const owner = controllerOf(pod);
+  if (!owner) return false;
+  const phase = str(obj(pod.status).phase);
+  return !(owner.kind === 'Job' && (phase === 'Succeeded' || phase === 'Failed'));
+}
+
+/** How a workload replaces its pods when its template changes (the API's default when unset). */
+export function updateStrategy(kind: KubeRestartableKind, workload: KubeObject): KubeUpdateStrategy {
+  const spec = obj(workload.spec);
+  const type = str(obj(kind === 'Deployment' ? spec.strategy : spec.updateStrategy).type);
+  if (kind === 'Deployment') return type === 'Recreate' ? 'Recreate' : 'RollingUpdate';
+  return type === 'OnDelete' ? 'OnDelete' : 'RollingUpdate';
+}
+
+/** What a template change does to the pods, for a result's message. */
+function replacementNote(strategy: KubeUpdateStrategy): string {
+  switch (strategy) {
+    case 'Recreate':
+      return 'all its pods stop, then new ones start';
+    case 'OnDelete':
+      return 'each pod picks up the change only when it is deleted (OnDelete strategy)';
+    default:
+      return 'its pods are replaced one by one';
+  }
+}
+
 function refOf(resource: KubeResource, namespace: string | null, name: string): KubeObjectRef {
   return { resource, kind: KUBE_RESOURCES[resource].kind, namespace, name };
 }
@@ -341,13 +373,14 @@ export async function restartRollout(
   }
   const previous = obj(obj(obj(obj(workload.spec).template).metadata).annotations)[RESTARTED_AT_ANNOTATION];
   await client.patch(resource, target.namespace, target.name, restartPatch(now), { type: 'strategic' });
+  const strategy = updateStrategy(target.kind, workload);
   return {
     action: 'restart',
     ref: refOf(resource, target.namespace, target.name),
     changed: true,
     before: { restartedAt: str(previous) },
     after: { restartedAt: now.toISOString() },
-    message: `Restarting ${target.name}: its pods are replaced one by one`,
+    message: strategy === 'OnDelete' ? `Restart requested for ${target.name}: ${replacementNote(strategy)}` : `Restarting ${target.name}: ${replacementNote(strategy)}`,
   };
 }
 
@@ -374,14 +407,27 @@ export async function rollbackDeployment(
   if (sameTemplate(obj(replicaSet.spec).template, currentTemplate)) {
     return { ...base, changed: false, message: `${target.name} already runs revision ${target.revision}'s template` };
   }
-  await client.patch('deployments', target.namespace, target.name, rollbackPatch(deployment, replicaSet), { type: 'json' });
-  return { ...base, changed: true, message: `Rolling ${target.name} back to revision ${target.revision}` };
+  try {
+    await client.patch('deployments', target.namespace, target.name, rollbackPatch(deployment, replicaSet), { type: 'json' });
+  } catch (err) {
+    // A failed `test` comes back as a bare 422 ("the server rejected our request…"): say what happened
+    if (err instanceof KubeError && err.statusCode === 422) {
+      const now = await client.get('deployments', target.namespace, target.name).catch(() => null);
+      if (now && now.metadata.resourceVersion !== deployment.metadata.resourceVersion) {
+        throw new KubeError(`${target.name} changed while it was being rolled back; nothing was changed — look again and retry`, 409, 'Conflict');
+      }
+    }
+    throw err;
+  }
+  const how = updateStrategy('Deployment', deployment) === 'Recreate' ? ': all its pods stop, then new ones start' : '';
+  return { ...base, changed: true, message: `Rolling ${target.name} back to revision ${target.revision}${how}` };
 }
 
 /** Delete a pod; its controller (if any) starts a replacement. */
 export async function deletePod(client: KubeClient, target: { namespace: string; name: string }): Promise<KubeActionResult> {
   const pod = await client.get('pods', target.namespace, target.name);
   const owner = controllerOf(pod);
+  const recreated = podIsRecreated(pod);
   await client.delete('pods', target.namespace, target.name);
   return {
     action: 'delete-pod',
@@ -389,9 +435,11 @@ export async function deletePod(client: KubeClient, target: { namespace: string;
     changed: true,
     before: { phase: str(obj(pod.status).phase), node: str(obj(pod.spec).nodeName), owner },
     after: { deleted: true },
-    message: owner
-      ? `Deleted ${target.name}; its ${owner.kind} starts a new pod in its place`
-      : `Deleted ${target.name}; it had no owner, so nothing recreates it`,
+    message: recreated
+      ? `Deleted ${target.name}; its ${owner!.kind} starts a new pod in its place`
+      : owner
+        ? `Deleted ${target.name}; its ${owner.kind} had finished, so nothing recreates it`
+        : `Deleted ${target.name}; it had no owner, so nothing recreates it`,
   };
 }
 
@@ -462,6 +510,9 @@ export async function triggerCronJob(
 
 // ── Preview ──────────────────────────────────────────────────
 
+/** Resources with guided actions; the preview of anything else is refused before it is read. */
+const ACTIONABLE_RESOURCES: ReadonlySet<KubeResource> = new Set(['deployments', 'statefulsets', 'daemonsets', 'pods', 'nodes', 'cronjobs']);
+
 /** Which actions apply to an object of `resource` in its current state, before permissions. */
 function applicableActions(resource: KubeResource, preview: KubeActionPreview): KubeActionId[] {
   switch (resource) {
@@ -493,6 +544,7 @@ export async function actionPreview(
   permissions: KubePermissions,
   namespaceAllowed: (namespace: string | null | undefined) => boolean,
 ): Promise<KubeActionPreview> {
+  if (!ACTIONABLE_RESOURCES.has(ref.resource)) throw new KubeError(`${KUBE_RESOURCES[ref.resource].kind} objects have no guided actions`, 400);
   const o = await client.get(ref.resource, ref.namespace, ref.name);
   const spec = obj(o.spec);
   const status = obj(o.status);
@@ -510,6 +562,7 @@ export async function actionPreview(
         available: num(status.availableReplicas),
       };
       preview.hpa = await controllingHpa(client, kind, ns, ref.name);
+      preview.strategy = updateStrategy(kind as KubeRestartableKind, o);
       if (ref.resource === 'deployments') {
         preview.paused = spec.paused === true;
         preview.revisions = toRevisions(o, await deploymentReplicaSets(client, o).catch(() => []));
@@ -523,9 +576,10 @@ export async function actionPreview(
         updated: num(status.updatedNumberScheduled),
         available: num(status.numberAvailable),
       };
+      preview.strategy = updateStrategy('DaemonSet', o);
       break;
     case 'pods':
-      preview.pod = { owner: controllerOf(o), nodeName: str(spec.nodeName), phase: str(status.phase) ?? 'Unknown' };
+      preview.pod = { owner: controllerOf(o), recreated: podIsRecreated(o), nodeName: str(spec.nodeName), phase: str(status.phase) ?? 'Unknown' };
       break;
     case 'nodes': {
       const pods = await client

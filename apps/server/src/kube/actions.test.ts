@@ -1,13 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { kubeActionCommand } from '@smt/shared';
-import type { KubeObject } from './client.js';
+import type { KubeClient, KubeObject } from './client.js';
+import { KubeError } from './errors.js';
 import {
   INSTANTIATE_ANNOTATION,
   RESTARTED_AT_ANNOTATION,
   cordonPatch,
   jobFromCronJob,
   manualJobName,
+  podIsRecreated,
   restartPatch,
+  rollbackDeployment,
   rollbackAnnotations,
   rollbackPatch,
   sameTemplate,
@@ -16,6 +19,7 @@ import {
   templateContainers,
   templateWithoutHash,
   toRevisions,
+  updateStrategy,
 } from './actions.js';
 import { isDns1123Subdomain } from './validation.js';
 
@@ -141,6 +145,58 @@ describe('rollback', () => {
       { name: 'app', image: 'a:1', envNames: ['TOKEN'] },
     ]);
     expect(JSON.stringify(containers)).not.toContain('hunter2');
+  });
+});
+
+describe('rollback against a Deployment that changes meanwhile', () => {
+  // A stub client: the Deployment's resourceVersion moves on after the first read, and the API server refuses the guarded patch as it does (a bare 422)
+  function racingClient(): KubeClient {
+    let reads = 0;
+    return {
+      get: async () => structuredClone({ ...deployment, metadata: { ...deployment.metadata, resourceVersion: ++reads === 1 ? '812' : '813' } }),
+      list: async () => ({ items: [rs(2, 'shop/web:1.2'), rs(3, 'shop/web:1.3', { LOG_LEVEL: 'debug', NEW_FLAG: '1' })] }),
+      patch: async () => {
+        throw new KubeError('the server rejected our request due to an error in our request', 422, 'Invalid');
+      },
+    } as unknown as KubeClient;
+  }
+
+  it('answers 409 with what happened instead of the API server’s bare 422', async () => {
+    const err = await rollbackDeployment(racingClient(), { namespace: 'shop', name: 'web', revision: 2 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(KubeError);
+    expect((err as KubeError).statusCode).toBe(409);
+    expect((err as KubeError).message).toMatch(/changed while it was being rolled back/);
+  });
+
+  it('passes a 422 through when the Deployment did not change (an invalid template)', async () => {
+    const client = racingClient();
+    (client as unknown as { get: () => Promise<KubeObject> }).get = async () => structuredClone(deployment);
+    const err = await rollbackDeployment(client, { namespace: 'shop', name: 'web', revision: 2 }).catch((e: unknown) => e);
+    expect((err as KubeError).statusCode).toBe(422);
+  });
+});
+
+describe('what a change does to the pods', () => {
+  it('reads the update strategy, with the API defaults when unset', () => {
+    const w = (spec: Record<string, unknown>): KubeObject => ({ metadata: { name: 'x' }, spec });
+    expect(updateStrategy('Deployment', w({}))).toBe('RollingUpdate');
+    expect(updateStrategy('Deployment', w({ strategy: { type: 'Recreate' } }))).toBe('Recreate');
+    expect(updateStrategy('StatefulSet', w({ updateStrategy: { type: 'OnDelete' } }))).toBe('OnDelete');
+    expect(updateStrategy('DaemonSet', w({ updateStrategy: { type: 'RollingUpdate' } }))).toBe('RollingUpdate');
+    // A Deployment has no OnDelete; its updateStrategy field is not its strategy
+    expect(updateStrategy('Deployment', w({ updateStrategy: { type: 'OnDelete' } }))).toBe('RollingUpdate');
+  });
+
+  it('knows which deleted pods come back', () => {
+    const p = (owner: string | null, phase: string): KubeObject => ({
+      metadata: { name: 'p', ...(owner && { ownerReferences: [{ kind: owner, name: 'o', controller: true }] }) },
+      status: { phase },
+    });
+    expect(podIsRecreated(p('ReplicaSet', 'Running'))).toBe(true);
+    expect(podIsRecreated(p('Job', 'Running'))).toBe(true);
+    expect(podIsRecreated(p('Job', 'Succeeded'))).toBe(false);
+    expect(podIsRecreated(p('Job', 'Failed'))).toBe(false);
+    expect(podIsRecreated(p(null, 'Running'))).toBe(false);
   });
 });
 

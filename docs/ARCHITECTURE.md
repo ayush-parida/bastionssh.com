@@ -698,10 +698,13 @@ below.
   The patch bodies are pure functions with their own tests. Guards: the capability
   (`KUBE_ACTION_CAPABILITY` → `requireKube`, 403), then cluster access (404), name checks
   (400) and the namespace allowlist (404) before anything is sent. An object already in
-  the asked state is answered `changed: false` with no write and no audit entry.
+  the asked state is answered `changed: false` with no write (audited with `changed: false`).
+  A rollback refused by its `test` (the Deployment changed meanwhile) is a 409.
   `GET …/actions/preview/:resource/:ns/:name` gives the panels the current state —
-  replicas, the HPA whose `scaleTargetRef` names the workload, a Deployment's revisions
-  (image and env var *names* per container, never values), a pod's owner, a node's pod
+  replicas, the HPA whose `scaleTargetRef` names the workload, the update strategy (so a
+  restart of a `Recreate` / `OnDelete` workload is not described as one-by-one), a
+  Deployment's revisions (image and env var *names* per container, never values), a pod's
+  owner and whether deleting it brings a fresh one (not for a finished Job's), a node's pod
   count within the allowlist, a CronJob's schedule — and the actions the caller may take.
   `kubeActionCommand` (shared) renders the equivalent kubectl command for the "What this
   does" panel; nothing runs it. Audit: `kube.scale`, `kube.restart`, `kube.rollback`,
