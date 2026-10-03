@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
   KubeClusterStatus,
   KubeClusterStatusView,
+  KubeGraphHealth,
   KubePodTileStatus,
   KubeStreamEvent,
   KubeStreamView,
@@ -24,6 +25,11 @@ export const kubeKeys = {
   workloads: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'workloads', namespace ?? '*'] as const,
   object: (clusterId: string, path: string) => ['kube', clusterId, 'object', path] as const,
   settings: ['kube-settings'] as const,
+  // K2: under the object's key, so its change feed refreshes the insight too
+  insight: (clusterId: string, path: string) => ['kube', clusterId, 'object', path, 'insight'] as const,
+  graph: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'graph', namespace ?? '*'] as const,
+  events: (clusterId: string, namespace: string | null, since: string) => ['kube', clusterId, 'events', namespace ?? '*', since] as const,
+  attention: (clusterId: string, namespace: string | null) => ['kube', clusterId, 'attention', namespace ?? '*'] as const,
 };
 
 /** Cluster page tabs (spec §5.5), in order; each one's body lives in its own file under components/kube. */
@@ -212,6 +218,39 @@ export const CLUSTER_STATUS_LABEL: Record<KubeClusterStatus, string> = {
   error: 'Unreachable',
   unknown: 'Not checked yet',
 };
+
+/** Topology graph nodes by health (spec §5.2): the same colours as the map's tiles. */
+export const GRAPH_HEALTH_STYLE: Record<KubeGraphHealth, { border: string; dot: string; label: string }> = {
+  healthy: { border: 'border-emerald-500', dot: 'bg-emerald-500', label: 'Healthy' },
+  progressing: { border: 'border-sky-500', dot: 'bg-sky-500', label: 'Updating' },
+  warning: { border: 'border-amber-500', dot: 'bg-amber-500', label: 'Needs a look' },
+  failing: { border: 'border-red-500', dot: 'bg-red-500', label: 'Failing' },
+  idle: { border: 'border-zinc-300 dark:border-zinc-600', dot: 'bg-zinc-400', label: 'Idle' },
+  missing: { border: 'border-red-500 border-dashed', dot: 'bg-red-500', label: 'Does not exist' },
+};
+
+/** `5 min ago`, `3 h ago`, `2 d ago`; '' without a time. */
+export function ago(iso: string | null | undefined, now = Date.now()): string {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (Number.isNaN(t)) return '';
+  const s = Math.max(0, Math.round((now - t) / 1000));
+  if (s < 60) return `${s} s ago`;
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86_400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86_400)} d ago`;
+}
+
+/** How long between two times, in words: `20 min`, `3 h`. */
+export function span(from: string | null, to: string | null): string {
+  const a = from ? Date.parse(from) : NaN;
+  const b = to ? Date.parse(to) : NaN;
+  if (Number.isNaN(a) || Number.isNaN(b) || b <= a) return '';
+  const s = Math.round((b - a) / 1000);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 86_400) return `${Math.round(s / 3600)} h`;
+  return `${Math.round(s / 86_400)} d`;
+}
 
 /** `1500` millicores → `1.5 cores`; `250` → `250m`. */
 export function formatCpu(millis: number): string {

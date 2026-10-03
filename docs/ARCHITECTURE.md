@@ -682,6 +682,44 @@ below.
   cluster CA) through the same diagnostics steps as servers; a server route runs the
   managed server's own steps (that is the hop the app makes). With login checks on, a
   final **Kubernetes API** step runs the connection test with the stored credential.
+- **Understanding (K2)** (`graph.ts`, `health.ts`, `events.ts`, `insight.ts`,
+  `api/routes/kube-graph.ts`), all read from the watch cache within the allowlist
+  (`readObjects`), so each view is live through the change feed (`view=graph|events|attention`):
+  - `GET …/graph?namespace=` — the app topology: Ingress → Service → Deployment /
+    StatefulSet / DaemonSet / CronJob → Job → pods, with ConfigMaps, Secrets (name only),
+    claims → volumes and autoscalers beside. Edges come only from real relationships: Ingress
+    backends, Service selectors matched against pod labels (drawn to the owning workload, and
+    to workloads whose template matches, so a scaled-to-zero Deployment still connects),
+    ownerReferences (ReplicaSets fold into their Deployment), volume / `envFrom` /
+    `valueFrom` references from templates and running pods, `volumeName`, `scaleTargetRef`.
+    A workload's pods are one replica ring (counts per colour, ready/desired, up to 300 pods
+    listed for expanding); more than 20 bare pods in a namespace share a ring. Edges that lead
+    nowhere are `broken` with the reason in words — an Ingress to a missing Service, a
+    Service no ready pod answers (a placeholder node when nothing matches its selector), a
+    missing non-optional ConfigMap/Secret/claim, a claim's vanished volume, an autoscaler's
+    missing target; a kind the credential may not list is never called missing.
+  - **Diagnoses** (`health.ts` `diagnose`): spec §5.4's rules, each a headline, cause, next
+    step and evidence (objects to open, events with counts, facts): image pull, OOMKilled
+    (recent), crash loop (exit code and what it means; `…/insight` adds the previous run's
+    last 20 log lines for members with the `logs` capability), unschedulable (needs vs the
+    largest free node from allocatable minus requests; selector/taints; other), readiness
+    probe failing (after the probe's own grace unless an `Unhealthy` event says so), Service
+    without ready pods, claim pending (missing StorageClass, provisioning failure;
+    `WaitForFirstConsumer` waits are not problems), node not ready / under pressure, rollout
+    stuck (`ProgressDeadlineExceeded`, naming the new and still-serving ReplicaSets). One
+    problem per pod, first rule wins. `GET …/attention` ranks them (critical, most
+    affected, newest) and merges a workload's pods into one line (`mergeByOwner`).
+  - `GET …/events?namespace=&since=` — Events grouped by involved object, newest first,
+    repeats of one reason and message collapsed with summed counts (`series` and `count`
+    understood); only plain fields leave the server.
+  - `GET …/objects/:resource/:ns/:name/insight` — the object's diagnoses (its own, its pods'
+    through any controller, an Ingress's Services'), its events (a Deployment's include its
+    ReplicaSets'), and the rollout timeline (Deployment: ReplicaSets as revisions with
+    images and change-cause) or the pod lifecycle (Scheduled → Pulled → Started → Ready from
+    conditions and events) and container lanes (init, app, sidecars).
+  - Web: `AppsTab` lazy-loads `TopologyGraph` (`@xyflow/react`, laid out by `elkjs`'s
+    layered algorithm, relaid only when the set of nodes or expanded rings changes);
+    `ObjectInsight` sits in the object panel; `AttentionList` heads the Map tab.
 - **Audit**: `kube_cluster.create/update/delete/test`, `kube_cluster.impersonation`,
   `org.kube_settings`, `kube.secret_view` (a Secret's redacted YAML was opened).
 

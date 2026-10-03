@@ -433,6 +433,213 @@ export type KubeStreamEvent =
 /**
  * Views the change feed can follow: `overview` (nodes and pods), `workloads`
  * (`namespace` optional), `namespaces`, and `object` (`resource`,
- * `namespace`, `name` — the object and the pods around it).
+ * `namespace`, `name` — the object and the pods around it). K2 adds
+ * `graph`, `events` and `attention` (`namespace` optional).
  */
-export type KubeStreamView = 'overview' | 'workloads' | 'namespaces' | 'object';
+export type KubeStreamView = 'overview' | 'workloads' | 'namespaces' | 'object' | 'graph' | 'events' | 'attention';
+
+// ── Understanding (K2): topology, diagnoses, events, attention ──────────────
+
+/**
+ * Plain-language problems (spec §5.4), one id per rule. Built from what the
+ * API server reports; no AI involved.
+ */
+export type KubeDiagnosisId =
+  | 'crash-loop'
+  | 'image-pull'
+  | 'oom-killed'
+  | 'unschedulable-resources'
+  | 'unschedulable-placement'
+  | 'unschedulable'
+  | 'readiness-failing'
+  | 'service-no-endpoints'
+  | 'pvc-pending'
+  | 'node-not-ready'
+  | 'node-pressure'
+  | 'rollout-stuck';
+
+/** `critical`: something is down or cannot start; `warning`: degraded or at risk. */
+export type KubeSeverity = 'critical' | 'warning';
+
+/** What a diagnosis rests on: an object (a link), an event, or a fact read from the object. */
+export interface KubeEvidence {
+  type: 'object' | 'event' | 'fact';
+  label: string;
+  detail: string | null;
+  ref: KubeObjectRef | null;
+}
+
+export interface KubeDiagnosis {
+  id: KubeDiagnosisId;
+  severity: KubeSeverity;
+  /** The object the problem is about (a pod, a Service, a node…). */
+  subject: KubeObjectRef;
+  /** The workload behind a pod, when it has one: problems of its pods add up there. */
+  owner: KubeObjectRef | null;
+  /** One sentence; `backticks` mark names and values. */
+  headline: string;
+  cause: string;
+  nextStep: string;
+  evidence: KubeEvidence[];
+  /** Last lines of the crashed container's previous run (crash loops; operators and up, when logs can be read). */
+  logTail?: string[];
+  /** How many objects share this problem (the attention list merges a workload's pods); 1 otherwise. */
+  affected: number;
+  /** When the problem was last seen (newest related event, or the condition's change). */
+  since: string | null;
+}
+
+/** GET /api/kube/clusters/:id/attention — problems ranked across namespaces. */
+export interface KubeAttentionList {
+  items: KubeDiagnosis[];
+  warnings: string[];
+  generatedAt: string;
+}
+
+/** Health colour of a node of the topology graph. */
+export type KubeGraphHealth = 'healthy' | 'progressing' | 'warning' | 'failing' | 'idle' | 'missing';
+
+/** How two nodes of the topology graph are related (spec §5.2). */
+export type KubeGraphRelation = 'routes' | 'selects' | 'owns' | 'mounts' | 'env' | 'bound' | 'scales';
+
+/** Pods of one workload, collapsed into a replica ring (expanded on click). */
+export interface KubePodGroup {
+  ready: number;
+  total: number;
+  /** Replicas asked for, when the owner says. */
+  desired: number | null;
+  counts: Record<KubePodTileStatus, number>;
+  /** Up to {@link KUBE_GRAPH_MAX_GROUP_PODS} pods, problems first. */
+  pods: KubePodTile[];
+}
+
+/** Pods listed per group in the graph; the ring's counts still cover every pod. */
+export const KUBE_GRAPH_MAX_GROUP_PODS = 300;
+
+export interface KubeGraphNode {
+  /** Stable across refreshes: `<kind>/<namespace>/<name>`, `pods:<owner id>`, `missing:<kind>/<namespace>/<name>`. */
+  id: string;
+  /** Kubernetes kind, or `Pods` for a replica ring. */
+  kind: string;
+  name: string;
+  namespace: string | null;
+  /** The object to open; null for a replica ring or something that does not exist. */
+  ref: KubeObjectRef | null;
+  health: KubeGraphHealth;
+  /** One line: "2 of 3 ready", "ClusterIP 10.0.0.12", "Bound 10Gi". */
+  summary: string;
+  /** Problems (diagnoses) on this object, or its pods. */
+  problems: number;
+  /** Replica ring nodes only. */
+  pods?: KubePodGroup;
+}
+
+export interface KubeGraphEdge {
+  id: string;
+  source: string;
+  target: string;
+  relation: KubeGraphRelation;
+  /** Leads nowhere (a Service no ready pod answers, an Ingress to a missing Service…): drawn dashed red. */
+  broken: boolean;
+  /** Why it is broken, or what the link means, in plain words. */
+  explanation: string;
+}
+
+/** GET /api/kube/clusters/:id/graph?namespace= — the app topology (spec §5.2). */
+export interface KubeGraph {
+  namespace: string | null;
+  nodes: KubeGraphNode[];
+  edges: KubeGraphEdge[];
+  /** Kinds the credential may not list, in plain words. */
+  warnings: string[];
+  generatedAt: string;
+}
+
+/** One line of the events timeline: repeats of the same event on the same object collapsed with a count. */
+export interface KubeEventEntry {
+  type: 'Normal' | 'Warning';
+  reason: string;
+  message: string;
+  /** Times it happened (the API's own count plus collapsed repeats). */
+  count: number;
+  firstSeen: string | null;
+  lastSeen: string | null;
+  /** Who reported it (kubelet, default-scheduler…). */
+  source: string | null;
+}
+
+export interface KubeEventGroup {
+  /** The object the events are about; `resource` is null for kinds the app does not read. */
+  object: Omit<KubeObjectRef, 'resource'> & { resource: KubeResource | null };
+  warnings: number;
+  lastSeen: string | null;
+  events: KubeEventEntry[];
+}
+
+/** GET /api/kube/clusters/:id/events?namespace=&since= — grouped by object, newest first. */
+export interface KubeEventList {
+  groups: KubeEventGroup[];
+  warnings: string[];
+  generatedAt: string;
+}
+
+/** A Deployment revision (one ReplicaSet) on the rollout timeline (spec §5.3). */
+export interface KubeRevision {
+  revision: number;
+  replicaSet: string;
+  images: string[];
+  /** The `kubernetes.io/change-cause` annotation, when someone set it. */
+  changeCause: string | null;
+  createdAt: string | null;
+  replicas: number;
+  readyReplicas: number;
+  current: boolean;
+}
+
+export interface KubeRollout {
+  /** The Deployment's current revision. */
+  current: number | null;
+  /** A rollout is under way. */
+  inProgress: boolean;
+  /** Desired / updated / ready / available, for the stacked bar. */
+  replicas: { desired: number; updated: number; ready: number; available: number };
+  /** Newest first. */
+  revisions: KubeRevision[];
+}
+
+export type KubeLifecycleStepId = 'scheduled' | 'pulled' | 'started' | 'ready';
+
+/** One step of a pod's lifecycle strip: Scheduled → Pulled → Started → Ready. */
+export interface KubeLifecycleStep {
+  id: KubeLifecycleStepId;
+  label: string;
+  state: 'done' | 'current' | 'failed' | 'waiting';
+  at: string | null;
+  detail: string | null;
+}
+
+/** A container lane of the pod panel: init containers first, then the app, then sidecars. */
+export interface KubeContainerLane {
+  name: string;
+  role: 'init' | 'app' | 'sidecar';
+  image: string | null;
+  state: 'running' | 'waiting' | 'terminated' | 'unknown';
+  /** Waiting or terminated reason (CrashLoopBackOff, Completed…). */
+  reason: string | null;
+  ready: boolean;
+  restarts: number;
+  lastTermination: { reason: string | null; exitCode: number | null; finishedAt: string | null } | null;
+}
+
+/**
+ * GET /api/kube/clusters/:id/objects/:resource/:ns/:name/insight — what is
+ * wrong with an object and what happened to it: diagnoses, its events
+ * (collapsed), and per kind the rollout timeline or the pod lifecycle.
+ */
+export interface KubeObjectInsight {
+  diagnoses: KubeDiagnosis[];
+  events: KubeEventEntry[];
+  rollout?: KubeRollout;
+  lifecycle?: KubeLifecycleStep[];
+  containers?: KubeContainerLane[];
+}
