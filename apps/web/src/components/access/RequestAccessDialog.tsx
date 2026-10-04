@@ -8,6 +8,7 @@ import type {
   RequestableServers,
   ResourceType,
 } from '@smt/shared';
+import { MODULES } from '@smt/shared';
 import { KeyRound, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
@@ -22,7 +23,7 @@ import {
   RESOURCE_TYPE_LABELS,
   levelAtLeast,
 } from '@/lib/access.js';
-import { useAuthStore } from '@/store/auth.js';
+import { moduleAtLeast, useMeAccess } from '@/hooks/useModules.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
 import { RoleDot } from './AccessBadges.js';
 import { NamespaceChips } from './GrantsEditor.js';
@@ -65,7 +66,7 @@ export function RequestAccessDialog({
   initial?: { type: ResourceType; id: string; level?: AccessLevel };
 }) {
   const qc = useQueryClient();
-  const myRole = useAuthStore((s) => s.role);
+  const { data: me } = useMeAccess();
   const { data, isLoading } = useRequestableAccess();
   const { data: servers } = useRequestableServers();
   const start = initial ?? (initialServerId ? { type: 'server' as const, id: initialServerId } : undefined);
@@ -83,8 +84,9 @@ export function RequestAccessDialog({
   const choices = durationChoices(max);
   // Default to 2 hours (or the org maximum, if lower) — ask for what the task needs
   const duration = minutes ?? Math.min(max, 120);
-  // What the base role would give, as a starting point
-  const effectiveLevel: AccessLevel = level ?? (myRole === 'operator' ? 'operate' : 'view');
+  // A starting point: operate where the member's roles let them operate this kind of resource
+  const module = MODULES.find((m) => m.resourceType === type)?.key;
+  const effectiveLevel: AccessLevel = level ?? (module && moduleAtLeast(module, me?.modules[module], 'operate') ? 'operate' : 'view');
 
   const expiry = new Map((servers?.servers ?? []).flatMap((s) => (s.granted?.expiresAt ? [[s.id, s.granted.expiresAt] as const] : [])));
   const ofType = (data?.resources ?? []).filter((r) => r.type === type);

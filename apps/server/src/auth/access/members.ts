@@ -5,6 +5,7 @@ import {
   MODULE_LEVELS,
   MODULES,
   MODULES_ONLY_DEFAULTS,
+  type AccessLevel,
   type BuiltInRole,
   type HeldRole,
   type MemberModuleAccess,
@@ -180,7 +181,7 @@ export interface HeldPermissions {
  * resolve.ts counts them: a role's only while that role has the resource
  * module on, personal ones while any held role does.
  */
-export function heldPermissions(orgId: string, userId: string): HeldPermissions {
+export function heldPermissions(orgId: string, userId: string, opts: { parked?: boolean } = {}): HeldPermissions {
   const rows = memberRoleRows(orgId, [userId]).get(userId) ?? [];
   if (rows.some((r) => r.system === 'owner')) return { owner: true, modules: allModules(), grants: [] };
   const { modules, byRole } = unionModules(orgId, rows);
@@ -194,7 +195,9 @@ export function heldPermissions(orgId: string, userId: string): HeldPermissions 
     for (const g of list) if (meetsModuleLevel(own[TYPE_MODULES[g.resourceType]], 'view')) grants.push(g);
   }
   for (const g of principalGrants(orgId, 'user', userId)) {
-    if (meetsModuleLevel(modules[TYPE_MODULES[g.resourceType]], 'view')) grants.push(g);
+    // `parked`: personal grants count even with their module off — they come
+    // back the moment any role turns it on, which no longer needs the actor
+    if (opts.parked || meetsModuleLevel(modules[TYPE_MODULES[g.resourceType]], 'view')) grants.push(g);
   }
   return { owner: false, modules, grants };
 }
@@ -257,7 +260,9 @@ export type RankRule = 'atOrBelow' | 'below' | 'strictlyBelow';
 
 export function outranks(orgId: string, actorId: string, targetId: string, rule: RankRule): boolean {
   const actor = heldPermissions(orgId, actorId);
-  const target = heldPermissions(orgId, targetId);
+  // The target's parked personal grants count as theirs: whoever takes over or
+  // locks out a member with "all servers: manage" parked must hold it too
+  const target = heldPermissions(orgId, targetId, { parked: true });
   if (target.owner) return actor.owner && rule !== 'strictlyBelow';
   if (actor.owner) return true;
   if (!permissionsCover(orgId, actor, target)) return false;
@@ -548,6 +553,70 @@ function mirroredGrantsMissing(actor: AccessSubject, userId: string, current: Me
   return [...missing];
 }
 
+/** True when `modules` has the resource module of `type` on. */
+function moduleOn(modules: Record<ModuleKey, ModuleLevel>, type: WantedGrant['resourceType']): boolean {
+  return meetsModuleLevel(modules[TYPE_MODULES[type]], 'view');
+}
+
+/**
+ * A personal grant counts only while one of the member's roles has its
+ * resource module on (resolve.ts), so a change of roles — or of a role's
+ * module levels — that turns that module on gives the grant back, and one
+ * that turns it off parks it (spec §10.4). Like a role's own parked grants
+ * (`PATCH /roles/:id`), the actor must hold each such grant, for as long, to
+ * move it either way. `rolesAfter` says what each member's roles become
+ * (each as `{ roleId, modulePermissions }`). Returns what is missing.
+ */
+export function personalGrantsMovedMissing(
+  actor: AccessSubject,
+  userIds: string[],
+  rolesAfter: (userId: string, rows: MemberRoleRow[]) => { roleId: string; system: string | null; modulePermissions: string | null }[],
+): string[] {
+  const orgId = actor.orgId;
+  const held = memberRoleRows(orgId, userIds);
+  const missing = new Set<string>();
+  for (const userId of userIds) {
+    const personal = principalGrants(orgId, 'user', userId);
+    if (!personal.length) continue;
+    const rows = held.get(userId) ?? [];
+    const after = rolesAfter(userId, rows);
+    // An owner reaches everything whatever their grants; only owners give or take Owner
+    if (rows.some((r) => r.system === 'owner') || after.some((r) => r.system === 'owner')) continue;
+    const was = unionModules(orgId, rows).modules;
+    const now = unionModules(orgId, after).modules;
+    for (const g of personal) {
+      if (moduleOn(was, g.resourceType) === moduleOn(now, g.resourceType)) continue;
+      const wanted = { resourceType: g.resourceType, selector: g.selector, resourceId: g.resourceId, tag: g.tag, namespaces: g.namespaces, level: g.level };
+      for (const m of canGrant(actor, { grants: [wanted] }, { expiresAt: g.expiresAt }).missing) missing.add(m);
+    }
+  }
+  return [...missing];
+}
+
+/**
+ * Personal grants that operate a server or cluster open the AI Assistant
+ * (at `view`) for a member none of whose roles do (resolve.ts), once its
+ * module is on for them. Giving one to such a member gives that module too — for as long as the longest of
+ * them lasts — so the actor must hold it that long. Returns what is
+ * missing; nothing when the member has the assistant already or no such
+ * grant is given.
+ */
+export function assistantDelegationMissing(
+  actor: AccessSubject,
+  userId: string,
+  grants: { resourceType: WantedGrant['resourceType']; level: AccessLevel; expiresAt?: string | null }[],
+): string[] {
+  const target = resolveAccess({ orgId: actor.orgId, userId });
+  // A parked grant (its module off for the member) opens nothing until a role turns it on
+  const operating = grants.filter(
+    (g) => (g.resourceType === 'server' || g.resourceType === 'cluster') && meetsLevel(g.level, 'operate') && moduleOn(target.modules, g.resourceType),
+  );
+  if (!operating.length || target.modules.ai !== 'none') return [];
+  const ends = operating.map((g) => g.expiresAt ?? null);
+  const until = ends.includes(null) ? null : ends.sort().at(-1)!;
+  return canGrant(actor, { modules: { ai: 'view' } }, { expiresAt: until }).missing;
+}
+
 export interface RoleChangeRefusal {
   status: 400 | 403;
   error: string;
@@ -589,7 +658,20 @@ export function changeMemberRoles(
   if (removedRows.some(isBaseRoleRole) && !outranks(orgId, actor.user.id, userId, 'below')) {
     return { refused: { status: 403, error: `You cannot ${verb} a member who holds as much access as you` } };
   }
-  const missing = [...roleDelegationMissing(actor, added, removed), ...mirroredGrantsMissing(actor, userId, current, next)];
+  const nextInfo = next.length
+    ? getDb()
+        .select({ roleId: roles.id, system: roles.system, modulePermissions: roles.modulePermissions })
+        .from(roles)
+        .where(and(eq(roles.orgId, orgId), inArray(roles.id, next.map((a) => a.roleId))))
+        .all()
+    : [];
+  const missing = [
+    ...new Set([
+      ...roleDelegationMissing(actor, added, removed),
+      ...mirroredGrantsMissing(actor, userId, current, next),
+      ...personalGrantsMovedMissing(actor, [userId], () => nextInfo),
+    ]),
+  ];
   if (missing.length) {
     return { refused: { status: 403, error: `You cannot ${verb}: you do not hold ${missing.join('; ')}`, missing } };
   }

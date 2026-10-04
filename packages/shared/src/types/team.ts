@@ -34,6 +34,13 @@ export interface OrgMember {
   scope?: MemberScope;
   /** Custom roles held now. Admins and owners only. */
   roles?: HeldRole[];
+  /**
+   * What the caller may do to this member, as the server weighs it (whoever
+   * holds Members at `operate`; never for themselves): `lockOut` — suspend,
+   * reactivate, sign out, remove (the member's access is within the caller's
+   * and less); `reset` — a password or passkey reset (strictly within).
+   */
+  actions?: { lockOut: boolean; reset: boolean };
 }
 
 /** Org-wide security policy, readable by every member; only owners change it. */

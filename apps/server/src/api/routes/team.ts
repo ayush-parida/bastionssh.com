@@ -75,6 +75,7 @@ import {
   snapshotAccess,
 } from '../../auth/access/index.js';
 import {
+  assistantDelegationMissing,
   baseRoleOf,
   builtInRoleId,
   changeMemberRoles,
@@ -289,6 +290,11 @@ function accessListDelegationMissing(
     for (const m of canGrant(req, { grants: [grant] }, { expiresAt }).missing) missing.add(m);
   }
   return [...missing];
+}
+
+/** When an entry of the old access list ends: picked minutes from now, else for good (kept ones are weighed as for good). */
+function listExpiry(minutes: number | null | undefined): string | null {
+  return minutes == null ? null : minutesFromNow(minutes);
 }
 
 /** When a membership given in a request ends: null for good, 'invalid' when out of range. */
@@ -630,6 +636,14 @@ export async function teamRoutes(app: FastifyInstance) {
         lastActiveAt: lastSeen.get(r.userId) ?? null,
         ...(seesPasskeys && { passkeyCount: passkeyCounts.get(r.userId) ?? 0 }),
         ...(seesRoles && { roles: presentHeldRoles(memberRoles) }),
+        // The rules targetMember applies, so the web offers only what would pass
+        ...(seesPasskeys &&
+          r.userId !== req.user.id && {
+            actions: {
+              lockOut: outranks(req.orgId, req.user.id, r.userId, 'below'),
+              reset: outranks(req.orgId, req.user.id, r.userId, 'strictlyBelow'),
+            },
+          }),
       };
     });
   });
@@ -1022,10 +1036,19 @@ export async function teamRoutes(app: FastifyInstance) {
     // given — at the member's base level, as the mirrored grant will be — or
     // taken away, or given for a new length of time, must be one the actor
     // holds, for as long. Admins at their defaults hold them all.
-    const listMissing = accessListDelegationMissing(req, userId, baseLevel(held.role), [
-      { type: 'server', ids: serverIds, minutes: body.expiresInMinutes },
-      ...(clusterIds ? [{ type: 'cluster' as const, ids: clusterIds, minutes: body.clusterExpiresInMinutes }] : []),
-    ]);
+    const listMissing = [
+      ...new Set([
+        ...accessListDelegationMissing(req, userId, baseLevel(held.role), [
+          { type: 'server', ids: serverIds, minutes: body.expiresInMinutes },
+          ...(clusterIds ? [{ type: 'cluster' as const, ids: clusterIds, minutes: body.clusterExpiresInMinutes }] : []),
+        ]),
+        // Operating what the list gives opens the AI Assistant for a member without it
+        ...assistantDelegationMissing(req, userId, [
+          ...serverIds.map((id) => ({ resourceType: 'server' as const, level: baseLevel(held.role), expiresAt: listExpiry(body.expiresInMinutes[id]) })),
+          ...(clusterIds ?? []).map((id) => ({ resourceType: 'cluster' as const, level: baseLevel(held.role), expiresAt: listExpiry(body.clusterExpiresInMinutes[id]) })),
+        ]),
+      ]),
+    ];
     if (listMissing.length) return sendDelegationRefused(reply, 'change server access for this member', listMissing);
 
     const memberGrants = and(eq(memberServerAccess.userId, userId), eq(memberServerAccess.orgId, req.orgId));

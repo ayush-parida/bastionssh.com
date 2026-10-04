@@ -937,6 +937,16 @@ all deleted by acceptance, is No access). SSO's default role and group
 mappings may name role ids (never Owner; only roles the configurer could give); roles a mapping
 names are managed by the IdP and follow the groups claim at each sign-in. Access-request
 approval needs the approver to hold the role or level for as long.
+Personal grants count only while some held role has their resource module on, so any change that
+turns that module on or off for a member — giving or taking a role (`changeMemberRoles`, role
+request approval), a role's module levels (`PATCH`, `reset`, delete) — weighs those grants too
+(`personalGrantsMovedMissing`), and `outranks` counts a target's parked personal grants as theirs
+(no account takeover of a member who would get "all servers: manage" back with any role). A
+personal grant that operates a server or cluster opens the AI Assistant for a member without it,
+so giving one (personal grants, the old access list, resource request approval) needs the actor to
+hold the AI Assistant (`assistantDelegationMissing`). `GET /team/members` gives whoever holds
+Members at `operate` an `actions` flag per member (`lockOut`: `below`; `reset`: `strictlyBelow`),
+which the web uses instead of comparing base roles.
 
 **Unified roles in the web.** `/api/team/roles` also serves, per role, `modulePermissions` (the
 same as `modules`, the editor's name), `generated` (a "(modules only)" role), `customized` (a

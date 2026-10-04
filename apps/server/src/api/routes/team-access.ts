@@ -61,6 +61,7 @@ import {
   type GrantDraft,
 } from '../../auth/access/index.js';
 import {
+  assistantDelegationMissing,
   changeMemberRoles,
   legacyRoleOf,
   legacyScopeOf,
@@ -68,6 +69,7 @@ import {
   managesEverything,
   memberRoleRows,
   outranks,
+  personalGrantsMovedMissing,
   revokeAfterMemberChange,
   snapshotMembers,
   type RoleAssignment,
@@ -592,7 +594,16 @@ export async function teamAccessRoutes(app: FastifyInstance) {
       // Servers on to hand out a parked "All servers: manage" they do not hold
       const on = (modules: ModulePermissions, type: ResourceType) => (modules[TYPE_MODULES[type]] ?? 'none') !== 'none';
       const moved = principalGrants(req.orgId, 'role', id).filter((g) => on(modulesBefore, g.resourceType) !== on(body.modules!, g.resourceType));
-      const missing = delegationMissing(req, moduleChanges(modulesBefore, body.modules), moved);
+      // …and so do its members' personal grants there, when no other role of theirs has the module on
+      const modulePermissions = JSON.stringify(body.modules);
+      const missing = [
+        ...new Set([
+          ...delegationMissing(req, moduleChanges(modulesBefore, body.modules), moved),
+          ...personalGrantsMovedMissing(req, memberIdsOf(req.orgId, id), (_, rows) =>
+            rows.map((r) => (r.roleId === id ? { ...r, modulePermissions } : r)),
+          ),
+        ]),
+      ];
       if (missing.length) return sendRefused(reply, 'change this role', missing);
       if (takesAway({ modules: modulesBefore }, { modules: body.modules }) && !mayTakeFromHolders(req, reply, row)) return reply;
     }
@@ -653,7 +664,16 @@ export async function teamAccessRoutes(app: FastifyInstance) {
       : [];
     const modulesBefore = modulesOf(req.orgId, row);
     const grantsBefore = principalGrants(req.orgId, 'role', id);
-    const missing = delegationMissing(req, moduleChanges(modulesBefore, defaults.modules), grantChanges(grantsBefore, grantDrafts));
+    const defaultPermissions = JSON.stringify(defaults.modules);
+    const missing = [
+      ...new Set([
+        ...delegationMissing(req, moduleChanges(modulesBefore, defaults.modules), grantChanges(grantsBefore, grantDrafts)),
+        // Members' personal grants its modules park or give back
+        ...personalGrantsMovedMissing(req, memberIdsOf(req.orgId, id), (_, rows) =>
+          rows.map((r) => (r.roleId === id ? { ...r, modulePermissions: defaultPermissions } : r)),
+        ),
+      ]),
+    ];
     if (missing.length) return sendRefused(reply, 'reset this role', missing);
     if (
       takesAway({ modules: modulesBefore, grants: grantsBefore }, { modules: defaults.modules, grants: grantDrafts }) &&
@@ -775,6 +795,9 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     }
     const delegation = canAssignRole(req, id);
     if (!delegation.ok) return sendRefused(reply, 'delete this role', delegation.missing);
+    // Members' personal grants parked when it goes, theirs only through this role
+    const parks = personalGrantsMovedMissing(req, memberIdsOf(req.orgId, id), (_, rows) => rows.filter((r) => r.roleId !== id));
+    if (parks.length) return sendRefused(reply, 'delete this role', parks);
     const db = getDb();
     const holders = memberIdsOf(req.orgId, id);
     const grants = principalGrants(req.orgId, 'role', id);
@@ -955,7 +978,13 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     if (!grantDrafts) return reply;
 
     const previous = principalGrants(req.orgId, 'user', userId);
-    const missing = delegationMissing(req, {}, grantChanges(previous, grantDrafts));
+    const missing = [
+      ...new Set([
+        ...delegationMissing(req, {}, grantChanges(previous, grantDrafts)),
+        // Operating a server or cluster through a personal grant opens the AI Assistant
+        ...assistantDelegationMissing(req, userId, grantDrafts),
+      ]),
+    ];
     if (missing.length) return sendRefused(reply, 'change these grants', missing);
     const before = snapshotMembers(req.orgId, [userId]);
     replaceGrants(req.orgId, 'user', userId, grantDrafts, req.user.id);

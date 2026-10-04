@@ -1,13 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import {
-  BUILT_IN_ROLE_DEFAULTS,
   MODULE_LEVELS,
   MODULES,
   type MeAccess,
   type MeModules,
   type ModuleKey,
   type ModuleLevel,
-  type Role,
 } from '@smt/shared';
 import { api } from '@/lib/api.js';
 import { useAuthStore } from '@/store/auth.js';
@@ -84,23 +82,4 @@ export function useModule(module: ModuleKey, level: Exclude<ModuleLevel, 'none'>
 export function useIsOwner(): boolean {
   const { data } = useMeAccess();
   return !!data?.owner;
-}
-
-/**
- * The base role the caller's module levels amount to, as the server works it
- * out for the member actions that still compare ranks (suspend, remove, reset
- * a password): owner with the Owner role, else the highest of Admin and
- * Operator whose default organization modules they hold every one of, else
- * viewer. Null until known. Only to hide what the server would refuse.
- */
-export function useBaseRole(): Role | null {
-  const { data } = useMeAccess();
-  if (!data) return null;
-  if (data.owner) return 'owner';
-  const holds = (role: 'admin' | 'operator') =>
-    Object.entries(BUILT_IN_ROLE_DEFAULTS[role].modules).every(([key, level]) => {
-      const module = MODULES.find((m) => m.key === key);
-      return module?.kind === 'resource' || LEVEL_ORDER(data.modules[key as ModuleKey] ?? 'none') >= LEVEL_ORDER(level!);
-    });
-  return holds('admin') ? 'admin' : holds('operator') ? 'operator' : 'viewer';
 }

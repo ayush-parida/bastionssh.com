@@ -16,7 +16,12 @@ import {
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { canAssignRole, canGrant, hasModule, isOwner, requireModule } from '../../auth/access/modules.js';
-import { managesEverything, membersWithModule } from '../../auth/access/members.js';
+import {
+  assistantDelegationMissing,
+  managesEverything,
+  membersWithModule,
+  personalGrantsMovedMissing,
+} from '../../auth/access/members.js';
 import { getDb } from '../../db/index.js';
 import {
   accessRequests,
@@ -762,11 +767,11 @@ export async function accessRequestRoutes(app: FastifyInstance) {
 
     const target = targetOf(request);
     let ids: string[] = [];
-    let role: { id: string; name: string } | undefined;
+    let role: { id: string; name: string; system: string | null; modulePermissions: string | null } | undefined;
     if (target.type === 'role') {
       role = request.roleId
         ? db
-            .select({ id: roles.id, name: roles.name })
+            .select({ id: roles.id, name: roles.name, system: roles.system, modulePermissions: roles.modulePermissions })
             .from(roles)
             .where(and(eq(roles.id, request.roleId), eq(roles.orgId, req.orgId), customRoleFilter()))
             .get()
@@ -798,25 +803,28 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     const expiresAt = minutesFromNow(minutes, now.getTime());
     // The delegation guard: a role, or the level asked for (the requester's
     // base level for a request without one) on each resource, until it ends
-    const delegation = role
-      ? canAssignRole(req, role.id, { expiresAt })
-      : canGrant(
-          req,
-          {
-            grants: ids.map((resourceId) => ({
-              resourceType: target.type as ResourceType,
-              selector: 'id' as const,
-              resourceId,
-              namespaces,
-              level: target.level ?? baseLevel(member.role),
-            })),
-          },
-          { expiresAt },
-        );
-    if (!delegation.ok) {
+    const wanted = ids.map((resourceId) => ({
+      resourceType: target.type as ResourceType,
+      selector: 'id' as const,
+      resourceId,
+      namespaces,
+      level: target.level ?? baseLevel(member.role),
+    }));
+    const delegation = role ? canAssignRole(req, role.id, { expiresAt }) : canGrant(req, { grants: wanted }, { expiresAt });
+    const missing = [
+      ...new Set([
+        ...delegation.missing,
+        // A role turning a module on gives back the requester's parked personal
+        // grants there; an operating grant opens the AI Assistant
+        ...(role
+          ? personalGrantsMovedMissing(req, [request.userId], (_, rows) => [...rows, { roleId: role!.id, system: role!.system, modulePermissions: role!.modulePermissions }])
+          : assistantDelegationMissing(req, request.userId, wanted.map((g) => ({ ...g, expiresAt })))),
+      ]),
+    ];
+    if (missing.length) {
       return reply.status(403).send({
-        error: `You cannot approve access you do not hold: ${delegation.missing.join('; ')}`,
-        missing: delegation.missing,
+        error: `You cannot approve access you do not hold: ${missing.join('; ')}`,
+        missing,
       });
     }
     let extended: string[] = [];

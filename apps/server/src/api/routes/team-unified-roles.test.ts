@@ -596,7 +596,8 @@ describe('Team & Access with unified roles', () => {
 
   describe('access requests', () => {
     it('lets an approver approve only what they hold, for as long', async () => {
-      const approvers = await role('Approvers', { team_roles: 'manage', servers: 'operate' }, [
+      // The AI Assistant too: an operate grant opens it for a requester without it
+      const approvers = await role('Approvers', { team_roles: 'manage', servers: 'operate', ai: 'view' }, [
         { resourceType: 'server', selector: 'tag', tag: 'frontend', level: 'operate' },
       ]);
       const approver = await memberWith([approvers.id]);

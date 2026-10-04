@@ -4,7 +4,7 @@ import { api } from '@/lib/api.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { useAuthStore } from '@/store/auth.js';
-import { useBaseRole, useModule } from '@/hooks/useModules.js';
+import { useModule } from '@/hooks/useModules.js';
 import type {
   CustomRole,
   DefaultRole,
@@ -12,7 +12,6 @@ import type {
   Invite,
   CreatedInvite,
   PasswordResetLink,
-  Role,
 } from '@smt/shared';
 import {
   Plus,
@@ -33,10 +32,6 @@ import {
 import { toast } from 'sonner';
 import MemberAccessDialog from '@/components/access/MemberAccessDialog.js';
 import { RoleDot } from '@/components/access/AccessBadges.js';
-
-/** Mirrors ROLES on the server; used only to hide actions the server would refuse. */
-const RANK: Role[] = ['viewer', 'operator', 'admin', 'owner'];
-const rank = (role: Role | null) => (role ? RANK.indexOf(role) : -1);
 
 async function copyText(text: string, message: string, fallback: string) {
   try {
@@ -152,7 +147,6 @@ function InviteRolePicker({ roles, value, onChange }: { roles: CustomRole[]; val
 export default function TeamMembers() {
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
-  const myRole = useBaseRole();
   const isAdmin = useModule('team_members', 'operate');
   const seesAccess = useModule('team_roles', 'view');
   const [accessFor, setAccessFor] = useState<OrgMember | null>(null);
@@ -362,13 +356,11 @@ export default function TeamMembers() {
             <tbody className="divide-y divide-border">
               {members.map((m) => {
                 const isSelf = m.userId === currentUser?.id;
-                // The server refuses actions on anyone ranked above you; don't offer them
-                const manageable = isAdmin && !isSelf && rank(m.role) <= rank(myRole);
-                // Removal, suspend / reactivate and sign out need a higher
-                // rank, except owner on owner; a password or passkey reset always needs
-                // a strictly higher rank.
-                const canLockOut = rank(m.role) < rank(myRole) || (myRole === 'owner' && m.role === 'owner');
-                const canReset = rank(m.role) < rank(myRole);
+                // The server says what it would allow on this member (their
+                // access within yours and less; strictly within for a reset)
+                const canLockOut = isAdmin && !isSelf && !!m.actions?.lockOut;
+                const canReset = isAdmin && !isSelf && !!m.actions?.reset;
+                const manageable = canLockOut || canReset;
                 return (
                   <tr key={m.userId} className={cn(m.status === 'suspended' && 'opacity-70')}>
                     <td className="px-4 py-3">
