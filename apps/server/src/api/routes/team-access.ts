@@ -406,6 +406,8 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const body = roleMemberSchema.parse(req.body);
     const row = findRole(req.orgId, id);
     if (!row) return reply.status(404).send({ error: 'Role not found' });
+    // As with personal grants: an admin's own roles would only outlive a demotion
+    if (body.userId === req.user.id) return reply.status(400).send({ error: 'You cannot change your own access' });
     const member = memberRow(req.orgId, body.userId);
     if (!member) return reply.status(404).send({ error: 'Not a member of this organization' });
     const expiresAt = expiryFrom(body);

@@ -11,6 +11,7 @@ import type {
 import { Pencil, Plus, Shield, Trash2, UserPlus, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
+import { useAuthStore } from '@/store/auth.js';
 import { DURATION_OPTIONS, LEVEL_LABELS, RESOURCE_TYPE_LABELS } from '@/lib/access.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
 import { RoleDot } from './AccessBadges.js';
@@ -54,7 +55,9 @@ function RoleMembers({ role }: { role: CustomRoleDetail }) {
   const [minutes, setMinutes] = useState<number | 'permanent'>('permanent');
   const { data: members } = useQuery<OrgMember[]>({ queryKey: ['team-members'], queryFn: () => api.get('/team/members') });
   const holding = new Set(role.members.map((m) => m.userId));
-  const candidates = (members ?? []).filter((m) => !holding.has(m.userId));
+  const myId = useAuthStore((s) => s.user?.id);
+  // Your own access is not yours to change (the server refuses it too)
+  const candidates = (members ?? []).filter((m) => !holding.has(m.userId) && m.userId !== myId);
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['role', role.id] });

@@ -356,6 +356,8 @@ async function changeScope(req: FastifyRequest, reply: FastifyReply, userId: str
     await audit(req, 'member.scope_change', 'member', userId, userEmail(userId), {
       from,
       to: scope,
+      before: { scope: from },
+      after: { scope },
       ...(live && { live }),
     });
   }

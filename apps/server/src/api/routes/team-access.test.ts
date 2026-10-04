@@ -235,6 +235,18 @@ describe('custom roles and resource access', () => {
       expect(changed).toMatchObject({ before: [{ selector: 'all', level: 'manage' }], after: [{ selector: 'id', resourceId: db1, level: 'view' }] });
     });
 
+    it('never lets an admin add themselves to a role, where it would outlive a demotion', async () => {
+      const role = await createRole(`Self ${nanoid(4)}`, [{ resourceType: 'server', selector: 'all', level: 'manage' }]);
+      const res = await as(admin).post(`/api/team/roles/${role.id}/members`, { userId: admin.userId });
+      expect(res.statusCode).toBe(400);
+      expect(getDb().select().from(roleMembers).where(eq(roleMembers.roleId, role.id)).all()).toHaveLength(0);
+      // Demoted and narrowed by an owner, they keep nothing the role would have given
+      const demoted = seedUser(orgId, 'admin');
+      expect((await as(demoted).post(`/api/team/roles/${role.id}/members`, { userId: demoted.userId })).statusCode).toBe(400);
+      expect((await as(owner).patch(`/api/team/members/${demoted.userId}`, { role: 'viewer', scope: 'roles' })).statusCode).toBe(200);
+      expect(levelFor({ orgId, userId: demoted.userId }, 'server', web1)).toBeNull();
+    });
+
     it('lets role memberships expire, closing what they gave', async () => {
       const role = await createRole(`Temp ${nanoid(4)}`, [{ resourceType: 'server', selector: 'id', resourceId: db1, level: 'operate' }]);
       const dave = await roleScoped('viewer');
@@ -259,7 +271,12 @@ describe('custom roles and resource access', () => {
       expect((await as(admin).patch(`/api/team/members/${erin.userId}`, { scope: 'roles' })).statusCode).toBe(200);
       expect(spies.terminals).toHaveBeenCalledWith(erin.userId, expect.objectContaining({ orgId, keepServerIds: [] }));
       expect(getDb().select().from(memberships).where(eq(memberships.userId, erin.userId)).get()).toMatchObject({ scope: 'roles', serverAccess: 'restricted' });
-      expect(audits('member.scope_change', erin.userId)[0]!.meta).toMatchObject({ from: 'all', to: 'roles' });
+      expect(audits('member.scope_change', erin.userId)[0]!.meta).toMatchObject({
+        from: 'all',
+        to: 'roles',
+        before: { scope: 'all' },
+        after: { scope: 'roles' },
+      });
       expect((await as(erin).get('/api/servers')).json()).toHaveLength(0);
     });
 
