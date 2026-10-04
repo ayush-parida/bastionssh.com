@@ -380,6 +380,13 @@ describe('cloud account routes', () => {
     }
     expect(provider.list).not.toHaveBeenCalled();
     expect(await storedToken(accountId)).toEqual({ kind: 'token', token: 'hcloud-token-secret-value' });
+    // Refused attempts change nothing, so they leave no update row behind
+    const managerUpdates = getDb()
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'cloud_account.update'), eq(auditLog.actorId, manager.userId)))
+      .all();
+    expect(managerUpdates).toHaveLength(1);
     expect(getDb().select().from(cloudAccounts).where(eq(cloudAccounts.id, accountId)).get()!.name).toBe('Hetzner (renamed)');
 
     // An admin still can
@@ -388,6 +395,19 @@ describe('cloud account routes', () => {
     expect(admins.statusCode).toBe(200);
     expect(admins.json().credentialHint).toBe('…alue');
     expect(await storedToken(accountId)).toEqual({ kind: 'token', token: 'hcloud-token-rotated-value' });
+    const rotated = getDb()
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'cloud_account.update'), eq(auditLog.resourceId, accountId), eq(auditLog.actorId, admin.userId)))
+      .all()
+      .at(-1)!;
+    expect(JSON.parse(rotated.metadata!)).toMatchObject({
+      before: { credentialHint: '…alue', name: 'Hetzner (renamed)' },
+      after: { credentialHint: '…alue', name: 'Hetzner prod' },
+      credentialsChanged: true,
+    });
+    // Neither the old secret nor the new one is ever written to the audit log
+    expect(rotated.metadata).not.toContain('hcloud-token');
   });
 
   it('hides the account from another organisation', async () => {
