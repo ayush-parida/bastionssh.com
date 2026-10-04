@@ -1,9 +1,7 @@
 import { Duplex, PassThrough, Writable } from 'node:stream';
-import { and, eq } from 'drizzle-orm';
-import { kubePermissions, type Role } from '@smt/shared';
-import { canAccessCluster } from '../auth/cluster-access.js';
-import { getDb } from '../db/index.js';
-import { memberships } from '../db/schema.js';
+import { kubePermissions } from '@smt/shared';
+import { levelFor } from '../auth/access/authorize.js';
+import { roleForLevel } from '../auth/access/levels.js';
 import { SSHBroker, type TerminalChannel } from '../ssh/broker.js';
 import type { KubeClient } from './client.js';
 import { kubeSettings } from './settings.js';
@@ -254,32 +252,30 @@ export async function openPodShell(
 
 /**
  * Close pod shells whose owner may no longer open them — after a role change,
- * an admin switching `operatorsCanExec` off, or losing the cluster. Scoped to
- * one org; `userId` narrows it to one member. Returns how many were closed.
+ * an admin switching `operatorsCanExec` off, or losing the cluster or the
+ * shell's namespace. The Kubernetes matrix is read at the owner's level in
+ * the shell's namespace (custom roles spec §5). Scoped to one org; `userId`
+ * narrows it to one member. Returns how many were closed.
  */
 export function closeDisallowedPodShells(orgId: string, userId?: string): number {
   const settings = kubeSettings(orgId);
   const allowed = new Map<string, boolean>();
-  const mayExec = (user: string, clusterId: string) => {
-    const key = `${user}\u0000${clusterId}`;
+  const mayExec = (user: string, clusterId: string, namespace: string) => {
+    const key = `${user}\u0000${clusterId}\u0000${namespace}`;
     let ok = allowed.get(key);
     if (ok === undefined) {
-      const member = getDb()
-        .select({ role: memberships.role, status: memberships.status })
-        .from(memberships)
-        .where(and(eq(memberships.userId, user), eq(memberships.orgId, orgId)))
-        .get();
-      ok =
-        !!member &&
-        member.status === 'active' &&
-        kubePermissions(member.role as Role, settings).exec &&
-        canAccessCluster({ orgId, userId: user }, clusterId);
+      const found = levelFor({ orgId, userId: user }, 'cluster', clusterId, { namespace });
+      ok = !!found && kubePermissions(roleForLevel(found.level), settings).exec;
       allowed.set(key, ok);
     }
     return ok;
   };
   return SSHBroker.closeWhere(
-    (s) => s.pod !== null && s.orgId === orgId && (!userId || s.userId === userId) && !mayExec(s.userId, s.pod.clusterId),
+    (s) =>
+      s.pod !== null &&
+      s.orgId === orgId &&
+      (!userId || s.userId === userId) &&
+      !mayExec(s.userId, s.pod.clusterId, s.pod.namespace),
   );
 }
 

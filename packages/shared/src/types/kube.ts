@@ -220,7 +220,14 @@ export interface KubeCluster {
 /** GET /api/kube/clusters/:id — the cluster and what the caller may do on it. */
 export interface KubeClusterStatusView {
   cluster: KubeCluster;
+  /** On the cluster as a whole. */
   permissions: KubePermissions;
+  /**
+   * When the caller's access is narrowed to some namespaces (custom roles),
+   * what they may do in each of them — possibly more than on the whole
+   * cluster. Absent when their access covers every namespace.
+   */
+  namespacePermissions?: Record<string, KubePermissions>;
 }
 
 /**

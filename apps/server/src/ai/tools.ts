@@ -8,6 +8,7 @@ import {
   accessibleSavedCommandFilter,
   accessibleServerFilter,
   canAccessServer,
+  canOnServer,
 } from '../auth/server-access.js';
 import { rank } from '../auth/middleware.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
@@ -355,8 +356,12 @@ export class ToolExecutor {
 
     const owner = { userId: this.userId, orgId: this.orgId };
     const { session, sessionServerId, serverId } = this.target(input);
-    // Same answer as a server that does not exist, so restricted members learn nothing
+    // Same answer as a server that does not exist, so restricted members learn nothing;
+    // one they only see needs `operate` to run anything there, as a terminal would
     if (serverId && !this.canUse(serverId)) throw new Error('Server not found');
+    if (serverId && !canOnServer({ orgId: this.orgId, userId: this.userId }, serverId, 'run_command')) {
+      throw new Error('Running commands on this server needs operate access to it');
+    }
 
     if (session && sessionServerId && serverId === sessionServerId) {
       try {

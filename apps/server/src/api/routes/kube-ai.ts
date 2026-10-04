@@ -1,9 +1,9 @@
-import type { FastifyInstance, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
-import type { KubeExplainEvent } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { canAccessCluster } from '../../auth/cluster-access.js';
+import { KUBE_CLUSTER_SCOPE, type KubeExplainEvent } from '@smt/shared';
+import { requireAuth } from '../../auth/middleware.js';
+import { canAccessCluster, clusterDenial } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
 import { aiProviderConfigs } from '../../db/schema.js';
@@ -22,7 +22,7 @@ import { clusterParams, sendKubeError } from './kube.js';
  * read logs — a short log tail (kube/ai-tools.ts `explainMaterial`) go to the
  * org's AI provider, and the narrative streams back as server-sent events.
  *
- * Operators and up, like the AI assistant itself; the cluster must be one the
+ * `operate` on the cluster (in the object's namespace), like the AI assistant; the cluster must be one the
  * caller may access (404 otherwise) and the object in an allowed namespace.
  * The stream counts against the per-user cap and is a Kubernetes stream for
  * revocation, so losing access to the cluster stops it. Audited with what
@@ -61,11 +61,24 @@ function providerFor(orgId: string, providerId?: string) {
         .get();
 }
 
+/**
+ * Explaining an object needs `operate` on the cluster (custom roles spec §5),
+ * in the object's namespace when it has one — from the base role or a custom
+ * role. 404 when the caller cannot reach the cluster or that namespace.
+ */
+async function requireExplain(req: FastifyRequest, reply: FastifyReply) {
+  const { id } = (req.params ?? {}) as { id?: string };
+  const namespace = (req.body as { namespace?: unknown } | undefined)?.namespace;
+  const scoped = typeof namespace === 'string' && namespace && namespace !== KUBE_CLUSTER_SCOPE ? namespace : undefined;
+  const denied = id ? clusterDenial(req, id, 'explain', scoped) : { status: 404 as const, error: 'Cluster not found' };
+  if (denied) return reply.status(denied.status).send({ error: denied.error });
+}
+
 export async function kubeAiRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
   /** POST /clusters/:id/explain — stream a plain-language explanation of one object. */
-  app.post('/clusters/:id/explain', { preHandler: requireRole('operator'), config: EXPLAIN_RATE_LIMIT }, async (req, reply) => {
+  app.post('/clusters/:id/explain', { preHandler: requireExplain, config: EXPLAIN_RATE_LIMIT }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = explainSchema.parse(req.body);
     if (activeStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) {

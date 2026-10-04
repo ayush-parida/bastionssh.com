@@ -1,7 +1,7 @@
 import type { FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import type { KubeConnectVia, KubePermissions, KubeSettings } from '@smt/shared';
-import { canAccessCluster } from '../auth/cluster-access.js';
+import { canAccessCluster, clusterNamespaces } from '../auth/cluster-access.js';
 import { getDb } from '../db/index.js';
 import { kubeClusters } from '../db/schema.js';
 import { vault } from '../vault/index.js';
@@ -37,9 +37,16 @@ export interface KubeContext {
   client: KubeClient;
   /** For the watch cache (cache.ts): shared per cluster, or per user when impersonating. */
   source: CacheSource;
+  /** On the cluster as a whole, where a namespace-narrowed grant gives `view` at most. */
   permissions: KubePermissions;
+  /** In one namespace, at the caller's level there; null (cluster-scoped objects) = `permissions`. */
+  permissionsIn: (namespace: string | null | undefined) => KubePermissions;
   settings: KubeSettings;
-  /** The cluster's namespace allowlist; null = every namespace. */
+  /**
+   * The namespaces the caller may see: the cluster's allowlist, narrowed to
+   * those their grants cover when the grants name namespaces (custom roles
+   * spec §2.4); null = every namespace.
+   */
   allowlist: string[] | null;
   /** True when the caller may see objects in `namespace` (cluster-scoped objects: null). */
   namespaceAllowed: (namespace: string | null | undefined) => boolean;
@@ -53,6 +60,20 @@ export function parseAllowlist(raw: string | null): string[] | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The namespaces of `cluster` the caller may see: its allowlist, intersected
+ * with the namespaces their grants narrow it to. Null = every namespace.
+ */
+export function callerNamespaces(
+  req: Pick<FastifyRequest, 'orgId' | 'user'>,
+  cluster: Pick<ClusterRow, 'id' | 'namespacesAllowlist'>,
+): string[] | null {
+  const allowlist = parseAllowlist(cluster.namespacesAllowlist);
+  const granted = clusterNamespaces(req, cluster.id);
+  if (!granted) return allowlist;
+  return allowlist ? allowlist.filter((ns) => granted.includes(ns)) : granted;
 }
 
 /** The cluster row, if the caller may use it; throws 404 otherwise. */
@@ -169,7 +190,7 @@ export async function cacheSourceFor(row: ClusterRow, req: Caller): Promise<Cach
  */
 export async function withKubeClient<T>(req: Caller, clusterId: string, fn: (ctx: KubeContext) => Promise<T>): Promise<T> {
   const cluster = kubeCluster(req, clusterId);
-  const allowlist = parseAllowlist(cluster.namespacesAllowlist);
+  const allowlist = callerNamespaces(req, cluster);
   const allowed = allowlist ? new Set(allowlist) : null;
   const client = await clusterClient(cluster, req);
   try {
@@ -178,6 +199,7 @@ export async function withKubeClient<T>(req: Caller, clusterId: string, fn: (ctx
       client,
       source: await cacheSourceFor(cluster, req),
       permissions: kubePermissionsFor(req, cluster.id),
+      permissionsIn: (namespace) => kubePermissionsFor(req, cluster.id, namespace ?? undefined),
       settings: kubeSettings(req.orgId),
       allowlist,
       namespaceAllowed: (namespace) => !allowed || !namespace || allowed.has(namespace),

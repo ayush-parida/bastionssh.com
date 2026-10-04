@@ -2,8 +2,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { HOST_KEY_FINGERPRINT_PATTERN } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { canAccessServer } from '../../auth/server-access.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { canAccessServer, requireServer } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
@@ -22,12 +22,14 @@ const fingerprintBody = z.object({ fingerprint: fingerprintSchema });
 
 /**
  * Host key management for a server: inspect, scan, pin, accept a changed key
- * or forget it. Admin-only — whoever decides which key is trusted decides who
- * the app will hand credentials to.
+ * or forget it. Needs `manage` on the server (admins, or a custom role that
+ * manages it — custom roles spec §5) — whoever decides which key is trusted
+ * decides who the app will hand credentials to. 404 when the caller cannot
+ * reach the server, 403 when they reach it below `manage`.
  */
 export async function hostKeyRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
-  app.addHook('preHandler', requireRole('admin'));
+  app.addHook('preHandler', requireServer('host_keys'));
 
   /** The server row if it is in the caller's org and they may use it. */
   function findServer(req: FastifyRequest) {

@@ -83,6 +83,35 @@ export function extendGrants(
   return changed;
 }
 
+/** {@link extendGrants} for Kubernetes clusters (`member_cluster_access`): never shortens access. */
+export function extendClusterGrants(
+  orgId: string,
+  userId: string,
+  clusterIds: string[],
+  grant: { expiresAt: string; grantedBy: string; reason: string | null },
+): string[] {
+  const db = getDb();
+  const changed: string[] = [];
+  db.transaction(() => {
+    for (const clusterId of clusterIds) {
+      const where = and(
+        eq(memberClusterAccess.orgId, orgId),
+        eq(memberClusterAccess.userId, userId),
+        eq(memberClusterAccess.clusterId, clusterId),
+      );
+      const existing = db.select().from(memberClusterAccess).where(where).get();
+      if (!existing) {
+        db.insert(memberClusterAccess).values({ orgId, userId, clusterId, ...grant }).run();
+        changed.push(clusterId);
+      } else if (existing.expiresAt !== null && existing.expiresAt < grant.expiresAt) {
+        db.update(memberClusterAccess).set(grant).where(where).run();
+        changed.push(clusterId);
+      }
+    }
+  });
+  return changed;
+}
+
 /**
  * Cancel a member's pending access requests in an org, when they are suspended
  * or removed: nobody should approve access for someone who can no longer use

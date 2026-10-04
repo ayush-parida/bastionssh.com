@@ -101,7 +101,7 @@ export async function kubePodRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
   /** GET /clusters/:id/pods/:ns/:name — containers as lanes, lifecycle, usage against requests and limits. */
-  app.get('/clusters/:id/pods/:ns/:name', { preHandler: requireKube('view') }, async (req, reply) => {
+  app.get('/clusters/:id/pods/:ns/:name', { preHandler: requireKube('view', 'param') }, async (req, reply) => {
     const { id, ns, name } = podParams.parse(req.params);
     try {
       return await withKubeClient(req, id, async (ctx): Promise<KubePodDetail> => {
@@ -119,7 +119,7 @@ export async function kubePodRoutes(app: FastifyInstance) {
    * — SSE: `ready` naming the container, `logs` batches, `end` when the log
    * ends (or `end` with `truncated` at the size cap).
    */
-  app.get('/clusters/:id/pods/:ns/:name/logs', { preHandler: requireKube('logs') }, async (req, reply) => {
+  app.get('/clusters/:id/pods/:ns/:name/logs', { preHandler: requireKube('logs', 'param') }, async (req, reply) => {
     const { id, ns, name } = podParams.parse(req.params);
     const q = logsQuery.parse(req.query);
     // Counted against the per-user cap as a Kubernetes stream, so revocation and cluster edits end it too
@@ -143,7 +143,7 @@ export async function kubePodRoutes(app: FastifyInstance) {
   });
 
   /** GET /clusters/:id/pods/:ns/:name/logs/download?container&previous&tail&timestamps — plain text, streamed. */
-  app.get('/clusters/:id/pods/:ns/:name/logs/download', { preHandler: requireKube('logs') }, async (req, reply) => {
+  app.get('/clusters/:id/pods/:ns/:name/logs/download', { preHandler: requireKube('logs', 'param') }, async (req, reply) => {
     const { id, ns, name } = podParams.parse(req.params);
     const q = downloadQuery.parse(req.query);
     try {
@@ -180,7 +180,7 @@ export async function kubePodRoutes(app: FastifyInstance) {
   });
 
   /** POST /clusters/:id/pods/:ns/:name/exec `{ container?, cmd?, cols, rows }` → a terminal session. */
-  app.post('/clusters/:id/pods/:ns/:name/exec', { preHandler: requireKube('exec') }, async (req, reply) => {
+  app.post('/clusters/:id/pods/:ns/:name/exec', { preHandler: requireKube('exec', 'param') }, async (req, reply) => {
     const { id, ns, name } = podParams.parse(req.params);
     const body = execSchema.parse(req.body ?? {});
     try {
@@ -274,7 +274,7 @@ export async function kubePodRoutes(app: FastifyInstance) {
    * redacted like every view (redact.ts): a Secret keeps its keys, never its
    * values, and env values from Secrets are references. A Secret's view is audited.
    */
-  app.get('/clusters/:id/objects/:resource/:ns/:name/yaml', { preHandler: requireKube('yaml') }, async (req, reply) => {
+  app.get('/clusters/:id/objects/:resource/:ns/:name/yaml', { preHandler: requireKube('yaml', 'param') }, async (req, reply) => {
     const params = objectParams.parse(req.params);
     try {
       const ref = objectRef(params.resource, params.ns, params.name);

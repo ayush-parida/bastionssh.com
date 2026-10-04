@@ -14,7 +14,7 @@ import type {
 } from '@smt/shared';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
 import { authorize } from '../../auth/access/authorize.js';
-import { filterAccessibleClusters } from '../../auth/cluster-access.js';
+import { clusterNamespaces, filterAccessibleClusters } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
 import { agents, kubeClusters, servers } from '../../db/schema.js';
@@ -408,7 +408,14 @@ export async function kubeRoutes(app: FastifyInstance) {
     const { id } = clusterParams.parse(req.params);
     try {
       const row = kubeCluster(req, id);
-      return { cluster: toCluster(row, namesFor(req.orgId, row)), permissions: kubePermissionsFor(req, row.id) };
+      const narrowed = clusterNamespaces(req, row.id);
+      return {
+        cluster: toCluster(row, namesFor(req.orgId, row)),
+        permissions: kubePermissionsFor(req, row.id),
+        ...(narrowed && {
+          namespacePermissions: Object.fromEntries(narrowed.map((ns) => [ns, kubePermissionsFor(req, row.id, ns)])),
+        }),
+      };
     } catch (err) {
       return sendKubeError(reply, err);
     }

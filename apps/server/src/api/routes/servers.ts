@@ -1,11 +1,13 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { CloudProvider, CloudServerState, DockerMode, DockerTransport, Server } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
+import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleServerFilter, canAccessServer, requireServer, serverDenial } from '../../auth/server-access.js';
+import { revokeAfterChange, snapshotAccess } from '../../auth/access/revoke.js';
+import { activeAt } from '../../auth/access/resolve.js';
 import { getDb } from '../../db/index.js';
-import { agents, servers, sshKeys } from '../../db/schema.js';
-import { eq, and, isNull } from 'drizzle-orm';
+import { agents, resourceGrants, roleMembers, roles, servers, sshKeys } from '../../db/schema.js';
+import { eq, and, inArray, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { audit } from '../../audit/index.js';
 import { vault } from '../../vault/index.js';
@@ -152,6 +154,111 @@ function agentUsableByOrg(orgId: string, agentId: string): boolean {
   );
 }
 
+/**
+ * Who a change to these tags can move (custom roles spec §8.3): every grant
+ * that selects servers by one of them, the roles holding those grants, and
+ * the members those grants reach now — the role's members, or the user of a
+ * personal grant. Tag selectors are evaluated live, so retagging a server is
+ * an access change for all of them.
+ */
+function tagCoverage(orgId: string, tags: string[]) {
+  if (!tags.length) return { roles: [] as { id: string; name: string; tags: string[] }[], userIds: [] as string[] };
+  const db = getDb();
+  const grants = db
+    .select({ principalType: resourceGrants.principalType, principalId: resourceGrants.principalId, tag: resourceGrants.tag })
+    .from(resourceGrants)
+    .where(
+      and(
+        eq(resourceGrants.orgId, orgId),
+        eq(resourceGrants.resourceType, 'server'),
+        eq(resourceGrants.selector, 'tag'),
+        inArray(resourceGrants.tag, tags),
+      ),
+    )
+    .all();
+  const roleTags = new Map<string, Set<string>>();
+  const userIds = new Set<string>();
+  for (const g of grants) {
+    if (g.principalType === 'role') {
+      const set = roleTags.get(g.principalId) ?? new Set<string>();
+      if (g.tag) set.add(g.tag);
+      roleTags.set(g.principalId, set);
+    } else if (g.principalType === 'user') {
+      userIds.add(g.principalId);
+    }
+  }
+  const roleIds = [...roleTags.keys()];
+  const roleRows = roleIds.length
+    ? db.select({ id: roles.id, name: roles.name }).from(roles).where(and(eq(roles.orgId, orgId), inArray(roles.id, roleIds))).all()
+    : [];
+  if (roleIds.length) {
+    const members = db
+      .select({ userId: roleMembers.userId })
+      .from(roleMembers)
+      .where(
+        and(
+          eq(roleMembers.orgId, orgId),
+          inArray(roleMembers.roleId, roleIds),
+          activeAt(roleMembers.expiresAt, new Date().toISOString()),
+        ),
+      )
+      .all();
+    for (const m of members) userIds.add(m.userId);
+  }
+  return {
+    roles: roleRows
+      .map((r) => ({ id: r.id, name: r.name, tags: [...(roleTags.get(r.id) ?? [])].sort() }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    userIds: [...userIds],
+  };
+}
+
+/**
+ * A server's `manage` level may come from a custom role rather than the admin
+ * base role (custom roles spec §5). Such a member may edit the server, but not
+ * steer the org's credentials somewhere new with it: the SSH key a server
+ * logs in with, its route through an agent, and a new host, port or user for
+ * the saved credential stay admin decisions — moving the endpoint is fine
+ * with a password given in the same edit, which then is the only credential
+ * that goes there. A new jump host needs `operate` on it, as a terminal through
+ * it would. Returns the refusal, or null.
+ */
+function editProblem(
+  req: FastifyRequest,
+  existing: typeof servers.$inferSelect,
+  body: Partial<z.infer<typeof createServerSchema>>,
+  jumpChanged: boolean,
+): { status: 400 | 403; error: string } | null {
+  if (rank(req.role) >= rank('admin')) return null;
+  if (body.agentId !== undefined && body.agentId !== existing.agentId) {
+    return { status: 403, error: 'Only admins can route a server through an agent' };
+  }
+  const newPassword = body.authType === 'password' && !!body.password;
+  const keyChanged =
+    body.authType === 'key' &&
+    (!!existing.encryptedPassword || (body.defaultKeyId !== undefined && body.defaultKeyId !== existing.defaultKeyId));
+  if (keyChanged) return { status: 403, error: 'Only admins can choose the SSH key a server logs in with' };
+  const endpointChanged =
+    (body.host !== undefined && body.host !== existing.host) ||
+    (body.port !== undefined && body.port !== existing.port) ||
+    (body.username !== undefined && body.username !== existing.username);
+  if (endpointChanged && !newPassword) {
+    return {
+      status: 403,
+      error: 'Only admins can move a server\'s saved credentials to a new host, port or user; enter a password with the change',
+    };
+  }
+  if (jumpChanged && body.jumpServerId) {
+    const denied = serverDenial(req, body.jumpServerId, 'terminal');
+    if (denied) {
+      return denied.status === 404
+        ? { status: 400, error: 'Unknown jump server' }
+        : { status: 403, error: 'Reaching a server through a jump host needs operate access to the jump host' };
+    }
+  }
+  return null;
+}
+
 export async function serverRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
@@ -249,16 +356,14 @@ export async function serverRoutes(app: FastifyInstance) {
     return sanitize(server);
   });
 
-  app.patch('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  /**
+   * Edit a server: `manage` on it (admins, or a custom role that manages it).
+   * Changing its tags moves every tag-selected grant, so it is audited with
+   * the roles whose coverage changed, and whatever a member lost closes.
+   */
+  app.patch('/:id', { preHandler: requireServer('edit') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = createServerSchema.partial().parse(req.body);
-    if (
-      body.authType === 'key' &&
-      body.defaultKeyId &&
-      !keyBelongsToOrg(req.orgId, body.defaultKeyId)
-    ) {
-      return reply.status(400).send({ error: 'Unknown or retired SSH key' });
-    }
     const db = getDb();
 
     const existing = db
@@ -267,13 +372,19 @@ export async function serverRoutes(app: FastifyInstance) {
       .where(and(eq(servers.id, id), eq(servers.orgId, req.orgId)))
       .get();
     if (!existing) return reply.status(404).send({ error: 'Not found' });
+    const jumpChanged =
+      body.jumpServerId !== undefined && (body.jumpServerId ?? null) !== existing.jumpServerId;
+    // Before anything that would tell a non-admin which agents or servers exist
+    const refused = editProblem(req, existing, body, jumpChanged);
+    if (refused) return reply.status(refused.status).send({ error: refused.error });
+    if (body.authType === 'key' && body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
+      return reply.status(400).send({ error: 'Unknown or retired SSH key' });
+    }
     // Re-sending the agent a server already has is a no-op, even once it is revoked
     if (body.agentId && body.agentId !== existing.agentId && !agentUsableByOrg(req.orgId, body.agentId)) {
       return reply.status(400).send({ error: 'Unknown or revoked agent' });
     }
 
-    const jumpChanged =
-      body.jumpServerId !== undefined && (body.jumpServerId ?? null) !== existing.jumpServerId;
     if (jumpChanged && body.jumpServerId) {
       const problem = jumpHostProblem(req.orgId, id, body.jumpServerId);
       if (problem) return reply.status(400).send({ error: problem });
@@ -281,6 +392,16 @@ export async function serverRoutes(app: FastifyInstance) {
     const nextJump = jumpChanged ? (body.jumpServerId ?? null) : existing.jumpServerId;
     const nextAgent = body.agentId !== undefined ? body.agentId : existing.agentId;
     if (nextJump && nextAgent) return reply.status(400).send({ error: ROUTE_CONFLICT });
+
+    // Tags select servers for roles and grants (spec §8.3): note who they reach before the change
+    const tagsBefore = parseTags(existing.tags);
+    const tagsAfter = body.tags !== undefined ? [...new Set(body.tags)] : tagsBefore;
+    const tagsChanged = [
+      ...tagsBefore.filter((t) => !tagsAfter.includes(t)),
+      ...tagsAfter.filter((t) => !tagsBefore.includes(t)),
+    ];
+    const coverage = tagCoverage(req.orgId, tagsChanged);
+    const accessBefore = coverage.userIds.length ? snapshotAccess(req.orgId, coverage.userIds) : null;
 
     const updateData: Partial<typeof servers.$inferInsert> = {
       ...(body.name !== undefined && { name: body.name }),
@@ -330,6 +451,19 @@ export async function serverRoutes(app: FastifyInstance) {
     db.update(servers).set(updateData).where(eq(servers.id, id)).run();
     // Pooled SFTP and Docker connections hold the old host/credentials/route — force a reconnect
     evictWithDependents(req.orgId, id);
+    if (tagsChanged.length) {
+      // Members who reached this server only through a removed tag lose what they had open on it
+      const closed = accessBefore ? revokeAfterChange(req.orgId, coverage.userIds, accessBefore) : new Map();
+      await audit(req, 'server.tags_change', 'server', id, existing.name, {
+        before: tagsBefore,
+        after: tagsAfter,
+        added: tagsAfter.filter((t) => !tagsBefore.includes(t)),
+        removed: tagsBefore.filter((t) => !tagsAfter.includes(t)),
+        affectedRoles: coverage.roles,
+        affectedMembers: coverage.userIds.length,
+        ...(closed.size && { revokedMembers: [...closed.keys()] }),
+      });
+    }
     await audit(
       req,
       'server.update',
@@ -367,7 +501,7 @@ export async function serverRoutes(app: FastifyInstance) {
     return sanitize(row);
   });
 
-  app.delete('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/:id', { preHandler: requireServer('delete') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 

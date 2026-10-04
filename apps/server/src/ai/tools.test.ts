@@ -6,7 +6,7 @@ const broker = vi.hoisted(() => ({
   execOnServer: vi.fn(),
 }));
 const credentials = vi.hoisted(() => ({ resolveServerAuth: vi.fn() }));
-const access = vi.hoisted(() => ({ canAccessServer: vi.fn() }));
+const access = vi.hoisted(() => ({ canAccessServer: vi.fn(), canOnServer: vi.fn() }));
 
 vi.mock('../ssh/broker.js', () => ({
   SSHBroker: { getSessionForUser: broker.getSessionForUser, exec: broker.exec },
@@ -21,6 +21,7 @@ vi.mock('../ssh/credentials.js', () => ({ resolveServerAuth: credentials.resolve
 vi.mock('../db/index.js', () => ({ getDb: vi.fn() }));
 vi.mock('../auth/server-access.js', () => ({
   canAccessServer: access.canAccessServer,
+  canOnServer: access.canOnServer,
   accessibleServerFilter: vi.fn(),
 }));
 
@@ -41,6 +42,7 @@ function sessionOn(serverId: string) {
 beforeEach(() => {
   vi.resetAllMocks();
   access.canAccessServer.mockReturnValue(true);
+  access.canOnServer.mockReturnValue(true);
   broker.exec.mockResolvedValue(ok('via-session'));
   broker.execOnServer.mockResolvedValue(ok('via-direct'));
   credentials.resolveServerAuth.mockImplementation(async (_orgId: string, serverId: string) => ({
@@ -57,6 +59,17 @@ describe('ToolExecutor run_command', () => {
 
     await expect(tools.runCommand({ command: 'uptime' })).rejects.toThrow('Server not found');
     expect(tools.resolveTarget({ command: 'uptime' })).toEqual({});
+    expect(broker.exec).not.toHaveBeenCalled();
+    expect(broker.execOnServer).not.toHaveBeenCalled();
+  });
+
+  it('needs operate on the server: one the member only views runs nothing, not even through their session', async () => {
+    sessionOn('prod');
+    access.canOnServer.mockImplementation((_who: unknown, id: string, action: string) => id !== 'prod' || action !== 'run_command');
+    const tools = new ToolExecutor('org-1', 'user-1', 'sess-1', 'prod');
+
+    await expect(tools.runCommand({ command: 'uptime' })).rejects.toThrow('needs operate access');
+    expect(access.canOnServer).toHaveBeenCalledWith({ orgId: 'org-1', userId: 'user-1' }, 'prod', 'run_command');
     expect(broker.exec).not.toHaveBeenCalled();
     expect(broker.execOnServer).not.toHaveBeenCalled();
   });

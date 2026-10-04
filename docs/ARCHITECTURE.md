@@ -406,6 +406,9 @@ REST surface, all under `/api/ftp`:
   decision is conditional on the row still being pending, so two admins cannot both win.
   Approval refuses (409) a requester who has left or is suspended, re-checked inside the
   decision transaction; suspending or removing a member cancels their pending requests.
+- Requests are resource-typed (`resource_type`): servers, or Kubernetes clusters
+  (`clusterIds`, `GET /access-requests/clusters`); a cluster approval goes to
+  `member_cluster_access` via `extendClusterGrants`.
 - Approval writes time-bound rows in `member_server_access` via `extendGrants`, which never
   shortens existing access. `activeGrantFilter` ignores expired grants at once; a sweep
   every minute deletes them and closes terminals/SFTP/agent streams still open on them.
@@ -859,6 +862,21 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   (at the member's base-role level, following role changes) and `server_access` into `scope`.
 - The access-grant expiry sweep also removes expired role memberships and grants and closes
   what they gave.
+- **Servers, clusters and their dependents** gate on the level, not the base role
+  (`requireServer(action)` / `serverDenial` in `server-access.ts`, `clusterDenial` in
+  `cluster-access.ts`, `requireResource`): view — detail, health, metrics, Docker lists;
+  operate — terminal (and its WebSocket re-attach), SFTP read and write, diagnostics, health
+  checks, alert acknowledgement, AI `run_command`; manage — edit, tags, host keys, key
+  rotation, monitoring on/off, delete. `requireDocker` / `requireKube` answer 404 for an
+  unreachable server or cluster before weighing the capability; `requireKube(cap, 'param' |
+  'body')` reads the Kubernetes matrix at the caller's level in the request's namespace, and
+  `KubeContext.allowlist` is the cluster allowlist narrowed to the caller's granted
+  namespaces (`permissionsIn(ns)` for per-namespace checks; `GET /clusters/:id` returns
+  `namespacePermissions`). Container and pod shells are closed by level too. Creating servers
+  stays admin-only; a server manager below admin cannot choose its SSH key or agent, move its
+  saved credential to a new host/port/user (only with a new password), or jump through a
+  server they cannot operate. Changing a server's tags is audited (`server.tags_change`) with
+  the roles whose tag grants it moves, and closes what members lost.
 
 ---
 

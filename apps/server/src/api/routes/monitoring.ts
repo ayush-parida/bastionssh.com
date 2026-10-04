@@ -13,8 +13,8 @@ import type {
   ServerStatus,
 } from '@smt/shared';
 import { METRIC_RANGES } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { accessibleServerFilter, requireServer, serverDenial } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { serverAlerts, serverHealth, serverMetrics, servers } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
@@ -282,10 +282,9 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Current health plus the newest full sample for one server. */
-  app.get('/servers/:id', async (req, reply): Promise<ServerHealthDetail | undefined> => {
+  app.get('/servers/:id', { preHandler: requireServer('health') }, async (req, reply): Promise<ServerHealthDetail | undefined> => {
     const { id } = req.params as { id: string };
     const db = getDb();
-    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
 
     const server = db
       .select()
@@ -319,11 +318,10 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Time series for the charts on the server health page. */
-  app.get('/servers/:id/metrics', async (req, reply) => {
+  app.get('/servers/:id/metrics', { preHandler: requireServer('metrics') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { range } = metricsQuerySchema.parse(req.query);
     const db = getDb();
-    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
 
     const server = db
       .select({ id: servers.id })
@@ -344,9 +342,8 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Probe a server right now instead of waiting for the next sweep. */
-  app.post('/servers/:id/check', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/servers/:id/check', { preHandler: requireServer('health_check') }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
     // A jump hop on the way is audited under the requesting user
     const outcome = await checkServerById(req.orgId, id, req.user.id);
     if (!outcome) return reply.status(404).send({ error: 'Not found' });
@@ -355,12 +352,11 @@ export async function monitoringRoutes(app: FastifyInstance) {
     return outcome;
   });
 
-  /** Turn monitoring on or off for a server. */
-  app.patch('/servers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  /** Turn monitoring on or off for a server — a server setting, so `manage` on it. */
+  app.patch('/servers/:id', { preHandler: requireServer('edit') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { enabled } = monitoringSettingsSchema.parse(req.body);
     const db = getDb();
-    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
 
     const server = db
       .select()
@@ -414,8 +410,11 @@ export async function monitoringRoutes(app: FastifyInstance) {
     return rows.map((a) => toAlert(a, names.get(a.serverId)));
   });
 
-  /** Acknowledge an alert — it stays open but stops demanding attention. */
-  app.post('/alerts/:id/acknowledge', { preHandler: requireRole('operator') }, async (req, reply) => {
+  /**
+   * Acknowledge an alert — it stays open but stops demanding attention. Like
+   * a health check, it needs `operate` on the alert's server.
+   */
+  app.post('/alerts/:id/acknowledge', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 
@@ -431,6 +430,8 @@ export async function monitoringRoutes(app: FastifyInstance) {
       )
       .get();
     if (!alert) return reply.status(404).send({ error: 'Not found' });
+    const denied = serverDenial(req, alert.serverId, 'health_check');
+    if (denied) return reply.status(denied.status).send({ error: denied.status === 404 ? 'Not found' : denied.error });
 
     db.update(serverAlerts)
       .set({ acknowledgedAt: new Date().toISOString(), acknowledgedBy: req.user.email })

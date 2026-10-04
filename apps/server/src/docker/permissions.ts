@@ -55,13 +55,17 @@ const REFUSED: Record<DockerCapability, string> = {
 
 /**
  * preHandler gate: `{ preHandler: requireDocker('inspect') }`. Must run after
- * `requireAuth`. The server is the `:id` route parameter, when there is one.
- * Sends 403 with the reason when the capability is missing.
+ * `requireAuth`. The server is the `:id` route parameter, when there is one;
+ * one the caller cannot reach is a 404 (custom roles spec §6), before any
+ * capability is weighed. Sends 403 with the reason when the capability is missing.
  */
 export function requireDocker(capability: DockerCapability) {
   return async function dockerGuard(req: FastifyRequest, reply: FastifyReply) {
     if (!req.role) return reply.status(401).send({ error: 'Unauthorized' });
     const serverId = (req.params as { id?: string } | undefined)?.id;
+    if (serverId && req.user && !levelFor(req, 'server', serverId)) {
+      return reply.status(404).send({ error: 'Server not found' });
+    }
     if (!dockerCan(req, capability, serverId)) return reply.status(403).send({ error: REFUSED[capability] });
   };
 }

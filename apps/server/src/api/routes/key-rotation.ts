@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { and, desc, eq, inArray, or } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { BulkRotateKeysResponse } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { accessibleServerFilter, requireServer, serverDenial } from '../../auth/server-access.js';
 import { requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { getDb } from '../../db/index.js';
 import { keyRotations, servers } from '../../db/schema.js';
@@ -28,8 +28,10 @@ const historyQuery = z.object({
 
 /**
  * SSH key rotation (see ssh/key-rotation.ts). Rotating changes who can log in
- * to a server, so it is admin-only and needs a passkey step-up whenever the
- * admin has a passkey; the history is readable by anyone who can see the server.
+ * to a server, so it needs `manage` on every server rotated (admins, or a
+ * custom role that manages them — custom roles spec §5) and a passkey step-up
+ * whenever the caller has a passkey; the history is readable by anyone who
+ * can see the server.
  */
 export async function keyRotationRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
@@ -58,11 +60,10 @@ export async function keyRotationRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/servers/:id/rotate-key {type?} — runs to the end and returns the record */
-  app.post('/servers/:id/rotate-key', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/servers/:id/rotate-key', { preHandler: requireServer('rotate_keys') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = rotateSchema.parse(req.body ?? {});
     if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
-    if (!canAccessServer(req, id)) return reply.status(404).send({ error: 'Not found' });
     const server = getDb()
       .select()
       .from(servers)
@@ -79,13 +80,14 @@ export async function keyRotationRoutes(app: FastifyInstance) {
    * and run them one after another in the background. Answers 202 at once;
    * poll GET /api/keys/rotations?batchId= for progress.
    */
-  app.post('/keys/rotate', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/keys/rotate', async (req, reply) => {
     const body = bulkRotateSchema.parse(req.body);
-    if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
     const serverIds = [...new Set(body.serverIds)];
-    if (serverIds.some((id) => !canAccessServer(req, id))) {
-      return reply.status(404).send({ error: 'Server not found' });
-    }
+    // Any server out of reach is a 404 before one below `manage` is a 403
+    const denials = serverIds.map((id) => serverDenial(req, id, 'rotate_keys')).filter((d) => d !== null);
+    const denied = denials.find((d) => d.status === 404) ?? denials[0];
+    if (denied) return reply.status(denied.status).send({ error: denied.error });
+    if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
     const rows = getDb()
       .select()
       .from(servers)
