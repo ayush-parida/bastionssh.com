@@ -183,7 +183,7 @@ export default function CronJobsPage() {
                       {access.can(j.id, 'operate') && (
                         <button onClick={() => runNowMutation.mutate(j.id)} disabled={runNowMutation.isPending} title="Run now" className="px-1.5 text-muted-foreground hover:text-foreground disabled:opacity-50"><Play size={14} /></button>
                       )}
-                      {access.can(j.id, 'manage') && (
+                      {(access.can(j.id, 'manage') || access.baseAllows(j.id, 'delete')) && (
                         <button onClick={() => { if (confirm('Delete?')) deleteMutation.mutate(j.id); }} title="Delete" className="px-1.5 text-red-500 hover:text-red-600"><Trash2 size={14} /></button>
                       )}
                     </div>

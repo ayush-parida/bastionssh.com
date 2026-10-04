@@ -1,5 +1,6 @@
 import type { FastifyReply } from 'fastify';
 import { and, isNull, or, type SQL } from 'drizzle-orm';
+import type { ResourceType } from '@smt/shared';
 import { cronJobs, savedCommands } from '../db/schema.js';
 import { authorize, type AuthorizeResult } from './access/authorize.js';
 import { accessibleFilter, accessibleIds } from './access/filter.js';
@@ -47,6 +48,21 @@ export function cronJobFilter(who: AccessSubject): SQL | undefined {
 export function baseRoleAllows(who: AccessSubject, minimum: Role): boolean {
   const access = resolveAccess(who);
   return access.active && access.scope === 'all' && !access.readOnly && rank(access.role) >= rank(minimum);
+}
+
+/**
+ * What the routes still let a scope-`all` operator do on every saved command
+ * or cron job they see, above `operate` (their `baseRole` of `'operator'`).
+ */
+const BASE_OPERATOR_ACTIONS: Partial<Record<ResourceType, readonly string[]>> = {
+  saved_command: ['edit'],
+  cron_job: ['edit', 'delete'],
+};
+
+/** Those actions for the subject on `type` — none unless their base role keeps them (for the web's buttons). */
+export function baseActions(who: AccessSubject, type: ResourceType): string[] {
+  const actions = BASE_OPERATOR_ACTIONS[type];
+  return actions && baseRoleAllows(who, 'operator') ? [...actions] : [];
 }
 
 /**

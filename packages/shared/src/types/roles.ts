@@ -224,6 +224,13 @@ export interface MyAccessLevels {
   orgAdmin: boolean;
   levels: Record<string, AccessLevel>;
   namespaces?: Record<string, string[]>;
+  /**
+   * Actions the member's base role (scope `all`) still allows on every
+   * resource of the type they see, above their level — a scope-`all`
+   * operator edits saved commands and edits or deletes cron jobs, as before
+   * custom roles.
+   */
+  baseActions?: string[];
 }
 
 /** A custom role a member may ask for (names only). */

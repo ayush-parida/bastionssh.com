@@ -321,6 +321,18 @@ describe('custom roles and resource access', () => {
       expect((await as(viewer).get('/api/team/access/mine?type=server')).json().levels[web1]).toBe('view');
       expect((await as(admin).get(`/api/team/access/resource?type=server&id=missing`)).statusCode).toBe(404);
     });
+
+    it('tells a scope-all operator what their base role still allows on commands and cron jobs', async () => {
+      const operator = seedUser(orgId, 'operator');
+      expect((await as(operator).get('/api/team/access/mine?type=saved_command')).json().baseActions).toEqual(['edit']);
+      expect((await as(operator).get('/api/team/access/mine?type=cron_job')).json().baseActions).toEqual(['edit', 'delete']);
+      expect((await as(operator).get('/api/team/access/mine?type=server')).json().baseActions).toBeUndefined();
+      // Neither a viewer nor a role-scoped operator keeps them
+      const viewer = seedUser(orgId, 'viewer');
+      expect((await as(viewer).get('/api/team/access/mine?type=cron_job')).json().baseActions).toBeUndefined();
+      const scoped = await roleScoped('operator');
+      expect((await as(scoped).get('/api/team/access/mine?type=cron_job')).json().baseActions).toBeUndefined();
+    });
   });
 
   describe('access requests', () => {

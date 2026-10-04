@@ -26,6 +26,7 @@ import { audit } from '../../audit/index.js';
 import { MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import type { LiveAccessRevoked } from '../../auth/revoke.js';
 import { activeAt } from '../../auth/access/resolve.js';
+import { baseActions } from '../../auth/command-access.js';
 import {
   draftGrants,
   effectiveAccessList,
@@ -574,11 +575,13 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const namespaces = Object.fromEntries(
       entries.flatMap((e) => (Array.isArray(e.namespaces) ? [[e.resourceId, e.namespaces]] : [])),
     );
+    const base = baseActions(req, type);
     return {
       resourceType: type,
       orgAdmin: rank(req.role) >= rank('admin'),
       levels: Object.fromEntries(entries.flatMap((e) => (e.level ? [[e.resourceId, e.level]] : []))),
       ...(type === 'cluster' && { namespaces }),
+      ...(base.length > 0 && { baseActions: base }),
     };
   });
 }

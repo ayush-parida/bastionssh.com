@@ -260,7 +260,7 @@ export default function CommandsPage() {
                     </button>
                   )}
                   <WhoHasAccessButton type="saved_command" id={cmd.id} name={cmd.name} className="px-2" />
-                  {access.can(cmd.id, 'manage') && (
+                  {(access.can(cmd.id, 'manage') || access.baseAllows(cmd.id, 'edit')) && (
                     <button onClick={() => openEdit(cmd)} className="text-muted-foreground hover:text-foreground" title="Edit">
                       <Pencil size={14} />
                     </button>

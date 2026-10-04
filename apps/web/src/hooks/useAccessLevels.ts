@@ -27,6 +27,9 @@ export function useAccessLevels(type: ResourceType) {
     levelOf,
     /** True when the caller's level on `id` reaches `required`. */
     can: (id: string | null | undefined, required: AccessLevel) => levelAtLeast(levelOf(id), required),
+    /** True when the caller's base role allows `action` on any `id` they see, whatever its level. */
+    baseAllows: (id: string | null | undefined, action: string) =>
+      levelOf(id) !== null && (data?.baseActions ?? []).includes(action),
     /** Clusters narrowed to some namespaces: which ones (undefined = every namespace). */
     namespacesOf: (id: string) => data?.namespaces?.[id],
   };
