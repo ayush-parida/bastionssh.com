@@ -89,6 +89,22 @@ SELECT 'legacy-cluster:' || a.`org_id` || ':' || a.`user_id` || ':' || a.`cluste
 	a.`expires_at`, a.`granted_by`, a.`reason`, a.`created_at`
 FROM `member_cluster_access` a;
 --> statement-breakpoint
+-- A restricted member was narrowed on servers and clusters only: FTP and
+-- storage connections, cloud accounts, saved commands and cron jobs stayed
+-- open to their base role. Role-scoped members see only what is granted, so
+-- restricted operators and viewers keep exactly that as personal grants on
+-- every resource of those types, at the base-role level (`legacy-` ids, so
+-- they follow role changes like the grants above). Saved commands and cron
+-- jobs still follow their servers. Admins can remove them like any grant.
+INSERT INTO `resource_grants` (`id`, `org_id`, `principal_type`, `principal_id`, `resource_type`, `selector`, `resource_id`, `level`, `expires_at`, `granted_by`, `reason`, `created_at`)
+SELECT 'legacy-all:' || t.`type` || ':' || m.`org_id` || ':' || m.`user_id`, m.`org_id`, 'user', m.`user_id`, t.`type`, 'all', NULL,
+	CASE m.`role` WHEN 'operator' THEN 'operate' ELSE 'view' END,
+	NULL, NULL, 'Kept from before custom roles', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM `memberships` m,
+	(SELECT 'ftp_connection' AS `type` UNION ALL SELECT 'storage_connection' UNION ALL SELECT 'cloud_account'
+		UNION ALL SELECT 'saved_command' UNION ALL SELECT 'cron_job') t
+WHERE m.`server_access` = 'restricted' AND m.`role` NOT IN ('admin', 'owner');
+--> statement-breakpoint
 -- Until the team and access-request routes write resource_grants themselves,
 -- whatever they write to the old per-member tables is mirrored here, at the
 -- member's base-role level (kept in step with role changes below), so the

@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { getDb } from '../db/index.js';
 import { commandRuns, savedCommands } from '../db/schema.js';
+import { authorize } from '../auth/access/authorize.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
 import { execOnServer } from '../ssh/broker.js';
 import { startExecRecording, withExecRecording } from '../recordings/index.js';
@@ -46,6 +47,26 @@ export function extractVariables(template: string): string[] {
 }
 
 /**
+ * Why `who` may no longer run `command` on `serverId`, or null when they may:
+ * what the run route checked — the command visible (with its bound server)
+ * and runnable, and `operate` on the target server.
+ */
+export function runnerRefusal(
+  who: { orgId: string; userId: string },
+  command: { id: string; serverId: string | null },
+  serverId: string,
+): string | null {
+  if (!authorize(who, 'server', serverId, 'run_command').ok) {
+    return 'Whoever started this run no longer has access to run commands on this server';
+  }
+  const visible = !command.serverId || authorize(who, 'server', command.serverId, 'view').ok;
+  if (!visible || !authorize(who, 'saved_command', command.id, 'run').ok) {
+    return 'Whoever started this run no longer has access to this saved command';
+  }
+  return null;
+}
+
+/**
  * Run a saved command against one server and record the outcome on its run row.
  *
  * Never throws: a failure the user should see — bad credentials, unreachable
@@ -78,6 +99,20 @@ export async function executeSavedCommand(input: ExecuteInput): Promise<void> {
     return;
   }
 
+  const run = db
+    .select({ triggeredBy: commandRuns.triggeredBy })
+    .from(commandRuns)
+    .where(eq(commandRuns.id, input.runId))
+    .get();
+  // A queued run, or one waiting its turn in a fan-out, may start well after
+  // the route checked: whoever started it must still be able to run the
+  // command here (custom roles spec §2.7, §2.8), or it does not run
+  const refusal = run ? runnerRefusal({ orgId: input.orgId, userId: run.triggeredBy }, command, input.serverId) : null;
+  if (refusal) {
+    fail(refusal);
+    return;
+  }
+
   update({ status: 'running', startedAt: new Date().toISOString() });
 
   try {
@@ -86,11 +121,6 @@ export async function executeSavedCommand(input: ExecuteInput): Promise<void> {
     const { server, auth } = await resolveServerAuth(input.orgId, input.serverId);
     const cmd = interpolate(command.command, input.variables);
     // A jump hop is audited under whoever started the run
-    const run = db
-      .select({ triggeredBy: commandRuns.triggeredBy })
-      .from(commandRuns)
-      .where(eq(commandRuns.id, input.runId))
-      .get();
     // Stored and shown as the template: variable values are often credentials
     const recording = run
       ? startExecRecording({

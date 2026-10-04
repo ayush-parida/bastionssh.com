@@ -556,6 +556,8 @@ export async function teamRoutes(app: FastifyInstance) {
     await audit(req, 'member.role_change', 'member', userId, target?.email, {
       from: member.role,
       to: role,
+      before: { role: member.role },
+      after: { role },
       ...(live && { live }),
     });
     if (scope !== undefined) {
@@ -785,6 +787,14 @@ export async function teamRoutes(app: FastifyInstance) {
     const legacyRows = rows.filter((r) => existing.has(r.serverId) || !newerServerIds.has(r.serverId));
     const legacyClusterRows = clusterRows.filter((r) => existingClusters.has(r.clusterId) || !newerClusterIds.has(r.clusterId));
 
+    // For the audit row: the personal server (and cluster) grants as they were
+    const personalBefore = principalGrants(req.orgId, 'user', userId);
+    const accessGrantsBefore = {
+      servers: personalIdGrants(personalBefore, 'server').map((g) => ({ serverId: g.id, expiresAt: g.expiresAt })),
+      ...(clusterIds && {
+        clusters: personalIdGrants(personalBefore, 'cluster').map((g) => ({ clusterId: g.id, expiresAt: g.expiresAt })),
+      }),
+    };
     const accessBefore = snapshotAccess(req.orgId, [userId]);
     db.transaction(() => {
       db.update(memberships)
@@ -835,6 +845,12 @@ export async function teamRoutes(app: FastifyInstance) {
     await audit(req, 'member.access_change', 'member', userId, userEmail(userId), {
       from: member.serverAccess,
       to: body.serverAccess,
+      before: { serverAccess: member.serverAccess, ...accessGrantsBefore },
+      after: {
+        serverAccess: body.serverAccess,
+        servers: grants.map((g) => ({ serverId: g.serverId, expiresAt: g.expiresAt })),
+        ...(clusterIds && { clusters: clusterGrants.map((g) => ({ clusterId: g.clusterId, expiresAt: g.expiresAt })) }),
+      },
       servers: grantedIds.length,
       timeBound: grants.filter((g) => g.expiresAt !== null).length,
       ...(clusterIds && { clusters: grantedClusterIds.length }),

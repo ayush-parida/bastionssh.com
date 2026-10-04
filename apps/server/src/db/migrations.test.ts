@@ -1053,7 +1053,7 @@ describe('migration 0023 (custom roles)', () => {
     ]);
     const grants = db
       .prepare(
-        'SELECT principal_type, principal_id, resource_type, selector, resource_id, tag, namespaces, level, expires_at, granted_by, reason, created_at FROM resource_grants ORDER BY created_at',
+        "SELECT principal_type, principal_id, resource_type, selector, resource_id, tag, namespaces, level, expires_at, granted_by, reason, created_at FROM resource_grants WHERE selector = 'id' ORDER BY created_at",
       )
       .all();
     expect(grants).toEqual([
@@ -1062,6 +1062,18 @@ describe('migration 0023 (custom roles)', () => {
       { principal_type: 'user', principal_id: 'op', resource_type: 'cluster', selector: 'id', resource_id: 'k1', tag: null, namespaces: null, level: 'operate', expires_at: FUTURE, granted_by: null, reason: null, created_at: '2024-01-03' },
       { principal_type: 'user', principal_id: 'vw', resource_type: 'server', selector: 'id', resource_id: 's1', tag: null, namespaces: null, level: 'view', expires_at: null, granted_by: null, reason: null, created_at: '2024-01-04' },
     ]);
+    // Restriction narrowed servers and clusters only: the restricted operator keeps every
+    // resource of the other types at their base level (admins need no grants)
+    expect(
+      db.prepare("SELECT principal_id, resource_type, level, expires_at FROM resource_grants WHERE selector = 'all' ORDER BY resource_type").all(),
+    ).toEqual(
+      ['cloud_account', 'cron_job', 'ftp_connection', 'saved_command', 'storage_connection'].map((type) => ({
+        principal_id: 'op',
+        resource_type: type,
+        level: 'operate',
+        expires_at: null,
+      })),
+    );
     // The old tables are kept for rollback; existing requests are for servers
     expect(db.prepare('SELECT count(*) AS n FROM member_server_access').get()).toEqual({ n: 3 });
     expect(db.prepare('SELECT resource_type, role_id FROM access_requests').get()).toEqual({ resource_type: 'server', role_id: null });
@@ -1237,6 +1249,18 @@ describe('migration 0023 keeps every member’s effective access', () => {
       }
       for (const k of clusters) {
         expect(kubePermissionsFor(req, k), `${userId} on ${k}`).toEqual(kubePermissions(role as 'viewer', kubeSettings('o1')));
+      }
+    }
+    // FTP and storage connections, cloud accounts, saved commands and cron jobs were never
+    // narrowed by the old restriction: every active member still reaches all of them, at their role
+    const { accessibleIds } = await import('../auth/access/filter.js');
+    for (const [userId, role, , status] of members) {
+      const who = { orgId: 'o1', userId };
+      const level = role === 'operator' ? 'operate' : role === 'viewer' ? 'view' : 'manage';
+      for (const type of ['ftp_connection', 'storage_connection', 'cloud_account', 'saved_command', 'cron_job'] as const) {
+        expect(accessibleIds(who, type).all, `${userId} sees every ${type}`).toBe(status === 'active');
+        expect(accessibleIds(who, type, level).all, `${userId} at ${level} on ${type}`).toBe(status === 'active');
+        if (level !== 'manage') expect(accessibleIds(who, type, 'manage').all, `${userId} manages ${type}`).toBe(false);
       }
     }
     // Spot checks on the expectations themselves

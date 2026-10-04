@@ -30,7 +30,7 @@ import { nanoid } from 'nanoid';
 import { config } from '../config/index.js';
 import { runMigrations } from '../db/migrate.js';
 import { getDb } from '../db/index.js';
-import { commandRuns, organizations, savedCommands, sessionRecordings } from '../db/schema.js';
+import { commandRuns, memberships, organizations, savedCommands, sessionRecordings } from '../db/schema.js';
 import { seedOrg, seedServer, seedUser } from '../api/routes/test-utils.js';
 import { recordingFile } from '../recordings/index.js';
 import { executeSavedCommand } from './run.js';
@@ -89,5 +89,38 @@ describe('saved command runs are recorded', () => {
     await executeSavedCommand({ runId, orgId, commandId, serverId, variables: { token: 'x' } });
     expect(getDb().select().from(sessionRecordings).all()).toHaveLength(before);
     expect(getDb().select().from(commandRuns).where(eq(commandRuns.id, runId)).get()?.status).toBe('success');
+  });
+});
+
+describe('saved command runs check whoever started them when they start', () => {
+  it('fail without running once the starter can no longer operate the server', async () => {
+    const orgId = seedOrg('org-run-starter');
+    const { userId } = seedUser(orgId, 'operator');
+    const serverId = seedServer(orgId, userId, 'app-2');
+    const commandId = nanoid();
+    getDb().insert(savedCommands).values({ id: commandId, orgId, name: 'uptime', command: 'uptime', createdBy: userId }).run();
+    const newRun = () => {
+      const runId = nanoid();
+      getDb().insert(commandRuns).values({ id: runId, commandId, serverId, triggeredBy: userId }).run();
+      return runId;
+    };
+
+    // Queued while they could; their access narrowed to roles (none) before it started
+    const queued = newRun();
+    getDb().update(memberships).set({ scope: 'roles' }).where(eq(memberships.userId, userId)).run();
+    ssh.execOnServer.mockClear();
+    await executeSavedCommand({ runId: queued, orgId, commandId, serverId });
+    expect(ssh.execOnServer).not.toHaveBeenCalled();
+    expect(getDb().select().from(commandRuns).where(eq(commandRuns.id, queued)).get()).toMatchObject({
+      status: 'failure',
+      stderr: 'Whoever started this run no longer has access to run commands on this server',
+    });
+
+    // Back to every resource: the next run goes ahead
+    getDb().update(memberships).set({ scope: 'all' }).where(eq(memberships.userId, userId)).run();
+    const next = newRun();
+    await executeSavedCommand({ runId: next, orgId, commandId, serverId });
+    expect(ssh.execOnServer).toHaveBeenCalledTimes(1);
+    expect(getDb().select().from(commandRuns).where(eq(commandRuns.id, next)).get()?.status).toBe('success');
   });
 });

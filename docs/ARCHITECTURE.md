@@ -874,12 +874,18 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   moving, changing what it runs, switching it on or running it now also needs `operate` on its
   server (and on its saved command); switching it off does not.
   Creating either needs `manage` on all of the type. Jobs run as their creator, who must
-  still operate the job, its server and its saved command at run time. Scope-`all` operators
+  still operate the job, its server and its saved command at run time; a queued or fanned-out
+  saved-command run checks whoever started it again when it starts (`commands/run.ts`
+  `runnerRefusal`). Scope-`all` operators
   keep their pre-roles rights (edit commands, edit/delete jobs, create both); `GET
   /team/access/mine` reports them as `baseActions` so the web still shows those buttons.
 - Until the team and access-request routes write `resource_grants` themselves, triggers from
   migration 0023 mirror `member_server_access` / `member_cluster_access` into personal grants
   (at the member's base-role level, following role changes) and `server_access` into `scope`.
+  The old restriction narrowed servers and clusters only, so 0023 also gives each member it
+  made role-scoped (operators and viewers) personal "all" grants on FTP and storage
+  connections, cloud accounts, saved commands and cron jobs at their base level (`legacy-all:`
+  ids, following role changes); admins remove them like any other grant.
 - The access-grant expiry sweep also removes expired role memberships and grants and closes
   what they gave.
 - **Servers, clusters and their dependents** gate on the level, not the base role
@@ -922,7 +928,9 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   access with "via" badges), Roles (editor with per-type pickers, tag selectors with a live
   count, namespace chips, a plain-language preview) and Access checker tabs; server, cluster,
   connection, cloud, command and cron pages have a "who has access" button for admins
-  (`components/access/`); `hooks/useAccessLevels.ts` hides actions the level does not allow.
+  (`components/access/`); `hooks/useAccessLevels.ts` hides actions the level does not allow
+  (per item on the server, cluster, FTP, storage, cloud, command and cron pages, the
+  diagnose button and Explain); adding a server, cluster, connection or account stays with admins.
 
 ---
 

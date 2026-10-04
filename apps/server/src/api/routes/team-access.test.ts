@@ -280,6 +280,25 @@ describe('custom roles and resource access', () => {
       expect((await as(erin).get('/api/servers')).json()).toHaveLength(0);
     });
 
+    it('audits base-role and old-endpoint access changes with before and after', async () => {
+      const gina = seedUser(orgId, 'operator');
+      expect((await as(admin).patch(`/api/team/members/${gina.userId}`, { role: 'viewer' })).statusCode).toBe(200);
+      expect(audits('member.role_change', gina.userId)[0]!.meta).toMatchObject({
+        before: { role: 'operator' },
+        after: { role: 'viewer' },
+      });
+
+      await as(admin).put(`/api/team/members/${gina.userId}/access`, { serverAccess: 'restricted', serverIds: [web1] });
+      await as(admin).put(`/api/team/members/${gina.userId}/access`, { serverAccess: 'restricted', serverIds: [web2] });
+      const rows = audits('member.access_change', gina.userId);
+      expect(rows.map((r) => r.meta)).toContainEqual(
+        expect.objectContaining({
+          before: { serverAccess: 'restricted', servers: [{ serverId: web1, expiresAt: null }] },
+          after: { serverAccess: 'restricted', servers: [{ serverId: web2, expiresAt: null }] },
+        }),
+      );
+    });
+
     it('replaces personal grants at any level, audited, and serves them through the old access endpoint too', async () => {
       const frank = await roleScoped('viewer');
       const res = await as(admin).put(`/api/team/members/${frank.userId}/grants`, {
