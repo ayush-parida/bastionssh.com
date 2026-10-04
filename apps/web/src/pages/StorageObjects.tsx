@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '@/lib/api.js';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { formatBytes } from '@/lib/utils.js';
 import type {
   StorageFolder,
@@ -43,7 +43,7 @@ export default function StorageObjectsPage() {
   const [uploadsInFlight, setUploadsInFlight] = useState(0);
 
   // Server enforces these too — this only keeps unusable controls off the screen
-  const canWrite = useHasRole('operator');
+  const canWrite = useAccessLevels('storage_connection').can(id, 'operate');
 
   const base = `/storage/connections/${id}/buckets/${encodeURIComponent(bucket ?? '')}`;
 

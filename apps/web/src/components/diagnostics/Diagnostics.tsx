@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DiagnosticStep, DiagnosticsResult, EgressIpInfo } from '@smt/shared';
+import type { DiagnosticStep, DiagnosticTargetKind, DiagnosticsResult, EgressIpInfo, ResourceType } from '@smt/shared';
 import {
   CircleAlert,
   CircleCheck,
@@ -17,7 +17,16 @@ import {
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { diagnosticsPath, isConnectivityFailure, type DiagnoseTarget } from '@/lib/diagnostics.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { useHasRole } from '@/store/auth.js';
+
+/** The resource type each kind of diagnostics target is, for the caller's level on it. */
+const TARGET_TYPES: Record<DiagnosticTargetKind, ResourceType> = {
+  server: 'server',
+  ftp_connection: 'ftp_connection',
+  storage_connection: 'storage_connection',
+  kube_cluster: 'cluster',
+};
 
 async function copyText(text: string) {
   try {
@@ -228,7 +237,7 @@ export function connectionFailedToast(
 /**
  * "Diagnose" button for a card. Opens its own dialog, or calls `onOpen` when the
  * page already hosts one (to share it with a failed-connection toast).
- * Operator and up, like the endpoint.
+ * Needs `operate` on the target, like the endpoint (custom roles spec §5).
  */
 export function DiagnoseButton({
   target,
@@ -239,9 +248,9 @@ export function DiagnoseButton({
   onOpen?: (target: DiagnoseTarget) => void;
   className?: string;
 }) {
-  const allowed = useHasRole('operator');
+  const access = useAccessLevels(TARGET_TYPES[target.kind]);
   const [open, setOpen] = useState(false);
-  if (!allowed) return null;
+  if (!access.can(target.id, 'operate')) return null;
   return (
     <>
       <button

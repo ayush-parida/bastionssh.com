@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import { formatBytes } from '@/lib/utils.js';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import type { FtpConnection, FtpEntry, FtpListResponse, FtpUploadResponse } from '@smt/shared';
 import {
   ArrowLeft,
@@ -59,7 +59,7 @@ export default function FtpFilesPage() {
   const [uploadsInFlight, setUploadsInFlight] = useState(0);
 
   // Server enforces these too — this only keeps unusable controls off the screen
-  const canWrite = useHasRole('operator');
+  const canWrite = useAccessLevels('ftp_connection').can(id, 'operate');
 
   const { data: connection } = useQuery<FtpConnection>({
     queryKey: ['ftp-connections', id],

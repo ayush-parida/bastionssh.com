@@ -138,6 +138,11 @@ export async function disablePasskeyAutofill(page: Page): Promise<void> {
 export async function snap(page: Page, name: string): Promise<void> {
   const dir = process.env.E2E_SCREENSHOTS;
   if (!dir) return;
-  // Finish CSS transitions (a tab's underline) that headless Chromium can leave half-way
-  await page.screenshot({ path: resolve(dir, `${name}.png`), animations: 'disabled' });
+  // Finish CSS transitions (a tab's underline) that headless Chromium can leave half-way,
+  // and leave out toasts, which would cover what the picture is of (a dialog's close button)
+  await page.screenshot({
+    path: resolve(dir, `${name}.png`),
+    animations: 'disabled',
+    style: '[data-sonner-toaster] { display: none !important; }',
+  });
 }

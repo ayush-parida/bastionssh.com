@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import type { MonitoringOverview, ServerAlert, ServerHealthWithServer } from '@smt/shared';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { formatUptime, statusMeta, usageTone } from '@/lib/monitoring.js';
 import { hostKeyPanelPath } from '@/lib/host-keys.js';
@@ -165,7 +165,8 @@ function ServerCard({
 
 export default function MonitoringPage() {
   const qc = useQueryClient();
-  const canCheck = useHasRole('operator');
+  // Checking a server and acknowledging its alerts need `operate` on it (custom roles spec §5)
+  const access = useAccessLevels('server');
 
   const { data, isLoading } = useQuery<MonitoringOverview>({
     queryKey: ['monitoring-overview'],
@@ -282,7 +283,7 @@ export default function MonitoringPage() {
                     acked
                   </span>
                 ) : (
-                  canCheck && (
+                  access.can(alert.serverId, 'operate') && (
                     <button
                       onClick={() => ackMutation.mutate(alert.id)}
                       className="shrink-0 rounded-md border border-border px-2 py-1 text-xs transition-colors hover:bg-muted"
@@ -319,7 +320,7 @@ export default function MonitoringPage() {
             <ServerCard
               key={health.serverId}
               health={health}
-              canCheck={canCheck}
+              canCheck={access.can(health.serverId, 'operate')}
               checking={checkMutation.isPending && checkMutation.variables === health.serverId}
               onCheck={(id) => checkMutation.mutate(id)}
             />

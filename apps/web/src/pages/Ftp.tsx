@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import {
   FTP_PROTOCOL_OPTIONS,
   ftpProtocolOption,
@@ -78,8 +79,9 @@ function protocolBadge(protocol: FtpProtocol): string {
 export default function FtpPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const canManage = useHasRole('admin');
-  const canDiagnose = useHasRole('operator');
+  // Adding needs an admin; on each one, what the caller's level allows (custom roles spec §5, §7)
+  const canAdd = useHasRole('admin');
+  const access = useAccessLevels('ftp_connection');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<ConnectionForm>(empty);
@@ -250,7 +252,7 @@ export default function FtpPage() {
             SFTP-only accounts, legacy boxes
           </p>
         </div>
-        {canManage && (
+        {canAdd && (
           <button
             onClick={openCreate}
             className="bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium"
@@ -457,7 +459,7 @@ export default function FtpPage() {
           <FolderSync size={40} className="mb-3 opacity-30" />
           <p>
             No FTP connections yet.
-            {canManage ? ' Click "Add connection" to register an FTP, FTPS or SFTP server.' : ''}
+            {canAdd ? ' Click "Add connection" to register an FTP, FTPS or SFTP server.' : ''}
           </p>
         </div>
       ) : (
@@ -516,7 +518,7 @@ export default function FtpPage() {
                   {c.lastStatus === 'ok'
                     ? `Connected${c.lastTestedAt ? ` · ${new Date(c.lastTestedAt).toLocaleString()}` : ''}`
                     : `Failed: ${c.lastError ?? 'unknown error'}`}
-                  {c.lastStatus !== 'ok' && isConnectivityFailure(c.lastError) && canDiagnose && (
+                  {c.lastStatus !== 'ok' && isConnectivityFailure(c.lastError) && access.can(c.id, 'operate') && (
                     <button
                       onClick={() => setDiagnosing({ kind: 'ftp_connection', id: c.id, name: c.name })}
                       className="text-primary ml-1 shrink-0 font-medium hover:underline"
@@ -538,7 +540,7 @@ export default function FtpPage() {
                   onOpen={setDiagnosing}
                 />
                 <WhoHasAccessButton type="ftp_connection" id={c.id} name={c.name} />
-                {canManage && (
+                {access.can(c.id, 'manage') && (
                   <>
                     <button
                       onClick={() => testMutation.mutate(c)}

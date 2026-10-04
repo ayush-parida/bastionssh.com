@@ -9,7 +9,7 @@ import type {
   ServerMetric,
 } from '@smt/shared';
 import { METRIC_RANGES } from '@smt/shared';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { CHART_COLORS, formatKb, formatUptime, usageTone } from '@/lib/monitoring.js';
 import StatusBadge, { UsageBar } from '@/components/monitoring/StatusBadge.js';
@@ -51,8 +51,10 @@ export default function ServerHealthPage() {
   const { id: serverId } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const canCheck = useHasRole('operator');
-  const canConfigure = useHasRole('admin');
+  // Checking needs `operate` on the server, switching monitoring `manage` (custom roles spec §5)
+  const access = useAccessLevels('server');
+  const canCheck = access.can(serverId, 'operate');
+  const canConfigure = access.can(serverId, 'manage');
   const [range, setRange] = useState<MetricRange>('24h');
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
 

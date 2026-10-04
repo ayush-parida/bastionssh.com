@@ -16,7 +16,7 @@ import {
   DURATION_OPTIONS,
   formatMinutes,
   LEVEL_LABELS,
-  LEVEL_VERBS,
+  LEVEL_HINTS,
   LEVELS,
   RESOURCE_SECTIONS,
   RESOURCE_TYPE_LABELS,
@@ -196,7 +196,7 @@ export function RequestAccessDialog({
                         onChange={(e) => setLevel(e.target.value as AccessLevel)}
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       >
-                        {LEVELS.map((l) => <option key={l} value={l}>{LEVEL_LABELS[l]} — {LEVEL_VERBS[type][l]}</option>)}
+                        {LEVELS.map((l) => <option key={l} value={l}>{LEVEL_LABELS[l]} — {LEVEL_HINTS[type][l]}</option>)}
                       </select>
                     </div>
                   </div>

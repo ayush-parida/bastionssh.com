@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 import {
   CLOUD_PROVIDER_LABEL,
@@ -125,8 +126,9 @@ function credentialFields(
 
 export default function CloudAccountsPage() {
   const qc = useQueryClient();
-  const canManage = useHasRole('admin');
-  const canSync = useHasRole('operator');
+  // Adding needs an admin; on each one, what the caller's level allows (custom roles spec §5, §7)
+  const canAdd = useHasRole('admin');
+  const access = useAccessLevels('cloud_account');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<AccountForm>(empty);
@@ -261,7 +263,7 @@ export default function CloudAccountsPage() {
             Import and keep servers in sync from AWS, Google Cloud, Azure, DigitalOcean and Hetzner
           </p>
         </div>
-        {canManage && (
+        {canAdd && (
           <button
             onClick={openCreate}
             className="bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium"
@@ -481,7 +483,7 @@ export default function CloudAccountsPage() {
           <Cloud size={40} className="mb-3 opacity-30" />
           <p>
             No cloud accounts yet.
-            {canManage ? ' Click "Add account" to import servers from a provider.' : ''}
+            {canAdd ? ' Click "Add account" to import servers from a provider.' : ''}
           </p>
         </div>
       ) : (
@@ -530,7 +532,7 @@ export default function CloudAccountsPage() {
               )}
 
               <div className="mt-auto flex flex-wrap gap-2">
-                {canSync && (
+                {access.can(a.id, 'operate') && (
                   <button
                     onClick={() => syncMutation.mutate(a.id)}
                     disabled={syncMutation.isPending}
@@ -541,7 +543,7 @@ export default function CloudAccountsPage() {
                   </button>
                 )}
                 <WhoHasAccessButton type="cloud_account" id={a.id} name={a.name} />
-                {canManage && (
+                {access.can(a.id, 'manage') && (
                   <>
                     <button
                       onClick={() => testMutation.mutate(a.id)}

@@ -9,7 +9,7 @@ import {
 import { ScanLine, ShieldAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { relativeTime } from '@/lib/utils.js';
 import { Fingerprint, HostKeyBadge } from '@/components/servers/HostKey.js';
 
@@ -18,22 +18,23 @@ const VERIFY_HINT = 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub';
 /**
  * Host key status for an SFTP connection card: the badge and fingerprint for
  * everyone; scan & pin, pin by hand, accept a changed key and forget for
- * admins. Same trust model
+ * whoever manages the connection. Same trust model
  * as a server's host key panel, compacted to fit a card.
  */
 export function FtpHostKeySection({ connection }: { connection: FtpConnection }) {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  // Pinning and forgetting the key is managing the connection (custom roles spec §5)
+  const canManage = useAccessLevels('ftp_connection').can(connection.id, 'manage');
   const [pinning, setPinning] = useState(false);
   const [draft, setDraft] = useState('');
   const [scan, setScan] = useState<HostKeyScanResult | null>(null);
   const base = `/ftp/connections/${connection.id}/host-key`;
 
-  // Only admins may read the trust details and mismatch evidence
+  // Only those who manage it may read the trust details and mismatch evidence
   const { data: hostKey } = useQuery<FtpHostKey>({
     queryKey: ['ftp-host-key', connection.id, connection.hostKeyStatus, connection.hostKeyFingerprint],
     queryFn: () => api.get(base),
-    enabled: isAdmin,
+    enabled: canManage,
   });
 
   function refresh() {
@@ -125,7 +126,7 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
     <div className="space-y-1.5 text-xs">
       <div className="flex flex-wrap items-center gap-2">
         <HostKeyBadge status={connection.hostKeyStatus} />
-        {isAdmin && (
+        {canManage && (
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
@@ -176,7 +177,7 @@ export function FtpHostKeySection({ connection }: { connection: FtpConnection })
         <p className="text-muted-foreground">Trusted {relativeTime(hostKey.trustedAt)}</p>
       )}
 
-      {connection.hostKeyStatus === 'mismatch' && !isAdmin && (
+      {connection.hostKeyStatus === 'mismatch' && !canManage && (
         <p className="text-red-600">
           The host presented a different key. Connections are refused until an admin reviews it.
         </p>

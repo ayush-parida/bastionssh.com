@@ -5,7 +5,7 @@ import type { HostKeyScanResult, HostKeyStatus, Server, ServerHostKey } from '@s
 import { Copy, KeyRound, ScanLine, ShieldAlert, ShieldCheck, ShieldQuestion, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { hostKeyPanelPath } from '@/lib/host-keys.js';
 
@@ -131,7 +131,8 @@ const VERIFY_HINT = 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub';
 export function HostKeyPanel({ serverId }: { serverId: string }) {
   const qc = useQueryClient();
   const location = useLocation();
-  const isAdmin = useHasRole('admin');
+  // Pinning, accepting and forgetting the key need `manage` on the server (custom roles spec §5)
+  const canManage = useAccessLevels('server').can(serverId, 'manage');
   const panelRef = useRef<HTMLDivElement>(null);
   const [scan, setScan] = useState<HostKeyScanResult | null>(null);
 
@@ -144,7 +145,7 @@ export function HostKeyPanel({ serverId }: { serverId: string }) {
   const { data: hostKey } = useQuery<ServerHostKey>({
     queryKey: ['host-key', serverId],
     queryFn: () => api.get(`/servers/${serverId}/host-key`),
-    enabled: isAdmin,
+    enabled: canManage,
   });
 
   // Linked to from connection errors: bring the panel into view
@@ -242,7 +243,7 @@ export function HostKeyPanel({ serverId }: { serverId: string }) {
         <KeyRound size={16} className="text-muted-foreground" />
         <h2 className="font-semibold">SSH host key</h2>
         <HostKeyBadge status={server.hostKeyStatus} />
-        {isAdmin && (
+        {canManage && (
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <button
               onClick={() => scanMutation.mutate()}
@@ -283,11 +284,11 @@ export function HostKeyPanel({ serverId }: { serverId: string }) {
       ) : (
         <p className="text-sm text-muted-foreground">
           No host key pinned. The first connection will trust the key the host presents and remember
-          it{isAdmin ? ' — or scan and pin it now after checking it on the server.' : '.'}
+          it{canManage ? ' — or scan and pin it now after checking it on the server.' : '.'}
         </p>
       )}
 
-      {server.hostKeyStatus === 'mismatch' && !isAdmin && (
+      {server.hostKeyStatus === 'mismatch' && !canManage && (
         <p className="mt-3 text-sm text-red-600">
           The host presented a different key. Connections are refused until an admin reviews it.
         </p>

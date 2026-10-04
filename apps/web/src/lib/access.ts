@@ -40,6 +40,20 @@ export const LEVEL_VERBS: Record<ResourceType, Record<AccessLevel, string>> = {
   cron_job: { view: 'see the history of', operate: 'run and pause', manage: 'edit and delete' },
 };
 
+/**
+ * The same, as a short phrase that stands on its own, for level pickers:
+ * "Operate — terminals, files and commands".
+ */
+export const LEVEL_HINTS: Record<ResourceType, Record<AccessLevel, string>> = {
+  server: { view: 'status and health', operate: 'terminals, files and commands', manage: 'edit, host keys and delete' },
+  cluster: { view: 'workloads and events', operate: 'logs, YAML, scale and exec', manage: 'rollback, cordon and settings' },
+  ftp_connection: { view: 'see it', operate: 'browse and transfer files', manage: 'edit, host key and delete' },
+  storage_connection: { view: 'list buckets and objects', operate: 'upload, download and delete objects', manage: 'buckets, edit and delete' },
+  cloud_account: { view: 'see it and its last sync', operate: 'sync now', manage: 'edit credentials and delete' },
+  saved_command: { view: 'see it', operate: 'run it', manage: 'edit and delete' },
+  cron_job: { view: 'see it and its runs', operate: 'run now, pause and resume', manage: 'edit and delete' },
+};
+
 /** True when `level` reaches `required` (view < operate < manage). */
 export function levelAtLeast(level: AccessLevel | null | undefined, required: AccessLevel): boolean {
   return !!level && LEVELS.indexOf(level) >= LEVELS.indexOf(required);

@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils.js';
 import {
   DURATION_OPTIONS,
   LEVEL_LABELS,
+  LEVEL_HINTS,
   LEVEL_VERBS,
   LEVELS,
   RESOURCE_SECTIONS,
@@ -263,7 +264,7 @@ export function GrantsEditor({
                       className={selectClass}
                     >
                       {LEVELS.map((l) => (
-                        <option key={l} value={l}>{LEVEL_LABELS[l]} — {LEVEL_VERBS[type][l]}</option>
+                        <option key={l} value={l}>{LEVEL_LABELS[l]} — {LEVEL_HINTS[type][l]}</option>
                       ))}
                     </select>
                     <select

@@ -4,7 +4,7 @@ import { AlertTriangle, History, KeyRound, RotateCw } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError, api } from '@/lib/api.js';
 import { isPasskeyCancel, passkeyErrorMessage } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { KEY_AGE_WARNING_DAYS, ROTATION_CONFIRM, isKeyOld, keyAgeDays, rotateServerKey, toastRotation } from '@/lib/key-rotation.js';
 
@@ -135,7 +135,8 @@ export function RotationHistory({
 /** The server's login key, its age, a rotate action and its rotation history. */
 export function ServerKeyPanel({ serverId }: { serverId: string }) {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  // Rotating needs `manage` on the server (custom roles spec §5)
+  const canRotate = useAccessLevels('server').can(serverId, 'manage');
 
   const { data: server } = useQuery<Server>({
     queryKey: ['servers', serverId],
@@ -167,7 +168,7 @@ export function ServerKeyPanel({ serverId }: { serverId: string }) {
         <KeyRound size={16} className="text-muted-foreground" />
         <h2 className="font-semibold">SSH login key</h2>
         {key && <KeyAgeBadge sshKey={key} />}
-        {isAdmin && keyAuth && (
+        {canRotate && keyAuth && (
           <button
             onClick={() => {
               if (confirm(`Rotate the SSH key of ${server.name}?\n\n${ROTATION_CONFIRM}`)) rotateMutation.mutate();

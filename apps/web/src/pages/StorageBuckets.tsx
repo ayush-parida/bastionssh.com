@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '@/lib/api.js';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import type { StorageBucket, StorageConnection, StorageDeleteBucketResponse } from '@smt/shared';
 import { ArrowLeft, ArrowRight, FolderOpen, Package, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -20,7 +20,8 @@ export default function StorageBucketsPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const canManage = useHasRole('admin');
+  // Creating and deleting buckets is managing the connection (custom roles spec §5)
+  const canManage = useAccessLevels('storage_connection').can(id, 'manage');
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState('');
   const [dialog, setDialog] = useState<DeleteDialog | null>(null);

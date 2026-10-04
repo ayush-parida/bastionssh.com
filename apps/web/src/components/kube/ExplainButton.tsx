@@ -7,6 +7,7 @@ import { api } from '@/lib/api.js';
 import { readSSE } from '@/lib/sse.js';
 import { kubePath } from '@/lib/kube.js';
 import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 
 type State =
   | { phase: 'idle' }
@@ -36,7 +37,10 @@ export default function ExplainButton({
   clusterId: string;
   objectRef: Pick<KubeObjectRef, 'resource' | 'namespace' | 'name'>;
 }) {
+  // The base role, or `operate` on the cluster from a custom role (the server
+  // checks the object's namespace too)
   const isOperator = useHasRole('operator');
+  const canExplain = useAccessLevels('cluster').can(clusterId, 'operate') || isOperator;
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<State>({ phase: 'idle' });
   const abortRef = useRef<AbortController | null>(null);
@@ -68,7 +72,7 @@ export default function ExplainButton({
     return () => window.removeEventListener('keydown', onKey, { capture: true });
   });
 
-  if (!isOperator) return null;
+  if (!canExplain) return null;
 
   const run = async () => {
     stop();

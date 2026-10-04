@@ -8,6 +8,7 @@ import { api } from '@/lib/api.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { CLUSTER_DOT, CLUSTER_STATUS_LABEL, kubeKeys, kubeTabUrl } from '@/lib/kube.js';
 import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { DiagnoseButton } from '@/components/diagnostics/Diagnostics.js';
 import ConfirmDialog from '@/components/docker/ConfirmDialog.js';
 import ClusterDialog from '@/components/kube/ClusterDialog.js';
@@ -27,6 +28,8 @@ function viaLabel(c: KubeCluster): string {
 export default function KubernetesPage() {
   const qc = useQueryClient();
   const isAdmin = useHasRole('admin');
+  // Testing, editing and removing a cluster is managing it (custom roles spec §5)
+  const access = useAccessLevels('cluster');
   const [editing, setEditing] = useState<KubeCluster | 'new' | null>(null);
   const [removing, setRemoving] = useState<KubeCluster | null>(null);
   const [tested, setTested] = useState<{ cluster: KubeCluster; result: KubeTestResult } | null>(null);
@@ -108,7 +111,7 @@ export default function KubernetesPage() {
               </Link>
               <div className="flex items-center gap-1 border-t border-border px-2 py-1.5">
                 <DiagnoseButton target={{ kind: 'kube_cluster', id: c.id, name: c.name }} />
-                {isAdmin && (
+                {access.can(c.id, 'manage') && (
                   <>
                     <button
                       onClick={() => test.mutate(c)}

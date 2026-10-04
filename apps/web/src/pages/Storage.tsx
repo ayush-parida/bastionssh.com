@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import {
   STORAGE_PROVIDER_PRESETS,
   endpointNeedsInput,
@@ -60,8 +61,9 @@ function describeTarget(c: StorageConnection): string {
 export default function StoragePage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const canManage = useHasRole('admin');
-  const canDiagnose = useHasRole('operator');
+  // Adding needs an admin; on each one, what the caller's level allows (custom roles spec §5, §7)
+  const canAdd = useHasRole('admin');
+  const access = useAccessLevels('storage_connection');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<ConnectionForm>(empty);
@@ -205,7 +207,7 @@ export default function StoragePage() {
             Browse and manage S3-compatible buckets — AWS, MinIO, R2, B2, Wasabi and more
           </p>
         </div>
-        {canManage && (
+        {canAdd && (
           <button
             onClick={openCreate}
             className="bg-primary text-primary-foreground hover:bg-primary/90 flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium"
@@ -344,7 +346,7 @@ export default function StoragePage() {
           <HardDrive size={40} className="mb-3 opacity-30" />
           <p>
             No storage connections yet.
-            {canManage ? ' Click "Add connection" to register an S3 or MinIO endpoint.' : ''}
+            {canAdd ? ' Click "Add connection" to register an S3 or MinIO endpoint.' : ''}
           </p>
         </div>
       ) : (
@@ -378,7 +380,7 @@ export default function StoragePage() {
                   {c.lastStatus === 'ok'
                     ? `Connected${c.lastTestedAt ? ` · ${new Date(c.lastTestedAt).toLocaleString()}` : ''}`
                     : `Failed: ${c.lastError ?? 'unknown error'}`}
-                  {c.lastStatus !== 'ok' && isConnectivityFailure(c.lastError) && canDiagnose && (
+                  {c.lastStatus !== 'ok' && isConnectivityFailure(c.lastError) && access.can(c.id, 'operate') && (
                     <button
                       onClick={() => setDiagnosing({ kind: 'storage_connection', id: c.id, name: c.name })}
                       className="text-primary ml-1 shrink-0 font-medium hover:underline"
@@ -400,7 +402,7 @@ export default function StoragePage() {
                   onOpen={setDiagnosing}
                 />
                 <WhoHasAccessButton type="storage_connection" id={c.id} name={c.name} />
-                {canManage && (
+                {access.can(c.id, 'manage') && (
                   <>
                     <button
                       onClick={() => testMutation.mutate(c)}

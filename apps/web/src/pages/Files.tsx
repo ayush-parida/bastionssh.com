@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import type { Server, SftpEntry, SftpListResponse, SftpReadResponse } from '@smt/shared';
-import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import {
   ArrowLeft,
   ArrowUp,
@@ -71,7 +71,7 @@ export default function FilesPage() {
   const [editorLoading, setEditorLoading] = useState(false);
 
   // Server enforces these too — this only keeps unusable controls off the screen
-  const canWrite = useHasRole('operator');
+  const canWrite = useAccessLevels('server').can(serverId, 'operate');
 
   const { data: server } = useQuery<Server>({
     queryKey: ['servers', serverId],
