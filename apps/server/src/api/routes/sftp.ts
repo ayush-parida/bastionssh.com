@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { pipeline } from 'node:stream/promises';
 import type { Readable } from 'node:stream';
 import posix from 'node:path/posix';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { canAccessServer } from '../../auth/server-access.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireServer, serverDenial } from '../../auth/server-access.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
@@ -42,6 +42,9 @@ function sendError(reply: FastifyReply, err: unknown) {
 
 export async function sftpRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Reading and writing files alike need `operate` on the server (custom roles spec §5):
+  // 404 when the caller cannot reach it, 403 when they only see it
+  app.addHook('preHandler', requireServer('sftp', 'serverId'));
 
   // Uploads arrive as a raw body so large files never buffer in memory.
   app.addContentTypeParser('application/octet-stream', (_req, payload, done) => {
@@ -52,8 +55,9 @@ export async function sftpRoutes(app: FastifyInstance) {
   async function lease(req: FastifyRequest, serverId: string, keyId?: string) {
     const { orgId } = req;
     const userId = req.user.id;
-    // Same answer as a server that does not exist
-    if (!canAccessServer(req, serverId)) throw new CredentialError('Server not found', 404);
+    // Same answer as a server that does not exist; re-checked here, where the channel opens
+    const denied = serverDenial(req, serverId, 'sftp');
+    if (denied) throw new CredentialError(denied.error, denied.status);
     const { server, auth } = await resolveServerAuth(orgId, serverId, keyId);
     const held = await sftp.acquire(
       sftp.poolKey(orgId, serverId, userId),
@@ -184,7 +188,7 @@ export async function sftpRoutes(app: FastifyInstance) {
   });
 
   /** PUT /api/sftp/:serverId/file?path=/tmp/x.txt — upload a raw body */
-  app.put('/:serverId/file', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.put('/:serverId/file', async (req, reply) => {
     const { serverId } = req.params as { serverId: string };
     const query = pathQuerySchema.parse(req.query);
     if (query.path === '.') return reply.status(400).send({ error: 'Path is required' });
@@ -225,7 +229,7 @@ export async function sftpRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/sftp/:serverId/mkdir */
-  app.post('/:serverId/mkdir', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/:serverId/mkdir', async (req, reply) => {
     const { serverId } = req.params as { serverId: string };
     const body = mkdirSchema.parse(req.body);
 
@@ -247,7 +251,7 @@ export async function sftpRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/sftp/:serverId/rename — also used for moves */
-  app.post('/:serverId/rename', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/:serverId/rename', async (req, reply) => {
     const { serverId } = req.params as { serverId: string };
     const body = renameSchema.parse(req.body);
 
@@ -270,7 +274,7 @@ export async function sftpRoutes(app: FastifyInstance) {
   });
 
   /** DELETE /api/sftp/:serverId/file?path=…&recursive=true */
-  app.delete('/:serverId/file', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.delete('/:serverId/file', async (req, reply) => {
     const { serverId } = req.params as { serverId: string };
     const query = deleteSchema.parse(req.query);
 

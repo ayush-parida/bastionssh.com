@@ -1,8 +1,7 @@
 import { Duplex, PassThrough } from 'node:stream';
-import { and, eq } from 'drizzle-orm';
-import { dockerPermissions, type Role } from '@smt/shared';
-import { getDb } from '../db/index.js';
-import { memberships } from '../db/schema.js';
+import { dockerPermissions } from '@smt/shared';
+import { levelFor } from '../auth/access/authorize.js';
+import { roleForLevel } from '../auth/access/levels.js';
 import logger from '../logger.js';
 import { SSHBroker, type TerminalChannel } from '../ssh/broker.js';
 import { compareApiVersions, type DockerClient } from './client.js';
@@ -260,26 +259,25 @@ export async function openContainerShell(
 
 /**
  * Close container shells whose owner may no longer open one — after a role
- * change, or an admin switching `operatorsCanExec` off. Scoped to one org;
- * `userId` narrows it to one member. Returns how many were closed.
+ * change, an admin switching `operatorsCanExec` off, or a custom role or
+ * grant change. The Docker matrix is read at the owner's level on the
+ * shell's server (custom roles spec §5). Scoped to one org; `userId` narrows
+ * it to one member. Returns how many were closed.
  */
 export function closeDisallowedExecSessions(orgId: string, userId?: string): number {
   const settings = dockerSettings(orgId);
   const allowed = new Map<string, boolean>();
-  const mayExec = (user: string) => {
-    let ok = allowed.get(user);
+  const mayExec = (user: string, serverId: string) => {
+    const key = `${user}\u0000${serverId}`;
+    let ok = allowed.get(key);
     if (ok === undefined) {
-      const member = getDb()
-        .select({ role: memberships.role, status: memberships.status })
-        .from(memberships)
-        .where(and(eq(memberships.userId, user), eq(memberships.orgId, orgId)))
-        .get();
-      ok = !!member && member.status === 'active' && dockerPermissions(member.role as Role, settings).exec;
-      allowed.set(user, ok);
+      const found = levelFor({ orgId, userId: user }, 'server', serverId);
+      ok = !!found && dockerPermissions(roleForLevel(found.level), settings).exec;
+      allowed.set(key, ok);
     }
     return ok;
   };
   return SSHBroker.closeWhere(
-    (s) => s.container !== null && s.orgId === orgId && (!userId || s.userId === userId) && !mayExec(s.userId),
+    (s) => s.container !== null && s.orgId === orgId && (!userId || s.userId === userId) && !mayExec(s.userId, s.serverId),
   );
 }

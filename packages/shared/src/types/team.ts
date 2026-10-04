@@ -76,12 +76,20 @@ export interface UpdateMemberServerAccess {
 
 export type AccessRequestStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';
 
+/** What a just-in-time request asks for: servers, or Kubernetes clusters. */
+export type AccessRequestResourceType = 'server' | 'cluster';
+
 export interface AccessRequest {
   id: string;
   userId: string;
   userEmail: string;
   userDisplayName: string;
+  /** Servers or clusters; older requests are all servers. */
+  resourceType: AccessRequestResourceType;
+  /** The servers asked for (empty for a cluster request). */
   servers: { id: string; name: string | null }[];
+  /** The clusters asked for (empty for a server request). */
+  clusters: { id: string; name: string | null }[];
   reason: string;
   durationMinutes: number;
   status: AccessRequestStatus;
@@ -97,7 +105,10 @@ export interface AccessRequest {
 }
 
 export interface CreateAccessRequest {
-  serverIds: string[];
+  /** Default `server`: then `serverIds`; for `cluster`, `clusterIds`. */
+  resourceType?: AccessRequestResourceType;
+  serverIds?: string[];
+  clusterIds?: string[];
   reason: string;
   durationMinutes: number;
 }
@@ -129,6 +140,14 @@ export interface RequestableServers {
   restricted: boolean;
   settings: AccessRequestSettings;
   servers: RequestableServer[];
+}
+
+/** The cluster counterpart of {@link RequestableServers} (names only, as for servers). */
+export interface RequestableClusters {
+  /** False for members who already see every cluster. */
+  restricted: boolean;
+  settings: AccessRequestSettings;
+  clusters: RequestableServer[];
 }
 
 /** Returned once when an admin issues a reset — the link is never readable again. */

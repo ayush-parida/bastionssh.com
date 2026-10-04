@@ -287,7 +287,7 @@ export async function kubeViewRoutes(app: FastifyInstance) {
    * only when the YAML tab is opened. `_` stands for "no namespace" on
    * cluster-scoped objects.
    */
-  app.get('/clusters/:id/objects/:resource/:ns/:name', { preHandler: requireKube('view') }, async (req, reply) => {
+  app.get('/clusters/:id/objects/:resource/:ns/:name', { preHandler: requireKube('view', 'param') }, async (req, reply) => {
     const params = objectParams.parse(req.params);
     try {
       const ref = objectRef(params.resource, params.ns, params.name);

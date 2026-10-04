@@ -1,7 +1,8 @@
 import { gt, isNull, or, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import { memberServerAccess, savedCommands } from '../db/schema.js';
-import { levelFor } from './access/authorize.js';
+import { authorize, levelFor, requireResource } from './access/authorize.js';
+import type { ResourceAction } from './access/levels.js';
 import {
   accessibleFilter,
   accessibleIds,
@@ -79,4 +80,30 @@ export function accessibleSavedCommandFilter(who: AccessSubject): SQL | undefine
 /** In-memory counterpart of `accessibleServerFilter` for rows already loaded. */
 export function filterAccessible<T>(who: AccessSubject, rows: T[], serverIdOf: (row: T) => string): T[] {
   return filterAccessibleRows(who, 'server', rows, serverIdOf);
+}
+
+/**
+ * preHandler gate for a server route: `{ preHandler: requireServer('terminal') }`
+ * — 404 when the caller cannot reach the server (`param`, default `id`), 403
+ * when they see it but the action needs a higher level (spec §5).
+ */
+export function requireServer(action: ResourceAction<'server'>, param = 'id') {
+  return requireResource('server', action, { param });
+}
+
+/** Why the subject may not do `action` on a server, for checks inside a handler; null when they may. */
+export function serverDenial(
+  who: AccessSubject,
+  serverId: string,
+  action: ResourceAction<'server'>,
+): { status: 403 | 404; error: string } | null {
+  const result = authorize(who, 'server', serverId, action);
+  if (result.ok) return null;
+  if (result.status === 404) return { status: 404, error: 'Server not found' };
+  return { status: 403, error: `This needs ${result.required} access to the server (you have ${result.level})` };
+}
+
+/** True when the subject may do `action` on the server (it exists in their org and their level suffices). */
+export function canOnServer(who: AccessSubject, serverId: string, action: ResourceAction<'server'>): boolean {
+  return authorize(who, 'server', serverId, action).ok;
 }

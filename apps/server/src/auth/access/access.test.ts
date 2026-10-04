@@ -12,6 +12,7 @@ const spies = vi.hoisted(() => ({
 }));
 vi.mock('../revoke.js', () => ({ revokeLiveAccess: spies.revoke }));
 
+import { EventEmitter } from 'node:events';
 import Fastify from 'fastify';
 import { nanoid } from 'nanoid';
 import { and, eq } from 'drizzle-orm';
@@ -38,6 +39,7 @@ import { permissionsFor } from '../../docker/permissions.js';
 import { kubePermissionsFor } from '../../kube/permissions.js';
 import { dockerSettings } from '../../docker/settings.js';
 import { kubeSettings } from '../../kube/settings.js';
+import { SSHBroker, type TerminalChannel } from '../../ssh/broker.js';
 import {
   accessibleFilter,
   accessibleIds,
@@ -404,6 +406,54 @@ describe('access engine', () => {
       const before2 = snapshotAccess(orgId, [member.userId]);
       getDb().delete(roleMembers).where(eq(roleMembers.roleId, ops)).run();
       expect(revokeAfterChange(orgId, [member.userId], before2).size).toBe(0);
+    });
+
+    it('weighs pod shells in their namespace: narrowing a grant closes the shells it no longer covers, and only those', () => {
+      const member = seedUser(orgId, 'viewer');
+      restrict(member.userId);
+      const k = cluster('ns-shells');
+      const s1 = seedServer(orgId, admin.userId, 'ns-shells-server');
+      const team = role('Shop shells', [{ userId: member.userId }]);
+      const g = grant({ role: team }, { resourceType: 'cluster', resourceId: k, level: 'operate', namespaces: JSON.stringify(['shop', 'web']) });
+      const serverGrant = grant({ role: team }, { resourceType: 'server', resourceId: s1, level: 'view' });
+      const ends = { shop: vi.fn(), web: vi.fn() };
+      const shell = (namespace: 'shop' | 'web') => {
+        const channel = Object.assign(new EventEmitter(), { stderr: new EventEmitter(), writable: true, write: vi.fn(), setWindow: vi.fn() });
+        return SSHBroker.adoptSession(
+          {
+            server: { id: '', host: '', port: 0, username: '' },
+            userId: member.userId,
+            orgId,
+            cols: 80,
+            rows: 24,
+            pod: { clusterId: k, namespace, name: `${namespace}-1`, container: 'app' },
+          },
+          channel as unknown as TerminalChannel,
+          ends[namespace],
+        );
+      };
+      const shop = shell('shop');
+      const web = shell('web');
+
+      // Narrowed to `shop`: the per-type sets do not change, the `web` shell still closes
+      const before = snapshotAccess(orgId, [member.userId]);
+      getDb().update(resourceGrants).set({ namespaces: JSON.stringify(['shop']) }).where(eq(resourceGrants.id, g)).run();
+      const closed = revokeAfterChange(orgId, [member.userId], before);
+      expect(closed.get(member.userId)).toMatchObject({ terminals: 1 });
+      expect(ends.web).toHaveBeenCalled();
+      expect(ends.shop).not.toHaveBeenCalled();
+      expect(SSHBroker.getSessionForUser(web, member.userId, orgId)).toBeUndefined();
+      expect(SSHBroker.getSessionForUser(shop, member.userId, orgId)).toBeDefined();
+
+      // Losing something else keeps the cluster's shells where the member still operates
+      spies.revoke.mockClear();
+      const before2 = snapshotAccess(orgId, [member.userId]);
+      getDb().delete(resourceGrants).where(eq(resourceGrants.id, serverGrant)).run();
+      revokeAfterChange(orgId, [member.userId], before2);
+      const scope = spies.revoke.mock.calls[0]![1] as Record<string, string[]>;
+      expect(scope.keepShellClusterIds).toEqual([k]);
+      expect(ends.shop).not.toHaveBeenCalled();
+      void SSHBroker.close(shop, { userId: member.userId, orgId });
     });
 
     it('sweeps expired role memberships and grants, closes what they gave and audits it', () => {

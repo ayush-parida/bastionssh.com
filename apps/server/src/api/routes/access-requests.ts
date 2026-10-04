@@ -4,29 +4,40 @@ import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type {
   AccessRequest,
+  AccessRequestResourceType,
   AccessRequestSettings,
   AccessRequestStatus,
+  RequestableClusters,
   RequestableServers,
 } from '@smt/shared';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { accessRequests, memberships, organizations, servers, users } from '../../db/schema.js';
-import { activeGrants, extendGrants, minutesFromNow, REQUEST_TTL_MS } from '../../auth/access-grants.js';
+import { accessRequests, kubeClusters, memberships, organizations, servers, users } from '../../db/schema.js';
+import {
+  activeGrants,
+  extendClusterGrants,
+  extendGrants,
+  minutesFromNow,
+  REQUEST_TTL_MS,
+} from '../../auth/access-grants.js';
 import { serverScope } from '../../auth/server-access.js';
+import { activeClusterGrants, clusterScope } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { notifyNotice } from '../../notifications/index.js';
 import { config } from '../../config/index.js';
 
 /**
- * Just-in-time access. A restricted member asks for some servers for a while,
- * with a reason; an admin (never the requester) approves — optionally for
+ * Just-in-time access. A restricted member asks for some servers — or some
+ * Kubernetes clusters (custom roles spec §6: requests are resource-typed) —
+ * for a while, with a reason; an admin (never the requester) approves — optionally for
  * less time — or denies. Approval adds time-bound grants that the expiry
  * sweep removes when they run out (auth/access-grants.ts).
  *
  * Whether a restricted member may see the names of servers they cannot use is
  * an org setting, on by default: without names there is nothing to ask for.
  * Only names are ever shown — never hosts, tags or anything else. With it off,
- * members can only ask to extend access to servers they already have.
+ * members can only ask to extend access to servers they already have. The
+ * same setting covers cluster names.
  */
 
 /** Hard ceiling for the org setting: a week. Anything longer is a permanent grant. */
@@ -45,11 +56,61 @@ const settingsSchema = z.object({
   maxRequestMinutes: z.number().int().min(15).max(MAX_POLICY_MINUTES).optional(),
 });
 
-const createSchema = z.object({
-  serverIds: z.array(z.string().min(1)).min(1).max(50),
-  reason: z.string().trim().min(3).max(500),
-  durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES),
-});
+const idList = z.array(z.string().min(1)).min(1).max(50);
+const createSchema = z
+  .object({
+    resourceType: z.enum(['server', 'cluster']).default('server'),
+    serverIds: idList.optional(),
+    clusterIds: idList.optional(),
+    reason: z.string().trim().min(3).max(500),
+    durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES),
+  })
+  .refine((v) => (v.resourceType === 'server' ? v.serverIds && !v.clusterIds : v.clusterIds && !v.serverIds), {
+    message: 'Give serverIds for a server request, clusterIds for a cluster request',
+  });
+
+/** Servers or clusters: the words, tables and grants each kind of request uses. */
+const KINDS = {
+  server: { table: servers, id: servers.id, name: servers.name, orgId: servers.orgId, noun: 'server', plural: 'Servers' },
+  cluster: {
+    table: kubeClusters,
+    id: kubeClusters.id,
+    name: kubeClusters.name,
+    orgId: kubeClusters.orgId,
+    noun: 'cluster',
+    plural: 'Clusters',
+  },
+} as const;
+
+function kindOf(row: Pick<RequestRow, 'resourceType'>): AccessRequestResourceType {
+  return row.resourceType === 'cluster' ? 'cluster' : 'server';
+}
+
+/** Ids of `kind` in the org, from `ids` (missing ones are left out), with their names. */
+function namesOf(orgId: string, kind: AccessRequestResourceType, ids: string[]): Map<string, string> {
+  if (!ids.length) return new Map();
+  const k = KINDS[kind];
+  return new Map(
+    getDb()
+      .select({ id: k.id, name: k.name })
+      .from(k.table)
+      .where(and(eq(k.orgId, orgId), inArray(k.id, ids)))
+      .all()
+      .map((r) => [r.id, r.name]),
+  );
+}
+
+/** A member's grants in force now on resources of `kind`, by id. */
+function grantsOf(orgId: string, userId: string, kind: AccessRequestResourceType): Map<string, { expiresAt: string | null }> {
+  return kind === 'cluster'
+    ? new Map(activeClusterGrants(orgId, userId).map((g) => [g.clusterId, g]))
+    : new Map(activeGrants(orgId, userId).map((g) => [g.serverId, g]));
+}
+
+/** True when the caller already reaches every resource of `kind`. */
+function seesAllOf(req: FastifyRequest, kind: AccessRequestResourceType): boolean {
+  return kind === 'cluster' ? clusterScope(req).all : serverScope(req).all;
+}
 
 const approveSchema = z.object({
   durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES).optional(),
@@ -100,17 +161,10 @@ function parseServerIds(raw: string): string[] {
 function present(orgId: string, rows: RequestRow[]): AccessRequest[] {
   if (rows.length === 0) return [];
   const db = getDb();
-  const serverIds = [...new Set(rows.flatMap((r) => parseServerIds(r.serverIds)))];
-  const names = new Map(
-    serverIds.length
-      ? db
-          .select({ id: servers.id, name: servers.name })
-          .from(servers)
-          .where(and(eq(servers.orgId, orgId), inArray(servers.id, serverIds)))
-          .all()
-          .map((s) => [s.id, s.name])
-      : [],
-  );
+  const idsOf = (kind: AccessRequestResourceType) => [
+    ...new Set(rows.filter((r) => kindOf(r) === kind).flatMap((r) => parseServerIds(r.serverIds))),
+  ];
+  const names = { server: namesOf(orgId, 'server', idsOf('server')), cluster: namesOf(orgId, 'cluster', idsOf('cluster')) };
   const userIds = [...new Set(rows.flatMap((r) => [r.userId, ...(r.decidedBy ? [r.decidedBy] : [])]))];
   const people = new Map(
     db
@@ -120,24 +174,35 @@ function present(orgId: string, rows: RequestRow[]): AccessRequest[] {
       .all()
       .map((u) => [u.id, u]),
   );
-  return rows.map((r) => ({
-    id: r.id,
-    userId: r.userId,
-    userEmail: people.get(r.userId)?.email ?? '',
-    userDisplayName: people.get(r.userId)?.displayName ?? '',
-    // A deleted server keeps its place in the request, without a name
-    servers: parseServerIds(r.serverIds).map((id) => ({ id, name: names.get(id) ?? null })),
-    reason: r.reason,
-    durationMinutes: r.durationMinutes,
-    status: r.status as AccessRequestStatus,
-    approvedMinutes: r.approvedMinutes,
-    decidedBy: r.decidedBy,
-    decidedByEmail: r.decidedBy ? (people.get(r.decidedBy)?.email ?? null) : null,
-    decidedAt: r.decidedAt,
-    decisionNote: r.decisionNote,
-    createdAt: r.createdAt,
-    expiresAt: r.expiresAt,
-  }));
+  return rows.map((r) => {
+    const kind = kindOf(r);
+    // A deleted server or cluster keeps its place in the request, without a name
+    const asked = parseServerIds(r.serverIds).map((id) => ({ id, name: names[kind].get(id) ?? null }));
+    return {
+      id: r.id,
+      userId: r.userId,
+      userEmail: people.get(r.userId)?.email ?? '',
+      userDisplayName: people.get(r.userId)?.displayName ?? '',
+      resourceType: kind,
+      servers: kind === 'server' ? asked : [],
+      clusters: kind === 'cluster' ? asked : [],
+      reason: r.reason,
+      durationMinutes: r.durationMinutes,
+      status: r.status as AccessRequestStatus,
+      approvedMinutes: r.approvedMinutes,
+      decidedBy: r.decidedBy,
+      decidedByEmail: r.decidedBy ? (people.get(r.decidedBy)?.email ?? null) : null,
+      decidedAt: r.decidedAt,
+      decisionNote: r.decisionNote,
+      createdAt: r.createdAt,
+      expiresAt: r.expiresAt,
+    };
+  });
+}
+
+/** The servers or clusters a presented request asks for. */
+function askedFor(request: AccessRequest): { id: string; name: string | null }[] {
+  return request.resourceType === 'cluster' ? request.clusters : request.servers;
 }
 
 function findRequest(orgId: string, id: string): RequestRow | undefined {
@@ -263,6 +328,29 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     };
   });
 
+  /** The cluster counterpart of GET /servers: what the caller could ask for, by name. */
+  app.get('/clusters', async (req): Promise<RequestableClusters> => {
+    const settings = accessRequestSettings(req.orgId);
+    if (seesAllOf(req, 'cluster')) return { restricted: false, settings, clusters: [] };
+
+    const granted = grantsOf(req.orgId, req.user.id, 'cluster');
+    const rows = getDb()
+      .select({ id: kubeClusters.id, name: kubeClusters.name })
+      .from(kubeClusters)
+      .where(eq(kubeClusters.orgId, req.orgId))
+      .orderBy(asc(kubeClusters.name))
+      .all()
+      .filter((c) => settings.restrictedSeeServerNames || granted.has(c.id));
+    return {
+      restricted: true,
+      settings,
+      clusters: rows.map((c) => {
+        const grant = granted.get(c.id);
+        return { id: c.id, name: c.name, granted: grant ? { expiresAt: grant.expiresAt } : null };
+      }),
+    };
+  });
+
   /** Admins see the org's requests; everyone else only their own. Pending first, then newest. */
   app.get('/', async (req): Promise<AccessRequest[]> => {
     const query = listSchema.parse(req.query);
@@ -291,8 +379,10 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       const db = getDb();
       const settings = accessRequestSettings(req.orgId);
 
-      if (serverScope(req).all) {
-        return reply.status(400).send({ error: 'You already have access to every server' });
+      const kind = body.resourceType;
+      const noun = KINDS[kind].noun;
+      if (seesAllOf(req, kind)) {
+        return reply.status(400).send({ error: `You already have access to every ${noun}` });
       }
       if (body.durationMinutes > settings.maxRequestMinutes) {
         return reply
@@ -300,19 +390,12 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           .send({ error: `Access can be requested for at most ${formatMinutes(settings.maxRequestMinutes)}` });
       }
 
-      const serverIds = [...new Set(body.serverIds)];
-      const known = new Map(
-        db
-          .select({ id: servers.id, name: servers.name })
-          .from(servers)
-          .where(and(eq(servers.orgId, req.orgId), inArray(servers.id, serverIds)))
-          .all()
-          .map((s) => [s.id, s.name]),
-      );
-      const granted = new Map(activeGrants(req.orgId, req.user.id).map((g) => [g.serverId, g]));
+      const serverIds = [...new Set((kind === 'cluster' ? body.clusterIds : body.serverIds) ?? [])];
+      const known = namesOf(req.orgId, kind, serverIds);
+      const granted = grantsOf(req.orgId, req.user.id, kind);
       // With names hidden, a server they cannot see answers exactly like one that does not exist
       const unknown = serverIds.some((id) => !known.has(id) || (!settings.restrictedSeeServerNames && !granted.has(id)));
-      if (unknown) return reply.status(400).send({ error: 'Unknown server in serverIds' });
+      if (unknown) return reply.status(400).send({ error: `Unknown ${noun} in ${noun}Ids` });
       const permanent = serverIds.find((id) => granted.get(id)?.expiresAt === null);
       if (permanent) {
         return reply.status(400).send({ error: `You already have permanent access to ${known.get(permanent)}` });
@@ -355,6 +438,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           id,
           orgId: req.orgId,
           userId: req.user.id,
+          resourceType: kind,
           serverIds: JSON.stringify(serverIds),
           reason: body.reason,
           durationMinutes: body.durationMinutes,
@@ -364,7 +448,8 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         .run();
 
       await audit(req, 'access_request.create', 'access_request', id, req.user.email, {
-        servers: serverIds,
+        resourceType: kind,
+        [kind === 'cluster' ? 'clusters' : 'servers']: serverIds,
         minutes: body.durationMinutes,
       });
 
@@ -378,7 +463,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           message: `${req.user.email} asks for ${formatMinutes(body.durationMinutes)} of access to ${names}: ${reason}`,
           details: [
             ['Requested by', req.user.email],
-            ['Servers', names],
+            [KINDS[kind].plural, names],
             ['Duration', formatMinutes(body.durationMinutes)],
             ['Reason', reason],
             ['Review', reviewLink()],
@@ -427,18 +512,12 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       return reply.status(409).send({ error: 'The requester is suspended in this organization' });
     }
 
-    // Servers deleted since the request was made are simply skipped
+    // Servers (or clusters) deleted since the request was made are simply skipped
+    const kind = kindOf(request);
     const requested = parseServerIds(request.serverIds);
-    const serverIds = requested.length
-      ? db
-          .select({ id: servers.id })
-          .from(servers)
-          .where(and(eq(servers.orgId, req.orgId), inArray(servers.id, requested)))
-          .all()
-          .map((s) => s.id)
-      : [];
+    const serverIds = [...namesOf(req.orgId, kind, requested).keys()];
     if (serverIds.length === 0) {
-      return reply.status(409).send({ error: 'None of the requested servers exist any more' });
+      return reply.status(409).send({ error: `None of the requested ${KINDS[kind].noun}s exist any more` });
     }
 
     const now = new Date();
@@ -463,11 +542,11 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       })) {
         return false;
       }
-      extended = extendGrants(req.orgId, request.userId, serverIds, {
-        expiresAt,
-        grantedBy: req.user.id,
-        reason: request.reason,
-      });
+      const grant = { expiresAt, grantedBy: req.user.id, reason: request.reason };
+      extended =
+        kind === 'cluster'
+          ? extendClusterGrants(req.orgId, request.userId, serverIds, grant)
+          : extendGrants(req.orgId, request.userId, serverIds, grant);
       return true;
     });
     if (!won) return reply.status(409).send({ error: 'This request is no longer pending' });
@@ -479,7 +558,8 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       .get();
     await audit(req, 'access_request.approve', 'access_request', request.id, requester?.email, {
       userId: request.userId,
-      servers: serverIds,
+      resourceType: kind,
+      [kind === 'cluster' ? 'clusters' : 'servers']: serverIds,
       extended,
       minutes,
       requestedMinutes: request.durationMinutes,
@@ -487,7 +567,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     });
 
     const [presented] = present(req.orgId, [findRequest(req.orgId, request.id)!]);
-    const names = presented!.servers.filter((s) => serverIds.includes(s.id)).map((s) => s.name ?? s.id).join(', ');
+    const names = askedFor(presented!).filter((s) => serverIds.includes(s.id)).map((s) => s.name ?? s.id).join(', ');
     notifyNotice(
       req.orgId,
       {
@@ -496,7 +576,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         message: `${req.user.email} approved ${formatMinutes(minutes)} of access to ${names} for ${requester?.email ?? 'a member'}`,
         details: [
           ['Requested by', requester?.email ?? ''],
-          ['Servers', names],
+          [KINDS[kind].plural, names],
           ['Duration', formatMinutes(minutes)],
           ['Until', expiresAt],
           ['Approved by', req.user.email],
@@ -523,11 +603,13 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     }
 
     const [presented] = present(req.orgId, [findRequest(req.orgId, request.id)!]);
+    const kind = presented!.resourceType;
     await audit(req, 'access_request.deny', 'access_request', request.id, presented!.userEmail, {
       userId: request.userId,
-      servers: presented!.servers.map((s) => s.id),
+      resourceType: kind,
+      [kind === 'cluster' ? 'clusters' : 'servers']: askedFor(presented!).map((s) => s.id),
     });
-    const names = presented!.servers.map((s) => s.name ?? s.id).join(', ');
+    const names = askedFor(presented!).map((s) => s.name ?? s.id).join(', ');
     notifyNotice(
       req.orgId,
       {
@@ -536,7 +618,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         message: `${req.user.email} denied ${presented!.userEmail}'s request for access to ${names}`,
         details: [
           ['Requested by', presented!.userEmail],
-          ['Servers', names],
+          [KINDS[kind].plural, names],
           ['Denied by', req.user.email],
           ...(body.note ? ([['Note', body.note]] as [string, string][]) : []),
         ],

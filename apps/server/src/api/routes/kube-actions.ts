@@ -111,13 +111,13 @@ export async function kubeActionRoutes(app: FastifyInstance) {
    * with images and env names, a pod's owner, a node's pods, a CronJob's
    * schedule) and the actions the caller may take on it.
    */
-  app.get('/clusters/:id/actions/preview/:resource/:ns/:name', { preHandler: requireKube('view') }, async (req, reply) => {
+  app.get('/clusters/:id/actions/preview/:resource/:ns/:name', { preHandler: requireKube('view', 'param') }, async (req, reply) => {
     const params = previewParams.parse(req.params);
     try {
       const ref = objectRef(params.resource, params.ns, params.name);
       return await withKubeClient(req, params.id, async (ctx): Promise<KubeActionPreview> => {
         if (!ctx.namespaceAllowed(ref.namespace)) throw new KubeError('Not found', 404);
-        return actionPreview(ctx.client, ref, ctx.permissions, ctx.namespaceAllowed);
+        return actionPreview(ctx.client, ref, ctx.permissionsIn(ref.namespace), ctx.namespaceAllowed);
       });
     } catch (err) {
       return sendKubeError(reply, err);
@@ -125,7 +125,7 @@ export async function kubeActionRoutes(app: FastifyInstance) {
   });
 
   /** POST /clusters/:id/actions/scale `{ kind, namespace, name, replicas }` */
-  app.post('/clusters/:id/actions/scale', { preHandler: requireKube('scale') }, async (req, reply) => {
+  app.post('/clusters/:id/actions/scale', { preHandler: requireKube('scale', 'body') }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = scaleSchema.parse(req.body);
     try {
@@ -141,7 +141,7 @@ export async function kubeActionRoutes(app: FastifyInstance) {
   });
 
   /** POST /clusters/:id/actions/restart `{ kind, namespace, name }` */
-  app.post('/clusters/:id/actions/restart', { preHandler: requireKube('scale') }, async (req, reply) => {
+  app.post('/clusters/:id/actions/restart', { preHandler: requireKube('scale', 'body') }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = restartSchema.parse(req.body);
     try {
@@ -157,7 +157,7 @@ export async function kubeActionRoutes(app: FastifyInstance) {
   });
 
   /** POST /clusters/:id/actions/rollback `{ namespace, name, revision }` — Deployments; admins. */
-  app.post('/clusters/:id/actions/rollback', { preHandler: requireKube('rollback') }, async (req, reply) => {
+  app.post('/clusters/:id/actions/rollback', { preHandler: requireKube('rollback', 'body') }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = rollbackSchema.parse(req.body);
     try {
@@ -177,7 +177,7 @@ export async function kubeActionRoutes(app: FastifyInstance) {
   });
 
   /** POST /clusters/:id/actions/delete-pod `{ namespace, name }` */
-  app.post('/clusters/:id/actions/delete-pod', { preHandler: requireKube('deletePod') }, async (req, reply) => {
+  app.post('/clusters/:id/actions/delete-pod', { preHandler: requireKube('deletePod', 'body') }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = namespacedSchema.parse(req.body);
     try {
@@ -211,7 +211,7 @@ export async function kubeActionRoutes(app: FastifyInstance) {
   }
 
   /** POST /clusters/:id/actions/suspend-cronjob `{ namespace, name, suspend }` — `suspend: false` resumes. */
-  app.post('/clusters/:id/actions/suspend-cronjob', { preHandler: requireKube('scale') }, async (req, reply) => {
+  app.post('/clusters/:id/actions/suspend-cronjob', { preHandler: requireKube('scale', 'body') }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = suspendSchema.parse(req.body);
     try {
@@ -231,7 +231,7 @@ export async function kubeActionRoutes(app: FastifyInstance) {
   });
 
   /** POST /clusters/:id/actions/trigger-cronjob `{ namespace, name }` — starts a Job now. */
-  app.post('/clusters/:id/actions/trigger-cronjob', { preHandler: requireKube('scale') }, async (req, reply) => {
+  app.post('/clusters/:id/actions/trigger-cronjob', { preHandler: requireKube('scale', 'body') }, async (req, reply) => {
     const { id } = clusterParams.parse(req.params);
     const body = namespacedSchema.parse(req.body);
     try {

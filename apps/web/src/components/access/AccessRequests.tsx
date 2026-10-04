@@ -27,6 +27,9 @@ function StatusPill({ request }: { request: AccessRequest }) {
 }
 
 function serverNames(request: AccessRequest): string {
+  if (request.resourceType === 'cluster') {
+    return request.clusters.map((c) => c.name ?? 'deleted cluster').join(', ');
+  }
   return request.servers.map((s) => s.name ?? 'deleted server').join(', ');
 }
 

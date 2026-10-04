@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
-import { canAccessServer } from '../../auth/server-access.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { canOnServer, serverDenial } from '../../auth/server-access.js';
 import { SSHBroker } from '../../ssh/broker.js';
 import { getDb } from '../../db/index.js';
 import { servers, sshKeys } from '../../db/schema.js';
@@ -12,7 +12,6 @@ import { vault } from '../../vault/index.js';
 import { startTerminalRecording } from '../../recordings/index.js';
 import { RETIRED_KEY_MESSAGE } from '../../ssh/credentials.js';
 import { dockerCan } from '../../docker/permissions.js';
-import { canAccessCluster } from '../../auth/cluster-access.js';
 import { kubeCan } from '../../kube/permissions.js';
 
 const createSessionSchema = z.object({
@@ -24,17 +23,16 @@ const createSessionSchema = z.object({
 
 export async function sshSessionRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
-  // Every route here opens or drives an interactive shell — viewers are excluded wholesale
-  app.addHook('preHandler', requireRole('operator'));
+  // Every route here opens or drives an interactive shell, which needs `operate` on its
+  // server (custom roles spec §5) — from the base role or a custom role — checked per route
 
   /** POST /api/sessions → create a session and return its WS URL */
   app.post('/', async (req, reply) => {
     const body = createSessionSchema.parse(req.body);
     const db = getDb();
 
-    if (!canAccessServer(req, body.serverId)) {
-      return reply.status(404).send({ error: 'Server not found' });
-    }
+    const denied = serverDenial(req, body.serverId, 'terminal');
+    if (denied) return reply.status(denied.status).send({ error: denied.error });
     const server = db
       .select()
       .from(servers)
@@ -107,12 +105,15 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     // Access may have been withdrawn since the session was opened; re-attaching
     // (e.g. after a page reload) must not outlive the grant.
     const owned = SSHBroker.getSessionForUser(id, req.user.id, req.orgId);
-    // A shell in a container also needs the Docker exec permission still (role, org setting)
-    // …and a shell in a pod the Kubernetes one, plus access to its cluster
-    const refused =
-      (owned?.container && !dockerCan(req, 'exec', owned.server.id)) ||
-      (owned?.pod && (!kubeCan(req, 'exec', owned.pod.clusterId) || !canAccessCluster(req, owned.pod.clusterId)));
-    if ((owned?.server.id && !canAccessServer(req, owned.server.id)) || refused) {
+    // A server shell needs `operate` on the server still; a shell in a container the
+    // Docker exec permission at the caller's level there (role, org setting), and a
+    // shell in a pod the Kubernetes one in the pod's namespace (none there: refused)
+    const refused = owned?.pod
+      ? !kubeCan(req, 'exec', owned.pod.clusterId, owned.pod.namespace)
+      : owned?.container
+        ? !canOnServer(req, owned.server.id, 'view') || !dockerCan(req, 'exec', owned.server.id)
+        : !!owned && !canOnServer(req, owned.server.id, 'terminal');
+    if (refused) {
       await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
       socket.close(4404, 'Session not found');
       return;
@@ -120,7 +121,7 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     await SSHBroker.attach(id, socket, req);
   });
 
-  /** DELETE /api/sessions/:id → close the session */
+  /** DELETE /api/sessions/:id → close the session (only the caller's own; no level needed to end it) */
   app.delete('/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });

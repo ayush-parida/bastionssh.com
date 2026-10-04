@@ -152,10 +152,11 @@ async function logTail(client: KubeClient, namespace: string, pod: string, conta
   }
 }
 
-/** Attach the log tail to crash-loop diagnoses, for members who may read logs. */
+/** Attach the log tail to crash-loop diagnoses, for members who may read logs in the pod's namespace. */
 async function withLogTails(ctx: KubeContext, diagnoses: KubeDiagnosis[], pods: KubeObject[]): Promise<KubeDiagnosis[]> {
-  if (!ctx.permissions.logs) return diagnoses;
-  const crashes = diagnoses.filter((d) => d.id === 'crash-loop' && d.subject.kind === 'Pod' && d.subject.namespace).slice(0, MAX_LOG_TAILS);
+  const crashes = diagnoses
+    .filter((d) => d.id === 'crash-loop' && d.subject.kind === 'Pod' && d.subject.namespace && ctx.permissionsIn(d.subject.namespace).logs)
+    .slice(0, MAX_LOG_TAILS);
   await Promise.all(
     crashes.map(async (d) => {
       const pod = pods.find((p) => p.metadata.name === d.subject.name && p.metadata.namespace === d.subject.namespace);
@@ -262,7 +263,7 @@ export async function kubeGraphRoutes(app: FastifyInstance) {
    * events, collapsed), and per kind the rollout timeline (Deployment) or the
    * lifecycle strip and container lanes (Pod).
    */
-  app.get('/clusters/:id/objects/:resource/:ns/:name/insight', { preHandler: requireKube('view') }, async (req, reply) => {
+  app.get('/clusters/:id/objects/:resource/:ns/:name/insight', { preHandler: requireKube('view', 'param') }, async (req, reply) => {
     const params = insightParams.parse(req.params);
     try {
       const ref = objectRef(params.resource, params.ns, params.name);

@@ -2,7 +2,8 @@ import { and, eq, gt, isNull, or, type SQL } from 'drizzle-orm';
 import type { ClusterGrant } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { memberClusterAccess } from '../db/schema.js';
-import { levelFor } from './access/authorize.js';
+import { authorize, levelFor } from './access/authorize.js';
+import type { ResourceAction } from './access/levels.js';
 import { accessibleIds, filterAccessible } from './access/filter.js';
 import type { AccessSubject } from './access/resolve.js';
 
@@ -43,6 +44,35 @@ export function canAccessCluster(who: AccessSubject, clusterId: string): boolean
 export function clusterNamespaces(who: AccessSubject, clusterId: string): string[] | null | undefined {
   const found = levelFor(who, 'cluster', clusterId);
   return found ? found.namespaces : undefined;
+}
+
+/**
+ * Why the subject may not do `action` on a cluster, for checks inside a
+ * handler; null when they may. With `namespace`, only grants covering that
+ * namespace count; without, the cluster as a whole (where a grant narrowed to
+ * some namespaces gives `view` at most).
+ */
+export function clusterDenial(
+  who: AccessSubject,
+  clusterId: string,
+  action: ResourceAction<'cluster'>,
+  namespace?: string,
+): { status: 403 | 404; error: string } | null {
+  const result = authorize(who, 'cluster', clusterId, action, { namespace });
+  if (result.ok) return null;
+  // A namespace no grant covers is as absent as a cluster they cannot reach
+  if (result.status === 404) return { status: 404, error: namespace === undefined ? 'Cluster not found' : 'Not found' };
+  return { status: 403, error: `This needs ${result.required} access to the cluster (you have ${result.level})` };
+}
+
+/** True when the subject may do `action` on the cluster (in `namespace`, when given). */
+export function canOnCluster(
+  who: AccessSubject,
+  clusterId: string,
+  action: ResourceAction<'cluster'>,
+  namespace?: string,
+): boolean {
+  return authorize(who, 'cluster', clusterId, action, { namespace }).ok;
 }
 
 /** In-memory filter for rows already loaded. */
