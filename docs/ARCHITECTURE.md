@@ -860,7 +860,8 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   server it sees is view-only); rewriting one needs `operate` on the servers of the cron jobs
   that run it. A job: `view` for its history, `operate` to run it now (`POST
   /api/cron-jobs/:id/run`) or switch it on/off, `manage` to edit or delete it; creating,
-  moving or changing what it runs needs `operate` on its server (and on its saved command).
+  moving, changing what it runs, switching it on or running it now also needs `operate` on its
+  server (and on its saved command); switching it off does not.
   Creating either needs `manage` on all of the type. Jobs run as their creator, who must
   still operate the job, its server and its saved command at run time. Scope-`all` operators
   keep their pre-roles rights (edit commands, edit/delete jobs, create both).

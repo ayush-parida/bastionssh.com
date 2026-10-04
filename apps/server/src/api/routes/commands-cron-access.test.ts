@@ -400,6 +400,31 @@ describe('saved commands and cron jobs under custom roles', () => {
       expect(context.cronJobs.map((j: { id: string }) => j.id)).toEqual([j1]);
       expect(context.commands.map((c: { id: string }) => c.id)).toEqual([c1]);
     });
+
+    it('switching a job on or running it now needs operate on its server and saved command', async () => {
+      // roleOp only views s2, and was never granted the command
+      const onViewed = seedJob('on-viewed-server', s2);
+      const hiddenCommand = seedCommand('c-not-granted');
+      const runsHidden = seedJob('runs-hidden-command', s1, users.admin.userId, hiddenCommand);
+      for (const job of [onViewed, runsHidden]) grant({ user: users.roleOp.userId }, 'cron_job', 'operate', job);
+
+      expect((await send('roleOp', 'PATCH', `/api/cron-jobs/${onViewed}`, { enabled: true })).statusCode).toBe(403);
+      expect((await send('roleOp', 'POST', `/api/cron-jobs/${onViewed}/run`)).statusCode).toBe(403);
+      expect((await send('roleOp', 'PATCH', `/api/cron-jobs/${runsHidden}`, { enabled: true })).statusCode).toBe(404);
+      expect((await send('roleOp', 'POST', `/api/cron-jobs/${runsHidden}/run`)).statusCode).toBe(404);
+      for (const job of [onViewed, runsHidden]) {
+        expect(getDb().select().from(cronJobs).where(eq(cronJobs.id, job)).get()?.enabled).toBe(false);
+      }
+
+      // Switching one off stays `operate` on the job alone
+      getDb().update(cronJobs).set({ enabled: true }).where(eq(cronJobs.id, onViewed)).run();
+      expect((await send('roleOp', 'PATCH', `/api/cron-jobs/${onViewed}`, { enabled: false })).statusCode).toBe(200);
+
+      // With operate on the command too, it may be started
+      grant({ user: users.roleOp.userId }, 'saved_command', 'operate', hiddenCommand);
+      expect((await send('roleOp', 'POST', `/api/cron-jobs/${runsHidden}/run`)).statusCode).toBe(202);
+      expect((await send('roleOp', 'PATCH', `/api/cron-jobs/${runsHidden}`, { enabled: true })).statusCode).toBe(200);
+    });
   });
 
   describe('a job runs as its creator only while they can operate it', () => {

@@ -84,6 +84,22 @@ function mayRunOn(req: FastifyRequest, reply: FastifyReply, serverId: string): b
 }
 
 /**
+ * Starting a job — running it now, or switching it on so it runs on schedule —
+ * puts its command on its server, so it needs what running it by hand would:
+ * `operate` on the server and on the saved command it runs. Switching a job
+ * off needs neither. Sends 404 / 403 and returns false when refused.
+ */
+function mayStart(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  job: { serverId: string; savedCommandId: string | null; inlineCommand: string | null },
+): boolean {
+  if (!mayRunOn(req, reply, job.serverId)) return false;
+  if (!job.inlineCommand && job.savedCommandId && !maySchedule(req, reply, job.savedCommandId)) return false;
+  return true;
+}
+
+/**
  * A job in the caller's org that they may see — `view` on the job and on its
  * server — checked at the level `action` needs. Jobs out of sight are reported
  * as not found, like their server. Sends 404 / 403 and returns undefined when
@@ -182,6 +198,16 @@ export async function cronJobRoutes(app: FastifyInstance) {
       body.savedCommandId !== undefined ||
       body.inlineCommand !== undefined;
     if (runsElsewhere && !mayRunOn(req, reply, body.serverId ?? job.serverId)) return reply;
+    // Switching a job on starts it running: the same checks as running it now,
+    // on the job as it will be after this change
+    if (body.enabled === true && !job.enabled) {
+      const after = {
+        serverId: body.serverId ?? job.serverId,
+        savedCommandId: body.savedCommandId ?? (body.inlineCommand ? null : job.savedCommandId),
+        inlineCommand: body.inlineCommand ?? (body.savedCommandId ? null : job.inlineCommand),
+      };
+      if (!mayStart(req, reply, after)) return reply;
+    }
 
     // A bad timezone alone would otherwise be saved and the job never scheduled.
     if (body.schedule || body.timezone) {
@@ -246,13 +272,13 @@ export async function cronJobRoutes(app: FastifyInstance) {
   /**
    * Run a job once now, enabled or not. It runs as its creator like any
    * scheduled run (so the worker's creator check applies); the caller needs
-   * `operate` on the job and on its server.
+   * `operate` on the job, on its server and on the saved command it runs.
    */
   app.post('/:id/run', async (req, reply) => {
     const { id } = req.params as { id: string };
     const job = loadJob(req, reply, id, 'run');
     if (!job) return reply;
-    if (!mayRunOn(req, reply, job.serverId)) return reply;
+    if (!mayStart(req, reply, job)) return reply;
 
     const data = { cronJobId: id, scheduledAt: new Date().toISOString(), manual: true };
     let mode: 'queued' | 'inline' = 'inline';
