@@ -255,7 +255,7 @@ describe('custom roles and resource access', () => {
       vi.clearAllMocks();
       sweepExpiredAccess(new Date(Date.now() + 31 * 60_000));
       expect(levelFor({ orgId, userId: dave.userId }, 'server', db1)).toBeNull();
-      expect(getDb().select().from(roleMembers).where(eq(roleMembers.userId, dave.userId)).all()).toHaveLength(0);
+      expect(getDb().select().from(roleMembers).where(and(eq(roleMembers.userId, dave.userId), eq(roleMembers.roleId, role.id))).all()).toHaveLength(0);
       expect(spies.terminals).toHaveBeenCalledWith(dave.userId, expect.objectContaining({ orgId }));
     });
   });

@@ -1118,7 +1118,7 @@ describe('migration 0023 (custom roles)', () => {
     `);
     db.exec("DELETE FROM memberships WHERE user_id = 'op'");
     expect(db.prepare("SELECT count(*) AS n FROM resource_grants WHERE principal_id = 'op'").get()).toEqual({ n: 0 });
-    expect(db.prepare('SELECT count(*) AS n FROM role_members').get()).toEqual({ n: 0 });
+    expect(db.prepare("SELECT count(*) AS n FROM role_members WHERE user_id = 'op'").get()).toEqual({ n: 0 });
 
     // Role names are unique per org; members once per role; roles go with the org
     expect(() =>
@@ -1221,7 +1221,8 @@ describe('migration 0023 keeps every member’s effective access', () => {
       ]),
     );
 
-    apply(raw, [ROLES_TAG]);
+    // 0023 and every migration after it, which must keep this as it was
+    apply(raw, journal.entries.map((e) => e.tag).filter((t) => t >= ROLES_TAG));
 
     const { canAccessServer, serverScope, filterAccessible } = await import('../auth/server-access.js');
     const { canAccessCluster, clusterScope } = await import('../auth/cluster-access.js');
@@ -1371,5 +1372,166 @@ describe('migration 0024 (provider tags kept apart)', () => {
       { id: 's1', tags: '["cloud:aws","us-east-1","env:prod"]', cloud_tags: '[]' },
       { id: 's2', tags: '["frontend"]', cloud_tags: '[]' },
     ]);
+  });
+});
+
+const UNIFIED_ROLES_TAG = '0025_unified_roles';
+
+describe('migration 0025 (unified roles)', () => {
+  const roleIds = (db: Database.Database, userId: string) =>
+    (db.prepare('SELECT role_id FROM role_members WHERE user_id = ? ORDER BY role_id').all(userId) as { role_id: string }[]).map((r) => r.role_id);
+
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(UNIFIED_ROLES_TAG);
+  });
+
+  it('records the built-in defaults exactly as @smt/shared has them', async () => {
+    const { BUILT_IN_ROLE_DEFAULTS, MODULES_ONLY_DEFAULTS } = await import('@smt/shared');
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    const rows = db.prepare('SELECT * FROM role_defaults ORDER BY key').all() as {
+      key: string;
+      system: string | null;
+      name: string;
+      description: string;
+      module_permissions: string;
+      grant_level: string | null;
+    }[];
+    const expected = [
+      ...Object.entries(BUILT_IN_ROLE_DEFAULTS).map(([system, d]) => ({
+        key: system,
+        system,
+        name: d.name,
+        description: d.description,
+        modules: d.modules,
+        // Owner reaches everything without grants
+        grant_level: system === 'owner' ? 'manage' : d.grantLevel,
+      })),
+      ...Object.entries(MODULES_ONLY_DEFAULTS).map(([base, d]) => ({
+        key: `modules-only:${base}`,
+        system: null,
+        name: d.name,
+        description: d.description,
+        modules: d.modules,
+        grant_level: null,
+      })),
+    ].sort((a, b) => a.key.localeCompare(b.key));
+    expect(rows.map(({ module_permissions, ...r }) => ({ ...r, modules: JSON.parse(module_permissions) }))).toEqual(expected);
+  });
+
+  it('gives every org the built-in roles and every member the role matching their base role and scope', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < UNIFIED_ROLES_TAG));
+    db.exec(`
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o2', 'Two', 'two', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES
+        ('ow', 'ow@x', 'ow', 'now', 'now'), ('ad', 'ad@x', 'ad', 'now', 'now'), ('op', 'op@x', 'op', 'now', 'now'),
+        ('vw', 'vw@x', 'vw', 'now', 'now'), ('opr', 'opr@x', 'opr', 'now', 'now'), ('vwr', 'vwr@x', 'vwr', 'now', 'now'),
+        ('adr', 'adr@x', 'adr', 'now', 'now'), ('odd', 'odd@x', 'odd', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, scope, joined_at) VALUES
+        ('ow', 'o1', 'owner', 'all', 'now'), ('ad', 'o1', 'admin', 'all', 'now'), ('op', 'o1', 'operator', 'all', 'now'),
+        ('vw', 'o1', 'viewer', 'all', 'now'), ('opr', 'o1', 'operator', 'roles', 'now'), ('vwr', 'o1', 'viewer', 'roles', 'now'),
+        ('adr', 'o1', 'admin', 'roles', 'now'), ('odd', 'o1', 'superuser', 'all', 'now'), ('ow', 'o2', 'viewer', 'all', 'now');
+      INSERT INTO roles (id, org_id, name, created_by, created_at, updated_at) VALUES
+        ('c1', 'o1', 'Admin', 'ad', 'now', 'now'), ('c2', 'o1', 'Web team', 'ad', 'now', 'now');
+      INSERT INTO role_members (role_id, user_id, org_id, added_at) VALUES ('c1', 'vwr', 'o1', 'now'), ('c2', 'vwr', 'o1', 'now');
+    `);
+
+    apply(db, [UNIFIED_ROLES_TAG]);
+
+    const builtIns = db.prepare("SELECT org_id, system, name FROM roles WHERE id LIKE 'builtin:%' ORDER BY org_id, system").all();
+    expect(builtIns).toEqual(
+      ['o1', 'o2'].flatMap((org) =>
+        [
+          ['admin', 'Admin'],
+          ['none', 'No access'],
+          ['operator', 'Operator'],
+          ['owner', 'Owner'],
+          ['viewer', 'Viewer'],
+        ].map(([system, name]) => ({ org_id: org, system, name })),
+      ),
+    );
+    // Admin, Operator and Viewer reach every resource of all seven types at their level
+    expect(db.prepare("SELECT principal_id, level, count(*) AS n FROM resource_grants WHERE org_id = 'o1' GROUP BY principal_id, level ORDER BY principal_id").all()).toEqual([
+      { principal_id: 'builtin:o1:admin', level: 'manage', n: 7 },
+      { principal_id: 'builtin:o1:operator', level: 'operate', n: 7 },
+      { principal_id: 'builtin:o1:viewer', level: 'view', n: 7 },
+    ]);
+    expect(roleIds(db, 'ow')).toEqual(['builtin:o1:owner', 'builtin:o2:viewer']);
+    expect(roleIds(db, 'ad')).toEqual(['builtin:o1:admin']);
+    expect(roleIds(db, 'op')).toEqual(['builtin:o1:operator']);
+    expect(roleIds(db, 'vw')).toEqual(['builtin:o1:viewer']);
+    // Role-scoped: the base role's modules without its "All …" grants, plus whatever they held
+    expect(roleIds(db, 'opr')).toEqual(['modules-only:o1:operator']);
+    expect(roleIds(db, 'vwr')).toEqual(['c1', 'c2', 'modules-only:o1:viewer']);
+    // Admins and owners always saw everything; unknown roles counted as viewer
+    expect(roleIds(db, 'adr')).toEqual(['builtin:o1:admin']);
+    expect(roleIds(db, 'odd')).toEqual(['builtin:o1:viewer']);
+    // Generated roles only where someone needs them, with no grants
+    expect(db.prepare("SELECT id, name, system FROM roles WHERE id LIKE 'modules-only:%' ORDER BY id").all()).toEqual([
+      { id: 'modules-only:o1:operator', name: 'Operator (modules only)', system: null },
+      { id: 'modules-only:o1:viewer', name: 'Viewer (modules only)', system: null },
+    ]);
+    expect(db.prepare("SELECT count(*) AS n FROM resource_grants WHERE principal_id LIKE 'modules-only:%'").get()).toEqual({ n: 0 });
+    // A custom role named like a built-in is renamed; custom roles keep null module permissions
+    expect(db.prepare("SELECT id, name, system, module_permissions FROM roles WHERE id IN ('c1', 'c2') ORDER BY id").all()).toEqual([
+      { id: 'c1', name: 'Admin (custom c1)', system: null, module_permissions: null },
+      { id: 'c2', name: 'Web team', system: null, module_permissions: null },
+    ]);
+    expect(db.prepare('SELECT id, default_role_id FROM organizations ORDER BY id').all()).toEqual([
+      { id: 'o1', default_role_id: 'builtin:o1:viewer' },
+      { id: 'o2', default_role_id: 'builtin:o2:viewer' },
+    ]);
+    // memberships.role and scope are kept for old API callers
+    expect(db.prepare("SELECT role, scope FROM memberships WHERE user_id = 'opr'").get()).toEqual({ role: 'operator', scope: 'roles' });
+  });
+
+  it('gives new orgs their built-in roles and keeps roles in step with what old writers put in memberships', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    db.exec(`
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x', 'A', 'now', 'now'), ('u2', 'b@x', 'B', 'now', 'now');
+      INSERT INTO roles (id, org_id, name, created_by, created_at, updated_at) VALUES ('c1', 'o1', 'Web team', 'u1', 'now', 'now');
+    `);
+    expect(db.prepare("SELECT count(*) AS n FROM roles WHERE org_id = 'o1' AND system IS NOT NULL").get()).toEqual({ n: 5 });
+    expect(db.prepare("SELECT default_role_id FROM organizations WHERE id = 'o1'").get()).toEqual({ default_role_id: 'builtin:o1:viewer' });
+
+    // Invited (a plain insert), then restricted the old way (server_access, mirrored to scope by 0023)
+    db.exec("INSERT INTO memberships (user_id, org_id, role, joined_at) VALUES ('u1', 'o1', 'operator', 'now')");
+    expect(roleIds(db, 'u1')).toEqual(['builtin:o1:operator']);
+    db.exec("INSERT INTO role_members (role_id, user_id, org_id, added_at) VALUES ('c1', 'u1', 'o1', 'now')");
+    db.exec("UPDATE memberships SET server_access = 'restricted' WHERE user_id = 'u1'");
+    expect(roleIds(db, 'u1')).toEqual(['c1', 'modules-only:o1:operator']);
+    db.exec("UPDATE memberships SET role = 'viewer' WHERE user_id = 'u1'");
+    expect(roleIds(db, 'u1')).toEqual(['c1', 'modules-only:o1:viewer']);
+    db.exec("UPDATE memberships SET role = 'admin' WHERE user_id = 'u1'");
+    expect(roleIds(db, 'u1')).toEqual(['builtin:o1:admin', 'c1']);
+    db.exec("UPDATE memberships SET role = 'operator', server_access = 'all' WHERE user_id = 'u1'");
+    expect(roleIds(db, 'u1')).toEqual(['builtin:o1:operator', 'c1']);
+
+    // Inserted already restricted: whichever trigger fires first, the row as it ends up decides
+    db.exec("INSERT INTO memberships (user_id, org_id, role, server_access, joined_at) VALUES ('u2', 'o1', 'viewer', 'restricted', 'now')");
+    expect(roleIds(db, 'u2')).toEqual(['modules-only:o1:viewer']);
+    // Writing the same values again changes nothing (expiry and who added stay)
+    db.exec("UPDATE role_members SET added_by = 'kept' WHERE user_id = 'u2'");
+    db.exec("UPDATE memberships SET role = 'viewer', scope = 'roles' WHERE user_id = 'u2'");
+    expect(db.prepare("SELECT added_by FROM role_members WHERE user_id = 'u2'").get()).toEqual({ added_by: 'kept' });
+
+    // Leaving drops every role membership; deleting the org drops its roles
+    db.exec("DELETE FROM memberships WHERE user_id = 'u1'");
+    expect(roleIds(db, 'u1')).toEqual([]);
+    db.exec("DELETE FROM organizations WHERE id = 'o1'");
+    expect(db.prepare('SELECT count(*) AS n FROM roles').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM resource_grants').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (sqlite.prepare('PRAGMA table_info(roles)').all() as { name: string }[]).map((c) => c.name);
+    expect(columns).toEqual(expect.arrayContaining(['system', 'module_permissions']));
+    expect(sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get()).toEqual({ n: journal.entries.length });
   });
 });

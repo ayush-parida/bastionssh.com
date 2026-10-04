@@ -1,9 +1,24 @@
-import { ACCESS_LEVELS, RESOURCE_TYPES, type AccessLevel, type ResourceType, type Role } from '@smt/shared';
+import {
+  ACCESS_LEVELS,
+  BUILT_IN_ROLE_DEFAULTS,
+  MODULE_KEYS,
+  MODULE_LEVELS,
+  MODULES,
+  RESOURCE_TYPES,
+  type AccessLevel,
+  type ModuleDefinition,
+  type ModuleKey,
+  type ModuleLevel,
+  type ModulePermissions,
+  type ResourceType,
+  type Role,
+} from '@smt/shared';
 
 /**
  * Resource levels (custom roles spec §5): their order, what each base role
  * means on a resource, and which level every action needs. One table, so a
- * route asks for an action and never hard-codes a level.
+ * route asks for an action and never hard-codes a level. Module levels
+ * (unified roles spec §3) are at the end.
  */
 
 export function levelRank(level: AccessLevel): number {
@@ -154,3 +169,105 @@ export const RESOURCE_LABELS: Record<ResourceType, string> = {
   saved_command: 'Saved command',
   cron_job: 'Cron job',
 };
+
+// ── Module levels (unified roles spec §3) ─────────────────────────────────────
+
+export function moduleRank(level: ModuleLevel): number {
+  return MODULE_LEVELS.indexOf(level);
+}
+
+export function meetsModuleLevel(level: ModuleLevel | null | undefined, required: ModuleLevel): boolean {
+  return !!level && moduleRank(level) >= moduleRank(required);
+}
+
+export function maxModuleLevel(a: ModuleLevel, b: ModuleLevel): ModuleLevel {
+  return moduleRank(a) >= moduleRank(b) ? a : b;
+}
+
+export function isModuleKey(value: unknown): value is ModuleKey {
+  return typeof value === 'string' && (MODULE_KEYS as readonly string[]).includes(value);
+}
+
+const MODULE_BY_KEY = new Map(MODULES.map((m) => [m.key, m]));
+
+export function moduleDefinition(key: ModuleKey): ModuleDefinition {
+  return MODULE_BY_KEY.get(key)!;
+}
+
+/** A module's highest level: what "everything" is there. */
+export function topModuleLevel(key: ModuleKey): ModuleLevel {
+  const { levels } = moduleDefinition(key);
+  return levels[levels.length - 1]!;
+}
+
+/** `level` as the module can hold it: anything above its highest counts as its highest. */
+export function clampModuleLevel(key: ModuleKey, level: ModuleLevel): ModuleLevel {
+  const top = topModuleLevel(key);
+  return moduleRank(level) > moduleRank(top) ? top : level;
+}
+
+/** Every module at `none`. */
+export function noModules(): Record<ModuleKey, ModuleLevel> {
+  return Object.fromEntries(MODULE_KEYS.map((key) => [key, 'none'])) as Record<ModuleKey, ModuleLevel>;
+}
+
+/** Every module at its highest level (the Owner role). */
+export function allModules(): Record<ModuleKey, ModuleLevel> {
+  return Object.fromEntries(MODULE_KEYS.map((key) => [key, topModuleLevel(key)])) as Record<ModuleKey, ModuleLevel>;
+}
+
+/**
+ * A role's stored module permissions. Unknown modules and levels are dropped
+ * and anything unreadable counts as nothing — never as more.
+ */
+export function parseModulePermissions(raw: string | null | undefined): ModulePermissions {
+  if (!raw) return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const permissions: ModulePermissions = {};
+  for (const [key, level] of Object.entries(value as Record<string, unknown>)) {
+    if (!isModuleKey(key) || typeof level !== 'string' || !(MODULE_LEVELS as readonly string[]).includes(level)) continue;
+    permissions[key] = clampModuleLevel(key, level as ModuleLevel);
+  }
+  return permissions;
+}
+
+/**
+ * The resource module whose level decides whether grants of a type count:
+ * a role with that module at `none` keeps its grants parked (spec §10.4).
+ * Containers are a view over servers and follow the Servers module.
+ */
+export const TYPE_MODULES: Record<ResourceType, ModuleKey> = {
+  server: 'servers',
+  cluster: 'kubernetes',
+  ftp_connection: 'ftp',
+  storage_connection: 'storage',
+  cloud_account: 'cloud',
+  saved_command: 'saved_commands',
+  cron_job: 'cron_jobs',
+};
+
+/**
+ * The base role a set of module levels amounts to, for the routes that still
+ * gate on base roles (`requireRole`, `req.role`) until they move to module
+ * checks: the highest of Admin, Operator and Viewer whose default org-module
+ * levels the member holds every one of (resource modules do not count —
+ * items come from grants). Owners are decided by holding the Owner role, not
+ * here. With every built-in at its defaults this is exactly the member's base
+ * role before unified roles; holding less than Viewer's still counts as
+ * viewer, the least these gates know.
+ */
+export function legacyRoleFor(modules: Record<ModuleKey, ModuleLevel>): Exclude<Role, 'owner'> {
+  const holds = (role: 'admin' | 'operator') =>
+    Object.entries(BUILT_IN_ROLE_DEFAULTS[role].modules).every(
+      ([key, level]) => moduleDefinition(key as ModuleKey).kind === 'resource' || meetsModuleLevel(modules[key as ModuleKey], level),
+    );
+  if (holds('admin')) return 'admin';
+  if (holds('operator')) return 'operator';
+  return 'viewer';
+}

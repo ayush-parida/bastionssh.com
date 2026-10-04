@@ -2,6 +2,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { and, asc, eq, inArray, ne, type SQL } from 'drizzle-orm';
 import { getDb } from '../db/index.js';
 import { memberships, organizations, sessions, ssoProviders } from '../db/schema.js';
+import { isOrgOwner } from './access/modules.js';
 
 /**
  * Where single sign-on constrains a request. Kept apart from the OIDC flow in
@@ -48,9 +49,9 @@ export function orgEnforcesSso(orgId: string): boolean {
     .get();
 }
 
-/** Enforcement applies to this member: everyone but owners. */
-export function ssoRequiredFor(membership: Pick<Membership, 'orgId' | 'role'>): boolean {
-  return membership.role !== 'owner' && orgEnforcesSso(membership.orgId);
+/** Enforcement applies to this member: everyone but holders of the Owner role. */
+export function ssoRequiredFor(membership: Pick<Membership, 'orgId' | 'userId'>): boolean {
+  return orgEnforcesSso(membership.orgId) && !isOrgOwner(membership.orgId, membership.userId);
 }
 
 export type LocalSignIn =

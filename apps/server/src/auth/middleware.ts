@@ -3,6 +3,8 @@ import { touchSession, validateSession } from './session.js';
 import { getDb } from '../db/index.js';
 import { users, memberships, apiTokens, organizations } from '../db/schema.js';
 import { eq, and, asc } from 'drizzle-orm';
+import { resolveAccess } from './access/resolve.js';
+import { isOrgOwner } from './access/modules.js';
 import {
   bearerFrom,
   effectiveRole,
@@ -28,6 +30,10 @@ declare module 'fastify' {
   interface FastifyRequest {
     user: { id: string; email: string; displayName: string };
     orgId: string;
+    /**
+     * @deprecated The base role the caller's module levels amount to (see
+     * `requireRole`); use `moduleLevel` / `requireModule` and resource checks.
+     */
     role: Role;
     /** True when the caller authenticated with an API token rather than a session. */
     viaApiToken: boolean;
@@ -104,8 +110,16 @@ export function rank(role: string): number {
 }
 
 /**
- * Gate a route on a minimum role. Must run after `requireAuth`, which is what
- * populates `req.role` from the caller's membership.
+ * @deprecated Gate on a module (`requireModule`) or a resource
+ * (`requireResource`) instead; this stays until every route has moved.
+ *
+ * Gate a route on a minimum base role. Base roles no longer exist (unified
+ * roles spec §2.1): `req.role` is what the caller's module levels amount to
+ * (`legacyRoleFor` in auth/access/levels.ts — admin when they hold every
+ * org module Admin holds by default, operator likewise, owner when they hold
+ * the Owner role), capped for read-only tokens. With the built-in roles at
+ * their defaults that is exactly the base role they had. Must run after
+ * `requireAuth`.
  *
  *   app.post('/', { preHandler: requireRole('admin') }, handler)
  */
@@ -232,7 +246,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   if (
     session &&
     !ssoOrgId &&
-    membership.role !== 'owner' &&
+    !isOrgOwner(membership.orgId, user.id) &&
     !req.routeOptions.config.ssoExempt &&
     orgEnforcesSso(membership.orgId)
   ) {
@@ -268,10 +282,6 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
     return reply.status(403).send({ error: RECOVERY_ONLY_MESSAGE, code: 'RECOVERY_ONLY' });
   }
 
-  const membershipRole = ROLES.includes(membership.role as Role)
-    ? (membership.role as Role)
-    : 'viewer';
-
   // Role checks only guard routes that ask for one; a read-only token must not
   // change anything even where a viewer session may (profile, own tokens).
   if (scopes && !scopes.includes('write') && !SAFE_METHODS.has(req.method)) {
@@ -280,10 +290,13 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
 
   req.user = { id: user.id, email: user.email, displayName: user.displayName };
   req.orgId = membership.orgId;
-  // A token can only narrow what its owner may do, never widen it.
-  req.role = scopes ? effectiveRole(membershipRole, scopes) : membershipRole;
   req.viaApiToken = scopes !== null;
   req.apiTokenReadOnly = !!scopes && !scopes.includes('write');
+  // What the caller's roles amount to as a base role, for gates not yet on
+  // modules (memberships.role is no longer read). A token can only narrow
+  // what its owner may do, never widen it.
+  const memberRole = resolveAccess(req).role;
+  req.role = scopes ? effectiveRole(memberRole, scopes) : memberRole;
   req.sessionId = session?.id ?? null;
   req.passkeyVerified = session?.passkeyVerified ?? false;
   req.ssoOrgId = ssoOrgId;

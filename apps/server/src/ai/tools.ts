@@ -1,5 +1,5 @@
 import { getDb } from '../db/index.js';
-import { servers, savedCommands, cronJobs, auditLog, memberships, users, kubeClusters } from '../db/schema.js';
+import { servers, savedCommands, cronJobs, auditLog, users, kubeClusters } from '../db/schema.js';
 import { eq, and, desc } from 'drizzle-orm';
 import { SSHBroker, execOnServer } from '../ssh/broker.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
@@ -12,6 +12,7 @@ import {
 } from '../auth/server-access.js';
 import { rank } from '../auth/middleware.js';
 import { cronJobFilter } from '../auth/command-access.js';
+import { resolveAccess } from '../auth/access/resolve.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
 import { permissionsFor } from '../docker/permissions.js';
 import { aiContainerLogs, aiInspect, aiListContainers } from '../docker/ai-tools.js';
@@ -459,12 +460,10 @@ export class ToolExecutor {
     return clusterId;
   }
 
+  /** What the user's roles amount to as a base role (auth/access/levels.ts `legacyRoleFor`), read afresh every call. */
   private memberRole(): string | undefined {
-    return getDb()
-      .select({ role: memberships.role })
-      .from(memberships)
-      .where(and(eq(memberships.userId, this.userId), eq(memberships.orgId, this.orgId)))
-      .get()?.role;
+    const access = resolveAccess({ orgId: this.orgId, userId: this.userId });
+    return access.active ? access.role : undefined;
   }
 
   private canUse(serverId: string): boolean {

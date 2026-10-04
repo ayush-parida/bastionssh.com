@@ -75,6 +75,7 @@ import {
 import { config } from '../../config/index.js';
 import { cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import { activeAt } from '../../auth/access/resolve.js';
+import { customRoleFilter } from '../../auth/access/modules.js';
 import { baseLevel, effectiveAccessList, principalGrants, revokeAfterChange, snapshotAccess } from '../../auth/access/index.js';
 
 const roleSchema = z.enum(ROLES);
@@ -302,6 +303,8 @@ function heldRoles(orgId: string, userIds: string[]): Map<string, HeldRole[]> {
         eq(roleMembers.orgId, orgId),
         inArray(roleMembers.userId, userIds),
         activeAt(roleMembers.expiresAt, new Date().toISOString()),
+        // Built-in roles show as the base role, as before
+        customRoleFilter(),
       ),
     )
     .orderBy(roles.name)

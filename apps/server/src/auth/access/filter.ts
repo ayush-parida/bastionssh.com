@@ -71,7 +71,11 @@ function reach(access: ResolvedAccess, type: ResourceType, minLevel: AccessLevel
  * them). Tag selectors are resolved to the servers carrying the tag now.
  */
 export function accessibleIds(who: AccessSubject, type: ResourceType, minLevel: AccessLevel = 'view'): AccessibleIds {
-  const access = resolveAccess(who);
+  return accessibleIdsFor(resolveAccess(who), type, minLevel);
+}
+
+/** `accessibleIds` with the subject's access already resolved. */
+export function accessibleIdsFor(access: ResolvedAccess, type: ResourceType, minLevel: AccessLevel = 'view'): AccessibleIds {
   const key = `ids:${type}:${minLevel}`;
   const cached = access.memo.get(key) as AccessibleIds | undefined;
   if (cached) return cached;
@@ -138,7 +142,11 @@ export function filterAccessible<T>(
  * (the AI assistant); every action still checks its own resource.
  */
 export function reachesAny(who: AccessSubject, type: ResourceType, minLevel: AccessLevel): boolean {
-  const access = resolveAccess(who);
+  return reachesAnyFor(resolveAccess(who), type, minLevel);
+}
+
+/** `reachesAny` with the subject's access already resolved. */
+export function reachesAnyFor(access: ResolvedAccess, type: ResourceType, minLevel: AccessLevel): boolean {
   if (!access.active) return false;
   // A grant narrowed to no namespace at all covers nothing
   const counts = (list: Contribution[]) =>

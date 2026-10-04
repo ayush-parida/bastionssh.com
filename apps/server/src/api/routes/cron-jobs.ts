@@ -123,7 +123,7 @@ function loadJob(
     return undefined;
   }
   const result = authorize(req, 'cron_job', id, action);
-  if (!result.ok && !(baseRole && baseRoleAllows(req, baseRole))) {
+  if (!result.ok && !(baseRole && baseRoleAllows(req, 'cron_job'))) {
     denyAccess(reply, result, 'Cron job');
     return undefined;
   }

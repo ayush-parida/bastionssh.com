@@ -259,3 +259,383 @@ export interface RequestableAccess {
   roles: RequestableRole[];
   resources: RequestableResource[];
 }
+
+// ── Unified roles and module permissions (unified roles spec §2–§3) ──────────
+
+/**
+ * What a role gives on a module: `none` (off), `view`, `operate` or `manage`,
+ * each implying the ones before it. Not every module uses every level (see
+ * `MODULES`); a level above a module's highest counts as its highest.
+ */
+export type ModuleLevel = 'none' | 'view' | 'operate' | 'manage';
+
+export const MODULE_LEVELS: readonly ModuleLevel[] = ['none', 'view', 'operate', 'manage'];
+
+/**
+ * The modules of the app. Resource modules hold items reached through
+ * resource grants; their level adds features not tied to an item (`manage`:
+ * create items, module-wide settings). Org modules are features of the org.
+ * Team & Access is three modules (members, roles, sign-in & SSO) so an org
+ * can delegate inviting people without editing roles.
+ */
+export type ModuleKey =
+  | 'servers'
+  | 'containers'
+  | 'kubernetes'
+  | 'ftp'
+  | 'storage'
+  | 'cloud'
+  | 'saved_commands'
+  | 'cron_jobs'
+  | 'dashboard'
+  | 'monitoring'
+  | 'diagnostics'
+  | 'ai'
+  | 'recordings'
+  | 'audit'
+  | 'ssh_keys'
+  | 'agents'
+  | 'team_members'
+  | 'team_roles'
+  | 'team_sign_in'
+  | 'settings';
+
+export type ModuleKind = 'resource' | 'org';
+
+export interface ModuleDefinition {
+  key: ModuleKey;
+  label: string;
+  kind: ModuleKind;
+  /** Modules shown together in the role editor (Team & Access). */
+  group?: 'team';
+  /** The levels the module uses, lowest first (`none` is always possible). */
+  levels: readonly Exclude<ModuleLevel, 'none'>[];
+  /** Resource modules: the resource type whose items they hold. */
+  resourceType?: ResourceType;
+  /** What each level allows, in plain words, for the role editor. */
+  hints: Partial<Record<Exclude<ModuleLevel, 'none'>, string>>;
+}
+
+const RESOURCE_LEVELS = ['view', 'operate', 'manage'] as const;
+
+/** The module catalogue (spec §3), in the order the editor and navigation show it. */
+export const MODULES: readonly ModuleDefinition[] = [
+  { key: 'dashboard', label: 'Dashboard', kind: 'org', levels: ['view'], hints: { view: 'Shown, limited to what the member can see' } },
+  {
+    key: 'servers',
+    label: 'Servers',
+    kind: 'resource',
+    resourceType: 'server',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Servers granted to them', operate: 'Servers granted to them', manage: 'Add servers' },
+  },
+  {
+    key: 'containers',
+    label: 'Containers',
+    kind: 'resource',
+    resourceType: 'server',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Containers on their servers', operate: 'Containers on their servers', manage: 'Docker settings' },
+  },
+  {
+    key: 'kubernetes',
+    label: 'Kubernetes',
+    kind: 'resource',
+    resourceType: 'cluster',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Clusters granted to them', operate: 'Clusters granted to them', manage: 'Add clusters, Kubernetes settings' },
+  },
+  {
+    key: 'ftp',
+    label: 'FTP',
+    kind: 'resource',
+    resourceType: 'ftp_connection',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Connections granted to them', operate: 'Connections granted to them', manage: 'Add connections' },
+  },
+  {
+    key: 'storage',
+    label: 'Object Storage',
+    kind: 'resource',
+    resourceType: 'storage_connection',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Connections granted to them', operate: 'Connections granted to them', manage: 'Add connections' },
+  },
+  {
+    key: 'cloud',
+    label: 'Cloud Accounts',
+    kind: 'resource',
+    resourceType: 'cloud_account',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Accounts granted to them', operate: 'Accounts granted to them', manage: 'Add accounts' },
+  },
+  {
+    key: 'saved_commands',
+    label: 'Saved Commands',
+    kind: 'resource',
+    resourceType: 'saved_command',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Commands granted to them', operate: 'Commands granted to them', manage: 'Create commands, edit any they see' },
+  },
+  {
+    key: 'cron_jobs',
+    label: 'Cron Jobs',
+    kind: 'resource',
+    resourceType: 'cron_job',
+    levels: RESOURCE_LEVELS,
+    hints: { view: 'Jobs granted to them', operate: 'Jobs granted to them', manage: 'Create jobs, edit or delete any they see' },
+  },
+  {
+    key: 'monitoring',
+    label: 'Monitoring & Alerts',
+    kind: 'org',
+    levels: ['view', 'operate', 'manage'],
+    hints: { view: 'Alerts of their servers and clusters', operate: 'Acknowledge alerts', manage: 'Alert rules, notification channels' },
+  },
+  {
+    key: 'diagnostics',
+    label: 'DNS Lookup & Diagnostics',
+    kind: 'org',
+    levels: ['view', 'operate'],
+    hints: { view: 'Run lookups', operate: 'Diagnose with a login' },
+  },
+  {
+    key: 'ai',
+    label: 'AI Assistant',
+    kind: 'org',
+    levels: ['view', 'manage'],
+    hints: { view: 'Chat (tools still per resource)', manage: 'AI provider settings' },
+  },
+  {
+    key: 'recordings',
+    label: 'Recordings',
+    kind: 'org',
+    levels: ['view', 'operate', 'manage'],
+    hints: { view: 'Their own recordings', operate: 'All recordings of what they see', manage: 'Delete, retention, recording settings' },
+  },
+  {
+    key: 'audit',
+    label: 'Audit Log',
+    kind: 'org',
+    levels: ['view', 'operate', 'manage'],
+    hints: { view: 'Read the log', operate: 'Export', manage: 'Retention, forwarding' },
+  },
+  {
+    key: 'ssh_keys',
+    label: 'SSH Keys',
+    kind: 'org',
+    levels: ['view', 'operate', 'manage'],
+    hints: { view: 'List keys', operate: 'Use keys in forms', manage: 'Create, import, rotate and delete keys' },
+  },
+  {
+    key: 'agents',
+    label: 'Agents',
+    kind: 'org',
+    levels: ['view', 'manage'],
+    hints: { view: 'List agents and their status', manage: 'Create, revoke and assign agents' },
+  },
+  {
+    key: 'team_members',
+    label: 'Members',
+    kind: 'org',
+    group: 'team',
+    levels: ['view', 'operate'],
+    hints: { view: 'See members', operate: 'Invite, suspend, sign out and reset passwords (members whose roles they hold)' },
+  },
+  {
+    key: 'team_roles',
+    label: 'Roles & access',
+    kind: 'org',
+    group: 'team',
+    levels: ['view', 'manage'],
+    hints: { view: 'See roles and effective access', manage: 'Edit and assign roles, grants, approve access requests' },
+  },
+  {
+    key: 'team_sign_in',
+    label: 'Sign-in & SSO',
+    kind: 'org',
+    group: 'team',
+    levels: ['view', 'manage'],
+    hints: { view: 'See sign-in policy', manage: 'Single sign-on, passkey policy, sign-in security' },
+  },
+  {
+    key: 'settings',
+    label: 'Organization settings',
+    kind: 'org',
+    levels: ['manage'],
+    hints: { manage: 'Org name, default role, Docker and Kubernetes settings' },
+  },
+];
+
+export const MODULE_KEYS: readonly ModuleKey[] = MODULES.map((m) => m.key);
+
+/** A role's module levels; a module left out is `none`. */
+export type ModulePermissions = Partial<Record<ModuleKey, ModuleLevel>>;
+
+/**
+ * The roles every org has (spec §2.2). Owner and No access are locked; Admin,
+ * Operator and Viewer are editable, with "Reset to default" going back to
+ * `BUILT_IN_ROLE_DEFAULTS`. None can be deleted.
+ */
+export type BuiltInRole = 'owner' | 'admin' | 'operator' | 'viewer' | 'none';
+
+export const BUILT_IN_ROLES: readonly BuiltInRole[] = ['owner', 'admin', 'operator', 'viewer', 'none'];
+
+export interface BuiltInRoleDefaults {
+  name: string;
+  description: string;
+  /** Owner and No access cannot be changed. */
+  editable: boolean;
+  modules: ModulePermissions;
+  /** The level of the role's "All …" grant on every resource type; null = none. Owner: everything, always. */
+  grantLevel: AccessLevel | null;
+}
+
+const VIEWER_MODULES: ModulePermissions = {
+  dashboard: 'view',
+  servers: 'view',
+  containers: 'view',
+  kubernetes: 'view',
+  ftp: 'view',
+  storage: 'view',
+  cloud: 'view',
+  saved_commands: 'view',
+  cron_jobs: 'view',
+  // Acknowledging still needs operate on the alert's server, as before
+  monitoring: 'operate',
+  diagnostics: 'view',
+  recordings: 'view',
+  ssh_keys: 'view',
+  team_members: 'view',
+};
+
+const OPERATOR_MODULES: ModulePermissions = {
+  ...VIEWER_MODULES,
+  servers: 'operate',
+  containers: 'operate',
+  kubernetes: 'operate',
+  ftp: 'operate',
+  storage: 'operate',
+  cloud: 'operate',
+  // Operators have always created saved commands and cron jobs, and edited those they see
+  saved_commands: 'manage',
+  cron_jobs: 'manage',
+  diagnostics: 'operate',
+  ai: 'view',
+};
+
+/** Every module at its highest level. */
+const ALL_MODULES: ModulePermissions = Object.fromEntries(
+  MODULES.map((m) => [m.key, m.levels[m.levels.length - 1]]),
+) as ModulePermissions;
+
+/**
+ * What the built-in roles hold by default. These reproduce exactly what the
+ * base roles allowed before unified roles (spec §2.6), so migrating changes
+ * nobody's access; that is why Viewer keeps the org features every member
+ * had (dashboard, alerts, DNS lookups, own recordings, key and member lists).
+ */
+export const BUILT_IN_ROLE_DEFAULTS: Record<BuiltInRole, BuiltInRoleDefaults> = {
+  owner: {
+    name: 'Owner',
+    description: 'Everything, including transferring ownership, backups and deleting the organization',
+    editable: false,
+    modules: ALL_MODULES,
+    grantLevel: 'manage',
+  },
+  admin: {
+    name: 'Admin',
+    description: 'Every module and every resource, managed',
+    editable: true,
+    modules: ALL_MODULES,
+    grantLevel: 'manage',
+  },
+  operator: {
+    name: 'Operator',
+    description: 'Operates every resource; AI Assistant and diagnostics',
+    editable: true,
+    modules: OPERATOR_MODULES,
+    grantLevel: 'operate',
+  },
+  viewer: {
+    name: 'Viewer',
+    description: 'Sees every resource',
+    editable: true,
+    modules: VIEWER_MODULES,
+    grantLevel: 'view',
+  },
+  none: {
+    name: 'No access',
+    description: 'Nothing beyond their own account',
+    editable: false,
+    modules: {},
+    grantLevel: null,
+  },
+};
+
+/**
+ * The roles migration 0025 generated for role-scoped members ("only resources
+ * from roles"): the base role's modules without its "All …" grants. Operators
+ * there could not create saved commands or cron jobs, so those stay `operate`.
+ * Ordinary editable roles once created.
+ */
+export const MODULES_ONLY_DEFAULTS: Record<'operator' | 'viewer', { name: string; description: string; modules: ModulePermissions }> = {
+  operator: {
+    name: 'Operator (modules only)',
+    description: 'Operator features; resources only from other roles and grants',
+    modules: { ...OPERATOR_MODULES, saved_commands: 'operate', cron_jobs: 'operate' },
+  },
+  viewer: {
+    name: 'Viewer (modules only)',
+    description: 'Viewer features; resources only from other roles and grants',
+    modules: VIEWER_MODULES,
+  },
+};
+
+/** One visible module and the member's level there. */
+export interface ModuleAccess {
+  module: ModuleKey;
+  level: Exclude<ModuleLevel, 'none'>;
+}
+
+/** `GET /api/me/modules`: the modules to show the caller (spec §3.1 visibility rule), for navigation. */
+export interface MeModules {
+  modules: ModuleAccess[];
+}
+
+/** A role the caller holds, for `GET /api/me/access`. */
+export interface MeRole {
+  id: string;
+  name: string;
+  /** Set for built-in roles. */
+  system: BuiltInRole | null;
+  color: string | null;
+  expiresAt: string | null;
+}
+
+/** `GET /api/me/access`: what the caller holds and may do, for the web. */
+export interface MeAccess {
+  /** Holds the Owner role (owner-only actions, spec §4.3). */
+  owner: boolean;
+  /** No module is visible: the "ask an admin" home. */
+  noAccess: boolean;
+  /** A read-only API token: every level capped at `view`. */
+  readOnly: boolean;
+  roles: MeRole[];
+  /** The caller's level on every module (union of their roles), whether shown or not. */
+  modules: Record<ModuleKey, ModuleLevel>;
+  /** The modules to show (spec §3.1). */
+  visible: ModuleKey[];
+  /** Per resource type: whether they reach every item, and how many items they reach. */
+  resources: Record<ResourceType, { all: boolean; count: number }>;
+}
+
+/**
+ * Permissions an actor wants to give (assign a role, edit one, grant, approve
+ * a request): the delegation guard (spec §4.2) allows it only when the actor
+ * holds each of them at the same or a higher level.
+ */
+export interface PermissionSet {
+  modules?: ModulePermissions;
+  grants?: Pick<GrantInput, 'resourceType' | 'selector' | 'resourceId' | 'tag' | 'namespaces' | 'level'>[];
+}

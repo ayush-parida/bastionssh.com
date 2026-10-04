@@ -843,7 +843,40 @@ below.
 
 ### 4.17 Custom Roles and the Access Engine (`/server/auth/access`)
 
-Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
+Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`, superseded in part by
+`docs/superpowers/specs/2026-10-04-unified-roles-design.md` (unified roles, below).
+
+**Unified roles (migration 0025, foundation).** There is one kind of role: a named bundle of
+**module permissions** (`roles.module_permissions`, JSON `{module: none|view|operate|manage}`
+over the catalogue `MODULES` in `@smt/shared`, Team & Access split into members / roles /
+sign-in & SSO) and **resource grants**. A member's access is the union of the roles they hold
+and their personal grants. Every org has built-in roles (`roles.system`, ids
+`builtin:<org>:<system>`): Owner (locked, everything — no grants needed), Admin, Operator and
+Viewer (editable; defaults in `BUILT_IN_ROLE_DEFAULTS`, also recorded in the `role_defaults`
+table for the triggers) and No access (locked, empty). 0025 gave every member the built-in
+matching their base role, or for role-scoped operators/viewers a generated "<Base> (modules
+only)" role (`modules-only:<org>:<base>`: the modules without the "All …" grants), so access is
+unchanged (`unified-roles.equivalence.test.ts` proves it against a frozen copy of the 0024
+resolver). `memberships.role` / `scope` are no longer read for decisions; until the team,
+invite and SSO routes assign roles themselves, 0025's triggers turn what they write there into
+the matching built-in role, and new orgs get their built-ins (and Viewer as
+`organizations.default_role_id`). A role's grants count only while that role has the grants'
+resource module on (otherwise they are parked); personal grants while any held role has it
+on; custom roles from before 0025 (`module_permissions` null) turn on the modules of their
+grants at `view`. `modules.ts`: `moduleLevel`, `requireModule(module, level)` (404 when the
+module is off or hidden, 403 below the level), `visibleModules` (a module is shown when on and,
+for a resource module, the member sees an item in it or holds it at `manage`), `isOwner` /
+`isOrgOwner` / `requireOwner` (owner-only actions), and the delegation guard `canGrant` /
+`canAssignRole` (only what the actor holds, per module and per selector: id ⊆ tag ⊆ all,
+namespaces ⊆ theirs; the Owner role only by owners). `GET /api/me/modules` and `GET
+/api/me/access` serve the web. `requireRole` and `req.role` remain, deprecated, as what the
+caller's org-module levels amount to (`legacyRoleFor`: admin when they hold every org module
+Admin holds by default, and so on), until every route gates on modules. The pre-0025
+custom-role routes, held-role lists and access requests see custom roles only
+(`customRoleFilter`); built-in names are reserved.
+
+The rest of this section describes the resource engine as custom roles introduced it; "base
+role" there now means the built-in role a member holds.
 
 - Every member has a base role and a **scope**: `all` (the base role applies to every
   resource, as before) or `roles` (only what their custom roles and personal grants cover;
@@ -1007,10 +1040,10 @@ User         1───* APIToken
 
 ### Key tables
 
-- **organizations** — root tenant scope inside an instance.
+- **organizations** — root tenant scope inside an instance; `default_role_id` is the role new members get.
 - **users** — global; can belong to multiple orgs.
-- **memberships** — `(user_id, org_id, role)`. Role is one of `owner | admin | operator | viewer`. `scope` is `all | roles` (§4.17); `server_access` mirrors it for one release.
-- **roles** — custom roles: `name` (unique per org), `description`, `color`. **role_members** — `(role_id, user_id)`, `expires_at`. **resource_grants** — `principal_type` (`role | user`), `principal_id`, `resource_type` (seven types), `selector` (`id | all | tag`), `resource_id`, `tag`, `namespaces` (clusters), `level` (`view | operate | manage`), `expires_at`, `granted_by`, `reason`.
+- **memberships** — `(user_id, org_id, role)`. Role is one of `owner | admin | operator | viewer`. `scope` is `all | roles` (§4.17); `server_access` mirrors it for one release. Since 0025 role and scope are kept for old API callers only; access comes from role memberships.
+- **roles** — built-in and custom roles: `name` (unique per org), `description`, `color`, `system` (built-ins), `module_permissions` (JSON). **role_defaults** — the built-in defaults (migration 0025). **role_members** — `(role_id, user_id)`, `expires_at`. **resource_grants** — `principal_type` (`role | user`), `principal_id`, `resource_type` (seven types), `selector` (`id | all | tag`), `resource_id`, `tag`, `namespaces` (clusters), `level` (`view | operate | manage`), `expires_at`, `granted_by`, `reason`.
 - **ssh_keys** — `name`, `type`, `public_key`, `encrypted_private_key`, `key_version`, `created_by`.
 - **servers** — `name`, `host`, `port`, `username`, `default_key_id`, `tags[]`, `notes`; cloud-imported ones also `cloud_tags[]` (the provider's tags, display only).
 - **saved_commands** — `server_id` (nullable for org-wide), `name`, `command`, `variables jsonb`, `category`.

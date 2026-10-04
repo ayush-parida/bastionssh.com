@@ -26,6 +26,7 @@ import { audit } from '../../audit/index.js';
 import { MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import type { LiveAccessRevoked } from '../../auth/revoke.js';
 import { activeAt } from '../../auth/access/resolve.js';
+import { customRoleFilter, RESERVED_ROLE_NAMES } from '../../auth/access/modules.js';
 import { baseActions } from '../../auth/command-access.js';
 import {
   draftGrants,
@@ -115,7 +116,7 @@ function findRole(orgId: string, id: string): RoleRow | undefined {
   return getDb()
     .select()
     .from(roles)
-    .where(and(eq(roles.id, id), eq(roles.orgId, orgId)))
+    .where(and(eq(roles.id, id), eq(roles.orgId, orgId), customRoleFilter()))
     .get();
 }
 
@@ -238,7 +239,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
 
   app.get('/roles', { preHandler: requireRole('admin') }, async (req): Promise<CustomRole[]> => {
     const db = getDb();
-    const rows = db.select().from(roles).where(eq(roles.orgId, req.orgId)).orderBy(roles.name).all();
+    const rows = db.select().from(roles).where(and(eq(roles.orgId, req.orgId), customRoleFilter())).orderBy(roles.name).all();
     const ids = rows.map((r) => r.id);
     const counts = new Map(
       ids.length
@@ -264,6 +265,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
   app.post('/roles', { preHandler: requireRole('admin') }, async (req, reply) => {
     const body = createRoleSchema.parse(req.body);
     const db = getDb();
+    if (RESERVED_ROLE_NAMES.has(body.name)) return reply.status(409).send({ error: `${body.name} is a built-in role name` });
     const taken = db
       .select({ id: roles.id })
       .from(roles)
@@ -311,6 +313,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     if (!row) return reply.status(404).send({ error: 'Role not found' });
     const db = getDb();
     if (body.name !== undefined && body.name !== row.name) {
+      if (RESERVED_ROLE_NAMES.has(body.name)) return reply.status(409).send({ error: `${body.name} is a built-in role name` });
       const taken = db
         .select({ id: roles.id })
         .from(roles)

@@ -49,6 +49,7 @@ import { kubeActionRoutes } from './routes/kube-actions.js';
 import { kubePodRoutes } from './routes/kube-pods.js';
 import { kubeFleetRoutes } from './routes/kube-fleet.js';
 import { kubeAiRoutes } from './routes/kube-ai.js';
+import { meRoutes } from './routes/me.js';
 import { untrustedForwardedForHook } from './trust-proxy.js';
 import { HostKeyMismatchError } from '../ssh/host-keys.js';
 
@@ -135,6 +136,7 @@ export async function buildApp() {
   await app.register(teamAccessRoutes, { prefix: '/api/team' });
   await app.register(accessRequestRoutes, { prefix: '/api/access-requests' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });
+  await app.register(meRoutes, { prefix: '/api/me' });
   await app.register(backupRoutes, { prefix: '/api/admin/backups' });
   await app.register(ssoSettingsRoutes, { prefix: '/api/sso' });
   // Unauthenticated: reading and accepting an invite happens before an account exists

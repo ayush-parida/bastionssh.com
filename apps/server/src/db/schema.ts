@@ -243,6 +243,8 @@ export const organizations = sqliteTable('organizations', {
   dockerSettings: text('docker_settings'),
   // Kubernetes permissions JSON {operatorsCanExec, operatorsCanDeletePods, operatorsCanScale, showConfigMapValues, clusterAlerts}; null = defaults (kube/settings.ts)
   kubeSettings: text('kube_settings'),
+  // The role new members get when none is picked (invites, SSO); null = the built-in Viewer
+  defaultRoleId: text('default_role_id'),
   createdAt: text('created_at')
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -660,6 +662,11 @@ export const roles = sqliteTable(
     name: text('name').notNull(),
     description: text('description'),
     color: text('color'),
+    // owner | admin | operator | viewer | none for the built-in roles (id `builtin:<org>:<system>`); null otherwise
+    system: text('system'),
+    // JSON {module: level} (unified roles spec §3); a module left out is `none`. Null for
+    // custom roles from before migration 0025, which enable their grants' resource modules
+    modulePermissions: text('module_permissions'),
     createdBy: text('created_by').notNull(),
     createdAt: text('created_at')
       .notNull()
@@ -673,7 +680,21 @@ export const roles = sqliteTable(
   }),
 );
 
-/** Who holds a custom role. Null expires_at = permanent; past = no longer counts, swept. */
+/**
+ * What the built-in roles (and the roles generated for role-scoped members,
+ * keys `modules-only:<base>`) hold by default, for migration 0025's triggers.
+ * Mirrors BUILT_IN_ROLE_DEFAULTS / MODULES_ONLY_DEFAULTS in @smt/shared.
+ */
+export const roleDefaults = sqliteTable('role_defaults', {
+  key: text('key').primaryKey(),
+  system: text('system'),
+  name: text('name').notNull(),
+  description: text('description').notNull(),
+  modulePermissions: text('module_permissions').notNull(),
+  grantLevel: text('grant_level'),
+});
+
+/** Who holds a role (built-in or custom). Null expires_at = permanent; past = no longer counts, swept. */
 export const roleMembers = sqliteTable(
   'role_members',
   {

@@ -77,7 +77,16 @@ export function levelFor(
   id: string,
   opts: { namespace?: string } = {},
 ): ResourceLevel | null {
-  const access = resolveAccess(who);
+  return levelForAccess(resolveAccess(who), type, id, opts);
+}
+
+/** `levelFor` with the subject's access already resolved. */
+export function levelForAccess(
+  access: ResolvedAccess,
+  type: ResourceType,
+  id: string,
+  opts: { namespace?: string } = {},
+): ResourceLevel | null {
   if (!access.active) return null;
   let tags: string[] = [];
   if (type === 'server') {

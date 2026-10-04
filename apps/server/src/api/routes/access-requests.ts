@@ -39,6 +39,7 @@ import { activeAt } from '../../auth/access/resolve.js';
 import {
   addPersonalGrant,
   baseLevel,
+  customRoleFilter,
   effectiveAccessList,
   isAccessLevel,
   isResourceType,
@@ -502,7 +503,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     const roleRows = db
       .select({ id: roles.id, name: roles.name, description: roles.description, color: roles.color })
       .from(roles)
-      .where(eq(roles.orgId, req.orgId))
+      .where(and(eq(roles.orgId, req.orgId), customRoleFilter()))
       .orderBy(asc(roles.name))
       .all();
     const resources: RequestableAccess['resources'] = [];
@@ -604,7 +605,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         const role = db
           .select({ id: roles.id, name: roles.name })
           .from(roles)
-          .where(and(eq(roles.id, body.roleId), eq(roles.orgId, req.orgId)))
+          .where(and(eq(roles.id, body.roleId), eq(roles.orgId, req.orgId), customRoleFilter()))
           .get();
         if (!role) return reply.status(400).send({ error: 'Unknown role' });
         const held = db
@@ -757,7 +758,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         ? db
             .select({ id: roles.id, name: roles.name })
             .from(roles)
-            .where(and(eq(roles.id, request.roleId), eq(roles.orgId, req.orgId)))
+            .where(and(eq(roles.id, request.roleId), eq(roles.orgId, req.orgId), customRoleFilter()))
             .get()
         : undefined;
       if (!role) return reply.status(409).send({ error: 'The requested role no longer exists' });

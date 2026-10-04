@@ -5,7 +5,6 @@ import { cronJobs, savedCommands } from '../db/schema.js';
 import { authorize, type AuthorizeResult } from './access/authorize.js';
 import { accessibleFilter, accessibleIds } from './access/filter.js';
 import { resolveAccess, type AccessSubject } from './access/resolve.js';
-import { rank, type Role } from './middleware.js';
 
 /**
  * Saved commands and cron jobs (custom roles spec §2.7, §5). Both are
@@ -16,10 +15,10 @@ import { rank, type Role } from './middleware.js';
  * job is visible only with its server and runs, as its creator, only while
  * the creator can operate the job and the server.
  *
- * Members with scope `all` keep exactly what their base role gave before
- * roles existed (spec §2.1): operators could edit saved commands and edit or
- * delete cron jobs, which on a resource is `manage`. Those rights are kept for
- * them here and nowhere else; anything a custom role or grant gives follows §5.
+ * Members with the module at `manage` keep exactly what their base role gave
+ * before roles existed (spec §2.1): operators could edit saved commands and
+ * edit or delete cron jobs, which on a resource is `manage`. Those rights are
+ * kept for them here and nowhere else; anything a grant gives follows §5.
  */
 
 /**
@@ -41,37 +40,44 @@ export function cronJobFilter(who: AccessSubject): SQL | undefined {
   );
 }
 
+/** The module whose `manage` lets a member create and edit every command or job they see. */
+const MODULE_OF = { saved_command: 'saved_commands', cron_job: 'cron_jobs' } as const;
+
 /**
- * True when a scope-`all` member's base role (at least `minimum`) allowed this
- * before custom roles. Read-only API tokens never get it; they read only.
+ * True when the subject has the Saved Commands (or Cron Jobs) module at
+ * `manage`: they create items there, and edit what they see above their
+ * level on it — the actions below. That is what an operator or admin with
+ * scope `all` could do before roles (unified roles spec §6: the built-in
+ * Operator holds both modules at `manage`, the generated "Operator (modules
+ * only)" at `operate`). Read-only API tokens never get it; they read only.
  */
-export function baseRoleAllows(who: AccessSubject, minimum: Role): boolean {
+export function baseRoleAllows(who: AccessSubject, type: 'saved_command' | 'cron_job'): boolean {
   const access = resolveAccess(who);
-  return access.active && access.scope === 'all' && !access.readOnly && rank(access.role) >= rank(minimum);
+  return access.active && !access.readOnly && access.modules[MODULE_OF[type]] === 'manage';
 }
 
 /**
- * What the routes still let a scope-`all` operator do on every saved command
- * or cron job they see, above `operate` (their `baseRole` of `'operator'`).
+ * What the routes let such a member do on every saved command or cron job
+ * they see, above `operate`.
  */
 const BASE_OPERATOR_ACTIONS: Partial<Record<ResourceType, readonly string[]>> = {
   saved_command: ['edit'],
   cron_job: ['edit', 'delete'],
 };
 
-/** Those actions for the subject on `type` — none unless their base role keeps them (for the web's buttons). */
+/** Those actions for the subject on `type` — none unless their module level keeps them (for the web's buttons). */
 export function baseActions(who: AccessSubject, type: ResourceType): string[] {
   const actions = BASE_OPERATOR_ACTIONS[type];
-  return actions && baseRoleAllows(who, 'operator') ? [...actions] : [];
+  return actions && (type === 'saved_command' || type === 'cron_job') && baseRoleAllows(who, type) ? [...actions] : [];
 }
 
 /**
  * May the subject create a saved command or cron job? A new one is managed
  * by whoever made it, so they need `manage` on every resource of the type —
- * or, with scope `all`, the operator role, as before.
+ * or the module at `manage`, as operators had.
  */
 export function mayCreate(who: AccessSubject, type: 'saved_command' | 'cron_job'): boolean {
-  return baseRoleAllows(who, 'operator') || accessibleIds(who, type, 'manage').all;
+  return baseRoleAllows(who, type) || accessibleIds(who, type, 'manage').all;
 }
 
 /** "Not found" or "needs more access", for a decision that did not allow. */

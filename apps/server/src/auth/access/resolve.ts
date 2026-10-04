@@ -2,29 +2,47 @@ import type { FastifyRequest } from 'fastify';
 import { and, eq, gt, inArray, isNull, or, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import {
+  BUILT_IN_ROLES,
   RESOURCE_TYPES,
   type AccessLevel,
   type AccessReason,
-  type MemberScope,
+  type BuiltInRole,
+  type ModuleKey,
+  type ModuleLevel,
   type ResourceType,
   type Role,
 } from '@smt/shared';
 import { getDb } from '../../db/index.js';
 import { memberships, resourceGrants, roleMembers, roles } from '../../db/schema.js';
-import { baseLevel, isAccessLevel, isResourceType, levelRank } from './levels.js';
+import {
+  allModules,
+  isAccessLevel,
+  isResourceType,
+  legacyRoleFor,
+  levelRank,
+  maxModuleLevel,
+  meetsModuleLevel,
+  noModules,
+  parseModulePermissions,
+  TYPE_MODULES,
+} from './levels.js';
 
 /**
- * Everything one member may use, loaded once: their membership (base role,
- * scope, status), the custom roles they hold right now, and every grant in
- * force for them or those roles — three small queries. The rest of the
- * engine (authorize, filter, explain, revoke) answers from this.
+ * Everything one member may use, loaded once: their membership (status), the
+ * roles they hold right now, and every grant in force for them or those
+ * roles — three small queries. The rest of the engine (authorize, filter,
+ * explain, revoke, modules) answers from this.
  *
- * Owners and admins get `manage` on every resource, whatever their scope.
- * Anyone else gets their base role's level on every resource when their
- * scope is `all`, and nothing by default when it is `roles` (spec §8.1).
- * Roles and personal grants add levels on top, never above `manage`.
- * Expired role memberships and grants stop counting at once; the expiry
- * sweep (auth/access-grants.ts) deletes them later.
+ * Unified roles (spec §2, §4.1): a member's access is the union of the roles
+ * they hold — built-in (Owner, Admin, Operator, Viewer, No access) or custom
+ * — and their personal grants. Module levels are the highest any role gives.
+ * A role's grants count only while that role has the grants' resource module
+ * on; with it at `none` they are parked (§10.4). Personal grants count while
+ * any held role has the module on. The Owner role is locked and reaches
+ * everything. Levels never exceed `manage`. Expired role memberships and
+ * grants stop counting at once; the expiry sweep (auth/access-grants.ts)
+ * deletes them later. memberships.role and scope are not read (migration
+ * 0025 turned them into roles).
  *
  * Results are memoized per request (a real request object, for a second at
  * most, so a long-lived WebSocket request does not keep a stale answer).
@@ -39,7 +57,7 @@ export type AccessSubject =
 export interface Subject {
   orgId: string;
   userId: string;
-  /** A read-only API token: every level is capped at `view` (spec §2.9). */
+  /** A read-only API token: every level is capped at `view` (spec §2.7). */
   readOnly: boolean;
 }
 
@@ -63,16 +81,35 @@ export interface TypeAccess {
   byTag: Map<string, Contribution[]>;
 }
 
+/** A role the member holds right now. */
+export interface HeldRoleInfo {
+  id: string;
+  name: string;
+  /** The built-in role it is, if any. */
+  system: BuiltInRole | null;
+  color: string | null;
+  /** When the membership ends; null = permanent. */
+  expiresAt: string | null;
+}
+
 export interface ResolvedAccess {
   orgId: string;
   userId: string;
   /** False when there is no active membership: no access to anything. */
   active: boolean;
+  /** Holds the Owner role: everything, and the owner-only actions (spec §4.3). */
+  owner: boolean;
+  /**
+   * @deprecated The base role these module levels amount to (`legacyRoleFor`),
+   * for gates not yet moved to module checks. Not capped for read-only tokens.
+   */
   role: Role;
-  scope: MemberScope;
-  /** Owner or admin: `manage` everywhere. */
+  /** @deprecated Owner or admin as `role` counts them. */
   orgAdmin: boolean;
   readOnly: boolean;
+  roles: HeldRoleInfo[];
+  /** The union of the roles' module levels, capped at `view` for read-only tokens. */
+  modules: Record<ModuleKey, ModuleLevel>;
   types: Record<ResourceType, TypeAccess>;
   /** Per-type id lists worked out from `types` (filter.ts), kept with the rest of the request's answer. */
   memo: Map<string, unknown>;
@@ -91,9 +128,7 @@ export function activeAt(column: SQLiteColumn, now: string): SQL {
   return or(isNull(column), gt(column, now))!;
 }
 
-const ROLE_NAMES: readonly Role[] = ['viewer', 'operator', 'admin', 'owner'];
-
-function emptyTypes(): Record<ResourceType, TypeAccess> {
+export function emptyTypes(): Record<ResourceType, TypeAccess> {
   return Object.fromEntries(
     RESOURCE_TYPES.map((type) => [type, { every: [], byId: new Map(), byTag: new Map() }]),
   ) as unknown as Record<ResourceType, TypeAccess>;
@@ -117,6 +152,17 @@ function parseNamespaces(raw: string | null): string[] | null | undefined {
   return undefined;
 }
 
+function isBuiltIn(value: string | null): value is BuiltInRole {
+  return value !== null && (BUILT_IN_ROLES as readonly string[]).includes(value);
+}
+
+/** Module levels capped at `view`, for read-only tokens. */
+function capped(modules: Record<ModuleKey, ModuleLevel>): Record<ModuleKey, ModuleLevel> {
+  return Object.fromEntries(
+    Object.entries(modules).map(([key, level]) => [key, level === 'none' ? 'none' : 'view']),
+  ) as Record<ModuleKey, ModuleLevel>;
+}
+
 function load(subject: Subject, now: string): ResolvedAccess {
   const { orgId, userId, readOnly } = subject;
   const db = getDb();
@@ -124,39 +170,33 @@ function load(subject: Subject, now: string): ResolvedAccess {
     orgId,
     userId,
     active: false,
+    owner: false,
     role: 'viewer',
-    scope: 'roles',
     orgAdmin: false,
     readOnly,
+    roles: [],
+    modules: noModules(),
     types: emptyTypes(),
     memo: new Map(),
   };
 
   const membership = db
-    .select({ role: memberships.role, status: memberships.status, scope: memberships.scope })
+    .select({ status: memberships.status })
     .from(memberships)
     .where(and(eq(memberships.userId, userId), eq(memberships.orgId, orgId)))
     .get();
   if (!membership || membership.status !== 'active') return access;
-
-  const role = (ROLE_NAMES as readonly string[]).includes(membership.role) ? (membership.role as Role) : 'viewer';
   access.active = true;
-  access.role = role;
-  access.orgAdmin = role === 'owner' || role === 'admin';
-  // Anything but an explicit `roles` is the default, as before roles existed
-  access.scope = membership.scope === 'roles' && !access.orgAdmin ? 'roles' : 'all';
-
-  if (access.scope === 'all') {
-    const level = baseLevel(role);
-    for (const type of RESOURCE_TYPES) {
-      access.types[type].every.push({ level, reason: { kind: 'base', name: role, level }, namespaces: null });
-    }
-  }
-  // Nothing a role or grant gives can exceed what admins already have
-  if (access.orgAdmin) return access;
 
   const held = db
-    .select({ roleId: roleMembers.roleId, name: roles.name, expiresAt: roleMembers.expiresAt })
+    .select({
+      roleId: roleMembers.roleId,
+      name: roles.name,
+      system: roles.system,
+      color: roles.color,
+      modulePermissions: roles.modulePermissions,
+      expiresAt: roleMembers.expiresAt,
+    })
     .from(roleMembers)
     .innerJoin(roles, eq(roles.id, roleMembers.roleId))
     .where(
@@ -168,8 +208,27 @@ function load(subject: Subject, now: string): ResolvedAccess {
       ),
     )
     .all();
-  const heldById = new Map(held.map((r) => [r.roleId, r]));
+  access.roles = held.map((r) => ({
+    id: r.roleId,
+    name: r.name,
+    system: isBuiltIn(r.system) ? r.system : null,
+    color: r.color,
+    expiresAt: r.expiresAt,
+  }));
 
+  // The Owner role is locked: every module, every resource, whatever else is held
+  if (held.some((r) => r.system === 'owner')) {
+    access.owner = true;
+    access.role = 'owner';
+    access.orgAdmin = true;
+    access.modules = readOnly ? capped(allModules()) : allModules();
+    for (const type of RESOURCE_TYPES) {
+      access.types[type].every.push({ level: 'manage', reason: { kind: 'base', name: 'owner', level: 'manage' }, namespaces: null });
+    }
+    return access;
+  }
+
+  const heldById = new Map(held.map((r) => [r.roleId, { ...r, modules: parseModulePermissions(r.modulePermissions) }]));
   const grants = db
     .select({
       id: resourceGrants.id,
@@ -198,6 +257,27 @@ function load(subject: Subject, now: string): ResolvedAccess {
     )
     .all();
 
+  // A custom role from before module permissions existed (null) turns on, at
+  // `view`, the resource modules of the types it has grants for: what it did then
+  for (const grant of grants) {
+    if (grant.principalType !== 'role' || !isResourceType(grant.resourceType)) continue;
+    const role = heldById.get(grant.principalId);
+    if (!role || role.modulePermissions !== null) continue;
+    const module = TYPE_MODULES[grant.resourceType];
+    role.modules[module] = maxModuleLevel(role.modules[module] ?? 'none', 'view');
+    if (module === 'servers') role.modules.containers = maxModuleLevel(role.modules.containers ?? 'none', 'view');
+  }
+
+  const modules = noModules();
+  for (const role of heldById.values()) {
+    for (const [key, level] of Object.entries(role.modules) as [ModuleKey, ModuleLevel][]) {
+      modules[key] = maxModuleLevel(modules[key], level);
+    }
+  }
+  access.role = legacyRoleFor(modules);
+  access.orgAdmin = access.role === 'admin';
+  access.modules = readOnly ? capped(modules) : modules;
+
   for (const grant of grants) {
     // Anything malformed counts for nothing rather than for too much
     if (!isResourceType(grant.resourceType) || !isAccessLevel(grant.level)) continue;
@@ -208,11 +288,20 @@ function load(subject: Subject, now: string): ResolvedAccess {
     let reason: AccessReason;
     if (grant.principalType === 'role') {
       const viaRole = heldById.get(grant.principalId);
-      if (!viaRole) continue;
+      // Parked: the role has this resource module off
+      if (!viaRole || !meetsModuleLevel(viaRole.modules[TYPE_MODULES[type]], 'view')) continue;
       // The earlier of the membership's and the grant's expiry is when this ends
       const ends = [viaRole.expiresAt, grant.expiresAt].filter((e): e is string => e !== null).sort()[0] ?? null;
+      if (isBuiltIn(viaRole.system) && grant.selector === 'all') {
+        // A built-in role's "All …" grant is what the base role gave before, and reads as it did
+        const base: AccessReason = { kind: 'base', name: viaRole.system, level: grant.level };
+        if (ends) base.expiresAt = ends;
+        access.types[type].every.push({ level: grant.level, reason: base, namespaces });
+        continue;
+      }
       reason = { kind: 'role', name: viaRole.name, roleId: viaRole.roleId, level: grant.level, expiresAt: ends };
     } else if (grant.principalType === 'user') {
+      if (!meetsModuleLevel(modules[TYPE_MODULES[type]], 'view')) continue;
       reason = { kind: 'grant', name: 'personal', grantId: grant.id, level: grant.level, expiresAt: grant.expiresAt };
     } else {
       continue;

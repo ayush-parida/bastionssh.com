@@ -105,7 +105,7 @@ function commandFor(
     return undefined;
   }
   const result = authorize(req, 'saved_command', id, action);
-  if (!result.ok && !(baseRole && baseRoleAllows(req, baseRole))) {
+  if (!result.ok && !(baseRole && baseRoleAllows(req, 'saved_command'))) {
     denyAccess(reply, result, 'Saved command');
     return undefined;
   }
