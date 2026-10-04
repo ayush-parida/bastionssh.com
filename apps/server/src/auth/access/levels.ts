@@ -83,11 +83,12 @@ export const ACTION_LEVELS = {
     configure: 'manage',
     delete: 'manage',
   },
+  // Reading is `view` (browse and download), writing and testing `operate`
   ftp_connection: {
     view: 'view',
-    browse: 'operate',
+    browse: 'view',
+    download: 'view',
     upload: 'operate',
-    download: 'operate',
     rename: 'operate',
     delete_files: 'operate',
     test: 'operate',
@@ -95,16 +96,16 @@ export const ACTION_LEVELS = {
     host_key: 'manage',
     delete: 'manage',
   },
+  // As for FTP: reading is `view` (list and download), writing and testing `operate`
   storage_connection: {
     view: 'view',
     list: 'view',
+    download: 'view',
     upload: 'operate',
-    download: 'operate',
     delete_objects: 'operate',
     // Connectivity checks with the stored credentials, as for FTP and servers
     diagnose: 'operate',
-    // Not in the spec's table: kept with editing the connection, as before (admin)
-    test: 'manage',
+    test: 'operate',
     buckets: 'manage',
     edit: 'manage',
     delete: 'manage',
@@ -141,23 +142,6 @@ export type ResourceAction<T extends ResourceType = ResourceType> = keyof (typeo
 export function requiredLevel<T extends ResourceType>(type: T, action: ResourceAction<T>): AccessLevel {
   const levels = ACTION_LEVELS[type] as Record<string, AccessLevel>;
   return levels[action] ?? 'manage';
-}
-
-/**
- * Actions a member's base role has always allowed at `view` (scope `all`, as
- * before custom roles), below the level the spec's table puts them at: any
- * member could browse and download FTP files and download stored objects.
- * Spec §2.1 keeps scope `all` unchanged, so the base role keeps them; a
- * custom role or personal grant still needs the table's level for them.
- */
-export const BASE_VIEW_ACTIONS: { readonly [T in ResourceType]?: readonly ResourceAction<T>[] } = {
-  ftp_connection: ['browse', 'download'],
-  storage_connection: ['download'],
-};
-
-/** True when the base role alone (at any level) allows `action` on `type`. */
-export function baseAllowsAtView<T extends ResourceType>(type: T, action: ResourceAction<T>): boolean {
-  return ((BASE_VIEW_ACTIONS[type] ?? []) as readonly string[]).includes(action);
 }
 
 /** What the API says a resource of each type is called, for "… not found". */

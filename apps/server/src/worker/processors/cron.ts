@@ -19,8 +19,10 @@ interface CronJobData {
 /**
  * Why the job's creator may not run it now, or null when they may. A job runs
  * as its creator, so they need `operate` on the job, on its server and on the
- * saved command it runs (custom roles spec §2.7) — checked before every run,
- * so losing any of them (a role, a grant, the membership) stops the job.
+ * saved command it runs (custom roles spec §2.7), and must still see the
+ * server that command is bound to, if any (a command is hidden with its
+ * server) — checked before every run, so losing any of them (a role, a grant,
+ * the membership) stops the job.
  */
 export function creatorRefusal(job: {
   id: string;
@@ -37,8 +39,16 @@ export function creatorRefusal(job: {
   if (!authorize(creator, 'cron_job', job.id, 'run').ok) {
     return 'The job creator no longer has access to this cron job';
   }
-  if (!job.inlineCommand && job.savedCommandId && !authorize(creator, 'saved_command', job.savedCommandId, 'run').ok) {
-    return 'The job creator no longer has access to its saved command';
+  if (!job.inlineCommand && job.savedCommandId) {
+    const command = getDb()
+      .select({ serverId: savedCommands.serverId })
+      .from(savedCommands)
+      .where(and(eq(savedCommands.id, job.savedCommandId), eq(savedCommands.orgId, job.orgId)))
+      .get();
+    const visible = !command?.serverId || authorize(creator, 'server', command.serverId, 'view').ok;
+    if (!visible || !authorize(creator, 'saved_command', job.savedCommandId, 'run').ok) {
+      return 'The job creator no longer has access to its saved command';
+    }
   }
   return null;
 }

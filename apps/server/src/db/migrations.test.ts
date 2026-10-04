@@ -1263,6 +1263,72 @@ describe('migration 0023 keeps every member’s effective access', () => {
         if (level !== 'manage') expect(accessibleIds(who, type, 'manage').all, `${userId} manages ${type}`).toBe(false);
       }
     }
+    // FTP/SFTP and storage actions, before custom roles: any member browsed, listed and
+    // downloaded, operators wrote, admins managed (and tested). Since roles, reading is `view`
+    // and testing `operate`, so the legacy "all" grants of restricted viewers and operators give
+    // each member exactly what their role allowed — testing aside, now open to operators.
+    const { authorize, ACTION_LEVELS } = await import('../auth/access/index.js');
+    const { ftpConnections, storageConnections } = await import('./schema.js');
+    const { getDb } = await import('./index.js');
+    getDb()
+      .insert(ftpConnections)
+      .values({ id: 'f1', orgId: 'o1', name: 'f1', host: 'ftp.example.com', username: 'u', encryptedPassword: 'x', createdBy: 'owner' })
+      .run();
+    getDb()
+      .insert(storageConnections)
+      .values({
+        id: 'st1',
+        orgId: 'o1',
+        name: 'st1',
+        provider: 'minio',
+        endpoint: 'http://minio.example.com:9000',
+        accessKeyId: 'a',
+        encryptedSecretAccessKey: 'x',
+        createdBy: 'owner',
+      })
+      .run();
+    const preRoles: Record<'ftp_connection' | 'storage_connection', Record<string, 'viewer' | 'operator' | 'admin'>> = {
+      ftp_connection: {
+        view: 'viewer',
+        browse: 'viewer',
+        download: 'viewer',
+        upload: 'operator',
+        rename: 'operator',
+        delete_files: 'operator',
+        test: 'admin',
+        edit: 'admin',
+        host_key: 'admin',
+        delete: 'admin',
+      },
+      storage_connection: {
+        view: 'viewer',
+        list: 'viewer',
+        download: 'viewer',
+        upload: 'operator',
+        delete_objects: 'operator',
+        diagnose: 'operator',
+        test: 'admin',
+        buckets: 'admin',
+        edit: 'admin',
+        delete: 'admin',
+      },
+    };
+    const rankOf: Record<string, number> = { viewer: 0, operator: 1, admin: 2, owner: 3 };
+    for (const [type, id] of [['ftp_connection', 'f1'], ['storage_connection', 'st1']] as const) {
+      // Every action the engine knows is weighed against the old rule
+      expect(Object.keys(ACTION_LEVELS[type]).sort()).toEqual(Object.keys(preRoles[type]).sort());
+      for (const [userId, role, , status] of members) {
+        for (const [action, needed] of Object.entries(preRoles[type])) {
+          // Testing a connection moved from admins to operators with custom roles
+          const before = action === 'test' ? 'operator' : needed;
+          const allowed = status === 'active' && (rankOf[role] ?? 0) >= (rankOf[before] ?? 0);
+          const result = authorize({ orgId: 'o1', userId }, type, id, action as never);
+          expect(result.ok, `${userId} ${action} on ${type}`).toBe(allowed);
+          // Never found-but-hidden for an active member: they all see every connection
+          expect(result.status, `${userId} ${action} on ${type}`).toBe(allowed ? 200 : status === 'active' ? 403 : 404);
+        }
+      }
+    }
     // Spot checks on the expectations themselves
     expect(expected.get('op-r')).toMatchObject({ servers: ['s1', 's2'], clusters: ['k1'] });
     expect(expected.get('vw-r')).toMatchObject({ servers: ['s4'], clusters: ['k2'] });

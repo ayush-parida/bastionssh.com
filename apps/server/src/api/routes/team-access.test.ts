@@ -37,7 +37,7 @@ import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
 import { auditLog, kubeClusters, memberships, resourceGrants, roleMembers } from '../../db/schema.js';
 import { canAccessServer } from '../../auth/server-access.js';
-import { levelFor } from '../../auth/access/index.js';
+import { accessibleIds, levelFor } from '../../auth/access/index.js';
 import { sweepExpiredAccess } from '../../auth/access-grants.js';
 import { seedOrg, seedServer, seedUser } from './test-utils.js';
 
@@ -297,6 +297,69 @@ describe('custom roles and resource access', () => {
           after: { serverAccess: 'restricted', servers: [{ serverId: web2, expiresAt: null }] },
         }),
       );
+    });
+
+    it('keeps what the old restriction never narrowed when the old endpoint restricts, as migration 0023 did', async () => {
+      const LEGACY = ['cloud_account', 'cron_job', 'ftp_connection', 'saved_command', 'storage_connection'] as const;
+      const legacyAll = (userId: string) =>
+        getDb()
+          .select({ id: resourceGrants.id, resourceType: resourceGrants.resourceType, selector: resourceGrants.selector, level: resourceGrants.level })
+          .from(resourceGrants)
+          .where(and(eq(resourceGrants.principalId, userId), eq(resourceGrants.selector, 'all')))
+          .orderBy(resourceGrants.resourceType)
+          .all();
+      const reaches = (userId: string, level?: 'operate' | 'manage') =>
+        LEGACY.filter((type) => accessibleIds({ orgId, userId }, type, level).all);
+
+      const hana = seedUser(orgId, 'operator');
+      const ivan = seedUser(orgId, 'viewer');
+      for (const who of [hana, ivan]) {
+        const res = await as(admin).put(`/api/team/members/${who.userId}/access`, { serverAccess: 'restricted', serverIds: [web1] });
+        expect(res.statusCode, res.body).toBe(200);
+      }
+      // The same ids as the migration's, so they follow the member's base role
+      expect(legacyAll(hana.userId)).toEqual(
+        LEGACY.map((type) => ({ id: `legacy-all:${type}:${orgId}:${hana.userId}`, resourceType: type, selector: 'all', level: 'operate' })),
+      );
+      expect(legacyAll(ivan.userId).map((g) => g.level)).toEqual(LEGACY.map(() => 'view'));
+      expect(reaches(hana.userId, 'operate')).toEqual([...LEGACY]);
+      expect(reaches(hana.userId, 'manage')).toEqual([]);
+      expect(reaches(ivan.userId)).toEqual([...LEGACY]);
+      expect(reaches(ivan.userId, 'operate')).toEqual([]);
+      // Servers stay narrowed
+      expect(canAccessServer({ orgId, userId: hana.userId }, web1)).toBe(true);
+      expect(canAccessServer({ orgId, userId: hana.userId }, web2)).toBe(false);
+      expect(audits('member.access_change', hana.userId)[0]!.meta).toMatchObject({
+        before: { serverAccess: 'all', legacyAll: [] },
+        after: { serverAccess: 'restricted', legacyAll: LEGACY.map((resourceType) => ({ resourceType, level: 'operate' })) },
+      });
+
+      // Demoted: they follow the base role down
+      expect((await as(admin).patch(`/api/team/members/${hana.userId}`, { role: 'viewer' })).statusCode).toBe(200);
+      expect(reaches(hana.userId, 'operate')).toEqual([]);
+      expect(reaches(hana.userId)).toEqual([...LEGACY]);
+
+      // Saved again while still restricted: an admin's removal of one is not undone
+      getDb().delete(resourceGrants).where(eq(resourceGrants.id, `legacy-all:cron_job:${orgId}:${ivan.userId}`)).run();
+      await as(admin).put(`/api/team/members/${ivan.userId}/access`, { serverAccess: 'restricted', serverIds: [web2] });
+      expect(reaches(ivan.userId)).toEqual(LEGACY.filter((type) => type !== 'cron_job'));
+
+      // Lifted: they go, and the base role covers everything again
+      expect((await as(admin).put(`/api/team/members/${ivan.userId}/access`, { serverAccess: 'all', serverIds: [] })).statusCode).toBe(200);
+      expect(legacyAll(ivan.userId)).toEqual([]);
+      expect(reaches(ivan.userId)).toEqual([...LEGACY]);
+      expect(audits('member.access_change', ivan.userId).at(-1)!.meta).toMatchObject({
+        before: { serverAccess: 'restricted', legacyAll: LEGACY.filter((t) => t !== 'cron_job').map((resourceType) => ({ resourceType, level: 'view' })) },
+        after: { serverAccess: 'all', legacyAll: [] },
+      });
+      // …and restricted again later, they come back whole
+      await as(admin).put(`/api/team/members/${ivan.userId}/access`, { serverAccess: 'restricted', serverIds: [] });
+      expect(reaches(ivan.userId)).toEqual([...LEGACY]);
+
+      // The newer scope switch is default-deny and leaves them to the admin
+      const jo = await roleScoped('operator');
+      expect(legacyAll(jo.userId)).toEqual([]);
+      expect(reaches(jo.userId)).toEqual([]);
     });
 
     it('replaces personal grants at any level, audited, and serves them through the old access endpoint too', async () => {

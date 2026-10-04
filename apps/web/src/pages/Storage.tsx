@@ -402,15 +402,17 @@ export default function StoragePage() {
                   onOpen={setDiagnosing}
                 />
                 <WhoHasAccessButton type="storage_connection" id={c.id} name={c.name} />
+                {access.can(c.id, 'operate') && (
+                  <button
+                    onClick={() => testMutation.mutate(c)}
+                    disabled={testMutation.isPending}
+                    className="text-muted-foreground hover:bg-muted flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+                  >
+                    <PlugZap size={12} /> Test
+                  </button>
+                )}
                 {access.can(c.id, 'manage') && (
                   <>
-                    <button
-                      onClick={() => testMutation.mutate(c)}
-                      disabled={testMutation.isPending}
-                      className="text-muted-foreground hover:bg-muted flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-                    >
-                      <PlugZap size={12} /> Test
-                    </button>
                     <button
                       onClick={() => openEdit(c)}
                       className="text-muted-foreground hover:bg-muted flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium"

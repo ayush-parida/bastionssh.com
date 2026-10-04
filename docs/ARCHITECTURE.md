@@ -862,10 +862,10 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   cluster only through a server they can operate, never through an agent.
 - FTP/SFTP connections, storage connections and cloud accounts: lists are filtered with
   `accessibleFilter`, every by-id route (and FTP/storage diagnostics) is gated with
-  `requireResource` at the §5 level; creating one stays admin-only. The base role (scope
-  `all`) keeps what it always allowed at view — browsing and downloading FTP files,
-  downloading objects (`BASE_VIEW_ACTIONS`) — and pooled FTP sessions are kept where the
-  member may still browse. A manager below admin cannot pick an org SSH key (FTP key auth,
+  `requireResource` at the §5 level; creating one stays admin-only. On FTP/SFTP and storage
+  connections `view` is read-only access (browse, list, download), as viewers had before roles;
+  `operate` writes and tests. Pooled FTP sessions are kept on every connection the member
+  still sees. A manager below admin cannot pick an org SSH key (FTP key auth,
   a cloud account's import key), re-aim a key-auth connection, or send a stored FTP
   password to a new endpoint (or with TLS checks off) without entering it again.
 - Saved commands and cron jobs (`auth/command-access.ts`): seeing one needs `view` on it, and
@@ -877,7 +877,9 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   moving, changing what it runs, switching it on or running it now also needs `operate` on its
   server (and on its saved command); switching it off does not.
   Creating either needs `manage` on all of the type. Jobs run as their creator, who must
-  still operate the job, its server and its saved command at run time; a queued or fanned-out
+  still operate the job, its server and its saved command (and still see the server that
+  command is bound to) at run time. Refusing to rewrite or delete a command in use names no
+  job, and its count only when the caller sees every job using it; a queued or fanned-out
   saved-command run checks whoever started it again when it starts (`commands/run.ts`
   `runnerRefusal`). Scope-`all` operators
   keep their pre-roles rights (edit commands, edit/delete jobs, create both); `GET
@@ -888,7 +890,10 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   The old restriction narrowed servers and clusters only, so 0023 also gives each member it
   made role-scoped (operators and viewers) personal "all" grants on FTP and storage
   connections, cloud accounts, saved commands and cron jobs at their base level (`legacy-all:`
-  ids, following role changes); admins remove them like any other grant.
+  ids, following role changes); admins remove them like any other grant. The old `PUT
+  /team/members/:userId/access` alias does the same when it restricts a member (moves them
+  to scope `roles`) and removes those grants when it lifts the restriction; switching scope
+  through `PATCH /team/members/:userId` stays default-deny.
 - The access-grant expiry sweep also removes expired role memberships and grants and closes
   what they gave.
 - **Servers, clusters and their dependents** gate on the level, not the base role
