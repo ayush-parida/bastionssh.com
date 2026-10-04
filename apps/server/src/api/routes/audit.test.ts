@@ -124,8 +124,8 @@ describe('audit routes', () => {
       expect(recorded).toContainEqual({ format: 'jsonl', filters: { action: 'user.login_failed' } });
     });
 
-    it('is for admins and up', async () => {
-      expect((await get('/api/audit/export', operator.headers)).statusCode).toBe(403);
+    it('is for admins and up: the Audit Log is off (not there) for an operator', async () => {
+      expect((await get('/api/audit/export', operator.headers)).statusCode).toBe(404);
     });
 
     it('csvCell quotes and defuses', () => {
@@ -142,7 +142,7 @@ describe('audit routes', () => {
       const settings = await get('/api/audit/settings', admin.headers);
       expect(settings.statusCode).toBe(200);
       expect(settings.json()).toEqual({ retentionDays: 365, forwarding: null });
-      expect((await get('/api/audit/settings', operator.headers)).statusCode).toBe(403);
+      expect((await get('/api/audit/settings', operator.headers)).statusCode).toBe(404);
 
       expect((await put('/api/audit/settings/retention', { retentionDays: 90 }, admin.headers)).statusCode).toBe(403);
       expect((await put('/api/audit/settings/retention', { retentionDays: 1 }, owner.headers)).statusCode).toBe(400);

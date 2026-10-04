@@ -1,13 +1,15 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import * as oidc from 'openid-client';
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { SsoErrorCode, SsoProviderKind, SsoRole, SsoRoleMapping, SsoTestResult } from '@smt/shared';
 import { getDb } from '../db/index.js';
-import { memberships, ssoLoginStates, ssoProviders, userIdentities, users } from '../db/schema.js';
+import { memberships, roles, ssoLoginStates, ssoProviders, userIdentities, users } from '../db/schema.js';
 import { config } from '../config/index.js';
 import { vault } from '../vault/index.js';
 import { rank } from './middleware.js';
+import { isOrgOwner } from './access/modules.js';
+import { builtInRoleId, memberRoleRows, setMemberRoles, snapshotMembers, type MemberSnapshot } from './access/members.js';
 
 /**
  * OpenID Connect single sign-on, one provider per org.
@@ -88,8 +90,8 @@ export function parseRoleMappings(raw: string): SsoRoleMapping[] {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed
-      .filter((m): m is { group: string; role: string } => typeof m?.group === 'string' && typeof m?.role === 'string')
-      .map((m) => ({ group: m.group, role: asSsoRole(m.role) }));
+      .filter((m): m is { group: string; role: string; roleId?: unknown } => typeof m?.group === 'string' && typeof m?.role === 'string')
+      .map((m) => ({ group: m.group, role: asSsoRole(m.role), ...(typeof m.roleId === 'string' && { roleId: m.roleId }) }));
   } catch {
     return [];
   }
@@ -321,16 +323,72 @@ export function idpAssertsPhishingResistantMfa(provider: SsoProvider, claims: Id
   );
 }
 
-/** The highest role the groups claim maps to; null when no mapping applies. */
-export function mappedRole(provider: SsoProvider, claims: IdTokenClaims): SsoRole | null {
-  if (!provider.groupsClaim) return null;
+/**
+ * The role accounts created on first sign-in get, when the provider names one
+ * (unified roles): `default_role` holds a role id then. Null when it holds a
+ * base role, as before unified roles.
+ */
+export function defaultRoleIdOf(provider: Pick<SsoProvider, 'defaultRole'>): string | null {
+  return SSO_ROLES.includes(provider.defaultRole as SsoRole) ? null : provider.defaultRole;
+}
+
+function claimedGroups(provider: SsoProvider, claims: IdTokenClaims): string[] {
+  if (!provider.groupsClaim) return [];
   const raw = claims[provider.groupsClaim];
-  const groups = Array.isArray(raw) ? raw.filter((g): g is string => typeof g === 'string') : typeof raw === 'string' ? [raw] : [];
+  return Array.isArray(raw) ? raw.filter((g): g is string => typeof g === 'string') : typeof raw === 'string' ? [raw] : [];
+}
+
+/** The highest base role the groups claim maps to (mappings without a role id); null when none applies. */
+export function mappedRole(provider: SsoProvider, claims: IdTokenClaims): SsoRole | null {
+  const groups = claimedGroups(provider, claims);
   let best: SsoRole | null = null;
   for (const m of parseRoleMappings(provider.roleMappings)) {
+    if (m.roleId) continue;
     if (groups.includes(m.group) && (!best || rank(m.role) > rank(best))) best = m.role;
   }
   return best;
+}
+
+/**
+ * Mappings to roles (unified roles): the roles the groups claim gives, and
+ * every role some mapping names — those the IdP manages, given and taken
+ * away with group membership. Roles no mapping names are left alone.
+ */
+export function mappedRoleIds(provider: SsoProvider, claims: IdTokenClaims): { matched: string[]; managed: string[] } {
+  const groups = claimedGroups(provider, claims);
+  const mappings = parseRoleMappings(provider.roleMappings).filter((m) => m.roleId);
+  return {
+    matched: [...new Set(mappings.filter((m) => groups.includes(m.group)).map((m) => m.roleId!))],
+    managed: [...new Set(mappings.map((m) => m.roleId!))],
+  };
+}
+
+/** The org's roles among `ids` that SSO may give: never Owner. */
+function grantableRoleIds(orgId: string, ids: string[]): string[] {
+  if (!ids.length) return [];
+  return getDb()
+    .select({ id: roles.id, system: roles.system })
+    .from(roles)
+    .where(and(eq(roles.orgId, orgId), inArray(roles.id, ids)))
+    .all()
+    .filter((r) => r.system !== 'owner')
+    .map((r) => r.id);
+}
+
+/**
+ * The roles a member SSO adds to the org gets: those the groups claim maps to
+ * (a base role mapping as its built-in role), else the provider's default
+ * role, else the base role it names.
+ */
+function provisionedRoleIds(provider: SsoProvider, role: SsoRole | null, mapped: string[]): string[] {
+  const ids = [...mapped];
+  if (role) {
+    const builtIn = builtInRoleId(provider.orgId, role);
+    if (builtIn) ids.push(builtIn);
+  }
+  if (ids.length) return ids;
+  const fallback = grantableRoleIds(provider.orgId, [defaultRoleIdOf(provider) ?? ''])[0] ?? builtInRoleId(provider.orgId, asSsoRole(provider.defaultRole));
+  return fallback ? [fallback] : [];
 }
 
 export interface SsoAccount {
@@ -344,6 +402,10 @@ export interface SsoAccount {
   /** Re-added to the org, having been removed since the identity was linked. */
   rejoined: boolean;
   roleChange?: { from: string; to: SsoRole };
+  /** Roles the groups claim gave or took away (role mappings), before and after. */
+  rolesChange?: { before: string[]; after: string[] };
+  /** What the member reached before a change of roles, to close what they lost (auth/access/members.ts). */
+  accessBefore?: MemberSnapshot;
 }
 
 function isGoogleIssuer(issuer: string): boolean {
@@ -388,6 +450,8 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
   const db = getDb();
   const now = new Date().toISOString();
   const role = mappedRole(provider, claims);
+  const mapped = mappedRoleIds(provider, claims);
+  const mappedIds = grantableRoleIds(provider.orgId, mapped.matched);
 
   // Synchronous from here on, so the checks and the writes cannot interleave
   // with another sign-in for the same person.
@@ -446,6 +510,7 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
         db.insert(memberships)
           .values({ userId: user.id, orgId: provider.orgId, role: role ?? asSsoRole(provider.defaultRole), joinedAt: now })
           .run();
+        setMemberRoles(provider.orgId, user.id, provisionedRoleIds(provider, role, mappedIds).map((roleId) => ({ roleId, expiresAt: null })), null);
         provisioned = true;
       }
       db.insert(userIdentities)
@@ -474,13 +539,27 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
         joinedAt: now,
       };
       db.insert(memberships).values(membership).run();
+      setMemberRoles(provider.orgId, user.id, provisionedRoleIds(provider, role, mappedIds).map((roleId) => ({ roleId, expiresAt: null })), null);
+      membership = db
+        .select()
+        .from(memberships)
+        .where(and(eq(memberships.userId, user.id), eq(memberships.orgId, provider.orgId)))
+        .get()!;
       rejoined = true;
     }
     if (membership.status !== 'active') throw new SsoError('suspended', 'The membership is suspended', provider, email);
 
     // The groups claim keeps the role in step with the IdP, but never touches an owner
     let roleChange: SsoAccount['roleChange'];
-    if (role && membership.role !== 'owner' && membership.role !== role) {
+    let rolesChange: SsoAccount['rolesChange'];
+    let accessBefore: MemberSnapshot | undefined;
+    const owner = isOrgOwner(provider.orgId, user.id);
+    if (!provisioned && !rejoined && !owner && (role || mapped.managed.length)) {
+      accessBefore = snapshotMembers(provider.orgId, [user.id]);
+    }
+    if (role && !owner && membership.role !== role) {
+      // A base-role mapping, as before unified roles: migration 0025's trigger
+      // turns the member's built-in role into the one for `role`
       roleChange = { from: membership.role, to: role };
       db.update(memberships)
         .set({ role })
@@ -488,12 +567,26 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
         .run();
       membership = { ...membership, role };
     }
+    if (!provisioned && !rejoined && !owner && mapped.managed.length) {
+      const held = memberRoleRows(provider.orgId, [user.id]).get(user.id) ?? [];
+      const managed = new Set(mapped.managed);
+      const next = [
+        ...held.filter((r) => !managed.has(r.roleId)).map((r) => ({ roleId: r.roleId, expiresAt: r.expiresAt })),
+        ...mappedIds.map((roleId) => ({ roleId, expiresAt: null })),
+      ];
+      const names = (list: { roleId: string }[]) => [...new Set(list.map((r) => r.roleId))].sort();
+      if (JSON.stringify(names(held)) !== JSON.stringify(names(next))) {
+        rolesChange = { before: names(held), after: names(next) };
+        setMemberRoles(provider.orgId, user.id, next, null);
+      }
+    }
+    if (!roleChange && !rolesChange) accessBefore = undefined;
 
     db.update(userIdentities)
       .set({ lastLoginAt: now, email })
       .where(and(eq(userIdentities.providerId, provider.id), eq(userIdentities.userId, user.id)))
       .run();
 
-    return { user, membership, email, provisioned, linked, rejoined, roleChange };
+    return { user, membership, email, provisioned, linked, rejoined, roleChange, rolesChange, accessBefore };
   });
 }

@@ -1,11 +1,13 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { SsoLookupResult, SsoSettings, SsoTestResult } from '@smt/shared';
 import { getDb } from '../../db/index.js';
-import { memberships, organizations, sessions, ssoProviders, userIdentities } from '../../db/schema.js';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { memberships, organizations, roles, sessions, ssoProviders, userIdentities } from '../../db/schema.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { canAssignRole, isOrgOwner, requireModule, requireOwner } from '../../auth/access/modules.js';
+import { liveSummary, revokeAfterMemberChange } from '../../auth/access/members.js';
 import { requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { createSession } from '../../auth/session.js';
 import { notifyNewDeviceSignIn, recordSignInDevice } from '../../auth/login-security.js';
@@ -15,6 +17,7 @@ import {
   asSsoRole,
   beginSsoLogin,
   completeSsoLogin,
+  defaultRoleIdOf,
   forgetProviderConfig,
   idpAssertsPhishingResistantMfa,
   issuerProtocolAllowed,
@@ -50,13 +53,22 @@ const providerSchema = z.object({
   clientSecret: z.string().min(1).max(4000).optional(),
   allowedDomains: z.array(domainSchema).min(1).max(50),
   defaultRole: ssoRoleSchema.default('viewer'),
+  /** A role to give new accounts instead of `defaultRole` (unified roles); null or absent: `defaultRole`. */
+  defaultRoleId: z.string().min(1).max(200).nullable().optional(),
   autoProvision: z.boolean().default(false),
   enforceSso: z.boolean().default(false),
   enabled: z.boolean().default(true),
   trustIdpMfa: z.boolean().default(false),
   groupsClaim: z.string().trim().min(1).max(100).nullable().optional(),
   roleMappings: z
-    .array(z.object({ group: z.string().trim().min(1).max(200), role: ssoRoleSchema }))
+    .array(
+      z.object({
+        group: z.string().trim().min(1).max(200),
+        role: ssoRoleSchema.default('viewer'),
+        /** The role this group gives (unified roles); `role` is then ignored. */
+        roleId: z.string().min(1).max(200).optional(),
+      }),
+    )
     .max(50)
     .default([]),
 });
@@ -99,6 +111,7 @@ function toSettings(provider: SsoProvider | undefined, orgSlug: string): SsoSett
     clientId: provider.clientId,
     allowedDomains: parseDomains(provider.allowedDomains),
     defaultRole: asSsoRole(provider.defaultRole),
+    defaultRoleId: defaultRoleIdOf(provider),
     autoProvision: provider.autoProvision,
     enforceSso: provider.enforceSso,
     enabled: provider.enabled,
@@ -153,7 +166,6 @@ function revokeNonSsoLiveAccess(provider: SsoProvider, exceptUserId: string) {
       and(
         eq(memberships.orgId, provider.orgId),
         eq(memberships.status, 'active'),
-        ne(memberships.role, 'owner'),
         ne(memberships.userId, exceptUserId),
         sql`not exists (select 1 from ${sessions} where ${sessions.userId} = ${memberships.userId} and ${sessions.ssoProviderId} = ${provider.id})`,
       ),
@@ -161,6 +173,8 @@ function revokeNonSsoLiveAccess(provider: SsoProvider, exceptUserId: string) {
     .all();
   const total = { members: 0, terminals: 0, sftp: 0, docker: 0, kube: 0, agents: 0 };
   for (const { userId } of members) {
+    // Owners may still sign in without SSO
+    if (isOrgOwner(provider.orgId, userId)) continue;
     const r = revokeLiveAccess(userId, { orgId: provider.orgId });
     if (r.terminals + r.sftp + r.docker + r.kube + r.agents === 0) continue;
     total.members++;
@@ -181,17 +195,54 @@ function mayChangeSso(req: FastifyRequest, reply: FastifyReply): boolean {
   return requireStepUpIfPasskeys(req, reply, req.orgId);
 }
 
-/** Owner-only SSO configuration for the caller's org. */
+/**
+ * The roles SSO is to give, checked: each in the org, never Owner, and one
+ * the configuring member could give themselves (unified roles spec §7: SSO
+ * can only assign roles its configurer could). Sends the error and returns
+ * false when one is not.
+ */
+function ssoRolesAllowed(req: FastifyRequest, reply: FastifyReply, ids: string[]): boolean {
+  const wanted = [...new Set(ids)];
+  if (!wanted.length) return true;
+  const found = getDb()
+    .select({ id: roles.id, system: roles.system })
+    .from(roles)
+    .where(and(eq(roles.orgId, req.orgId), inArray(roles.id, wanted)))
+    .all();
+  if (found.length !== wanted.length) {
+    reply.status(400).send({ error: 'Unknown role' });
+    return false;
+  }
+  if (found.some((r) => r.system === 'owner')) {
+    reply.status(400).send({ error: 'Single sign-on never makes anyone an owner' });
+    return false;
+  }
+  const missing = [...new Set(wanted.flatMap((id) => canAssignRole(req, id).missing))];
+  if (missing.length) {
+    reply.status(403).send({ error: `You cannot let single sign-on give roles you could not: you do not hold ${missing.join('; ')}`, missing });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * SSO configuration for the caller's org: Sign-in & SSO at `manage`, and
+ * owners only, as before unified roles (the built-in Admin holds that level).
+ */
+const OWNER_SSO = [requireModule('team_sign_in', 'manage'), requireOwner()];
+
 export async function ssoSettingsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/', { preHandler: requireRole('owner') }, async (req): Promise<SsoSettings> => {
+  app.get('/', { preHandler: OWNER_SSO }, async (req): Promise<SsoSettings> => {
     return toSettings(providerForOrg(req.orgId), orgSlug(req.orgId));
   });
 
-  app.put('/', { preHandler: requireRole('owner') }, async (req, reply) => {
+  app.put('/', { preHandler: OWNER_SSO }, async (req, reply) => {
     const body = providerSchema.parse(req.body);
     if (!mayChangeSso(req, reply)) return reply;
+    const roleIds = [...(body.defaultRoleId ? [body.defaultRoleId] : []), ...body.roleMappings.flatMap((m) => (m.roleId ? [m.roleId] : []))];
+    if (!ssoRolesAllowed(req, reply, roleIds)) return reply;
 
     if (!issuerProtocolAllowed(new URL(body.issuer))) {
       return reply.status(400).send({ error: 'issuer: must be an https URL' });
@@ -214,7 +265,8 @@ export async function ssoSettingsRoutes(app: FastifyInstance) {
         ? await vault.encrypt(body.clientSecret, id)
         : before!.encryptedClientSecret,
       allowedDomains: JSON.stringify(allowedDomains),
-      defaultRole: body.defaultRole,
+      // A role id when one is named, else the base role as before
+      defaultRole: body.defaultRoleId ?? body.defaultRole,
       autoProvision: body.autoProvision,
       enforceSso: body.enforceSso,
       enabled: body.enabled,
@@ -257,7 +309,10 @@ export async function ssoSettingsRoutes(app: FastifyInstance) {
       clientId: provider.clientId,
       secretChanged: !!body.clientSecret,
       allowedDomains,
-      defaultRole: provider.defaultRole,
+      defaultRole: asSsoRole(provider.defaultRole),
+      defaultRoleId: defaultRoleIdOf(provider),
+      before: before ? { defaultRole: before.defaultRole, roleMappings: parseRoleMappings(before.roleMappings) } : null,
+      after: { defaultRole: provider.defaultRole, roleMappings: parseRoleMappings(provider.roleMappings) },
       autoProvision: provider.autoProvision,
       enforceSso: provider.enforceSso,
       enabled: provider.enabled,
@@ -272,7 +327,7 @@ export async function ssoSettingsRoutes(app: FastifyInstance) {
   });
 
   /** Remove SSO. Its sessions and identity links go with it; members sign in as before. */
-  app.delete('/', { preHandler: requireRole('owner') }, async (req, reply) => {
+  app.delete('/', { preHandler: OWNER_SSO }, async (req, reply) => {
     if (!mayChangeSso(req, reply)) return reply;
     const provider = providerForOrg(req.orgId);
     if (!provider) return reply.status(404).send({ error: 'Single sign-on is not set up' });
@@ -285,7 +340,7 @@ export async function ssoSettingsRoutes(app: FastifyInstance) {
   });
 
   /** Fetch the issuer's discovery document and keys — the saved issuer, or one from the form. */
-  app.post('/test', { preHandler: requireRole('owner') }, async (req, reply): Promise<SsoTestResult | undefined> => {
+  app.post('/test', { preHandler: OWNER_SSO }, async (req, reply): Promise<SsoTestResult | undefined> => {
     const body = testSchema.parse(req.body ?? {});
     const issuer = body.issuer ?? providerForOrg(req.orgId)?.issuer;
     if (!issuer) return reply.status(400).send({ error: 'issuer: Required' });
@@ -390,8 +445,25 @@ export async function publicSsoRoutes(app: FastifyInstance) {
         await audit(req, 'member.join', 'member', user.id, user.email, { role: account.membership.role, via: 'sso' });
       }
       if (account.linked) await audit(req, 'sso.identity_linked', 'user', user.id, user.email, { subject: claims.sub });
+      // A role the groups claim no longer gives: close what it kept open
+      const live = account.accessBefore
+        ? liveSummary(revokeAfterMemberChange(provider.orgId, [user.id], account.accessBefore))
+        : undefined;
       if (account.roleChange) {
-        await audit(req, 'member.role_change', 'member', user.id, user.email, { ...account.roleChange, via: 'sso' });
+        await audit(req, 'member.role_change', 'member', user.id, user.email, {
+          ...account.roleChange,
+          before: { role: account.roleChange.from },
+          after: { role: account.roleChange.to },
+          via: 'sso',
+          ...(live && !account.rolesChange && { live }),
+        });
+      }
+      if (account.rolesChange) {
+        await audit(req, 'member.roles_change', 'member', user.id, user.email, {
+          ...account.rolesChange,
+          via: 'sso',
+          ...(live && { live }),
+        });
       }
       await audit(req, 'user.login_sso', 'user', user.id, user.email, {
         method: 'sso',

@@ -111,7 +111,7 @@ export async function notificationRoutes(app: FastifyInstance) {
     email: emailAvailable(),
   }));
 
-  app.get('/channels', async (req) => {
+  app.get('/channels', { preHandler: requireModule('monitoring', 'view') }, async (req) => {
     return getDb()
       .select(publicColumns)
       .from(notificationChannels)

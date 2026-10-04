@@ -1,26 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  canGrantRole,
-  emailsMatch,
-  generateInviteToken,
-  inviteExpiry,
-  inviteState,
-  maskEmail,
-  wouldOrphanOrg,
-} from './invite.js';
-
-describe('canGrantRole', () => {
-  it('lets an owner grant anything', () => {
-    expect(canGrantRole('owner', 'owner')).toBe(true);
-    expect(canGrantRole('owner', 'viewer')).toBe(true);
-  });
-
-  it('stops an admin minting an owner — the privilege-escalation path', () => {
-    expect(canGrantRole('admin', 'owner')).toBe(false);
-    expect(canGrantRole('admin', 'admin')).toBe(true);
-    expect(canGrantRole('admin', 'operator')).toBe(true);
-  });
-});
+import { emailsMatch, generateInviteToken, inviteExpiry, inviteState, maskEmail } from './invite.js';
 
 describe('inviteState', () => {
   const now = new Date('2026-01-10T00:00:00.000Z');
@@ -42,34 +21,6 @@ describe('inviteState', () => {
 
   it('issues expiry in the future', () => {
     expect(new Date(inviteExpiry(now)).getTime()).toBeGreaterThan(now.getTime());
-  });
-});
-
-describe('wouldOrphanOrg', () => {
-  const members = [
-    { userId: 'u1', role: 'owner' },
-    { userId: 'u2', role: 'admin' },
-  ];
-
-  it('blocks demoting the only owner', () => {
-    expect(wouldOrphanOrg(members, 'u1', 'admin')).toBe(true);
-  });
-
-  it('blocks removing the only owner', () => {
-    expect(wouldOrphanOrg(members, 'u1', null)).toBe(true);
-  });
-
-  it('allows changing a non-owner', () => {
-    expect(wouldOrphanOrg(members, 'u2', 'viewer')).toBe(false);
-  });
-
-  it('allows demoting one owner when another remains', () => {
-    const two = [...members, { userId: 'u3', role: 'owner' }];
-    expect(wouldOrphanOrg(two, 'u1', 'admin')).toBe(false);
-  });
-
-  it('treats an owner staying an owner as harmless', () => {
-    expect(wouldOrphanOrg(members, 'u1', 'owner')).toBe(false);
   });
 });
 

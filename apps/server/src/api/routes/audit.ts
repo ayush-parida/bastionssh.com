@@ -3,7 +3,8 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import type { AuditForwardingInfo, AuditLogEntry, AuditSettings } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule, requireOwner } from '../../auth/access/modules.js';
 import { requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { getDb } from '../../db/index.js';
 import { auditForwarders, auditLog, organizations, users } from '../../db/schema.js';
@@ -195,10 +196,17 @@ function sendUnsafe(reply: FastifyReply, err: unknown) {
   throw err;
 }
 
+/**
+ * Retention and forwarding are the Audit Log at `manage` (unified roles spec
+ * §3.2) and stay with owners, as before unified roles: the built-in Admin
+ * holds that level, and deleting or copying out history was never theirs.
+ */
+const OWNER_AUDIT_SETTINGS = [requireModule('audit', 'manage'), requireOwner()];
+
 export async function auditRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/', { preHandler: requireRole('admin') }, async (req) => {
+  app.get('/', { preHandler: requireModule('audit', 'view') }, async (req) => {
     const db = getDb();
     const { page, limit, ...filters } = listSchema.parse(req.query);
     const offset = (page - 1) * limit;
@@ -235,7 +243,7 @@ export async function auditRoutes(app: FastifyInstance) {
   });
 
   /** The whole (filtered) log as CSV or JSON Lines, oldest first, streamed. */
-  app.get('/export', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.get('/export', { preHandler: requireModule('audit', 'operate') }, async (req, reply) => {
     const { format, ...filters } = exportSchema.parse(req.query);
     const where = filterConditions(req.orgId, filters);
     const org = getDb().select({ slug: organizations.slug }).from(organizations).where(eq(organizations.id, req.orgId)).get();
@@ -258,7 +266,7 @@ export async function auditRoutes(app: FastifyInstance) {
       .send(body);
   });
 
-  app.get('/settings', { preHandler: requireRole('admin') }, async (req): Promise<AuditSettings> => {
+  app.get('/settings', { preHandler: requireModule('audit', 'manage') }, async (req): Promise<AuditSettings> => {
     const db = getDb();
     const org = db
       .select({ retentionDays: organizations.auditRetentionDays })
@@ -270,7 +278,7 @@ export async function auditRoutes(app: FastifyInstance) {
   });
 
   /** How long audit rows are kept. Shortening it deletes history, so it takes a passkey when there is one. */
-  app.put('/settings/retention', { preHandler: requireRole('owner') }, async (req, reply) => {
+  app.put('/settings/retention', { preHandler: OWNER_AUDIT_SETTINGS }, async (req, reply) => {
     const { retentionDays } = z
       .object({ retentionDays: z.number().int().min(MIN_AUDIT_RETENTION_DAYS).max(MAX_AUDIT_RETENTION_DAYS) })
       .parse(req.body);
@@ -297,7 +305,7 @@ export async function auditRoutes(app: FastifyInstance) {
    * must resolve to a public address unless the operator allowed its network.
    * A new target starts from now: existing history is not replayed.
    */
-  app.put('/forwarding', { preHandler: requireRole('owner') }, async (req, reply): Promise<AuditForwardingInfo> => {
+  app.put('/forwarding', { preHandler: OWNER_AUDIT_SETTINGS }, async (req, reply): Promise<AuditForwardingInfo> => {
     const input = forwardingSchema.parse(req.body);
     if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
     const db = getDb();
@@ -364,7 +372,7 @@ export async function auditRoutes(app: FastifyInstance) {
     return toForwardingInfo(row);
   });
 
-  app.delete('/forwarding', { preHandler: requireRole('owner') }, async (req, reply) => {
+  app.delete('/forwarding', { preHandler: OWNER_AUDIT_SETTINGS }, async (req, reply) => {
     if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return reply;
     const db = getDb();
     const existing = db.select().from(auditForwarders).where(eq(auditForwarders.orgId, req.orgId)).get();
@@ -380,7 +388,7 @@ export async function auditRoutes(app: FastifyInstance) {
   /** Send one test event now and report whether the target took it. */
   app.post(
     '/forwarding/test',
-    { preHandler: requireRole('owner'), config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    { preHandler: OWNER_AUDIT_SETTINGS, config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
     async (req, reply) => {
       const db = getDb();
       const row = db.select().from(auditForwarders).where(eq(auditForwarders.orgId, req.orgId)).get();

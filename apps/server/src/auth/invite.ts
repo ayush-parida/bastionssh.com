@@ -1,6 +1,4 @@
 import { randomBytes } from 'crypto';
-import type { Role } from './middleware.js';
-import { rank } from './middleware.js';
 
 export const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -49,26 +47,4 @@ export function inviteState(
   if (invite.acceptedAt) return 'accepted';
   if (new Date(invite.expiresAt) <= now) return 'expired';
   return 'valid';
-}
-
-/**
- * Nobody may hand out more authority than they hold — an admin cannot mint an
- * owner. Without this, `requireRole('admin')` on the invite route would be a
- * one-step path to the top of the org.
- */
-export function canGrantRole(actorRole: Role, targetRole: Role): boolean {
-  return rank(targetRole) <= rank(actorRole);
-}
-
-/** The org must never lose its last owner, by demotion or removal. */
-export function wouldOrphanOrg(
-  members: { userId: string; role: string }[],
-  targetUserId: string,
-  nextRole: Role | null,
-): boolean {
-  const owners = members.filter((m) => m.role === 'owner');
-  const targetIsOwner = owners.some((m) => m.userId === targetUserId);
-  if (!targetIsOwner) return false;
-  if (nextRole === 'owner') return false;
-  return owners.length <= 1;
 }

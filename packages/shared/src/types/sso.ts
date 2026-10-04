@@ -9,7 +9,10 @@ export type SsoRole = Exclude<Role, 'owner'>;
 export interface SsoRoleMapping {
   /** A value of the configured groups claim, matched exactly. */
   group: string;
+  /** A base role, as before unified roles: its built-in role. Ignored when `roleId` is set. */
   role: SsoRole;
+  /** Unified roles: the role this group gives (never Owner). */
+  roleId?: string;
 }
 
 /** GET /sso: the org's provider as its owner sees it. The client secret never leaves the server. */
@@ -20,6 +23,8 @@ export interface SsoProviderConfig {
   clientId: string;
   allowedDomains: string[];
   defaultRole: SsoRole;
+  /** Unified roles: the role accounts created on first sign-in get, when one is set instead of `defaultRole`. */
+  defaultRoleId?: string | null;
   /** Create accounts for unknown users from an allowed domain on their first sign-in. */
   autoProvision: boolean;
   /** Members other than owners must sign in with SSO. */
@@ -45,6 +50,8 @@ export interface SsoProviderInput {
   clientSecret?: string;
   allowedDomains: string[];
   defaultRole: SsoRole;
+  /** Unified roles: a role to give instead of `defaultRole` (never Owner); null goes back to `defaultRole`. */
+  defaultRoleId?: string | null;
   autoProvision: boolean;
   enforceSso: boolean;
   enabled: boolean;

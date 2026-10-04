@@ -871,8 +871,7 @@ for a resource module, the member sees an item in it or holds it at `manage`), `
 namespaces ⊆ theirs; the Owner role only by owners). `GET /api/me/modules` and `GET
 /api/me/access` serve the web. `requireRole` and `req.role` remain, deprecated, as what the
 caller's org-module levels amount to (`legacyRoleFor`: admin when they hold every org module
-Admin holds by default, and so on), until every route gates on modules. The pre-0025
-custom-role routes, held-role lists and access requests see custom roles only
+Admin holds by default, and so on), until every route gates on modules. Access requests ask for custom roles only
 (`customRoleFilter`); built-in names are reserved.
 
 **Resource and feature modules on module gates.** Every route of Servers (terminal sessions,
@@ -899,6 +898,42 @@ and `revokeAfterChange` ends AI chat and Explain streams once a member's AI Assi
 off.
 `resource-modules.test.ts` walks the app's route table to prove No access (and parked grants)
 get 404 on every one of these routes, and holds the module × level matrix.
+
+**Unified roles: org modules and Team & Access.** Audit log, SSH keys, agents, notification
+channels (Monitoring at `manage`), AI provider settings (AI at `manage`), backups (Settings at
+`manage` + owner) and every Team & Access route gate on `requireModule` (§3.2 levels): Members
+(`team_members`: list at `view`; invite, suspend, reactivate, sign out, password and passkey
+resets, remove at `operate`), Roles & access (`team_roles`: roles, the checker and requests at
+`view`; editing and assigning roles, grants, approving requests at `manage`) and Sign-in & SSO
+(`team_sign_in`). What was owner-only stays so on top of the module (`requireOwner`: passkey and
+backup-code policy, SSO, audit retention and forwarding, backups), because the built-in Admin
+holds those modules at `manage`. `auth/access/members.ts` weighs members against each other:
+`outranks` (the target's permissions within the actor's — `below` also needs the actor to hold
+something the target does not, owners act on owners, nobody resets an owner; with the built-ins
+at their defaults exactly the old base-role order), `changeMemberRoles` (delegation guard on every
+role given or taken away, for as long; taking away a built-in or "(modules only)" role needs
+`below`; the org keeps a permanent active owner; a change of built-in role that moves the level of
+the member's mirrored `legacy-` grants needs the actor to hold those grants at the higher level),
+`setMemberRoles` (also writes the base role their built-in or "(modules only)" role stands for —
+`baseRoleOf`, never raised by a custom role — and the scope into `memberships.role` / `scope`,
+which 0023's and 0025's triggers and old API callers still read) and `revokeAfterMemberChange` (resources as `revokeAfterChange`, plus
+AI streams, Docker and Kubernetes streams and shells when those modules drop).
+`PUT /team/members/:id/roles` assigns several roles (none: No access); the old `PATCH
+/team/members/:id` (base role, scope) and `PUT …/access` map onto the built-in or "(modules
+only)" role, and `PUT …/access` weighs each server or cluster it adds or drops with `canGrant`.
+Taking a module level or grant from a built-in or "(modules only)" role needs the actor to be
+`below`-above every other member holding it (no admin strips fellow admins by editing Admin), and
+the role new members get (org or SSO default) cannot be deleted. `/team/roles` lists every role (built-ins first), creates and edits module levels
+and grants, `POST …/reset` puts Admin/Operator/Viewer back to `BUILT_IN_ROLE_DEFAULTS`, `POST
+…/clone` copies any role; Owner and No access are locked and built-ins are never deleted or
+renamed. Every write passes `canGrant` / `canAssignRole` for what it gives or takes away and is
+audited with before, after and how the guard allowed it. Invites carry role ids
+(`invites.role`: a base role name or a JSON id list; none = `GET/PUT /team/default-role`, which
+Settings at `manage` sets to a role the actor could give; an empty list, or one whose roles are
+all deleted by acceptance, is No access). SSO's default role and group
+mappings may name role ids (never Owner; only roles the configurer could give); roles a mapping
+names are managed by the IdP and follow the groups claim at each sign-in. Access-request
+approval needs the approver to hold the role or level for as long.
 
 The rest of this section describes the resource engine as custom roles introduced it; "base
 role" there now means the built-in role a member holds.

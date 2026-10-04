@@ -4,7 +4,8 @@ import { and, count, desc, eq, isNotNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { Agent, CreatedAgent } from '@smt/shared';
 import { AGENT_PORTS_HEADER, AGENT_VERSION_HEADER, AgentCloseCode, parsePortList } from '@smt/agent';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { getDb } from '../../db/index.js';
 import { agents, servers } from '../../db/schema.js';
@@ -50,12 +51,13 @@ function serverCounts(orgId: string): Map<string, number> {
 }
 
 /**
- * Admin management of connectivity agents: create (the token and install
- * command are shown once), list with live status, revoke.
+ * Connectivity agents (unified roles spec §3.2): list with live status at
+ * `view`; create (the token and install command are shown once) and revoke
+ * at `manage`.
  */
 export async function agentRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
-  app.addHook('preHandler', requireRole('admin'));
+  app.addHook('preHandler', requireModule('agents', 'view'));
 
   app.get('/', async (req) => {
     const counts = serverCounts(req.orgId);
@@ -68,7 +70,7 @@ export async function agentRoutes(app: FastifyInstance) {
       .map((row) => agentView(row, counts.get(row.id) ?? 0));
   });
 
-  app.post('/', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
+  app.post('/', { preHandler: requireModule('agents', 'manage'), config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (req, reply) => {
     const body = createAgentSchema.parse(req.body);
     // An agent token is a standing credential into the org's network: as with
     // other credentials, a passkey holder must have used it for this session.
@@ -94,7 +96,7 @@ export async function agentRoutes(app: FastifyInstance) {
   });
 
   /** Revoke for good: the token stops working and a live connection is dropped. */
-  app.post('/:id/revoke', async (req, reply) => {
+  app.post('/:id/revoke', { preHandler: requireModule('agents', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const row = db
