@@ -248,6 +248,17 @@ export function forgetAccess(req: object): void {
   memo.delete(req);
 }
 
+/**
+ * What a contribution gives on a resource as a whole. A cluster grant narrowed
+ * to some namespaces gives its level in those namespaces only (ask with a
+ * namespace); on the cluster as a whole — cordoning nodes, its settings, the
+ * Kubernetes matrix read for the cluster — it makes the cluster visible and no
+ * more, so a namespace-narrowed `manage` never becomes `manage` everywhere.
+ */
+export function wholeResource(c: Contribution): Contribution {
+  return c.namespaces !== null && c.level !== 'view' ? { ...c, level: 'view' } : c;
+}
+
 /** The highest level among `contributions`, capped at `view` for read-only tokens. Null when there are none. */
 export function topLevel(access: ResolvedAccess, contributions: Contribution[]): AccessLevel | null {
   let best: AccessLevel | null = null;

@@ -348,6 +348,28 @@ describe('access engine', () => {
       const opReq = { orgId, role: 'operator' as const, user: { id: op.userId, email: '', displayName: '' } };
       expect(permissionsFor(opReq, s2).inspect).toBe(false);
     });
+
+    it('gives a namespace-narrowed grant no more than view on the cluster as a whole', () => {
+      const member = seedUser(orgId, 'viewer');
+      restrict(member.userId);
+      const k = cluster('kube-narrow');
+      grant({ user: member.userId }, { resourceType: 'cluster', resourceId: k, level: 'manage', namespaces: JSON.stringify(['shop']) });
+      const req = { orgId, role: 'viewer' as const, user: { id: member.userId, email: '', displayName: '' } };
+
+      // Full level inside the namespace…
+      expect(levelFor(who(member.userId), 'cluster', k, { namespace: 'shop' })?.level).toBe('manage');
+      // …but cordoning nodes or editing the cluster is not a namespace's to give
+      expect(levelFor(who(member.userId), 'cluster', k)?.level).toBe('view');
+      expect(authorize(who(member.userId), 'cluster', k, 'cordon').status).toBe(403);
+      expect(kubePermissionsFor(req, k)).toEqual(kubePermissions('viewer', kubeSettings(orgId)));
+      expect(accessibleIds(who(member.userId), 'cluster')).toEqual({ all: false, ids: [k] });
+      expect(accessibleIds(who(member.userId), 'cluster', 'operate')).toEqual({ all: false, ids: [] });
+
+      // A whole-cluster grant alongside still counts in full
+      grant({ user: member.userId }, { resourceType: 'cluster', resourceId: k, level: 'operate' });
+      expect(levelFor(who(member.userId), 'cluster', k)?.level).toBe('operate');
+      expect(accessibleIds(who(member.userId), 'cluster', 'operate')).toEqual({ all: false, ids: [k] });
+    });
   });
 
   describe('revocation', () => {

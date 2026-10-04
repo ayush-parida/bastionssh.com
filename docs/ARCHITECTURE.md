@@ -850,7 +850,10 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   sessions are kept per connection.
 - `auth/server-access.ts` and `auth/cluster-access.ts` keep their exports as wrappers. The
   Docker and Kubernetes matrices are read at the caller's level on the server or cluster in
-  the route (`operate` as operator with the org toggles, `manage` as admin).
+  the route (`operate` as operator with the org toggles, `manage` as admin). A cluster grant
+  narrowed to namespaces gives its level in those namespaces only; on the cluster as a whole
+  (no namespace asked) it gives `view` at most. A cluster manager below admin may re-route the
+  cluster only through a server they can operate, never through an agent.
 - Until the team and access-request routes write `resource_grants` themselves, triggers from
   migration 0023 mirror `member_server_access` / `member_cluster_access` into personal grants
   (at the member's base-role level, following role changes) and `server_access` into `scope`.

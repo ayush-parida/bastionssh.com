@@ -12,7 +12,8 @@ import type {
   KubeTestResult,
   KubeconfigSummary,
 } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { authorize } from '../../auth/access/authorize.js';
 import { filterAccessibleClusters } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
@@ -302,6 +303,31 @@ async function connectionFor(req: FastifyRequest, body: ClusterInput, existing: 
   };
 }
 
+/**
+ * A cluster's `manage` level may come from a custom role rather than the
+ * admin base role (custom roles spec §5). Such a member may edit the cluster,
+ * but not borrow what only admins hold to do it: pointing the cluster at a
+ * route through a server — a new server, or a new address behind the same
+ * one — needs `operate` on that server (it tunnels through the server's
+ * SSH), and through an agent it stays admin-only, as agents are.
+ */
+function checkRouteChange(
+  req: FastifyRequest,
+  existing: ClusterRow,
+  conn: Awaited<ReturnType<typeof connectionFor>>,
+): void {
+  if (rank(req.role) >= rank('admin')) return;
+  const moved = conn.apiUrl !== existing.apiUrl;
+  if (conn.viaServerId && (moved || conn.viaServerId !== existing.viaServerId)) {
+    const result = authorize(req, 'server', conn.viaServerId, 'terminal');
+    if (result.status === 404) throw new KubeError('Server not found', 404);
+    if (!result.ok) throw new KubeError('Routing a cluster through a server needs operate access to that server', 403);
+  }
+  if (conn.viaAgentId && (moved || conn.viaAgentId !== existing.viaAgentId)) {
+    throw new KubeError('Only admins can route a cluster through an agent', 403);
+  }
+}
+
 function routeOf(req: FastifyRequest, conn: Awaited<ReturnType<typeof connectionFor>>): ApiRoute {
   return {
     orgId: req.orgId,
@@ -439,6 +465,7 @@ export async function kubeRoutes(app: FastifyInstance) {
     try {
       const existing = kubeCluster(req, id);
       const conn = await connectionFor(req, body, existing);
+      checkRouteChange(req, existing, conn);
       const changes = {
         name: (conn.name ?? existing.name).slice(0, 100),
         apiUrl: conn.apiUrl,

@@ -11,11 +11,11 @@ import {
 } from '../auth/server-access.js';
 import { rank } from '../auth/middleware.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
-import { dockerSettings } from '../docker/settings.js';
+import { permissionsFor } from '../docker/permissions.js';
 import { aiContainerLogs, aiInspect, aiListContainers } from '../docker/ai-tools.js';
 import { filterAccessibleClusters } from '../auth/cluster-access.js';
 import { aiDescribe, aiEvents, aiListWorkloads, aiPodLogs } from '../kube/ai-tools.js';
-import { dockerPermissions, type AITool, type DockerCapability, type HostKeyStatus, type Role } from '@smt/shared';
+import { type AITool, type DockerCapability, type HostKeyStatus, type Role } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -413,7 +413,7 @@ export class ToolExecutor {
 
   /**
    * The server a Docker tool reads from: `server_id`, else the one the user is
-   * looking at or connected to (as for run_command). The caller's role must allow `capability` under the org's
+   * looking at or connected to (as for run_command). The caller's level there must allow `capability` under the org's
    * Docker settings — logs and inspect need an operator, like the Docker tab.
    * A server they cannot access reads as not found (withDockerClient again).
    */
@@ -421,8 +421,10 @@ export class ToolExecutor {
     const { serverId } = this.target(input);
     if (!serverId) throw new Error('No server specified: pass server_id');
     if (!this.canUse(serverId)) throw new Error('Server not found');
+    // The matrix at the user's level on this server, as the Docker tab reads it
     const role = (this.memberRole() ?? 'viewer') as Role;
-    if (!dockerPermissions(role, dockerSettings(this.orgId))[capability]) {
+    const caller = { orgId: this.orgId, role, user: { id: this.userId, email: '', displayName: '' } };
+    if (!permissionsFor(caller, serverId)[capability]) {
       throw new Error('Your role does not allow reading container logs or details');
     }
     return serverId;

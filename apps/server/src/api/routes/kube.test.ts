@@ -13,7 +13,7 @@ import type {
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { auditLog, kubeClusters, memberClusterAccess } from '../../db/schema.js';
+import { auditLog, kubeClusters, memberClusterAccess, memberships, resourceGrants } from '../../db/schema.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { sweepExpiredAccess } from '../../auth/access-grants.js';
 import { resetKubeCache } from '../../kube/cache.js';
@@ -320,6 +320,66 @@ describe('kube routes', () => {
   });
 
   describe('access', () => {
+    it('lets a cluster manager below admin route the cluster only through servers they operate', async () => {
+      // manage on a cluster through a grant (custom roles), restricted to what is granted
+      const manager = seedUser(orgId, 'viewer');
+      getDb().update(memberships).set({ serverAccess: 'restricted' }).where(eq(memberships.userId, manager.userId)).run();
+      const hop = seedServer(orgId, admin.userId, 'hop-managed');
+      const viaId = 'via-managed';
+      getDb()
+        .insert(kubeClusters)
+        .values({
+          id: viaId,
+          orgId,
+          name: 'managed',
+          apiUrl: 'https://kube.internal:6443',
+          connectVia: 'server',
+          viaServerId: hop,
+          authType: 'token',
+          encryptedCredential: 'unused',
+          credentialHint: 'token ending …abcd',
+          createdBy: admin.userId,
+        })
+        .run();
+      const grantTo = (resourceType: string, resourceId: string, level: string) =>
+        getDb()
+          .insert(resourceGrants)
+          .values({
+            id: `t-${resourceType}-${resourceId}-${level}`,
+            orgId,
+            principalType: 'user',
+            principalId: manager.userId,
+            resourceType,
+            selector: 'id',
+            resourceId,
+            level,
+            createdAt: new Date().toISOString(),
+          })
+          .run();
+      const moveTo = { apiUrl: 'https://10.9.9.9:6443', token: 'new-token' };
+      try {
+        grantTo('cluster', viaId, 'manage');
+        expect((await send(manager, 'PATCH', `/api/kube/clusters/${viaId}`, { name: 'managed-2', token: 't' })).statusCode).toBe(200);
+        // A new address behind a server they cannot see, or only see
+        expect((await send(manager, 'PATCH', `/api/kube/clusters/${viaId}`, moveTo)).statusCode).toBe(404);
+        grantTo('server', hop, 'view');
+        const viewOnly = await send(manager, 'PATCH', `/api/kube/clusters/${viaId}`, moveTo);
+        expect(viewOnly.statusCode).toBe(403);
+        expect(viewOnly.json().error).toMatch(/operate access to that server/);
+        // …or a server they cannot see, from a direct cluster
+        grantTo('cluster', clusterId, 'manage');
+        const other = seedServer(orgId, admin.userId, 'hop-hidden');
+        expect((await send(manager, 'PATCH', c(), { connectVia: 'server', viaServerId: other, token: 't' })).statusCode).toBe(404);
+        expect(getDb().select().from(kubeClusters).where(eq(kubeClusters.id, clusterId)).get()!.connectVia).toBe('direct');
+        // With operate on the server the route is theirs to change
+        grantTo('server', hop, 'operate');
+        expect((await send(manager, 'PATCH', `/api/kube/clusters/${viaId}`, moveTo)).statusCode).toBe(200);
+      } finally {
+        getDb().delete(resourceGrants).where(eq(resourceGrants.principalId, manager.userId)).run();
+        getDb().delete(kubeClusters).where(eq(kubeClusters.id, viaId)).run();
+      }
+    });
+
     it('hides clusters from restricted members and other orgs as not found', async () => {
       expect((await get(restricted, '/api/kube/clusters')).json()).toEqual([]);
       expect((await get(restricted, c())).statusCode).toBe(404);

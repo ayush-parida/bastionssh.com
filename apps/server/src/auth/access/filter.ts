@@ -12,7 +12,14 @@ import {
   storageConnections,
 } from '../../db/schema.js';
 import { meetsLevel } from './levels.js';
-import { resolveAccess, topLevel, type AccessSubject, type Contribution, type ResolvedAccess } from './resolve.js';
+import {
+  resolveAccess,
+  topLevel,
+  wholeResource,
+  type AccessSubject,
+  type Contribution,
+  type ResolvedAccess,
+} from './resolve.js';
 
 /**
  * Which resources of a type someone may see (spec §4 filter.ts): as a SQL
@@ -36,9 +43,9 @@ export const RESOURCE_TABLES: Record<ResourceType, { table: SQLiteTable; id: SQL
 /** Every resource of a type, or only these. */
 export type AccessibleIds = { all: true } | { all: false; ids: string[] };
 
-/** Contributions that count at `minLevel` (after the read-only cap). */
+/** Contributions that count at `minLevel` on the whole resource (after the read-only cap). */
 function reaching(access: ResolvedAccess, list: Contribution[], minLevel: AccessLevel): Contribution[] {
-  return list.filter((c) => meetsLevel(topLevel(access, [c]), minLevel));
+  return list.filter((c) => meetsLevel(topLevel(access, [wholeResource(c)]), minLevel));
 }
 
 /** Servers in `orgId` carrying any of `tags` (malformed tag lists match nothing). */

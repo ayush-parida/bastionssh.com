@@ -83,7 +83,7 @@ import { and, eq } from 'drizzle-orm';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { auditLog, servers } from '../../db/schema.js';
+import { auditLog, memberships, resourceGrants, servers } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
 import { AGENT_TOOLS, ToolExecutor } from '../../ai/tools.js';
 import { startFakeDaemon, type FakeDaemon } from '../../docker/fake-daemon.test-helper.js';
@@ -254,6 +254,30 @@ describe('AI Docker tools', () => {
 
   it('keep logs and inspect from viewers, like the Docker tab', async () => {
     const tools = new ToolExecutor(orgId, viewer.userId, undefined, alpha);
+    expect(await tools.execute('docker_list_containers', {})).toContain('- web');
+    await expect(tools.execute('docker_container_logs', { container: 'web' })).rejects.toThrow(/role does not allow/);
+    await expect(tools.execute('docker_inspect', { container: 'web' })).rejects.toThrow(/role does not allow/);
+  });
+
+  it('read the Docker matrix at the member’s level on the server, not their base role', async () => {
+    // A role-scoped operator holding only view on alpha (custom roles): no logs or inspect there
+    const member = seedUser(orgId, 'operator');
+    getDb().update(memberships).set({ serverAccess: 'restricted' }).where(eq(memberships.userId, member.userId)).run();
+    getDb()
+      .insert(resourceGrants)
+      .values({
+        id: `ai-view-${member.userId}`,
+        orgId,
+        principalType: 'user',
+        principalId: member.userId,
+        resourceType: 'server',
+        selector: 'id',
+        resourceId: alpha,
+        level: 'view',
+        createdAt: new Date().toISOString(),
+      })
+      .run();
+    const tools = new ToolExecutor(orgId, member.userId, undefined, alpha);
     expect(await tools.execute('docker_list_containers', {})).toContain('- web');
     await expect(tools.execute('docker_container_logs', { container: 'web' })).rejects.toThrow(/role does not allow/);
     await expect(tools.execute('docker_inspect', { container: 'web' })).rejects.toThrow(/role does not allow/);

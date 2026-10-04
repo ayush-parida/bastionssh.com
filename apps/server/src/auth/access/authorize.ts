@@ -5,7 +5,14 @@ import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { levelRank, meetsLevel, RESOURCE_LABELS, requiredLevel, type ResourceAction } from './levels.js';
 import { resourceExists } from './filter.js';
-import { resolveAccess, topLevel, type AccessSubject, type Contribution, type ResolvedAccess } from './resolve.js';
+import {
+  resolveAccess,
+  topLevel,
+  wholeResource,
+  type AccessSubject,
+  type Contribution,
+  type ResolvedAccess,
+} from './resolve.js';
 
 /**
  * Decisions on one resource (spec §4 authorize.ts). A resource the subject
@@ -61,7 +68,8 @@ export function foldContributions(access: ResolvedAccess, found: Contribution[])
 /**
  * The subject's level on one resource, or null when they cannot reach it or
  * it is not in their org. For clusters, `namespace` counts only what covers
- * that namespace.
+ * that namespace; without one, the level is on the cluster as a whole, where
+ * a namespace-narrowed grant gives `view` at most (`wholeResource`).
  */
 export function levelFor(
   who: AccessSubject,
@@ -83,6 +91,9 @@ export function levelFor(
   if (type === 'cluster' && opts.namespace !== undefined) {
     const ns = opts.namespace;
     found = found.filter((c) => c.namespaces === null || c.namespaces.includes(ns));
+  } else {
+    // The whole cluster: namespace-narrowed grants show it, and give no more
+    found = found.map(wholeResource);
   }
   return foldContributions(access, found);
 }
