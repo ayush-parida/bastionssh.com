@@ -20,9 +20,10 @@ import { abortKubeStreams } from '../../kube/sse.js';
 import { closeDisallowedPodShells } from '../../kube/exec.js';
 import type { LiveAccessRevoked } from '../revoke.js';
 import { grantsOfRoles, principalGrants } from './grants.js';
-import { canAssignRole } from './modules.js';
+import { canAssignRole, canGrant } from './modules.js';
 import {
   allModules,
+  baseLevel,
   legacyRoleFor,
   maxModuleLevel,
   meetsLevel,
@@ -130,6 +131,24 @@ function unionModules(orgId: string, rows: { roleId: string; modulePermissions: 
 export function legacyRoleOf(orgId: string, rows: { roleId: string; system: string | null; modulePermissions: string | null }[]): Role {
   if (rows.some((r) => r.system === 'owner')) return 'owner';
   return legacyRoleFor(unionModules(orgId, rows).modules);
+}
+
+/**
+ * The base role the member's built-in (or generated "<Base> (modules only)")
+ * role stands for — what memberships.role stores. Never derived from custom
+ * roles: migration 0023's trigger sets the level of the member's mirrored
+ * per-server and "all" grants from it, so a custom role counted here would
+ * raise those grants past what the delegation guard weighed when it was
+ * given. No built-in: viewer, the least.
+ */
+export function baseRoleOf(rows: { roleId: string; system: string | null }[]): Role {
+  const order: Role[] = ['owner', 'admin', 'operator'];
+  for (const role of order) {
+    if (rows.some((r) => r.system === role || (role === 'operator' && r.roleId.startsWith('modules-only:') && r.roleId.endsWith(':operator')))) {
+      return role;
+    }
+  }
+  return 'viewer';
 }
 
 /**
@@ -388,9 +407,9 @@ export function setMemberRoles(orgId: string, userId: string, assignments: RoleA
         .where(and(eq(roles.orgId, orgId), inArray(roles.id, wanted.map((a) => a.roleId))))
         .all()
     : [];
-  // Only roles held for good decide the base role the old columns show
+  // Only built-in roles held for good decide the base role the old columns show
   const lasting = info.filter((r) => wanted.find((a) => a.roleId === r.roleId)?.expiresAt === null);
-  const role = legacyRoleOf(orgId, lasting);
+  const role = baseRoleOf(lasting);
   const scope = legacyScopeOf(lasting);
   const existing = new Map(
     db
@@ -493,6 +512,38 @@ export function roleDelegationMissing(actor: AccessSubject, added: RoleAssignmen
   return [...missing];
 }
 
+/**
+ * The member's mirrored grants from before custom roles (`legacy-` ids: the
+ * pre-roles per-server and per-cluster lists, the "all" grants of a
+ * restricted member) sit at their base role's level and follow it (migration
+ * 0023's trigger on memberships.role). A change of built-in role that moves
+ * that level moves those grants too, so the actor must hold each of them at
+ * the higher of the two levels — giving and taking away alike — for as long.
+ * Returns what is missing; nothing when the level stays.
+ */
+function mirroredGrantsMissing(actor: AccessSubject, userId: string, current: MemberRoleRow[], next: RoleAssignment[]): string[] {
+  const lasting = (rows: { roleId: string; system: string | null }[], ends: (id: string) => string | null | undefined) =>
+    rows.filter((r) => ends(r.roleId) === null);
+  const nextInfo = next.length
+    ? getDb()
+        .select({ roleId: roles.id, system: roles.system })
+        .from(roles)
+        .where(and(eq(roles.orgId, actor.orgId), inArray(roles.id, next.map((a) => a.roleId))))
+        .all()
+    : [];
+  const from = baseLevel(baseRoleOf(lasting(current, (id) => current.find((r) => r.roleId === id)?.expiresAt)));
+  const to = baseLevel(baseRoleOf(lasting(nextInfo, (id) => next.find((a) => a.roleId === id)?.expiresAt)));
+  if (from === to) return [];
+  const level = meetsLevel(from, to) ? from : to;
+  const missing = new Set<string>();
+  for (const g of principalGrants(actor.orgId, 'user', userId)) {
+    if (!g.id.startsWith('legacy-')) continue;
+    const wanted = { resourceType: g.resourceType, selector: g.selector, resourceId: g.resourceId, tag: g.tag, namespaces: g.namespaces, level };
+    for (const m of canGrant(actor, { grants: [wanted] }, { expiresAt: g.expiresAt }).missing) missing.add(m);
+  }
+  return [...missing];
+}
+
 export interface RoleChangeRefusal {
   status: 400 | 403;
   error: string;
@@ -534,7 +585,7 @@ export function changeMemberRoles(
   if (removedRows.some(isBaseRoleRole) && !outranks(orgId, actor.user.id, userId, 'below')) {
     return { refused: { status: 403, error: `You cannot ${verb} a member who holds as much access as you` } };
   }
-  const missing = roleDelegationMissing(actor, added, removed);
+  const missing = [...roleDelegationMissing(actor, added, removed), ...mirroredGrantsMissing(actor, userId, current, next)];
   if (missing.length) {
     return { refused: { status: 403, error: `You cannot ${verb}: you do not hold ${missing.join('; ')}`, missing } };
   }

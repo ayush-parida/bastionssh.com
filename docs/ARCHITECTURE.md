@@ -887,19 +887,25 @@ holds those modules at `manage`. `auth/access/members.ts` weighs members against
 something the target does not, owners act on owners, nobody resets an owner; with the built-ins
 at their defaults exactly the old base-role order), `changeMemberRoles` (delegation guard on every
 role given or taken away, for as long; taking away a built-in or "(modules only)" role needs
-`below`; the org keeps a permanent active owner), `setMemberRoles` (also writes the base role and
-scope the roles amount to into `memberships.role` / `scope`, which 0023's and 0025's triggers and
-old API callers still read) and `revokeAfterMemberChange` (resources as `revokeAfterChange`, plus
+`below`; the org keeps a permanent active owner; a change of built-in role that moves the level of
+the member's mirrored `legacy-` grants needs the actor to hold those grants at the higher level),
+`setMemberRoles` (also writes the base role their built-in or "(modules only)" role stands for —
+`baseRoleOf`, never raised by a custom role — and the scope into `memberships.role` / `scope`,
+which 0023's and 0025's triggers and old API callers still read) and `revokeAfterMemberChange` (resources as `revokeAfterChange`, plus
 AI streams, Docker and Kubernetes streams and shells when those modules drop).
 `PUT /team/members/:id/roles` assigns several roles (none: No access); the old `PATCH
 /team/members/:id` (base role, scope) and `PUT …/access` map onto the built-in or "(modules
-only)" role. `/team/roles` lists every role (built-ins first), creates and edits module levels
+only)" role, and `PUT …/access` weighs each server or cluster it adds or drops with `canGrant`.
+Taking a module level or grant from a built-in or "(modules only)" role needs the actor to be
+`below`-above every other member holding it (no admin strips fellow admins by editing Admin), and
+the role new members get (org or SSO default) cannot be deleted. `/team/roles` lists every role (built-ins first), creates and edits module levels
 and grants, `POST …/reset` puts Admin/Operator/Viewer back to `BUILT_IN_ROLE_DEFAULTS`, `POST
 …/clone` copies any role; Owner and No access are locked and built-ins are never deleted or
 renamed. Every write passes `canGrant` / `canAssignRole` for what it gives or takes away and is
 audited with before, after and how the guard allowed it. Invites carry role ids
 (`invites.role`: a base role name or a JSON id list; none = `GET/PUT /team/default-role`, which
-Settings at `manage` sets to a role the actor could give). SSO's default role and group
+Settings at `manage` sets to a role the actor could give; an empty list, or one whose roles are
+all deleted by acceptance, is No access). SSO's default role and group
 mappings may name role ids (never Owner; only roles the configurer could give); roles a mapping
 names are managed by the IdP and follow the groups claim at each sign-in. Access-request
 approval needs the approver to hold the role or level for as long.

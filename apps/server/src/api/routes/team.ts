@@ -12,6 +12,7 @@ import {
   type OrgMember,
   type OrgSecuritySettings,
   type PasswordResetLink,
+  type PermissionSet,
   type RoleGrant,
 } from '@smt/shared';
 import { requireAuth, ROLES, type Role } from '../../auth/middleware.js';
@@ -64,7 +65,7 @@ import {
 import { config } from '../../config/index.js';
 import { cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import { activeAt } from '../../auth/access/resolve.js';
-import { canAssignRole, hasModule, isOrgOwner, isOwner, requireModule, requireOwner } from '../../auth/access/modules.js';
+import { canAssignRole, canGrant, hasModule, isOrgOwner, isOwner, requireModule, requireOwner } from '../../auth/access/modules.js';
 import {
   baseLevel,
   effectiveAccessList,
@@ -73,6 +74,8 @@ import {
   snapshotAccess,
 } from '../../auth/access/index.js';
 import {
+  baseRoleOf,
+  builtInRoleId,
   changeMemberRoles,
   defaultRoleId,
   isBaseRoleRole,
@@ -206,11 +209,15 @@ function targetMember(
   return member;
 }
 
-/** A member's roles now, and the base role and scope they amount to (the compatible fields). */
+/**
+ * A member's roles now, and the base role their built-in role stands for and
+ * the scope (the compatible fields, and what the compatible endpoints map
+ * from: never raised by a custom role).
+ */
 function rolesOf(orgId: string, userId: string) {
   const rows = memberRoleRows(orgId, [userId]).get(userId) ?? [];
   const lasting = rows.filter((r) => r.expiresAt === null);
-  return { rows, role: legacyRoleOf(orgId, lasting), scope: legacyScopeOf(lasting) };
+  return { rows, role: baseRoleOf(lasting), scope: legacyScopeOf(lasting) };
 }
 
 /** Role names for an audit row: what the member holds, and until when. */
@@ -242,6 +249,44 @@ function changeRoles(
     return undefined;
   }
   return result;
+}
+
+/**
+ * What the actor lacks to replace a member's personal server (and cluster)
+ * grants by id with `lists`, as the compatible access endpoint does: each id
+ * added at `level` (until its picked expiry, else for good), each one whose
+ * expiry is picked anew, and each one dropped (at its level, until it would
+ * have ended). Empty when allowed.
+ */
+function accessListDelegationMissing(
+  req: FastifyRequest,
+  userId: string,
+  level: ReturnType<typeof baseLevel>,
+  lists: { type: 'server' | 'cluster'; ids: string[]; minutes: Record<string, number | null> }[],
+): string[] {
+  const personal = principalGrants(req.orgId, 'user', userId);
+  const changes: { grant: NonNullable<PermissionSet['grants']>[number]; expiresAt: string | null }[] = [];
+  for (const { type, ids, minutes } of lists) {
+    const prior = new Map(personal.filter((g) => g.resourceType === type && g.selector === 'id').map((g) => [g.resourceId!, g]));
+    for (const id of ids) {
+      const was = prior.get(id);
+      if (was && minutes[id] === undefined) continue;
+      const expiresAt = minutes[id] == null ? null : minutesFromNow(minutes[id]!);
+      changes.push({ grant: { resourceType: type, selector: 'id', resourceId: id, namespaces: null, level: was?.level ?? level }, expiresAt });
+    }
+    for (const [id, was] of prior) {
+      if (ids.includes(id)) continue;
+      changes.push({
+        grant: { resourceType: type, selector: 'id', resourceId: id, namespaces: was.namespaces, level: was.level },
+        expiresAt: was.expiresAt,
+      });
+    }
+  }
+  const missing = new Set<string>();
+  for (const { grant, expiresAt } of changes) {
+    for (const m of canGrant(req, { grants: [grant] }, { expiresAt }).missing) missing.add(m);
+  }
+  return [...missing];
 }
 
 /** When a membership given in a request ends: null for good, 'invalid' when out of range. */
@@ -297,14 +342,13 @@ function presentInviteRoles(orgId: string, stored: string) {
 
 /**
  * Give a member who just joined the invite's roles (deleted ones are skipped;
- * none left: the org's default role). Inside the accepting transaction; the
- * membership row's base role already made migration 0025's trigger give a
- * built-in, which this replaces.
+ * none left: No access — never the default role, which the inviter was not
+ * checked for). Inside the accepting transaction; the membership row's base
+ * role already made migration 0025's trigger give a built-in, which this
+ * replaces.
  */
 function assignInviteRoles(orgId: string, userId: string, stored: string, invitedBy: string) {
-  const ids = [...orgRoles(orgId, inviteRoleIds(orgId, stored)).keys()];
-  const fallback = defaultRoleId(orgId);
-  const roleIds = ids.length ? ids : fallback ? [fallback] : [];
+  const roleIds = [...orgRoles(orgId, inviteRoleIds(orgId, stored)).keys()];
   setMemberRoles(orgId, userId, roleIds.map((roleId) => ({ roleId, expiresAt: null })), invitedBy);
 }
 
@@ -969,6 +1013,16 @@ export async function teamRoutes(app: FastifyInstance) {
       }
     }
 
+    // The delegation guard over the list (spec §4.2): every server or cluster
+    // given — at the member's base level, as the mirrored grant will be — or
+    // taken away, or given for a new length of time, must be one the actor
+    // holds, for as long. Admins at their defaults hold them all.
+    const listMissing = accessListDelegationMissing(req, userId, baseLevel(held.role), [
+      { type: 'server', ids: serverIds, minutes: body.expiresInMinutes },
+      ...(clusterIds ? [{ type: 'cluster' as const, ids: clusterIds, minutes: body.clusterExpiresInMinutes }] : []),
+    ]);
+    if (listMissing.length) return sendDelegationRefused(reply, 'change server access for this member', listMissing);
+
     const memberGrants = and(eq(memberServerAccess.userId, userId), eq(memberServerAccess.orgId, req.orgId));
     // Existing rows, expired or not: a grant that lapses while the dialog is
     // open must stay lapsed on save, never turn permanent.
@@ -1295,6 +1349,13 @@ export async function teamRoutes(app: FastifyInstance) {
     if (body.roleIds) {
       roleIds = [...new Set(body.roleIds)];
       if (orgRoles(req.orgId, roleIds).size !== roleIds.length) return reply.status(400).send({ error: 'Unknown role' });
+      // An empty list is No access, as for a member's roles — never the
+      // default role, which the inviter may not be able to give
+      if (!roleIds.length) {
+        const none = builtInRoleId(req.orgId, 'none');
+        if (!none) return reply.status(409).send({ error: 'The No access role is missing from this organization' });
+        roleIds = [none];
+      }
     } else {
       const id = body.role ? roleIdForBaseRole(req.orgId, body.role) : defaultRoleId(req.orgId);
       if (!id) return reply.status(409).send({ error: 'That role is missing from this organization' });

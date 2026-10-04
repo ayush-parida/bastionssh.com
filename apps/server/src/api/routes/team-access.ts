@@ -29,7 +29,7 @@ import {
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { accessRequests, memberships, resourceGrants, roleMembers, roles, users } from '../../db/schema.js';
+import { accessRequests, memberships, organizations, resourceGrants, roleMembers, roles, ssoProviders, users } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import { MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import { activeAt } from '../../auth/access/resolve.js';
@@ -321,6 +321,34 @@ function delegationMissing(req: FastifyRequest, modules: ModulePermissions, gran
   return [...missing];
 }
 
+/** True when `after` takes something from `before`: a module lowered, or a grant gone. */
+function takesAway(before: { modules?: ModulePermissions; grants?: GrantShape[] }, after: { modules?: ModulePermissions; grants?: GrantShape[] }): boolean {
+  if (before.modules && after.modules) {
+    if (MODULE_KEYS.some((key) => moduleRank(after.modules![key] ?? 'none') < moduleRank(before.modules![key] ?? 'none'))) return true;
+  }
+  if (before.grants && after.grants) {
+    const kept = new Set(after.grants.map(grantKey));
+    if (before.grants.some((g) => !kept.has(grantKey(g)))) return true;
+  }
+  return false;
+}
+
+/**
+ * Taking something from a built-in role (or a generated "(modules only)"
+ * one) takes it from every member holding it — a demotion of them all — so,
+ * as for taking that role from one member (`changeMemberRoles`), the actor
+ * must hold more than each of them (`outranks` `below`; owners may).
+ * Otherwise an admin could strip their fellow admins by editing Admin.
+ * Sends the refusal and returns false when one of them is not below.
+ */
+function mayTakeFromHolders(req: FastifyRequest, reply: FastifyReply, row: RoleRow): boolean {
+  if (!systemOf(row) && !row.id.startsWith('modules-only:')) return true;
+  const above = membersOf(req.orgId, row.id).some((m) => m.userId !== req.user.id && !outranks(req.orgId, req.user.id, m.userId, 'below'));
+  if (!above) return true;
+  reply.status(403).send({ error: `You cannot take access from the ${row.name} role: a member holding it holds as much access as you` });
+  return false;
+}
+
 function sendRefused(reply: FastifyReply, verb: string, missing: string[]) {
   return reply.status(403).send({ error: `You cannot ${verb}: you do not hold ${missing.join('; ')}`, missing });
 }
@@ -491,6 +519,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     if (body.modules) {
       const missing = delegationMissing(req, moduleChanges(modulesBefore, body.modules), []);
       if (missing.length) return sendRefused(reply, 'change this role', missing);
+      if (takesAway({ modules: modulesBefore }, { modules: body.modules }) && !mayTakeFromHolders(req, reply, row)) return reply;
     }
     const before = { name: row.name, description: row.description, color: row.color, modules: modulesBefore };
     const after = {
@@ -551,6 +580,12 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const grantsBefore = principalGrants(req.orgId, 'role', id);
     const missing = delegationMissing(req, moduleChanges(modulesBefore, defaults.modules), grantChanges(grantsBefore, grantDrafts));
     if (missing.length) return sendRefused(reply, 'reset this role', missing);
+    if (
+      takesAway({ modules: modulesBefore, grants: grantsBefore }, { modules: defaults.modules, grants: grantDrafts }) &&
+      !mayTakeFromHolders(req, reply, row)
+    ) {
+      return reply;
+    }
 
     const holders = memberIdsOf(req.orgId, id);
     const snapshot = snapshotMembers(req.orgId, holders);
@@ -657,6 +692,12 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const row = findRole(req.orgId, id);
     if (!row) return reply.status(404).send({ error: 'Role not found' });
     if (systemOf(row)) return reply.status(400).send({ error: 'Built-in roles cannot be deleted' });
+    // New members would fall back to Viewer, which whoever chose this role may not have meant to give
+    const org = getDb().select({ defaultRoleId: organizations.defaultRoleId }).from(organizations).where(eq(organizations.id, req.orgId)).get();
+    const sso = getDb().select({ defaultRole: ssoProviders.defaultRole }).from(ssoProviders).where(eq(ssoProviders.orgId, req.orgId)).get();
+    if (org?.defaultRoleId === id || sso?.defaultRole === id) {
+      return reply.status(409).send({ error: `${row.name} is the role new members get: make another role the default first` });
+    }
     const delegation = canAssignRole(req, id);
     if (!delegation.ok) return sendRefused(reply, 'delete this role', delegation.missing);
     const db = getDb();
@@ -720,6 +761,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const previous = principalGrants(req.orgId, 'role', id);
     const missing = delegationMissing(req, {}, grantChanges(previous, grantDrafts));
     if (missing.length) return sendRefused(reply, 'change this role', missing);
+    if (takesAway({ grants: previous }, { grants: grantDrafts }) && !mayTakeFromHolders(req, reply, row)) return reply;
     const holders = memberIdsOf(req.orgId, id);
     const before = snapshotMembers(req.orgId, holders);
     replaceGrants(req.orgId, 'role', id, grantDrafts, req.user.id);
