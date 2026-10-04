@@ -65,6 +65,7 @@ import {
 import { config } from '../../config/index.js';
 import { cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import { activeAt } from '../../auth/access/resolve.js';
+import { requireAnyModule } from '../../auth/access/any-module.js';
 import { canAssignRole, canGrant, hasModule, isOrgOwner, isOwner, requireModule, requireOwner } from '../../auth/access/modules.js';
 import {
   baseLevel,
@@ -81,6 +82,7 @@ import {
   isBaseRoleRole,
   legacyRoleOf,
   legacyScopeOf,
+  memberModules,
   memberRoleRows,
   outranks,
   presentHeldRoles,
@@ -545,7 +547,8 @@ async function changeScope(req: FastifyRequest, reply: FastifyReply, userId: str
 export async function teamRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/members', { preHandler: requireModule('team_members', 'view') }, async (req): Promise<OrgMember[]> => {
+  // Members (who is here), or Roles & access (whom to give roles); neither: 404, as for a module that is off
+  app.get('/members', { preHandler: requireAnyModule(['team_members', 'team_roles']) }, async (req): Promise<OrgMember[]> => {
     const db = getDb();
     const rows = db
       .select({
@@ -611,7 +614,8 @@ export async function teamRoutes(app: FastifyInstance) {
 
     // The roles each member holds; the base role and scope fields are what they amount to
     const held = memberRoleRows(req.orgId, userIds);
-    const seesRoles = hasModule(req, 'team_roles', 'view');
+    // Whoever sees roles, or acts on members (invites pick roles, suspending weighs them)
+    const seesRoles = seesPasskeys || hasModule(req, 'team_roles', 'view');
 
     return rows.map((r) => {
       const memberRoles = held.get(r.userId) ?? [];
@@ -804,7 +808,7 @@ export async function teamRoutes(app: FastifyInstance) {
   });
 
   /** The role new members get when none is picked (invites, SSO). */
-  app.get('/default-role', { preHandler: requireModule('team_members', 'view') }, async (req, reply): Promise<DefaultRoleSetting> => {
+  app.get('/default-role', { preHandler: requireAnyModule(['team_members', 'team_roles']) }, async (req, reply): Promise<DefaultRoleSetting> => {
     const roleId = defaultRoleId(req.orgId);
     const role = roleId ? orgRoles(req.orgId, [roleId]).get(roleId) : undefined;
     if (!role) return reply.status(404).send({ error: 'No default role' });
@@ -959,6 +963,7 @@ export async function teamRoutes(app: FastifyInstance) {
       effective: Object.fromEntries(
         RESOURCE_TYPES.map((type) => [type, effectiveAccessList(who, type)]),
       ) as MemberServerAccess['effective'],
+      modules: memberModules(req.orgId, userId),
     } satisfies MemberServerAccess;
   });
 
@@ -1461,10 +1466,13 @@ export async function publicInviteRoutes(app: FastifyInstance) {
       .where(eq(organizations.id, invite.orgId))
       .get();
 
+    const given = presentInviteRoles(invite.orgId, invite.role);
     return {
       // Masked: holding the link must not reveal the address needed to redeem it.
       emailHint: maskEmail(invite.email),
-      ...presentInviteRoles(invite.orgId, invite.role),
+      role: given.role,
+      // Names only: the accept page says what joining gives, nothing about how roles are built
+      roles: given.roles.map((r) => r.name),
       organizationName: org?.name ?? 'the organization',
       state: inviteState(invite),
       // Deliberately no hint of whether the address already has an account:

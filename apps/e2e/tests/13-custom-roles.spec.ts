@@ -4,8 +4,9 @@ import { createMember, expect, fakeClientIp, ownerApi, signInWithPassword, snap,
 /**
  * Custom roles end to end (custom roles spec §10): an owner builds a role in
  * Team & Access → Roles from a server tag and a cluster narrowed to one
- * namespace, adds a viewer limited to "only resources from roles", and that
- * viewer then sees exactly those resources. The access checker says why.
+ * namespace, adds a viewer and takes their Viewer role away, so the new role
+ * is all they hold; they then see exactly those resources. The access
+ * checker says why.
  */
 
 test('a role with a tag selector and a cluster namespace gives a member exactly those resources', async ({ page, browser }) => {
@@ -73,12 +74,16 @@ test('a role with a tag selector and a cluster namespace gives a member exactly 
   await saved.getByRole('button', { name: 'Close', exact: true }).first().click();
   await expect(page.getByText(`tag ${tag} · operate`)).toBeVisible();
 
-  // Limit the member to what roles give them
+  // Limit the member to what the role gives them: take Viewer away, leaving the role
   await page.getByRole('tab', { name: 'Members' }).click();
   await page.getByRole('button', { name: `Access for ${member.email}` }).click();
   const detail = page.getByRole('dialog', { name: `Access — ${member.displayName}` });
-  await detail.getByLabel('Only resources from roles').click();
-  await expect(page.getByText('Scope updated')).toBeVisible();
+  await expect(detail.getByTestId('member-roles')).toContainText('Viewer');
+  await detail.getByRole('button', { name: 'Remove role Viewer' }).click();
+  await expect(page.getByText('Role removed — what only it gave is closed')).toBeVisible();
+  await expect(detail.getByTestId('member-roles')).not.toContainText('Viewer');
+  // The role turned on the modules of what it grants
+  await expect(detail.getByTestId('effective-modules')).toContainText(`via ${roleName}`);
   // Effective access, with where it comes from
   await expect(detail.getByTestId('effective-server')).toContainText(web1.name);
   await expect(detail.getByTestId('effective-server')).toContainText(`via ${roleName}`);
@@ -130,9 +135,9 @@ test('a member who can operate nothing is not offered the AI assistant', async (
   await signInWithPassword(page, member.email, member.password);
   await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: 'AI Assistant' })).toHaveCount(0);
-  // Straight to the page: it says why instead of offering a chat the server would refuse
+  // Straight to the page: not there for them, as the server answers, with a way to ask
   await page.goto('/ai');
-  await expect(page.getByTestId('ai-unavailable')).toBeVisible();
+  await expect(page.getByTestId('module-not-found')).toBeVisible();
   await context.close();
 });
 

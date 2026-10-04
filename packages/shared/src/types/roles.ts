@@ -76,14 +76,25 @@ export interface CustomRole {
   updatedAt: string;
   memberCount?: number;
   grants?: RoleGrant[];
-  /** Unified roles: the built-in role this is, null for every other role. */
+  /**
+   * Unified roles (spec §5), from `GET /team/roles`: the built-in role this
+   * is (null for every other role).
+   */
   system?: BuiltInRole | null;
-  /** Unified roles: the role's module levels (a module left out is `none`). */
+  /** The role's module levels (a module left out is `none`). */
   modules?: ModulePermissions;
+  /** The same as `modules`, under the name the web's role editor uses. */
+  modulePermissions?: ModulePermissions;
   /** False for Owner and No access, which are locked. */
   editable?: boolean;
   /** False for the built-in roles. */
   deletable?: boolean;
+  /** One of the "<Base> (modules only)" roles migration 0025 generated. */
+  generated?: boolean;
+  /** Built-in roles: changed from their defaults ("Reset to default" puts them back). */
+  customized?: boolean;
+  /** The caller may give this role to someone, or take it away (the delegation guard, spec §4.2). */
+  assignable?: boolean;
 }
 
 /** A member of a custom role; `expiresAt` null = permanent. */
@@ -172,6 +183,8 @@ export interface SaveCustomRole {
    * role from before module permissions did.
    */
   modules?: ModulePermissions;
+  /** The same as `modules` (the web's name for it); `modules` wins when both are given. */
+  modulePermissions?: ModulePermissions;
 }
 
 /** Any resource access can be granted on, as pickers and lists name it. */
@@ -692,4 +705,26 @@ export interface DefaultRoleSetting {
   roleId: string;
   name: string;
   system: BuiltInRole | null;
+}
+
+/** The default role as the web's forms read it. */
+export type DefaultRole = DefaultRoleSetting;
+
+/** Where a member's level on a module comes from: one role they hold. */
+export interface ModuleAccessReason {
+  roleId: string;
+  name: string;
+  system: BuiltInRole | null;
+  level: Exclude<ModuleLevel, 'none'>;
+  expiresAt: string | null;
+}
+
+/** A member's level on one module, whether it is shown to them, and which roles give it. */
+export interface MemberModuleAccess {
+  module: ModuleKey;
+  level: ModuleLevel;
+  /** Shown in their navigation (spec §3.1): on, and for a resource module something in it. */
+  visible: boolean;
+  /** Every role giving the module, highest level first. */
+  via: ModuleAccessReason[];
 }

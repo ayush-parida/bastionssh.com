@@ -12,6 +12,13 @@ interface AcceptResponse {
   role: Role;
 }
 
+/** "Operator", "Web team and Viewer", or "No access" — the roles the invite gives. */
+function invitedAs(invite: InvitePreview): string {
+  const names = invite.roles ?? [invite.role.charAt(0).toUpperCase() + invite.role.slice(1)];
+  if (names.length === 0) return 'No access';
+  return names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
 export default function AcceptInvitePage() {
   const { token = '' } = useParams();
   const navigate = useNavigate();
@@ -60,7 +67,7 @@ export default function AcceptInvitePage() {
           <>
             <h1 className="text-xl font-bold mb-1">Join {invite.organizationName}</h1>
             <p className="text-sm text-muted-foreground mb-6">
-              You were invited as <span className="font-medium capitalize">{invite.role}</span>. If you already have
+              You were invited as <span className="font-medium">{invitedAs(invite)}</span>. If you already have
               an account for <span className="font-mono">{invite.emailHint}</span>, sign in as it to accept. Your
               password stays the same.
             </p>
@@ -121,7 +128,7 @@ export default function AcceptInvitePage() {
           <>
             <h1 className="text-xl font-bold mb-1">Join {invite.organizationName}</h1>
             <p className="text-sm text-muted-foreground mb-6">
-              You were invited as <span className="font-medium capitalize">{invite.role}</span>. Create an account
+              You were invited as <span className="font-medium">{invitedAs(invite)}</span>. Create an account
               with the address this invite was sent to: <span className="font-mono">{invite.emailHint}</span>
             </p>
             <form

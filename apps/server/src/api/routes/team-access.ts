@@ -36,6 +36,7 @@ import { activeAt } from '../../auth/access/resolve.js';
 import {
   canAssignRole,
   canGrant,
+  hasModule,
   isOwner,
   isReservedRoleName,
   requireModule,
@@ -134,6 +135,8 @@ const createRoleSchema = z.object({
   color: colorSchema.nullable().optional(),
   grants: z.array(grantSchema).max(500).optional(),
   modules: modulesSchema.optional(),
+  /** The web's name for `modules`; `modules` wins when both are given. */
+  modulePermissions: modulesSchema.optional(),
 });
 const updateRoleSchema = z
   .object({
@@ -141,7 +144,9 @@ const updateRoleSchema = z
     description: z.string().trim().max(500).nullable().optional(),
     color: colorSchema.nullable().optional(),
     modules: modulesSchema.optional(),
+    modulePermissions: modulesSchema.optional(),
   })
+  .transform(({ modulePermissions, ...b }) => ({ ...b, modules: b.modules ?? modulePermissions }))
   .refine((b) => b.name !== undefined || b.description !== undefined || b.color !== undefined || b.modules !== undefined, {
     message: 'Nothing to change',
   });
@@ -194,8 +199,34 @@ function modulesOf(orgId: string, row: RoleRow): ModulePermissions {
   return parseModulePermissions(row.modulePermissions);
 }
 
-function presentRole(orgId: string, row: RoleRow, extra: Partial<CustomRole> = {}): CustomRole {
+/** One of the "<Base> (modules only)" roles migration 0025 made for role-scoped members. */
+function isGenerated(row: RoleRow): boolean {
+  return row.id.startsWith('modules-only:');
+}
+
+/** Two module sets giving the same (a module left out is `none`). */
+function sameModules(a: ModulePermissions, b: ModulePermissions): boolean {
+  return MODULE_KEYS.every((key) => (a[key] ?? 'none') === (b[key] ?? 'none'));
+}
+
+/** True when a built-in holds exactly its defaults, so "Reset to default" would change nothing. */
+function atDefaults(orgId: string, row: RoleRow, grants: RoleGrant[]): boolean {
   const system = systemOf(row);
+  if (!system || isLocked(row)) return true;
+  const defaults = BUILT_IN_ROLE_DEFAULTS[system];
+  if (!sameModules(modulesOf(orgId, row), defaults.modules)) return false;
+  return (
+    grants.length === RESOURCE_TYPES.length &&
+    RESOURCE_TYPES.every((type) =>
+      grants.some((g) => g.resourceType === type && g.selector === 'all' && g.level === defaults.grantLevel && !g.namespaces && !g.expiresAt),
+    )
+  );
+}
+
+function presentRole(req: FastifyRequest, row: RoleRow, extra: Partial<CustomRole> = {}): CustomRole {
+  const system = systemOf(row);
+  const modules = modulesOf(req.orgId, row);
+  const grants = extra.grants ?? principalGrants(req.orgId, 'role', row.id);
   return {
     id: row.id,
     name: row.name,
@@ -205,11 +236,25 @@ function presentRole(orgId: string, row: RoleRow, extra: Partial<CustomRole> = {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     system,
-    modules: modulesOf(orgId, row),
+    modules,
+    modulePermissions: modules,
     editable: !isLocked(row),
     deletable: system === null,
+    generated: isGenerated(row),
+    customized: !atDefaults(req.orgId, row, grants),
+    assignable: canAssignRole(req, row.id).ok,
     ...extra,
   };
+}
+
+/**
+ * Roles & access at `view`, or Members at `operate` (whoever invites picks
+ * roles from the list). Neither: 404, as for a module that is off.
+ */
+async function requireRoleList(req: FastifyRequest, reply: FastifyReply) {
+  if (!req.user) return reply.status(401).send({ error: 'Unauthorized' });
+  if (hasModule(req, 'team_roles', 'view') || hasModule(req, 'team_members', 'operate')) return;
+  return reply.status(404).send({ error: 'Not found' });
 }
 
 /** Built-in roles first, in their order (Owner … No access), then the rest by name. */
@@ -383,6 +428,14 @@ function nameProblem(orgId: string, name: string, exceptId?: string): string | u
   return taken ? `A role named ${name} already exists` : undefined;
 }
 
+/** "<name> (copy)", or "(copy 2)" and on when that is taken: a free name for a clone. */
+function copyName(orgId: string, name: string): string {
+  for (let n = 1; ; n++) {
+    const candidate = `${name.slice(0, 48)} (copy${n === 1 ? '' : ` ${n}`})`;
+    if (!nameProblem(orgId, candidate)) return candidate;
+  }
+}
+
 function expiryFrom(body: { expiresAt?: string | null; expiresInMinutes?: number | null }): string | null | 'invalid' {
   if (body.expiresAt) {
     const at = new Date(body.expiresAt).getTime();
@@ -422,9 +475,26 @@ export async function teamAccessRoutes(app: FastifyInstance) {
 
   // ── Roles ───────────────────────────────────────────────────────────────────
 
-  app.get('/roles', { preHandler: requireModule('team_roles', 'view') }, async (req): Promise<CustomRole[]> => {
+  app.get('/roles', { preHandler: requireRoleList }, async (req): Promise<CustomRole[]> => {
     const db = getDb();
     const rows = db.select().from(roles).where(eq(roles.orgId, req.orgId)).all().sort(roleOrder);
+    // Members who only invite see names and what they may give, not what roles contain
+    if (!hasModule(req, 'team_roles', 'view')) {
+      return rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        color: r.color,
+        createdBy: r.createdBy,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+        system: systemOf(r),
+        editable: false,
+        deletable: false,
+        generated: isGenerated(r),
+        assignable: canAssignRole(req, r.id).ok,
+      }));
+    }
     const ids = rows.map((r) => r.id);
     const counts = new Map(
       ids.length
@@ -444,7 +514,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
         : [],
     );
     const grants = grantsOfRoles(req.orgId, ids);
-    return rows.map((r) => presentRole(req.orgId, r, { memberCount: counts.get(r.id) ?? 0, grants: grants.get(r.id) ?? [] }));
+    return rows.map((r) => presentRole(req, r, { memberCount: counts.get(r.id) ?? 0, grants: grants.get(r.id) ?? [] }));
   });
 
   /**
@@ -458,7 +528,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     if (problem) return reply.status(409).send({ error: problem });
     const grantDrafts = drafts(req, reply, body.grants ?? []);
     if (!grantDrafts) return reply;
-    const modules = body.modules ?? modulesFromGrants(grantDrafts);
+    const modules = body.modules ?? body.modulePermissions ?? modulesFromGrants(grantDrafts);
     const missing = delegationMissing(req, modules, grantDrafts);
     if (missing.length) return sendRefused(reply, 'create this role', missing);
 
@@ -487,7 +557,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     });
     return reply
       .status(201)
-      .send({ ...presentRole(req.orgId, findRole(req.orgId, id)!), grants, members: [], memberCount: 0 } satisfies CustomRoleDetail);
+      .send({ ...presentRole(req, findRole(req.orgId, id)!), grants, members: [], memberCount: 0 } satisfies CustomRoleDetail);
   });
 
   app.get('/roles/:id', { preHandler: requireModule('team_roles', 'view') }, async (req, reply): Promise<CustomRoleDetail> => {
@@ -495,7 +565,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const row = findRole(req.orgId, id);
     if (!row) return reply.status(404).send({ error: 'Role not found' });
     const members = membersOf(req.orgId, id);
-    return { ...presentRole(req.orgId, row), grants: principalGrants(req.orgId, 'role', id), members, memberCount: members.length };
+    return { ...presentRole(req, row), grants: principalGrants(req.orgId, 'role', id), members, memberCount: members.length };
   });
 
   /**
@@ -517,7 +587,12 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     }
     const modulesBefore = modulesOf(req.orgId, row);
     if (body.modules) {
-      const missing = delegationMissing(req, moduleChanges(modulesBefore, body.modules), []);
+      // A resource module turned on or off un-parks or parks the role's grants
+      // there (spec §10.4), so those count as given or taken too: nobody turns
+      // Servers on to hand out a parked "All servers: manage" they do not hold
+      const on = (modules: ModulePermissions, type: ResourceType) => (modules[TYPE_MODULES[type]] ?? 'none') !== 'none';
+      const moved = principalGrants(req.orgId, 'role', id).filter((g) => on(modulesBefore, g.resourceType) !== on(body.modules!, g.resourceType));
+      const missing = delegationMissing(req, moduleChanges(modulesBefore, body.modules), moved);
       if (missing.length) return sendRefused(reply, 'change this role', missing);
       if (takesAway({ modules: modulesBefore }, { modules: body.modules }) && !mayTakeFromHolders(req, reply, row)) return reply;
     }
@@ -548,7 +623,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
       ...(body.modules && { members: holders.length, delegation: delegationNote(req) }),
       ...(live && { live }),
     });
-    return presentRole(req.orgId, findRole(req.orgId, id)!);
+    return presentRole(req, findRole(req.orgId, id)!);
   });
 
   /**
@@ -612,7 +687,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
       ...(live && { live }),
     });
     const members = membersOf(req.orgId, id);
-    return { ...presentRole(req.orgId, findRole(req.orgId, id)!), grants, members, memberCount: members.length } satisfies CustomRoleDetail;
+    return { ...presentRole(req, findRole(req.orgId, id)!), grants, members, memberCount: members.length } satisfies CustomRoleDetail;
   });
 
   /**
@@ -625,7 +700,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const body = cloneRoleSchema.parse(req.body ?? {});
     const row = findRole(req.orgId, id);
     if (!row) return reply.status(404).send({ error: 'Role not found' });
-    const name = body.name ?? `${row.name} (copy)`.slice(0, 60);
+    const name = body.name ?? copyName(req.orgId, row.name);
     const problem = nameProblem(req.orgId, name);
     if (problem) return reply.status(409).send({ error: problem });
     const modules = modulesOf(req.orgId, row);
@@ -680,7 +755,7 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     });
     return reply
       .status(201)
-      .send({ ...presentRole(req.orgId, findRole(req.orgId, newId)!), grants, members: [], memberCount: 0 } satisfies CustomRoleDetail);
+      .send({ ...presentRole(req, findRole(req.orgId, newId)!), grants, members: [], memberCount: 0 } satisfies CustomRoleDetail);
   });
 
   /**

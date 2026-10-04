@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, test } from './fixtures.js';
+import { createMember, ensureKubernetesShown, expect, signInWithPassword, test } from './fixtures.js';
 
 /**
  * Kubernetes integrations (K5) against a stubbed API: the fleet overview
@@ -167,6 +167,7 @@ test.describe('Kubernetes integrations', () => {
   let viewer: { email: string; password: string };
   let operator: { email: string; password: string };
   test.beforeAll(async () => {
+    await ensureKubernetesShown();
     viewer = await createMember('viewer', 'kube-k5');
     operator = await createMember('operator', 'kube-k5');
   });

@@ -2,25 +2,25 @@ import { useQuery } from '@tanstack/react-query';
 import type { AccessLevel, MyAccessLevels, ResourceType } from '@smt/shared';
 import { api } from '@/lib/api.js';
 import { levelAtLeast } from '@/lib/access.js';
-import { useHasRole } from '@/store/auth.js';
+import { useIsOwner } from '@/hooks/useModules.js';
 
 /**
  * The signed-in member's level on each resource of a type (custom roles spec
  * §7), so pages hide buttons the level does not allow. UI-side only — the
- * server enforces every action regardless. Owners and admins manage
- * everything; until the levels load, nothing extra is hidden for them and
- * everything level-gated is hidden for everyone else.
+ * server enforces every action regardless. Owners manage everything (the
+ * Owner role is locked); everyone else's levels come from their roles, so
+ * until they load, everything level-gated is hidden.
  */
 export function useAccessLevels(type: ResourceType) {
-  const isAdmin = useHasRole('admin');
+  const isOwner = useIsOwner();
   const { data } = useQuery<MyAccessLevels>({
     queryKey: ['my-access', type],
     queryFn: () => api.get(`/team/access/mine?type=${type}`),
-    enabled: !isAdmin,
+    enabled: !isOwner,
     staleTime: 30_000,
   });
   const levelOf = (id: string | null | undefined): AccessLevel | null => {
-    if (isAdmin || data?.orgAdmin) return 'manage';
+    if (isOwner || data?.orgAdmin) return 'manage';
     return id ? (data?.levels[id] ?? null) : null;
   };
   return {

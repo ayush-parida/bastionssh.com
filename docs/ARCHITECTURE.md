@@ -871,8 +871,8 @@ for a resource module, the member sees an item in it or holds it at `manage`), `
 namespaces ⊆ theirs; the Owner role only by owners). `GET /api/me/modules` and `GET
 /api/me/access` serve the web. `requireRole` and `req.role` remain, deprecated, as what the
 caller's org-module levels amount to (`legacyRoleFor`: admin when they hold every org module
-Admin holds by default, and so on), until every route gates on modules. Access requests ask for custom roles only
-(`customRoleFilter`); built-in names are reserved.
+Admin holds by default, and so on), until every route gates on modules. Access requests
+still see custom roles only (`customRoleFilter`); built-in names are reserved.
 
 **Resource and feature modules on module gates.** Every route of Servers (terminal sessions,
 SFTP, the Docker tab, health, host keys, key rotation), Containers (the fleet, Docker
@@ -934,6 +934,22 @@ all deleted by acceptance, is No access). SSO's default role and group
 mappings may name role ids (never Owner; only roles the configurer could give); roles a mapping
 names are managed by the IdP and follow the groups claim at each sign-in. Access-request
 approval needs the approver to hold the role or level for as long.
+
+**Unified roles in the web.** `/api/team/roles` also serves, per role, `modulePermissions` (the
+same as `modules`, the editor's name), `generated` (a "(modules only)" role), `customized` (a
+built-in off its defaults) and `assignable` (the delegation guard for the caller); members with
+Members at `operate` but not Roles & access see the list without what roles contain, to pick
+invite roles. `PATCH` weighs the grants a resource module turned on or off un-parks or parks
+as given or taken. `GET /team/members` needs Members or Roles & access at `view` (404 else), and
+`GET /team/members/:id/access` adds `modules` (level, shown or not, and the roles giving it:
+`memberModules`). The web builds the sidebar, dashboard widgets and routes from `GET
+/api/me/modules` (`hooks/useModules.ts`: `useVisibleModules`, `useModule(module, level)`,
+`useIsOwner`): a hidden module's deep link gets a not-found page with "Request access"
+(`components/layout/ModuleGate.tsx`), a member with nothing shown gets the No-access home
+(`pages/NoAccess.tsx`), and Settings keeps only their account. The Roles tab edits modules in
+a grid (`components/access/ModulesGrid.tsx`, Team & Access as its three parts) above the
+resource picker; member detail shows role chips in place of base role and scope; the invite
+form ticks roles and the SSO form picks the role for new accounts.
 
 The rest of this section describes the resource engine as custom roles introduced it; "base
 role" there now means the built-in role a member holds.
@@ -1065,7 +1081,7 @@ role" there now means the built-in role a member holds.
   and `GET /api/ai/context` list only what the caller can see. `GET /api/ai/access` answers
   `{ chat }` by the same rule, so the web hides the AI Assistant link (and the chat page says
   why) from members who cannot use it.
-- Web: Team & Access has Members (member detail: scope, roles, personal grants, effective
+- Web: Team & Access has Members (member detail: role chips, personal grants, effective
   access with "via" badges), Roles (editor with per-type pickers, tag selectors with a live
   count, namespace chips, a plain-language preview) and Access checker tabs; server, cluster,
   connection, cloud, command and cron pages have a "who has access" button for admins
@@ -1263,8 +1279,9 @@ Two deliberate departures from a naive reading of "viewer = read-only":
   transitively command execution. A viewer whose custom role or personal grant lets them
   operate somewhere may chat too; `run_command` still needs operate on its target server.
 
-The UI hides controls the caller cannot use (`useHasRole` in `/web/store/auth.ts`), but
-that is cosmetic only — every rule above is enforced server-side and independently.
+The UI hides controls the caller cannot use (`useModule` / `useIsOwner` in
+`/web/hooks/useModules.ts`, `useAccessLevels` per item), but that is cosmetic only — every
+rule above is enforced server-side and independently.
 
 Not yet implemented: per-resource ACLs overriding role defaults, and member-management
 routes (invite / role change / remove), which is why `owner` currently grants nothing

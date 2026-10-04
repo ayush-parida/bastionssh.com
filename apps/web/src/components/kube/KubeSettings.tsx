@@ -4,7 +4,7 @@ import { BellRing, FileText, Scaling, ShipWheel, TerminalSquare, Trash2 } from '
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { kubeKeys } from '@/lib/kube.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { Switch } from '@/components/docker/DockerSettings.js';
 
 const ROWS: { key: keyof Settings; title: string; detail: string; icon: typeof ShipWheel }[] = [
@@ -43,7 +43,7 @@ const ROWS: { key: keyof Settings; title: string; detail: string; icon: typeof S
 /** The org's Kubernetes permissions (spec §7, §13). Owners and admins change them; nobody else sees this section. */
 export default function KubeSettings() {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('kubernetes', 'manage');
   const { data: settings } = useQuery<Settings>({
     queryKey: kubeKeys.settings,
     queryFn: () => api.get('/kube/settings'),

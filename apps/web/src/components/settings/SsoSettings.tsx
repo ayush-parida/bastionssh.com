@@ -2,8 +2,17 @@ import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
-import type { SsoProviderInput, SsoProviderKind, SsoRole, SsoRoleMapping, SsoSettings, SsoTestResult } from '@smt/shared';
+import { useIsOwner } from '@/hooks/useModules.js';
+import type {
+  CustomRole,
+  DefaultRole,
+  SsoProviderInput,
+  SsoProviderKind,
+  SsoRole,
+  SsoRoleMapping,
+  SsoSettings,
+  SsoTestResult,
+} from '@smt/shared';
 import { Building2, Copy, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -28,6 +37,8 @@ interface Form {
   clientSecret: string;
   domains: string;
   defaultRole: SsoRole;
+  /** The role new accounts get; empty until the roles load (then the org default). */
+  defaultRoleId: string;
   autoProvision: boolean;
   enforceSso: boolean;
   enabled: boolean;
@@ -43,6 +54,7 @@ const emptyForm: Form = {
   clientSecret: '',
   domains: '',
   defaultRole: 'viewer',
+  defaultRoleId: '',
   autoProvision: false,
   enforceSso: false,
   enabled: true,
@@ -63,7 +75,7 @@ function copy(text: string) {
 
 /** The org's OpenID Connect provider. Owners only: the server answers 403 to anyone else. */
 export default function SsoSettingsPanel() {
-  const isOwner = useHasRole('owner');
+  const isOwner = useIsOwner();
   if (!isOwner) return null;
   return <SsoSettingsForm />;
 }
@@ -74,6 +86,9 @@ function SsoSettingsForm() {
   const [test, setTest] = useState<SsoTestResult | null>(null);
 
   const { data: settings } = useQuery<SsoSettings>({ queryKey: ['sso-settings'], queryFn: () => api.get('/sso') });
+  // New accounts get a role; a new provider starts from the org's default role (unified roles spec §5)
+  const { data: roles } = useQuery<CustomRole[]>({ queryKey: ['roles'], queryFn: () => api.get('/team/roles') });
+  const { data: defaultRole } = useQuery<DefaultRole>({ queryKey: ['default-role'], queryFn: () => api.get('/team/default-role') });
 
   // Load the saved provider into the form (the secret is never sent back)
   useEffect(() => {
@@ -85,6 +100,7 @@ function SsoSettingsForm() {
       clientSecret: '',
       domains: settings.allowedDomains.join(', '),
       defaultRole: settings.defaultRole,
+      defaultRoleId: settings.defaultRoleId ?? '',
       autoProvision: settings.autoProvision,
       enforceSso: settings.enforceSso,
       enabled: settings.enabled,
@@ -95,6 +111,8 @@ function SsoSettingsForm() {
   }, [settings]);
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
+  // No role picked: a saved provider gives the built-in role of its base role, a new one the org's default
+  const fallbackRoleId = settings?.configured ? roles?.find((r) => r.system === form.defaultRole)?.id : defaultRole?.roleId;
 
   const save = useMutation({
     mutationFn: () => {
@@ -105,6 +123,7 @@ function SsoSettingsForm() {
         ...(form.clientSecret && { clientSecret: form.clientSecret }),
         allowedDomains: form.domains.split(/[\s,]+/).filter(Boolean),
         defaultRole: form.defaultRole,
+        defaultRoleId: form.defaultRoleId || fallbackRoleId || null,
         autoProvision: form.autoProvision,
         enforceSso: form.enforceSso,
         enabled: form.enabled,
@@ -288,13 +307,16 @@ function SsoSettingsForm() {
             <label className="block text-sm font-medium mb-1" htmlFor="sso-role">Role for new accounts</label>
             <select
               id="sso-role"
-              value={form.defaultRole}
-              onChange={(e) => set('defaultRole', e.target.value as SsoRole)}
+              value={form.defaultRoleId || fallbackRoleId || ''}
+              onChange={(e) => set('defaultRoleId', e.target.value)}
               className={input}
             >
-              {ROLES.map((r) => (
-                <option key={r} value={r}>{r}</option>
-              ))}
+              {/* Any role but Owner, which an identity provider never hands out */}
+              {(roles ?? [])
+                .filter((r) => r.system !== 'owner' && r.assignable !== false)
+                .map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
             </select>
           </div>
         </div>

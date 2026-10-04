@@ -11,7 +11,10 @@ test('an owner invites a teammate who joins through the link', async ({ page, br
   await page.getByRole('button', { name: 'Invite person' }).click();
   const form = page.locator('form', { has: page.getByRole('button', { name: 'Create invite' }) });
   await form.getByPlaceholder('teammate@example.com').fill(email);
-  await form.locator('select').selectOption('operator');
+  // The org's default role (Viewer) starts ticked; give Operator instead
+  await expect(form.getByLabel('Role Viewer', { exact: true })).toBeChecked();
+  await form.getByLabel('Role Viewer', { exact: true }).uncheck();
+  await form.getByLabel('Role Operator', { exact: true }).check();
   await form.getByRole('button', { name: 'Create invite' }).click();
 
   // Shown once, with the address it is bound to
@@ -25,7 +28,7 @@ test('an owner invites a teammate who joins through the link', async ({ page, br
   const invitee = await inviteeContext.newPage();
   await invitee.goto(link);
   await expect(invitee.getByRole('heading', { name: 'Join Default Organization' })).toBeVisible();
-  await expect(invitee.getByText('You were invited as')).toContainText('operator');
+  await expect(invitee.getByText('You were invited as')).toContainText('Operator');
 
   await invitee.getByLabel('Email address').fill(email);
   await invitee.getByLabel('Your name').fill('E2E Invitee');

@@ -2,10 +2,14 @@ import type { FastifyRequest } from 'fastify';
 import { and, eq, inArray, isNull } from 'drizzle-orm';
 import {
   BUILT_IN_ROLES,
+  MODULE_LEVELS,
+  MODULES,
   MODULES_ONLY_DEFAULTS,
   type BuiltInRole,
   type HeldRole,
+  type MemberModuleAccess,
   type MemberScope,
+  type ModuleAccessReason,
   type ModuleKey,
   type ModuleLevel,
   type PermissionSet,
@@ -20,7 +24,7 @@ import { abortKubeStreams } from '../../kube/sse.js';
 import { closeDisallowedPodShells } from '../../kube/exec.js';
 import type { LiveAccessRevoked } from '../revoke.js';
 import { grantsOfRoles, principalGrants } from './grants.js';
-import { canAssignRole, canGrant } from './modules.js';
+import { canAssignRole, canGrant, visibleModules } from './modules.js';
 import {
   allModules,
   baseLevel,
@@ -606,4 +610,33 @@ export function changeMemberRoles(
 /** What closed, per member, for an audit row; undefined when nothing did. */
 export function liveSummary(closed: Map<string, LiveAccessRevoked>): Record<string, LiveAccessRevoked> | undefined {
   return closed.size ? Object.fromEntries(closed) : undefined;
+}
+
+/**
+ * Every module with the member's level there, whether it is shown to them,
+ * and which of their roles give it (spec §5: "Team & Access: invite members
+ * — via Team leads"), for the member detail.
+ */
+export function memberModules(orgId: string, userId: string): MemberModuleAccess[] {
+  const held = memberRoleRows(orgId, [userId]).get(userId) ?? [];
+  const { byRole } = unionModules(orgId, held);
+  const visible = new Set(visibleModules({ orgId, userId }).map((m) => m.module));
+  const reasons = new Map<ModuleKey, ModuleAccessReason[]>();
+  for (const role of held) {
+    const given = byRole.get(role.roleId) ?? {};
+    for (const m of MODULES) {
+      // The Owner role reaches every module at its highest level, whatever it stores
+      const level = role.system === 'owner' ? m.levels[m.levels.length - 1]! : given[m.key];
+      if (!level || level === 'none') continue;
+      reasons.set(m.key, [
+        ...(reasons.get(m.key) ?? []),
+        { roleId: role.roleId, name: role.name, system: role.system, level, expiresAt: role.expiresAt },
+      ]);
+    }
+  }
+  const order = (l: ModuleLevel) => MODULE_LEVELS.indexOf(l);
+  return MODULES.map((m) => {
+    const via = (reasons.get(m.key) ?? []).sort((a, b) => order(b.level) - order(a.level) || a.name.localeCompare(b.name));
+    return { module: m.key, level: via[0]?.level ?? 'none', visible: visible.has(m.key), via };
+  });
 }

@@ -6,7 +6,8 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { DURATION_OPTIONS, formatMinutes, RESOURCE_TYPE_LABELS } from '@/lib/access.js';
-import { useAuthStore, useHasRole } from '@/store/auth.js';
+import { useAuthStore } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
 import { NamespaceChips } from './GrantsEditor.js';
 import { durationChoices, RequestAccessDialog, useRequestableAccess, useRequestableServers } from './RequestAccessDialog.js';
@@ -252,7 +253,7 @@ function RequestPolicy({ settings }: { settings: AccessRequestSettings }) {
  */
 export default function AccessRequests() {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('team_roles', 'manage');
   const currentUser = useAuthStore((s) => s.user);
   const [requesting, setRequesting] = useState(false);
   const [showPolicy, setShowPolicy] = useState(false);

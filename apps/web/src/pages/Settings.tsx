@@ -15,6 +15,7 @@ import DatabaseBackups from '@/components/settings/DatabaseBackups.js';
 import DockerSettings from '@/components/docker/DockerSettings.js';
 import KubeSettings from '@/components/kube/KubeSettings.js';
 import { useAuthStore } from '@/store/auth.js';
+import { useModule, useVisibleModules } from '@/hooks/useModules.js';
 
 interface ProviderForm {
   name: string;
@@ -33,11 +34,14 @@ export default function SettingsPage() {
   const [form, setForm] = useState<ProviderForm>(emptyForm);
   // A backup-code sign-in that must add a passkey first: nothing else here would load
   const recoveryGate = useAuthStore((s) => s.recoveryGate);
+  // Organization sections follow the member's modules; their own account is always theirs
+  const managesAi = useModule('ai', 'manage');
+  const showsMonitoring = useVisibleModules().isVisible('monitoring');
 
   const { data: providers } = useQuery<AIProviderConfig[]>({
     queryKey: ['ai-providers'],
     queryFn: () => api.get('/ai/providers'),
-    enabled: !recoveryGate,
+    enabled: !recoveryGate && managesAi,
   });
 
   const createMutation = useMutation({
@@ -106,89 +110,91 @@ export default function SettingsPage() {
       <h1 className="text-2xl font-bold mb-1">Settings</h1>
       <p className="text-muted-foreground text-sm mb-8">Manage AI providers, alerting, and application settings</p>
 
-      {/* AI Providers */}
-      <section>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">AI Providers</h2>
-          <button onClick={() => { setEditingId(null); setForm(emptyForm); setShowForm(true); }} className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
-            <Plus size={14} /> Add provider
-          </button>
-        </div>
-
-        {showForm && (
-          <div className="mb-4 rounded-lg border border-border bg-card p-5">
-            <h3 className="text-sm font-semibold mb-3">{editingId ? 'Edit provider' : 'New provider'}</h3>
-            <form onSubmit={handleSubmit} className="space-y-3">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-sm font-medium mb-1">Name</label>
-                  <input type="text" required value={form.name} onChange={(e) => setForm(p => ({ ...p, name: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium mb-1">Type</label>
-                  <select value={form.provider} onChange={(e) => setForm(p => ({ ...p, provider: e.target.value as ProviderForm['provider'] }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary">
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="openai_compatible">OpenAI-compatible (LM Studio, Ollama…)</option>
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">API Key</label>
-                <input type="password" value={form.apiKey} onChange={(e) => setForm(p => ({ ...p, apiKey: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" placeholder="sk-…" />
-              </div>
-              {form.provider === 'openai_compatible' && (
-                <div>
-                  <label className="block text-sm font-medium mb-1">Base URL</label>
-                  <input type="url" value={form.baseUrl} onChange={(e) => setForm(p => ({ ...p, baseUrl: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" placeholder="http://localhost:11434/v1" />
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium mb-1">Model</label>
-                <input type="text" value={form.model} onChange={(e) => setForm(p => ({ ...p, model: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" placeholder="gpt-4o / claude-3-5-sonnet / llama3.2" />
-              </div>
-              {editingId && (
-                <p className="text-xs text-muted-foreground">Leave API Key blank to keep existing key.</p>
-              )}
-              <div className="flex gap-2">
-                <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
-                  {editingId ? 'Update' : 'Save'}
-                </button>
-                <button type="button" onClick={closeForm} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">Cancel</button>
-              </div>
-            </form>
+      {/* AI Providers: only for those who may change them */}
+      {managesAi && (
+        <section>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold">AI Providers</h2>
+            <button onClick={() => { setEditingId(null); setForm(emptyForm); setShowForm(true); }} className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+              <Plus size={14} /> Add provider
+            </button>
           </div>
-        )}
 
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
-          {!providers?.length ? (
-            <div className="flex flex-col items-center py-12 text-muted-foreground">
-              <Bot size={36} className="mb-3 opacity-30" />
-              <p className="text-sm">No AI providers configured.</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-border">
-              {providers.map((p) => (
-                <div key={p.id} className="flex items-center gap-3 px-4 py-3">
-                  <Bot size={16} className="text-muted-foreground" />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium">{p.name}</p>
-                    <p className="text-xs text-muted-foreground">{p.provider} · {p.model}{p.baseUrl ? ` · ${p.baseUrl}` : ''}</p>
+          {showForm && (
+            <div className="mb-4 rounded-lg border border-border bg-card p-5">
+              <h3 className="text-sm font-semibold mb-3">{editingId ? 'Edit provider' : 'New provider'}</h3>
+              <form onSubmit={handleSubmit} className="space-y-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Name</label>
+                    <input type="text" required value={form.name} onChange={(e) => setForm(p => ({ ...p, name: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" />
                   </div>
-                  <button onClick={() => openEdit(p)} className="text-muted-foreground hover:text-foreground mr-1" title="Edit">
-                    <Pencil size={14} />
-                  </button>
-                  <button onClick={() => { if (confirm('Remove provider?')) deleteMutation.mutate(p.id); }} className="text-red-500 hover:text-red-600" title="Delete">
-                    <Trash2 size={14} />
-                  </button>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Type</label>
+                    <select value={form.provider} onChange={(e) => setForm(p => ({ ...p, provider: e.target.value as ProviderForm['provider'] }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary">
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai_compatible">OpenAI-compatible (LM Studio, Ollama…)</option>
+                    </select>
+                  </div>
                 </div>
-              ))}
+                <div>
+                  <label className="block text-sm font-medium mb-1">API Key</label>
+                  <input type="password" value={form.apiKey} onChange={(e) => setForm(p => ({ ...p, apiKey: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" placeholder="sk-…" />
+                </div>
+                {form.provider === 'openai_compatible' && (
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Base URL</label>
+                    <input type="url" value={form.baseUrl} onChange={(e) => setForm(p => ({ ...p, baseUrl: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" placeholder="http://localhost:11434/v1" />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-sm font-medium mb-1">Model</label>
+                  <input type="text" value={form.model} onChange={(e) => setForm(p => ({ ...p, model: e.target.value }))} className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary" placeholder="gpt-4o / claude-3-5-sonnet / llama3.2" />
+                </div>
+                {editingId && (
+                  <p className="text-xs text-muted-foreground">Leave API Key blank to keep existing key.</p>
+                )}
+                <div className="flex gap-2">
+                  <button type="submit" disabled={createMutation.isPending || updateMutation.isPending} className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+                    {editingId ? 'Update' : 'Save'}
+                  </button>
+                  <button type="button" onClick={closeForm} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">Cancel</button>
+                </div>
+              </form>
             </div>
           )}
-        </div>
-      </section>
 
-      <NotificationChannels />
+          <div className="rounded-lg border border-border bg-card overflow-hidden">
+            {!providers?.length ? (
+              <div className="flex flex-col items-center py-12 text-muted-foreground">
+                <Bot size={36} className="mb-3 opacity-30" />
+                <p className="text-sm">No AI providers configured.</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-border">
+                {providers.map((p) => (
+                  <div key={p.id} className="flex items-center gap-3 px-4 py-3">
+                    <Bot size={16} className="text-muted-foreground" />
+                    <div className="flex-1">
+                      <p className="text-sm font-medium">{p.name}</p>
+                      <p className="text-xs text-muted-foreground">{p.provider} · {p.model}{p.baseUrl ? ` · ${p.baseUrl}` : ''}</p>
+                    </div>
+                    <button onClick={() => openEdit(p)} className="text-muted-foreground hover:text-foreground mr-1" title="Edit">
+                      <Pencil size={14} />
+                    </button>
+                    <button onClick={() => { if (confirm('Remove provider?')) deleteMutation.mutate(p.id); }} className="text-red-500 hover:text-red-600" title="Delete">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      {showsMonitoring && <NotificationChannels />}
       <AccountSettings />
       <Passkeys />
       <Sessions />

@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useIsOwner } from '@/hooks/useModules.js';
 import type { OrgSecuritySettings } from '@smt/shared';
 import { LifeBuoy, ShieldCheck, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
@@ -10,7 +10,7 @@ import { toast } from 'sonner';
 /** The org's "require passkeys" switch. Owners change it; everyone else sees whether it is on. */
 export default function PasskeyPolicy() {
   const qc = useQueryClient();
-  const isOwner = useHasRole('owner');
+  const isOwner = useIsOwner();
 
   const { data: settings } = useQuery<OrgSecuritySettings>({
     queryKey: ['team-settings'],

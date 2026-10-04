@@ -4,6 +4,7 @@ import type {
   BuiltInRole,
   EffectiveAccessEntry,
   HeldRole,
+  MemberModuleAccess,
   MemberScope,
   ResourceType,
   RoleGrant,
@@ -63,6 +64,8 @@ export interface MemberServerAccess {
   roles?: HeldRole[];
   personalGrants?: RoleGrant[];
   effective?: Record<ResourceType, EffectiveAccessEntry[]>;
+  /** Every module with the member's level there and the roles giving it (unified roles spec §5). */
+  modules?: MemberModuleAccess[];
 }
 
 export interface ClusterGrant {
@@ -257,6 +260,8 @@ export interface InvitePreview {
   /** Partially masked, e.g. `de•@ex•••••.com` — the link must not reveal it. */
   emailHint: string;
   role: Role;
+  /** The names of the roles the invite gives. */
+  roles?: string[];
   organizationName: string;
   state: InviteState;
   // Deliberately says nothing about whether the address already has an
