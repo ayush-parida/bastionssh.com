@@ -5,6 +5,7 @@ import { accessibleServerFilter, canAccessServer } from '../../auth/server-acces
 import { authorize, accessibleIds, type ResourceAction } from '../../auth/access/index.js';
 import {
   baseRoleAllows,
+  cronJobFilter,
   denyAccess,
   mayCreate,
   refuseServers,
@@ -115,7 +116,8 @@ function commandFor(
  * Changing or deleting a command changes what every cron job using it runs —
  * as that job's creator, on that job's server. So the caller must be able to
  * operate every such server too, or they could plant commands on servers they
- * were never granted. Sends a 403 and returns false when blocked.
+ * were never granted. Sends a 403 and returns false when blocked; the message
+ * names no job or server, since the caller may not see them.
  */
 function mayRewriteCommand(req: FastifyRequest, reply: FastifyReply, commandId: string): boolean {
   const jobs = getDb()
@@ -125,8 +127,7 @@ function mayRewriteCommand(req: FastifyRequest, reply: FastifyReply, commandId: 
     .all();
   if (refuseServers(req, jobs.map((job) => job.serverId))) {
     reply.status(403).send({
-      error:
-        'This command is used by a cron job on a server you do not have access to, so you cannot change or delete it',
+      error: 'Changing or deleting this command needs operate access to every server it is scheduled to run on',
     });
     return false;
   }
@@ -393,15 +394,24 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     if (!mayRewriteCommand(req, reply, id)) return reply;
 
     // cron_jobs references this row without ON DELETE, so the delete would fail
-    // with a bare foreign-key error. Explain what is in the way instead.
+    // with a bare foreign-key error. Explain what is in the way instead —
+    // counting only the jobs the caller sees, and none when some are hidden.
     const usedBy = db
       .select({ id: cronJobs.id })
       .from(cronJobs)
       .where(eq(cronJobs.savedCommandId, id))
       .all();
     if (usedBy.length > 0) {
+      const seen = db
+        .select({ id: cronJobs.id })
+        .from(cronJobs)
+        .where(and(eq(cronJobs.savedCommandId, id), eq(cronJobs.orgId, req.orgId), cronJobFilter(req)))
+        .all().length;
       return reply.status(409).send({
-        error: `This command is used by ${usedBy.length} cron job${usedBy.length > 1 ? 's' : ''}. Delete them or switch them to another command first.`,
+        error:
+          seen === usedBy.length
+            ? `This command is used by ${seen} cron job${seen > 1 ? 's' : ''}. Delete them or switch them to another command first.`
+            : 'This command is used by cron jobs. They must be deleted or switched to another command first.',
       });
     }
 

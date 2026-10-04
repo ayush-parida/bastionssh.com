@@ -33,8 +33,8 @@ export const LEVEL_LABELS: Record<AccessLevel, string> = { view: 'View', operate
 export const LEVEL_VERBS: Record<ResourceType, Record<AccessLevel, string>> = {
   server: { view: 'see', operate: 'open terminals and files on', manage: 'fully manage' },
   cluster: { view: 'see the workloads of', operate: 'read logs, scale and exec into', manage: 'fully manage' },
-  ftp_connection: { view: 'see', operate: 'browse and transfer files on', manage: 'fully manage' },
-  storage_connection: { view: 'list objects in', operate: 'upload and download objects in', manage: 'fully manage' },
+  ftp_connection: { view: 'browse and download files on', operate: 'upload and change files on', manage: 'fully manage' },
+  storage_connection: { view: 'list and download objects in', operate: 'upload and change objects in', manage: 'fully manage' },
   cloud_account: { view: 'see', operate: 'sync', manage: 'fully manage' },
   saved_command: { view: 'see', operate: 'run', manage: 'edit and delete' },
   cron_job: { view: 'see the history of', operate: 'run and pause', manage: 'edit and delete' },
@@ -47,8 +47,8 @@ export const LEVEL_VERBS: Record<ResourceType, Record<AccessLevel, string>> = {
 export const LEVEL_HINTS: Record<ResourceType, Record<AccessLevel, string>> = {
   server: { view: 'status and health', operate: 'terminals, files and commands', manage: 'edit, host keys and delete' },
   cluster: { view: 'workloads and events', operate: 'logs, YAML, scale and exec', manage: 'rollback, cordon and settings' },
-  ftp_connection: { view: 'see it', operate: 'browse and transfer files', manage: 'edit, host key and delete' },
-  storage_connection: { view: 'list buckets and objects', operate: 'upload, download and delete objects', manage: 'buckets, edit and delete' },
+  ftp_connection: { view: 'browse and download files', operate: 'upload, rename, delete and test', manage: 'edit, host key and delete' },
+  storage_connection: { view: 'list and download objects', operate: 'upload, rename, delete and test', manage: 'buckets, edit and delete' },
   cloud_account: { view: 'see it and its last sync', operate: 'sync now', manage: 'edit credentials and delete' },
   saved_command: { view: 'see it', operate: 'run it', manage: 'edit and delete' },
   cron_job: { view: 'see it and its runs', operate: 'run now, pause and resume', manage: 'edit and delete' },

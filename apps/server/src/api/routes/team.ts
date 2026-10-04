@@ -75,7 +75,7 @@ import {
 import { config } from '../../config/index.js';
 import { cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import { activeAt } from '../../auth/access/resolve.js';
-import { effectiveAccessList, principalGrants, revokeAfterChange, snapshotAccess } from '../../auth/access/index.js';
+import { baseLevel, effectiveAccessList, principalGrants, revokeAfterChange, snapshotAccess } from '../../auth/access/index.js';
 
 const roleSchema = z.enum(ROLES);
 
@@ -330,6 +330,33 @@ function personalIdGrants(grants: RoleGrant[], type: 'server' | 'cluster') {
     grantedBy: g.grantedBy,
     reason: g.reason,
   }));
+}
+
+/**
+ * The types the pre-roles restriction never narrowed: restricting a member
+ * through the old access endpoint keeps them open at the base level, as
+ * migration 0023 did for members restricted before custom roles.
+ */
+const LEGACY_ALL_TYPES = ['ftp_connection', 'storage_connection', 'cloud_account', 'saved_command', 'cron_job'] as const;
+
+/** The id migration 0023 gives a legacy "all" grant, so it follows base-role changes (its trigger). */
+function legacyAllId(type: (typeof LEGACY_ALL_TYPES)[number], orgId: string, userId: string): string {
+  return `legacy-all:${type}:${orgId}:${userId}`;
+}
+
+/** A member's legacy "all" grants, for the audit row: type and level. */
+function legacyAllGrants(orgId: string, userId: string) {
+  return getDb()
+    .select({ resourceType: resourceGrants.resourceType, level: resourceGrants.level })
+    .from(resourceGrants)
+    .where(
+      inArray(
+        resourceGrants.id,
+        LEGACY_ALL_TYPES.map((type) => legacyAllId(type, orgId, userId)),
+      ),
+    )
+    .orderBy(resourceGrants.resourceType)
+    .all();
 }
 
 /**
@@ -795,12 +822,46 @@ export async function teamRoutes(app: FastifyInstance) {
         clusters: personalIdGrants(personalBefore, 'cluster').map((g) => ({ clusterId: g.id, expiresAt: g.expiresAt })),
       }),
     };
+    // Moving in or out of the restriction: the types it never narrowed stay
+    // open through legacy "all" grants at the base level, as migration 0023
+    // gave members restricted before custom roles, and go when it is lifted.
+    const wasRestricted = member.scope === 'roles';
+    const restricting = body.serverAccess === 'restricted' && !wasRestricted;
+    const lifting = body.serverAccess === 'all' && wasRestricted;
+    const legacyAllBefore = legacyAllGrants(req.orgId, userId);
+    const legacyAllIds = LEGACY_ALL_TYPES.map((type) => legacyAllId(type, req.orgId, userId));
     const accessBefore = snapshotAccess(req.orgId, [userId]);
     db.transaction(() => {
       db.update(memberships)
         .set({ serverAccess: body.serverAccess })
         .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
         .run();
+      if (restricting || lifting) {
+        db.delete(resourceGrants)
+          .where(and(eq(resourceGrants.orgId, req.orgId), inArray(resourceGrants.id, legacyAllIds)))
+          .run();
+      }
+      if (restricting) {
+        const createdAt = new Date(now).toISOString();
+        for (const type of LEGACY_ALL_TYPES) {
+          db.insert(resourceGrants)
+            .values({
+              id: legacyAllId(type, req.orgId, userId),
+              orgId: req.orgId,
+              principalType: 'user',
+              principalId: userId,
+              resourceType: type,
+              selector: 'all',
+              resourceId: null,
+              level: baseLevel(member.role),
+              expiresAt: null,
+              grantedBy: req.user.id,
+              reason: 'Kept from before custom roles',
+              createdAt,
+            })
+            .run();
+        }
+      }
       db.delete(memberServerAccess).where(memberGrants).run();
       for (const row of legacyRows) {
         db.insert(memberServerAccess).values({ orgId: req.orgId, userId, ...row }).run();
@@ -841,15 +902,21 @@ export async function teamRoutes(app: FastifyInstance) {
     // Narrowed: anything already open on what the member no longer reaches
     // (through this list, their roles or other grants) closes now
     const live = revokeAfterChange(req.orgId, [userId], accessBefore).get(userId);
+    const legacyAllAfter = legacyAllGrants(req.orgId, userId);
 
     await audit(req, 'member.access_change', 'member', userId, userEmail(userId), {
       from: member.serverAccess,
       to: body.serverAccess,
-      before: { serverAccess: member.serverAccess, ...accessGrantsBefore },
+      before: {
+        serverAccess: member.serverAccess,
+        ...accessGrantsBefore,
+        ...((restricting || lifting) && { legacyAll: legacyAllBefore }),
+      },
       after: {
         serverAccess: body.serverAccess,
         servers: grants.map((g) => ({ serverId: g.serverId, expiresAt: g.expiresAt })),
         ...(clusterIds && { clusters: clusterGrants.map((g) => ({ clusterId: g.clusterId, expiresAt: g.expiresAt })) }),
+        ...((restricting || lifting) && { legacyAll: legacyAllAfter }),
       },
       servers: grantedIds.length,
       timeBound: grants.filter((g) => g.expiresAt !== null).length,

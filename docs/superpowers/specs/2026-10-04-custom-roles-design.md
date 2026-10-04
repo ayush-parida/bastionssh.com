@@ -65,13 +65,15 @@ Existing helpers (`canAccessServer`, `accessibleServerFilter`, `serverScope`, cl
 | --- | --- | --- | --- |
 | Server | See it, health, metrics, host-key status, Docker lists/status, recordings of own sessions | Terminal, SFTP read/write, run commands, Docker logs/stats/actions/exec (subject to org Docker toggles), diagnostics with login | Edit server, host keys (pin/accept/forget), key rotation, Docker remove/prune/env reveal, delete server |
 | Cluster (+ns) | Map, graph, workloads, events, diagnoses | Logs, YAML, scale/restart/delete-pod/exec (subject to org Kube toggles), Explain | Rollback, cordon, cluster settings/credentials, impersonation toggle |
-| FTP/SFTP connection | See it | Browse, upload, download, rename, delete files, test | Edit, host key, delete connection |
-| Storage connection | See it, list buckets/objects | Upload, download, delete objects | Edit, delete connection |
+| FTP/SFTP connection | See it, browse, download (read-only) | Upload, new folders, rename, delete files, test, diagnostics | Edit, host key, delete connection |
+| Storage connection | See it, list buckets/objects, download (read-only) | Upload, new folders, rename, delete objects, test, diagnostics | Buckets (create/delete), edit, delete connection |
 | Cloud account | See it, last sync, instances | Trigger sync | Edit credentials, delete |
 | Saved command | See it | Run (also needs `operate` on each target server) | Edit, delete |
 | Cron job | See it, run history | Run now, enable/disable | Edit, delete (also needs `operate` on its server to create/move) |
 
 Org toggles (Docker `operatorsCanExec`/`operatorsCanRemove`/`allowPrune`, Kubernetes `operatorsCan*`) apply to `operate`; `manage` implies them.
+
+FTP/SFTP and storage connections: `view` is everything read-only, as viewers had before custom roles (browse, list, download), so a restricted viewer's migrated `view` grant keeps exactly that; `operate` is every write plus testing the stored credentials. Testing was admin-only before roles; it is now `operate`, like the diagnostics that already ran with the same credentials at operator level.
 
 ## 6. API
 
@@ -136,4 +138,4 @@ Resolution loads at most a few small queries per request (membership, role membe
 2. **Base roles unchanged:** viewer/operator/admin/owner stay; role-scoped members keep their base role for org-level features, and roles add resource levels on top. No new "Member" base role.
 3. **Tag selectors included** for servers, evaluated live; changing a server's tags requires `manage` on that server and is audited with the affected roles.
 4. **Kubernetes namespace narrowing included** per role entry and per personal grant.
-5. **Old per-member access endpoints** (`/members/:userId/access`, cluster access) stay as compatible aliases for one release, backed by personal grants.
+5. **Old per-member access endpoints** (`/members/:userId/access`, cluster access) stay as compatible aliases for one release, backed by personal grants. Restricting a member through them narrows servers and clusters only, as before: like migration 0023, it gives them personal "all" grants at their base level on FTP/storage connections, cloud accounts, saved commands and cron jobs (`legacy-all:` ids), removed again when the alias lifts the restriction.

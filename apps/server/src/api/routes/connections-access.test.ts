@@ -7,7 +7,8 @@ import { Readable, type Writable } from 'node:stream';
  * role-scoped member with no access (404), with a custom role or a personal
  * grant at view / operate / manage (403 below the level the action needs),
  * and for all-scope members, whose base role keeps what it allowed before.
- * Lists show only what a member may see; managers below admin cannot reach
+ * Reading (browsing, listing, downloading) is `view`; writing and testing
+ * `operate`. Lists show only what a member may see; managers below admin cannot reach
  * the org's SSH keys or send a stored password somewhere new; losing a role
  * closes pooled FTP sessions on the lost connections only.
  *
@@ -250,7 +251,7 @@ interface Subject {
   name: string;
   make: (type: ConnectionType, id: string) => { headers: Record<string, string> };
   level: AccessLevel | 'none';
-  /** The base role applies (scope `all`): it keeps browsing and downloading at view. */
+  /** The base role applies (scope `all`): it sees every one. */
   base?: boolean;
 }
 
@@ -327,8 +328,6 @@ interface Route {
   url: (id: string) => string;
   /** The level the spec's §5 table asks for. */
   level: AccessLevel;
-  /** The base role (scope `all`) has always allowed it at view. */
-  baseView?: boolean;
   payload?: unknown;
   octet?: boolean;
 }
@@ -340,8 +339,8 @@ const cloud = (path: string) => (id: string) => `/api/cloud/accounts/${id}${path
 const ROUTES: Record<ConnectionType, Route[]> = {
   ftp_connection: [
     { method: 'GET', url: ftp(''), level: 'view' },
-    { method: 'GET', url: ftp('/list?path=.'), level: 'operate', baseView: true },
-    { method: 'GET', url: ftp('/download?path=/home/deploy/index.html'), level: 'operate', baseView: true },
+    { method: 'GET', url: ftp('/list?path=.'), level: 'view' },
+    { method: 'GET', url: ftp('/download?path=/home/deploy/index.html'), level: 'view' },
     { method: 'PUT', url: ftp('/file?path=/home/deploy/new.txt'), level: 'operate', payload: Buffer.from('hey'), octet: true },
     { method: 'POST', url: ftp('/mkdir'), level: 'operate', payload: { path: '/home/deploy/new' } },
     { method: 'POST', url: ftp('/rename'), level: 'operate', payload: { from: '/home/deploy/a', to: '/home/deploy/b' } },
@@ -361,13 +360,13 @@ const ROUTES: Record<ConnectionType, Route[]> = {
     { method: 'GET', url: storage(''), level: 'view' },
     { method: 'GET', url: storage('/buckets'), level: 'view' },
     { method: 'GET', url: storage('/buckets/media/objects'), level: 'view' },
-    { method: 'GET', url: storage('/buckets/media/object?key=a.txt'), level: 'operate', baseView: true },
+    { method: 'GET', url: storage('/buckets/media/object?key=a.txt'), level: 'view' },
     { method: 'PUT', url: storage('/buckets/media/object?key=b.txt'), level: 'operate', payload: Buffer.from('hey'), octet: true },
     { method: 'POST', url: storage('/buckets/media/folder'), level: 'operate', payload: { prefix: 'new/' } },
     { method: 'POST', url: storage('/buckets/media/rename'), level: 'operate', payload: { from: 'a.txt', to: 'b.txt' } },
     { method: 'DELETE', url: storage('/buckets/media/object?key=a.txt'), level: 'operate' },
     { method: 'POST', url: (id) => `/api/diagnostics/storage/${id}`, level: 'operate', payload: {} },
-    { method: 'POST', url: storage('/test'), level: 'manage' },
+    { method: 'POST', url: storage('/test'), level: 'operate' },
     { method: 'POST', url: storage('/buckets'), level: 'manage', payload: { name: 'fresh-bucket' } },
     { method: 'DELETE', url: storage('/buckets/media'), level: 'manage' },
     { method: 'PATCH', url: storage(''), level: 'manage', payload: { name: 'renamed' } },
@@ -389,8 +388,7 @@ const LISTS: Record<ConnectionType, string> = {
 
 function expected(subject: Subject, route: Route): 'allowed' | 403 | 404 {
   if (subject.level === 'none') return 404;
-  if (RANK[subject.level] >= RANK[route.level]) return 'allowed';
-  return subject.base && route.baseView ? 'allowed' : 403;
+  return RANK[subject.level] >= RANK[route.level] ? 'allowed' : 403;
 }
 
 describe('connections, storage and cloud accounts under custom roles', () => {
@@ -461,7 +459,7 @@ describe('connections, storage and cloud accounts under custom roles', () => {
     }
   });
 
-  it('gates the HEAD twins of GET routes the same way (no existence leak, no download at view)', async () => {
+  it('gates the HEAD twins of GET routes the same way (no existence leak, download at view)', async () => {
     const ftpId = await ftpConnection();
     const storageId = await storageConnection();
     const none = seedUser(orgId, 'operator');
@@ -477,7 +475,9 @@ describe('connections, storage and cloud accounts under custom roles', () => {
     ];
     for (const url of urls) {
       expect((await inject({ method: 'HEAD', url, headers: none.headers })).statusCode).toBe(404);
-      expect((await inject({ method: 'HEAD', url, headers: viewer.headers })).statusCode).toBe(403);
+      const res = await inject({ method: 'HEAD', url, headers: viewer.headers });
+      expect([403, 404]).not.toContain(res.statusCode);
+      expect(res.statusCode).toBeLessThan(500);
     }
   });
 
@@ -570,7 +570,7 @@ describe('connections, storage and cloud accounts under custom roles', () => {
       expect((await browse(u, b)).statusCode).toBe(404);
     });
 
-    it('closes them where only view is left', async () => {
+    it('keeps them where view is left, since view browses', async () => {
       const a = await ftpConnection();
       const u = seedUser(orgId, 'viewer');
       scopeRoles(u.userId);
@@ -581,8 +581,15 @@ describe('connections, storage and cloud accounts under custom roles', () => {
       const before = snapshotAccess(orgId, [u.userId]);
       getDb().update(resourceGrants).set({ level: 'view' }).where(eq(resourceGrants.principalId, r)).run();
       revokeAfterChange(orgId, [u.userId], before);
-      expect(open(a)).toBe(0);
-      expect((await browse(u, a)).statusCode).toBe(403);
+      expect(open(a)).toBe(1);
+      expect((await browse(u, a)).statusCode).toBe(200);
+      const upload = await inject({
+        method: 'PUT',
+        url: `/api/ftp/connections/${a}/file?path=/home/deploy/new.txt`,
+        headers: { ...u.headers, 'content-type': 'application/octet-stream' },
+        payload: Buffer.from('hey'),
+      });
+      expect(upload.statusCode).toBe(403);
     });
 
     it('keeps an all-scope viewer’s sessions when a role that raised them goes, since their base role browses', async () => {
@@ -598,20 +605,23 @@ describe('connections, storage and cloud accounts under custom roles', () => {
       expect(open(a)).toBe(1);
     });
 
-    it('closes them when scope narrows to roles that only show the connections', async () => {
+    it('closes them when scope narrows to roles that leave the connection out', async () => {
       const a = await ftpConnection();
+      const b = await ftpConnection();
       const u = seedUser(orgId, 'viewer');
-      // Every type visible either way: only browsing (and so the session) is lost
+      // Every other type visible either way; of the connections only b stays
       const r = role([u.userId]);
-      for (const type of ['server', 'cluster', 'ftp_connection', 'storage_connection', 'cloud_account', 'saved_command', 'cron_job'] as const) {
+      for (const type of ['server', 'cluster', 'storage_connection', 'cloud_account', 'saved_command', 'cron_job'] as const) {
         grant({ role: r }, type, 'view', null);
       }
+      grant({ role: r }, 'ftp_connection', 'view', b);
       expect((await browse(u, a)).statusCode).toBe(200);
+      expect((await browse(u, b)).statusCode).toBe(200);
 
       const before = snapshotAccess(orgId, [u.userId]);
       scopeRoles(u.userId);
       revokeAfterChange(orgId, [u.userId], before);
-      expect(open(a)).toBe(0);
+      expect([open(a), open(b)]).toEqual([0, 1]);
     });
   });
 });

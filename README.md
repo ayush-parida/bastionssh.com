@@ -264,7 +264,7 @@ Add an S3-compatible connection under **Object Storage** with an endpoint, regio
 - Buckets: list, create, delete (optionally emptying it first, with a typed-name confirmation)
 - Objects: browse by folder, upload (streamed, multipart above 8 MiB), download, rename, delete a file or a whole folder
 - Every action is audited with the bucket and key
-- Roles: viewers browse and download, operators change objects, admins manage connections and buckets
+- Roles: viewers browse and download, operators change objects and test the connection, admins manage connections and buckets (with custom roles: the `view`, `operate` and `manage` levels)
 
 Uploads are capped by `SMT_STORAGE_MAX_UPLOAD_BYTES` (default 5 GiB).
 
@@ -274,7 +274,7 @@ Some hosts only speak FTP. Add one under **FTP** with a host, port, protocol and
 
 - Browse from the account's login directory or a configured start directory
 - Upload (streamed), download, create folders, rename, delete a file or a whole tree
-- Roles: viewers browse and download, operators change files, admins manage connections
+- Roles: viewers browse and download, operators change files and test the connection, admins manage connections (with custom roles: the `view`, `operate` and `manage` levels)
 - One logged-in session per user per connection, reused across requests and closed after two minutes idle
 
 Uploads are capped by `SMT_FTP_MAX_UPLOAD_BYTES` (default 1 GiB).
