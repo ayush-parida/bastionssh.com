@@ -885,7 +885,11 @@ then its resource check. Creating items and module-wide settings need the module
 (for saved commands and cron jobs `manage` on every one of them still does, as before); what admins
 alone could change on an item they manage through a grant (a server's endpoint or key, an FTP
 connection's key, a cloud account's credentials) needs the module at `manage`, and routing
-through an agent Agents at `manage`. Recordings: `view` own, `operate` everyone's; the policy and
+through an agent Agents at `manage`. Whatever lets an org SSH key log in somewhere new — adding
+a server or changing where one connects (a terminal names any org key), a key-auth FTP
+connection's key or endpoint, a cloud account's default key — also needs SSH Keys at
+`operate`, and a jump host needs `operate` on that server, so a custom role with a resource
+module at `manage` never gets the org's keys or another server's login with it. Recordings: `view` own, `operate` everyone's; the policy and
 deleting stay owner-only. The Docker and Kubernetes matrices read the module level where no
 single resource is asked. The AI Assistant is the `ai` module (`ai/access.ts`), which members who
 operated a server or cluster namespace through a pre-0025 custom role or a personal grant keep

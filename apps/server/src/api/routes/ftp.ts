@@ -233,6 +233,14 @@ function managerRefusal(change: {
   return null;
 }
 
+/**
+ * An org SSH key logs in wherever a key-auth connection points, so choosing
+ * one, or aiming such a connection at another host, account or root, also
+ * needs the SSH Keys module at `operate` ("use keys in forms", unified roles
+ * spec §3.2), whatever the caller holds on FTP. The built-in Admin has it.
+ */
+const KEYS_NEEDED = 'Choosing the SSH key a connection logs in with, or where one connects, needs operate access to SSH Keys';
+
 /** An SFTP connection in the caller's org; host keys mean nothing for FTP/FTPS. */
 function loadSftpConnection(orgId: string, id: string): FtpConnectionRow {
   const connection = loadConnection(orgId, id);
@@ -272,6 +280,9 @@ export async function ftpRoutes(app: FastifyInstance) {
 
   app.post('/connections', { preHandler: requireModule('ftp', 'manage') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
+    if (body.authMethod === 'key' && !hasModule(req, 'ssh_keys', 'operate')) {
+      return reply.status(403).send({ error: KEYS_NEEDED });
+    }
     try {
       const host = assertSafeHost(body.host);
       const rootPath = resolveRootPath(body.rootPath);
@@ -359,18 +370,24 @@ export async function ftpRoutes(app: FastifyInstance) {
         (body.verifyTls !== undefined && body.verifyTls !== existing.verifyTls) ||
         (authMethod === 'password' && body.password !== undefined);
 
+      const usernameChanged = body.username !== undefined && body.username !== existing.username;
+      const jailChanged = rootPath !== existing.rootPath || (existing.restrictToRoot && !restrictToRoot);
       const refused =
         !hasModule(req, 'ftp', 'manage') &&
         managerRefusal({
           authChanged,
           keyAuth: authMethod === 'key',
           endpointChanged,
-          usernameChanged: body.username !== undefined && body.username !== existing.username,
-          jailChanged: rootPath !== existing.rootPath || (existing.restrictToRoot && !restrictToRoot),
+          usernameChanged,
+          jailChanged,
           tlsLoosened: body.verifyTls === false && existing.verifyTls,
           newPassword: body.password !== undefined,
         });
       if (refused) return reply.status(403).send({ error: refused });
+      const keyTargetChanged = authChanged || endpointChanged || usernameChanged || jailChanged;
+      if (authMethod === 'key' && keyTargetChanged && !hasModule(req, 'ssh_keys', 'operate')) {
+        return reply.status(403).send({ error: KEYS_NEEDED });
+      }
 
       db.update(ftpConnections)
         .set({

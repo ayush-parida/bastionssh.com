@@ -160,6 +160,13 @@ function sendError(reply: FastifyReply, err: unknown) {
   throw err;
 }
 
+/**
+ * Imported servers log in with the account's default SSH key, so choosing
+ * one also needs the SSH Keys module at `operate` ("use keys in forms",
+ * unified roles spec §3.2). The built-in Admin has it.
+ */
+const KEYS_NEEDED = 'Choosing the SSH key imported servers log in with needs operate access to SSH Keys';
+
 export async function cloudRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
   app.addHook('preHandler', requireModule('cloud'));
@@ -176,6 +183,9 @@ export async function cloudRoutes(app: FastifyInstance) {
 
   app.post('/accounts', { preHandler: requireModule('cloud', 'manage') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
+    if (body.defaultKeyId && !hasModule(req, 'ssh_keys', 'operate')) {
+      return reply.status(403).send({ error: KEYS_NEEDED });
+    }
     if (body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
       return reply.status(400).send({ error: 'Default SSH key not found or retired' });
     }
@@ -237,6 +247,9 @@ export async function cloudRoutes(app: FastifyInstance) {
       !hasModule(req, 'cloud', 'manage')
     ) {
       return reply.status(403).send({ error: 'Choosing the SSH key imported servers log in with needs manage access to Cloud Accounts' });
+    }
+    if (body.defaultKeyId && body.defaultKeyId !== existing.defaultKeyId && !hasModule(req, 'ssh_keys', 'operate')) {
+      return reply.status(403).send({ error: KEYS_NEEDED });
     }
 
     // Credentials stay with them too: a manager who could swap in their own

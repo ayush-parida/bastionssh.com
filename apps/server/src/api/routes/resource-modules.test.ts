@@ -49,6 +49,7 @@ import {
   serverAlerts,
   servers,
   sessionRecordings,
+  sshKeys,
   storageConnections,
 } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
@@ -311,6 +312,8 @@ describe('resource and feature modules', () => {
   const MATRIX: ModuleCase[] = [
     {
       module: 'servers',
+      // Adding a server also needs the org's SSH keys (below)
+      with: { ssh_keys: 'operate' },
       grants: { server: 'manage' },
       routes: [
         { name: 'list', method: 'GET', url: () => '/api/servers', expect: { none: 404, view: 200, operate: 200, manage: 200 } },
@@ -484,6 +487,79 @@ describe('resource and feature modules', () => {
     expect((await call(owner, 'GET', '/api/servers')).json()).toEqual([]);
     getDb().insert(servers).values({ id: nanoid(), orgId: empty, name: 'first', host: '127.0.0.1', username: 'root', createdBy: owner.userId }).run();
     expect((await call(viewer, 'GET', '/api/servers')).json()).toHaveLength(1);
+  });
+
+  // ── What a module at `manage` does not carry ─────────────────────────────
+
+  /**
+   * Adding or re-pointing servers, FTP connections and cloud accounts was
+   * admin-only before; at `manage` on their module a custom role may now do
+   * it. That must not hand over the org's SSH keys (a terminal names any org
+   * key, so whoever sets where a server connects decides where every key
+   * logs in) or a tunnel through a jump host the member cannot operate.
+   */
+  describe('what Servers, FTP and Cloud Accounts at `manage` do not carry', () => {
+    let keyId: string;
+    const newServer = (extra: object = {}) => ({ name: `s-${nanoid(4)}`, host: '127.0.0.1', username: 'root', authType: 'password', password: 'pw', ...extra });
+
+    beforeAll(() => {
+      keyId = nanoid();
+      getDb()
+        .insert(sshKeys)
+        .values({ id: keyId, orgId, name: 'deploy', publicKey: 'ssh-ed25519 AAAA', fingerprint: 'SHA256:deploy', encryptedPrivateKey: 'x', createdBy: admin.userId })
+        .run();
+    });
+
+    it('adds a server, or changes where one connects, only with SSH Keys at `operate`', async () => {
+      const noKeys = memberWith({ servers: 'manage' }, { server: 'manage' });
+      const keys = memberWith({ servers: 'manage', ssh_keys: 'operate' }, { server: 'manage' });
+      expect((await call(noKeys, 'POST', '/api/servers', newServer())).statusCode).toBe(403);
+      expect((await call(keys, 'POST', '/api/servers', newServer())).statusCode).toBe(201);
+      expect((await call(noKeys, 'PATCH', `/api/servers/${ids.server}`, { host: '192.0.2.99' })).statusCode).toBe(403);
+      expect((await call(noKeys, 'PATCH', `/api/servers/${ids.server}`, { authType: 'key', defaultKeyId: keyId })).statusCode).toBe(403);
+      // A rename touches neither a key nor where the server connects
+      expect((await call(noKeys, 'PATCH', `/api/servers/${ids.server}`, { name: 'web-1' })).statusCode).toBe(200);
+    });
+
+    it('connects through a jump host only with `operate` on it', async () => {
+      const db = getDb();
+      const hidden = nanoid();
+      const seen = nanoid();
+      db.insert(servers).values({ id: hidden, orgId, name: 'bastion', host: '127.0.0.1', username: 'root', createdBy: admin.userId }).run();
+      db.insert(servers).values({ id: seen, orgId, name: 'web-edge', host: '127.0.0.1', username: 'root', createdBy: admin.userId, tags: '["edge"]' }).run();
+      const roleId = customRole({ servers: 'manage', ssh_keys: 'operate' }, {});
+      db.insert(resourceGrants)
+        .values({ id: nanoid(), orgId, principalType: 'role', principalId: roleId, resourceType: 'server', selector: 'tag', tag: 'edge', level: 'view', grantedBy: admin.userId })
+        .run();
+      const member = seedUser(orgId, 'viewer');
+      holdOnly(member.userId, roleId);
+
+      // One they cannot see reads as unknown; one they only see is refused
+      const viaHidden = await call(member, 'POST', '/api/servers', newServer({ jumpServerId: hidden }));
+      expect(viaHidden.statusCode).toBe(400);
+      expect(viaHidden.json().error).toBe('Unknown jump host');
+      expect((await call(member, 'POST', '/api/servers', newServer({ jumpServerId: seen }))).statusCode).toBe(403);
+      // The built-in Admin operates every server, as before
+      expect((await call(admin, 'POST', '/api/servers', newServer({ jumpServerId: hidden }))).statusCode).toBe(201);
+    });
+
+    it('lets an FTP connection or cloud account log in with an org key only with SSH Keys at `operate`', async () => {
+      const ftp = memberWith({ ftp: 'manage' }, { ftp_connection: 'manage' });
+      const keyAuth = { name: 'k', host: '192.0.2.40', protocol: 'sftp', username: 'deploy', authMethod: 'key', sshKeyId: keyId };
+      expect((await call(ftp, 'POST', '/api/ftp/connections', keyAuth)).statusCode).toBe(403);
+      // A password connection uses no org key
+      const passwordAuth = { name: 'p', host: '192.0.2.41', protocol: 'ftps', username: 'deploy', password: 'pw' };
+      expect((await call(ftp, 'POST', '/api/ftp/connections', passwordAuth)).statusCode).toBe(201);
+      const ftpKeys = memberWith({ ftp: 'manage', ssh_keys: 'operate' }, { ftp_connection: 'manage' });
+      expect((await call(ftpKeys, 'POST', '/api/ftp/connections', keyAuth)).statusCode).toBe(201);
+      // Nor turned onto a key on an existing connection
+      expect((await call(ftp, 'PATCH', `/api/ftp/connections/${ids.ftp}`, { protocol: 'sftp', authMethod: 'key', sshKeyId: keyId })).statusCode).toBe(403);
+
+      const cloud = memberWith({ cloud: 'manage' }, { cloud_account: 'manage' });
+      const account = { name: 'c', provider: 'hetzner', token: 'hcloud-token-123', defaultKeyId: keyId };
+      expect((await call(cloud, 'POST', '/api/cloud/accounts', account)).statusCode).toBe(403);
+      expect((await call(cloud, 'PATCH', `/api/cloud/accounts/${ids.cloud}`, { defaultKeyId: keyId })).statusCode).toBe(403);
+    });
   });
 
   // ── Built-in roles: the gates the base roles decided before ───────────────
