@@ -16,7 +16,7 @@
 export * from './levels.js';
 export { resolveAccess, forgetAccess, subjectOf, type AccessSubject, type ResolvedAccess } from './resolve.js';
 export { authorize, levelFor, requireResource, type AuthorizeResult, type ResourceLevel } from './authorize.js';
-export { accessibleFilter, accessibleIds, filterAccessible, resourceExists, type AccessibleIds } from './filter.js';
+export { accessibleFilter, accessibleIds, filterAccessible, reachesAny, resourceExists, type AccessibleIds } from './filter.js';
 export { explain, explainFor } from './explain.js';
 export { effectiveAccessList, listResources } from './effective.js';
 export {

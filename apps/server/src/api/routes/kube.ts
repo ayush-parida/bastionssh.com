@@ -41,6 +41,7 @@ import { kubeSettings, updateKubeSettings } from '../../kube/settings.js';
 import { closeDisallowedPodShells } from '../../kube/exec.js';
 import { namespaceName } from '../../kube/validation.js';
 import {
+  callerNamespaces,
   clientFor,
   clusterCredential,
   credentialPlaintext,
@@ -249,6 +250,29 @@ export function toCluster(row: ClusterRow, names: { server: string | null; agent
 }
 
 /** Record how a cluster answered (its health dot). Never touches `updatedAt`, which keys the caches. */
+/**
+ * A cluster as the caller may see it. Members whose access is narrowed to
+ * some namespaces (custom roles) see those namespaces only — within the
+ * allowlist, never the rest of it — and nothing of how the cluster is
+ * reached: the server or agent in between is not theirs to know. Admins and
+ * anyone whose access covers the whole cluster see it all.
+ */
+function clusterFor(req: FastifyRequest, row: ClusterRow): KubeCluster {
+  const narrowed = clusterNamespaces(req, row.id);
+  if (!narrowed) return toCluster(row, namesFor(req.orgId, row));
+  const cluster = toCluster(row, { server: null, agent: null });
+  const namespaces = callerNamespaces(req, row) ?? narrowed;
+  return {
+    ...cluster,
+    viaServerId: null,
+    viaAgentId: null,
+    namespacesAllowlist: namespaces,
+    defaultNamespace: namespaces.includes(row.defaultNamespace)
+      ? row.defaultNamespace
+      : (namespaces[0] ?? narrowed[0] ?? 'default'),
+  };
+}
+
 export function recordClusterStatus(clusterId: string, ok: boolean, error: string | null, serverVersion?: string | null): void {
   getDb()
     .update(kubeClusters)
@@ -400,7 +424,7 @@ export async function kubeRoutes(app: FastifyInstance) {
     const rows = getDb().select().from(kubeClusters).where(eq(kubeClusters.orgId, req.orgId)).all();
     return filterAccessibleClusters(req, rows, (r) => r.id)
       .sort((a, b) => a.name.localeCompare(b.name))
-      .map((row) => toCluster(row, namesFor(req.orgId, row)));
+      .map((row) => clusterFor(req, row));
   });
 
   /** GET /clusters/:id — the cluster and what the caller may do on it. */
@@ -410,7 +434,7 @@ export async function kubeRoutes(app: FastifyInstance) {
       const row = kubeCluster(req, id);
       const narrowed = clusterNamespaces(req, row.id);
       return {
-        cluster: toCluster(row, namesFor(req.orgId, row)),
+        cluster: clusterFor(req, row),
         permissions: kubePermissionsFor(req, row.id),
         ...(narrowed && {
           namespacePermissions: Object.fromEntries(narrowed.map((ns) => [ns, kubePermissionsFor(req, row.id, ns)])),

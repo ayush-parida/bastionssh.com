@@ -38,6 +38,7 @@ import { activeClusterGrants, clusterScope } from '../../auth/cluster-access.js'
 import { activeAt } from '../../auth/access/resolve.js';
 import {
   addPersonalGrant,
+  baseLevel,
   effectiveAccessList,
   isAccessLevel,
   isResourceType,
@@ -67,6 +68,11 @@ import { config } from '../../config/index.js';
  * (approval adds them to it until the time is up) or for a level on
  * resources of any type they can already see — or, for servers, that the org
  * lists by name (approval adds time-bound personal grants at that level).
+ *
+ * A cluster request may name namespaces instead of the whole cluster, and
+ * the approver may narrow it further (or narrow a whole-cluster request to
+ * some namespaces), never widen it: approval then adds grants narrowed to
+ * those namespaces.
  */
 
 /** Hard ceiling for the org setting: a week. Anything longer is a permanent grant. */
@@ -103,6 +109,10 @@ function legacyKind(body: unknown): unknown {
   return rest;
 }
 
+const namespaceSchema = z.string().max(63).regex(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/, 'Invalid namespace');
+/** Namespaces of a cluster request or approval: at least one, when given. */
+const namespacesSchema = z.array(namespaceSchema).min(1).max(100);
+
 const createSchema = z.preprocess(
   legacyKind,
   z
@@ -117,6 +127,8 @@ const createSchema = z.preprocess(
       resourceType: z.enum(RESOURCE_TYPES as [ResourceType, ...ResourceType[]]).optional(),
       resourceIds: z.array(z.string().min(1)).min(1).max(50).optional(),
       level: z.enum(ACCESS_LEVELS as [AccessLevel, ...AccessLevel[]]).optional(),
+      /** Clusters only: these namespaces rather than the whole cluster. */
+      namespaces: namespacesSchema.optional(),
       reason: z.string().trim().min(3).max(500),
       durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES),
     })
@@ -127,7 +139,10 @@ const createSchema = z.preprocess(
         ).length === 1 &&
         (b.resourceType === undefined || (b.resourceIds !== undefined && b.level !== undefined)),
       { message: 'Ask for servers, clusters, a role, or resources of one type at a level' },
-    ),
+    )
+    .refine((b) => b.namespaces === undefined || b.clusterIds !== undefined || b.resourceType === 'cluster', {
+      message: 'Only cluster requests can name namespaces',
+    }),
 );
 
 /** Base-role-level requests: servers or clusters, with the grants each kind uses. */
@@ -147,6 +162,8 @@ function seesAllOf(req: FastifyRequest, kind: LegacyKind): boolean {
 
 const approveSchema = z.object({
   durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES).optional(),
+  /** Cluster requests: grant only these namespaces (a subset of those asked for, if any were). */
+  namespaces: namespacesSchema.optional(),
   note: z.string().trim().max(500).optional(),
 });
 
@@ -194,36 +211,63 @@ function parseServerIds(raw: string): string[] {
  * What a request asks for. Server requests from before custom roles keep a
  * plain id list in `server_ids` (the base role's level); a request for
  * resources at a level stores `{ ids, level }` there, under its
- * `resource_type`; a role request stores the role in `role_id`.
+ * `resource_type`; a role request stores the role in `role_id`. A cluster
+ * request naming namespaces adds `namespaces` (with `level: null` when it is
+ * at the base role's level), and its approval `approvedNamespaces`.
  */
 interface RequestTarget {
   type: ResourceType | 'role';
   ids: string[];
   level: AccessLevel | null;
+  /** Clusters: the namespaces asked for; null = the whole cluster. */
+  namespaces: string[] | null;
+  /** Clusters, once approved: the namespaces granted; null = as asked. */
+  approvedNamespaces: string[] | null;
+}
+
+/** A stored namespace list: null when absent, undefined when unreadable. */
+function storedNamespaces(value: unknown): string[] | null | undefined {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value) && value.length > 0 && value.every((ns) => typeof ns === 'string')) return value as string[];
+  return undefined;
 }
 
 function targetOf(row: RequestRow): RequestTarget {
-  if (row.resourceType === 'role') return { type: 'role', ids: [], level: null };
+  const none = { namespaces: null, approvedNamespaces: null };
+  if (row.resourceType === 'role') return { type: 'role', ids: [], level: null, ...none };
   const type: ResourceType = isResourceType(row.resourceType) ? row.resourceType : 'server';
   try {
     const value = JSON.parse(row.serverIds) as unknown;
-    if (Array.isArray(value)) return { type, ids: parseServerIds(row.serverIds), level: null };
-    const { ids, level } = (value ?? {}) as { ids?: unknown; level?: unknown };
+    if (Array.isArray(value)) return { type, ids: parseServerIds(row.serverIds), level: null, ...none };
+    const { ids, level, namespaces, approvedNamespaces } = (value ?? {}) as Record<string, unknown>;
+    const asked = type === 'cluster' ? storedNamespaces(namespaces) : null;
+    const approved = type === 'cluster' ? storedNamespaces(approvedNamespaces) : null;
+    // An unreadable namespace list covers nothing, rather than the whole cluster
+    if (asked === undefined || approved === undefined) return { type, ids: [], level: null, ...none };
     return {
       type,
       ids: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [],
-      level: isAccessLevel(level) ? level : 'view',
+      // `null`: a cluster request (namespaced, or narrowed on approval) at the base role's level
+      level: level === null && type === 'cluster' ? null : isAccessLevel(level) ? level : 'view',
+      namespaces: asked,
+      approvedNamespaces: approved,
     };
   } catch {
-    return { type, ids: [], level: null };
+    return { type, ids: [], level: null, ...none };
   }
 }
 
-/** `a, b and c`, or the role's name: what a request is for, for notifications. */
+/** ` in namespaces a, b` for a cluster request narrowed to some; empty otherwise. */
+function namespacesText(namespaces: string[] | null | undefined): string {
+  return namespaces?.length ? ` in namespace${namespaces.length === 1 ? '' : 's'} ${namespaces.join(', ')}` : '';
+}
+
+/** `a, b and c`, or the role's name: what a request is for (or was granted), for notifications. */
 function targetNames(request: AccessRequest): string {
   if (request.resourceType === 'role') return `the ${request.role?.name ?? 'deleted'} role`;
   const names = (request.resources ?? request.servers).map((s) => s.name ?? 'a deleted resource').join(', ');
-  return request.level ? `${names} (${request.level})` : names;
+  const scoped = `${names}${namespacesText(request.approvedNamespaces ?? request.namespaces)}`;
+  return request.level ? `${scoped} (${request.level})` : scoped;
 }
 
 /** Rows as the API returns them, with people and server names resolved in bulk. */
@@ -280,6 +324,7 @@ function present(orgId: string, rows: RequestRow[]): AccessRequest[] {
       role: target.type === 'role' ? { id: r.roleId ?? '', name: r.roleId ? (roleNames.get(r.roleId) ?? null) : null } : null,
       resources,
       level: target.level,
+      ...(target.type === 'cluster' && { namespaces: target.namespaces, approvedNamespaces: target.approvedNamespaces }),
     };
   });
 }
@@ -545,9 +590,16 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         if (permanent) {
           return reply.status(400).send({ error: `You already have permanent access to ${known.get(permanent)}` });
         }
-        stored = { resourceType: legacy, serverIds: JSON.stringify(serverIds), roleId: null };
-        auditDetails = legacy === 'cluster' ? { resourceType: 'cluster', clusters: serverIds } : { servers: serverIds };
-        names = serverIds.map((s) => known.get(s)!).join(', ');
+        const namespaces = legacy === 'cluster' && body.namespaces ? [...new Set(body.namespaces)].sort() : null;
+        stored = {
+          resourceType: legacy,
+          // Namespaces need the object form; the level stays the base role's (null)
+          serverIds: JSON.stringify(namespaces ? { ids: serverIds, level: null, namespaces } : serverIds),
+          roleId: null,
+        };
+        auditDetails =
+          legacy === 'cluster' ? { resourceType: 'cluster', clusters: serverIds, ...(namespaces && { namespaces }) } : { servers: serverIds };
+        names = serverIds.map((s) => known.get(s)!).join(', ') + namespacesText(namespaces);
       } else if (body.roleId) {
         const role = db
           .select({ id: roles.id, name: roles.name })
@@ -570,6 +622,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         const type = body.resourceType!;
         const level = body.level!;
         const ids = [...new Set(body.resourceIds!)];
+        const namespaces = type === 'cluster' && body.namespaces ? [...new Set(body.namespaces)].sort() : null;
         const known = new Map(listResources(req.orgId, type).map((r) => [r.id, r.name]));
         for (const id of ids) {
           const current = known.has(id) ? levelFor(req, type, id) : null;
@@ -577,13 +630,15 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           const listed = current !== null || (type === 'server' && settings.restrictedSeeServerNames);
           if (!known.has(id) || !listed) return reply.status(400).send({ error: 'Unknown resource in resourceIds' });
           // Asking for what is already held for good, at that level, would change nothing
-          if (current?.via.some((v) => meetsLevel(v.level, level) && !v.expiresAt && v.namespaces == null)) {
+          const covers = (held: string[] | null | undefined) =>
+            held == null || (namespaces !== null && namespaces.every((ns) => held.includes(ns)));
+          if (current?.via.some((v) => meetsLevel(v.level, level) && !v.expiresAt && covers(v.namespaces))) {
             return reply.status(400).send({ error: `You already have ${current.level} access to ${known.get(id)}` });
           }
         }
-        stored = { resourceType: type, serverIds: JSON.stringify({ ids, level }), roleId: null };
-        auditDetails = { type, resources: ids, level };
-        names = `${ids.map((id) => known.get(id)!).join(', ')} (${level})`;
+        stored = { resourceType: type, serverIds: JSON.stringify({ ids, level, ...(namespaces && { namespaces }) }), roleId: null };
+        auditDetails = { type, resources: ids, level, ...(namespaces && { namespaces }) };
+        names = `${ids.map((id) => known.get(id)!).join(', ')}${namespacesText(namespaces)} (${level})`;
       }
 
       const recent = db
@@ -717,15 +772,28 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       }
     }
 
+    // Cluster requests: the namespaces granted — those the approver picked
+    // (only ever fewer than asked), else as asked; null = the whole cluster
+    if (body.namespaces && target.type !== 'cluster') {
+      return reply.status(400).send({ error: 'Only cluster requests can be narrowed to namespaces' });
+    }
+    const picked = body.namespaces ? [...new Set(body.namespaces)].sort() : null;
+    if (picked && target.namespaces && picked.some((ns) => !target.namespaces!.includes(ns))) {
+      return reply.status(400).send({ error: 'Approval can narrow the namespaces asked for, not add to them' });
+    }
+    const namespaces = target.type === 'cluster' ? (picked ?? target.namespaces) : null;
+
     const now = new Date();
     const expiresAt = minutesFromNow(minutes, now.getTime());
     let extended: string[] = [];
     let roleBefore: { expiresAt: string | null } | null = null;
+    /** The level granted when the namespaces narrow a request at the base role's level. */
+    let grantedLevel: AccessLevel | null = target.level;
     const won = db.transaction(() => {
       // Suspending or removing the member cancels the request; this closes
       // the gap between the check above and the decision
       const stillActive = db
-        .select({ status: memberships.status })
+        .select({ status: memberships.status, role: memberships.role })
         .from(memberships)
         .where(and(eq(memberships.userId, request.userId), eq(memberships.orgId, req.orgId)))
         .get();
@@ -737,6 +805,10 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         decidedAt: now.toISOString(),
         decisionNote: body.note || null,
         expiresAt,
+        // What was granted, beside what was asked
+        ...(picked && {
+          serverIds: JSON.stringify({ ids: target.ids, level: target.level, namespaces: target.namespaces, approvedNamespaces: picked }),
+        }),
       })) {
         return false;
       }
@@ -755,15 +827,20 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           db.update(roleMembers).set({ expiresAt, addedBy: req.user.id }).where(where).run();
           extended = [role.id];
         }
-      } else if (target.level === null) {
+      } else if (target.level === null && !namespaces) {
         // Servers (or clusters) asked for without a level: the base role's level, as before custom roles
         extended =
           target.type === 'cluster'
             ? extendClusterGrants(req.orgId, request.userId, ids, grant)
             : extendGrants(req.orgId, request.userId, ids, grant);
       } else {
-        const level = target.level;
-        extended = ids.filter((id) => addPersonalGrant(req.orgId, request.userId, target.type as ResourceType, id, level, grant));
+        // Narrowed to namespaces, a base-level cluster request becomes a personal
+        // grant at the requester's base-role level as it is now
+        const level = target.level ?? baseLevel(stillActive.role);
+        grantedLevel = level;
+        extended = ids.filter((id) =>
+          addPersonalGrant(req.orgId, request.userId, target.type as ResourceType, id, level, grant, namespaces),
+        );
       }
       return true;
     });
@@ -781,8 +858,10 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         : target.type === 'server' && target.level === null
           ? { servers: ids }
           : target.type === 'cluster' && target.level === null
-            ? { resourceType: 'cluster', clusters: ids }
+            ? { resourceType: 'cluster', clusters: ids, ...(namespaces && { level: grantedLevel }) }
             : { type: target.type, resources: ids, level: target.level }),
+      // Namespaces asked for and granted (null = the whole cluster)
+      ...(target.type === 'cluster' && { namespaces: { before: target.namespaces, after: namespaces } }),
       extended,
       minutes,
       requestedMinutes: request.durationMinutes,
@@ -856,13 +935,14 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         resources: presented!.resources?.map((s) => s.id),
       }),
       ...(presented!.level && { level: presented!.level }),
+      ...(presented!.namespaces && { namespaces: presented!.namespaces }),
     });
     const legacy = presented!.resourceType === 'server' && !presented!.level;
     const legacyClusters = presented!.resourceType === 'cluster' && !presented!.level;
     const names = legacy
       ? presented!.servers.map((s) => s.name ?? s.id).join(', ')
       : legacyClusters
-        ? presented!.clusters.map((s) => s.name ?? s.id).join(', ')
+        ? presented!.clusters.map((s) => s.name ?? s.id).join(', ') + namespacesText(presented!.namespaces)
         : targetNames(presented!);
     notifyNotice(
       req.orgId,

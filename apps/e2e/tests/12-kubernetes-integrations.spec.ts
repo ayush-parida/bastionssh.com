@@ -24,6 +24,19 @@ const permissions = {
   configure: false,
 };
 
+/** What a viewer may do: look, nothing more. */
+const viewerPermissions = {
+  view: true,
+  logs: false,
+  yaml: false,
+  scale: false,
+  deletePod: false,
+  rollback: false,
+  cordon: false,
+  exec: false,
+  configure: false,
+};
+
 function cluster(id: string, name: string) {
   return {
     id,
@@ -113,7 +126,8 @@ const explanation = [
   { type: 'done' },
 ];
 
-async function stubKube(page: Page) {
+/** The cluster view's permissions: an operator's by default; `namespacePermissions` for a member narrowed to some namespaces. */
+async function stubKube(page: Page, view: { permissions?: typeof permissions; namespacePermissions?: Record<string, typeof permissions> } = {}) {
   const explained: unknown[] = [];
   await page.route('**/api/kube/**', async (route: Route) => {
     const req = route.request();
@@ -122,7 +136,9 @@ async function stubKube(page: Page) {
 
     if (path === '/clusters') return json([cluster(EDGE, 'edge'), cluster(PROD, 'shop-prod')]);
     if (path === '/overview') return json(fleet);
-    if (path === `/clusters/${PROD}`) return json({ cluster: cluster(PROD, 'shop-prod'), permissions });
+    if (path === `/clusters/${PROD}`) {
+      return json({ cluster: cluster(PROD, 'shop-prod'), permissions: view.permissions ?? permissions, ...(view.namespacePermissions && { namespacePermissions: view.namespacePermissions }) });
+    }
     if (path === `/clusters/${PROD}/overview`) {
       return json({ clusterId: PROD, serverVersion: 'v1.31.5', metricsAvailable: false, namespaces: ['shop'], nodes: [], unscheduled: [], warnings: [], generatedAt: new Date().toISOString() });
     }
@@ -131,6 +147,9 @@ async function stubKube(page: Page) {
       return route.fulfill({ status: 200, contentType: 'text/event-stream', body: `data: ${JSON.stringify({ type: 'ready' })}\n\n` });
     }
     if (path === `/clusters/${PROD}/objects/pods/shop/worker-1`) return json(podDetail);
+    if (path === `/clusters/${PROD}/objects/pods/ops/tool-1`) {
+      return json({ ...podDetail, ref: { ...podDetail.ref, namespace: 'ops', name: 'tool-1' } });
+    }
     if (path === `/clusters/${PROD}/explain` && req.method() === 'POST') {
       explained.push(req.postDataJSON());
       return route.fulfill({
@@ -153,7 +172,7 @@ test.describe('Kubernetes integrations', () => {
   });
 
   test('the fleet overview shows every cluster at a glance, and the one that did not answer', async ({ page }) => {
-    await stubKube(page);
+    await stubKube(page, { permissions: viewerPermissions });
     await signInWithPassword(page, viewer.email, viewer.password);
     await page.goto('/kubernetes');
     await page.getByRole('link', { name: 'Overview' }).click();
@@ -202,5 +221,20 @@ test.describe('Kubernetes integrations', () => {
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(panel).toBeVisible();
+  });
+
+  test('shows Explain in the namespaces a member operates in, and nowhere else', async ({ page }) => {
+    // A viewer whose role lets them operate in `shop` only: the cluster as a whole is view
+    await stubKube(page, { permissions: viewerPermissions, namespacePermissions: { shop: permissions } });
+    await signInWithPassword(page, viewer.email, viewer.password);
+
+    await page.goto(`/kubernetes/${PROD}/objects/pods/shop/worker-1`);
+    const panel = page.getByTestId('kube-object-panel');
+    await expect(panel).toContainText('worker-1');
+    await expect(panel.getByTestId('kube-explain')).toBeVisible();
+
+    await page.goto(`/kubernetes/${PROD}/objects/pods/ops/tool-1`);
+    await expect(panel).toContainText('tool-1');
+    await expect(page.getByTestId('kube-explain')).toHaveCount(0);
   });
 });

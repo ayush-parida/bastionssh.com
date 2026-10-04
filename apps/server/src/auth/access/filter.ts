@@ -130,6 +130,39 @@ export function filterAccessible<T>(
   return rows.filter((row) => allowed.has(idOf(row)));
 }
 
+/**
+ * True when the subject reaches at least one resource of `type` that exists
+ * at `minLevel` — for clusters, in at least one namespace: a grant narrowed
+ * to some namespaces counts at its own level here, where `accessibleIds`
+ * weighs the cluster as a whole. For "may use this feature at all" gates
+ * (the AI assistant); every action still checks its own resource.
+ */
+export function reachesAny(who: AccessSubject, type: ResourceType, minLevel: AccessLevel): boolean {
+  const access = resolveAccess(who);
+  if (!access.active) return false;
+  // A grant narrowed to no namespace at all covers nothing
+  const counts = (list: Contribution[]) =>
+    meetsLevel(topLevel(access, list.filter((c) => c.namespaces === null || c.namespaces.length > 0)), minLevel);
+  const typeAccess = access.types[type];
+  const { table, id: idColumn, orgId: orgColumn } = RESOURCE_TABLES[type];
+  let scope: SQL | undefined;
+  if (!counts(typeAccess.every)) {
+    const ids = [...typeAccess.byId].filter(([, list]) => counts(list)).map(([id]) => id);
+    const tags = [...typeAccess.byTag].filter(([, list]) => counts(list)).map(([tag]) => tag);
+    const parts: SQL[] = [];
+    if (ids.length) parts.push(inArray(idColumn, ids));
+    if (tags.length) parts.push(sql`${idColumn} in (${serversTaggedSql(access.orgId, tags)})`);
+    if (!parts.length) return false;
+    scope = parts.length === 1 ? parts[0] : or(...parts);
+  }
+  return !!getDb()
+    .select({ id: idColumn })
+    .from(table)
+    .where(and(eq(orgColumn, access.orgId), scope))
+    .limit(1)
+    .get();
+}
+
 /** True when `id` is a resource of `type` in `orgId`. */
 export function resourceExists(orgId: string, type: ResourceType, id: string): boolean {
   const { table, id: idColumn, orgId: orgColumn } = RESOURCE_TABLES[type];

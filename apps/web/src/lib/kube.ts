@@ -4,11 +4,13 @@ import type {
   KubeClusterStatus,
   KubeClusterStatusView,
   KubeGraphHealth,
+  KubePermissions,
   KubePodTileStatus,
   KubeStreamEvent,
   KubeStreamView,
   KubeWorkloadHealth,
 } from '@smt/shared';
+import { KUBE_CLUSTER_SCOPE } from '@smt/shared';
 import { api } from '@/lib/api.js';
 import { readSSE } from '@/lib/sse.js';
 import { useAuthStore } from '@/store/auth.js';
@@ -73,6 +75,21 @@ export function useKubeCluster(clusterId: string | undefined) {
     enabled: !!clusterId,
     retry: false,
   });
+}
+
+/**
+ * What the caller may do where an object lives: in its namespace when their
+ * access is narrowed to some namespaces (custom roles — possibly more than on
+ * the cluster as a whole), else on the cluster as a whole, which is also what
+ * cluster-scoped objects use. UI-side only; the server checks again.
+ */
+export function permissionsIn(
+  view: KubeClusterStatusView | undefined,
+  namespace: string | null | undefined,
+): KubePermissions | undefined {
+  if (!view) return undefined;
+  if (!namespace || namespace === KUBE_CLUSTER_SCOPE) return view.permissions;
+  return view.namespacePermissions?.[namespace] ?? view.permissions;
 }
 
 /**

@@ -230,6 +230,8 @@ export function replaceGrants(
 /**
  * A personal grant on one resource until `expiresAt`, unless one already gives
  * at least `level` for at least as long (an approval never shortens access).
+ * For a cluster, `namespaces` narrows the grant to those namespaces (null =
+ * every one); a grant already covering all of them counts as covering it.
  * Returns true when a grant was added.
  */
 export function addPersonalGrant(
@@ -239,10 +241,12 @@ export function addPersonalGrant(
   resourceId: string,
   level: AccessLevel,
   grant: { expiresAt: string; grantedBy: string; reason: string | null },
+  namespaces: string[] | null = null,
 ): boolean {
   const db = getDb();
+  const narrowTo = type === 'cluster' && namespaces ? [...new Set(namespaces)].sort() : null;
   const existing = db
-    .select({ level: resourceGrants.level, expiresAt: resourceGrants.expiresAt })
+    .select({ level: resourceGrants.level, expiresAt: resourceGrants.expiresAt, namespaces: resourceGrants.namespaces })
     .from(resourceGrants)
     .where(
       and(
@@ -253,13 +257,18 @@ export function addPersonalGrant(
         eq(resourceGrants.selector, 'id'),
         eq(resourceGrants.resourceId, resourceId),
         activeAt(resourceGrants.expiresAt, new Date().toISOString()),
-        sql`${resourceGrants.namespaces} is null`,
+        narrowTo ? undefined : sql`${resourceGrants.namespaces} is null`,
       ),
     )
     .all();
-  const covered = existing.some(
-    (g) => meetsLevel(isAccessLevel(g.level) ? g.level : null, level) && (g.expiresAt === null || g.expiresAt >= grant.expiresAt),
-  );
+  const covered = existing.some((g) => {
+    const held = parseNamespaces(g.namespaces);
+    return (
+      meetsLevel(isAccessLevel(g.level) ? g.level : null, level) &&
+      (g.expiresAt === null || g.expiresAt >= grant.expiresAt) &&
+      (held === null || (narrowTo !== null && narrowTo.every((ns) => held.includes(ns))))
+    );
+  });
   if (covered) return false;
   db.insert(resourceGrants)
     .values({
@@ -270,6 +279,7 @@ export function addPersonalGrant(
       resourceType: type,
       selector: 'id',
       resourceId,
+      namespaces: narrowTo ? JSON.stringify(narrowTo) : null,
       level,
       ...grant,
       createdAt: new Date().toISOString(),

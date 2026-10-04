@@ -1,6 +1,7 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { reachesAny } from '../../auth/access/filter.js';
 import {
   accessibleSavedCommandFilter,
   accessibleServerFilter,
@@ -28,6 +29,24 @@ function kubeClusterName(orgId: string, clusterId: string): string | undefined {
     .from(kubeClusters)
     .where(and(eq(kubeClusters.id, clusterId), eq(kubeClusters.orgId, orgId)))
     .get()?.name;
+}
+
+/**
+ * The assistant acts for the user — commands on servers, reads of clusters —
+ * so it is for members who can operate somewhere: operators and up by base
+ * role, or anyone a custom role or personal grant lets operate at least one
+ * server or cluster (a namespace of one counts). It widens nothing: every
+ * tool checks the caller's level on its own target (run_command needs
+ * operate on the server and approval for changes; Docker and Kubernetes
+ * reads follow their matrices), and the prompt lists only what they can see.
+ */
+async function requireAssistant(req: FastifyRequest, reply: FastifyReply) {
+  if (!req.role) return reply.status(401).send({ error: 'Unauthorized' });
+  if (rank(req.role) >= rank('operator')) return;
+  if (reachesAny(req, 'server', 'operate') || reachesAny(req, 'cluster', 'operate')) return;
+  return reply.status(403).send({
+    error: 'The AI assistant needs the operator role, or operate access to at least one server or cluster',
+  });
 }
 
 /** While a command waits for approval, keep proxies from closing the idle stream. */
@@ -203,7 +222,7 @@ export async function aiRoutes(app: FastifyInstance) {
   });
 
   // ── Chat / Agent (streaming SSE) ──────────────────────────────
-  app.post('/chat', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/chat', { preHandler: requireAssistant }, async (req, reply) => {
     const body = chatSchema.parse(req.body);
     const db = getDb();
     if (body.context?.serverId && !canAccessServer(req, body.context.serverId)) {
@@ -458,7 +477,7 @@ export async function aiRoutes(app: FastifyInstance) {
   // ── Command approvals ─────────────────────────────────────────
   // Settles a command the agent is waiting on. Only the user whose chat raised
   // it can decide; anyone else gets the same 404 as for an unknown id.
-  app.post('/approvals/:id', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/approvals/:id', { preHandler: requireAssistant }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { approved } = z.object({ approved: z.boolean() }).parse(req.body);
     const settled = resolveApproval(id, { orgId: req.orgId, userId: req.user.id }, approved);

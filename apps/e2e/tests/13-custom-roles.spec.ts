@@ -121,3 +121,59 @@ test('a role with a tag selector and a cluster namespace gives a member exactly 
   await expect(result).toContainText('No access');
   await expect(result).toContainText('No role or personal grant covers it');
 });
+
+test('a member asks for namespaces of a cluster; the approver narrows them and only those are granted', async ({ page, browser }) => {
+  const run = Date.now().toString(36);
+  const owner = await ownerApi();
+  const clusterRes = await owner.post('/api/kube/clusters', {
+    data: { name: `ns-request-${run}`, apiUrl: 'https://192.0.2.21:6443', token: 'e2e-token' },
+  });
+  expect(clusterRes.status(), await clusterRes.text()).toBe(201);
+  const cluster = (await clusterRes.json()) as { id: string; name: string };
+  // A viewer: they see the cluster, and may ask for more on it
+  const member = await createMember('viewer', 'ns-request');
+  const members = (await (await owner.get('/api/team/members')).json()) as { userId: string; email: string }[];
+  const memberId = members.find((m) => m.email === member.email)!.userId;
+
+  // ── The member asks for two namespaces ─────────────────────────────────────
+  const memberContext = await browser.newContext({ extraHTTPHeaders: { 'X-Forwarded-For': fakeClientIp() } });
+  const memberPage = await memberContext.newPage();
+  await signInWithPassword(memberPage, member.email, member.password);
+  await memberPage.goto('/team');
+  await memberPage.getByRole('button', { name: 'Request access' }).click();
+  const dialog = memberPage.getByRole('form', { name: 'Request access' });
+  await dialog.getByLabel('Type').selectOption('cluster');
+  await dialog.getByLabel('Level').selectOption('operate');
+  await dialog.getByRole('checkbox', { name: new RegExp(cluster.name) }).check();
+  for (const ns of ['shop', 'web']) {
+    await dialog.getByLabel('Add a namespace to ask for').fill(ns);
+    await dialog.getByLabel('Add a namespace to ask for').press('Enter');
+  }
+  await expect(dialog.getByTestId('request-namespaces')).toContainText('shop');
+  await expect(dialog.getByTestId('request-namespaces')).toContainText('web');
+  await dialog.getByLabel('Reason').fill('fix the shop rollout');
+  await dialog.getByRole('button', { name: 'Send request' }).click();
+  await expect(memberPage.getByText('Request sent — admins have been notified')).toBeVisible();
+  await memberContext.close();
+
+  // ── The owner keeps only `shop` and approves ───────────────────────────────
+  await signInWithPassword(page, ADMIN_EMAIL, ADMIN_PASSWORD);
+  await page.goto('/team');
+  const row = page.getByTestId('access-request').filter({ hasText: member.email }).filter({ hasText: cluster.name });
+  await expect(row).toContainText('in namespaces shop, web (operate)');
+  await row.getByLabel('Grant namespace web').uncheck();
+  await row.getByRole('button', { name: 'Approve' }).click();
+  await expect(page.getByText('Access granted')).toBeVisible();
+  await expect(page.getByTestId('access-request').filter({ hasText: member.email }).filter({ hasText: cluster.name })).toContainText(
+    'in namespace shop (asked for shop, web) (operate)',
+  );
+
+  // Operate in `shop` only; the rest of the cluster stays at view
+  const levelIn = async (namespace: string) =>
+    ((await (await owner.get(`/api/team/access/explain?userId=${memberId}&type=cluster&id=${cluster.id}&namespace=${namespace}`)).json()) as {
+      level: string | null;
+    }).level;
+  expect(await levelIn('shop')).toBe('operate');
+  expect(await levelIn('web')).toBe('view');
+  await owner.dispose();
+});

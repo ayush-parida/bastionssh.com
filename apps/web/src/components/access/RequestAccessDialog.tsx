@@ -25,6 +25,7 @@ import {
 import { useAuthStore } from '@/store/auth.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
 import { RoleDot } from './AccessBadges.js';
+import { NamespaceChips } from './GrantsEditor.js';
 
 /** What a restricted member may ask for. Shared by the Servers and Team pages. */
 export function useRequestableServers() {
@@ -73,6 +74,8 @@ export function RequestAccessDialog({
   const [selected, setSelected] = useState<Set<string>>(new Set(start ? [start.id] : []));
   const [roleId, setRoleId] = useState('');
   const [level, setLevel] = useState<AccessLevel | null>(start?.level ?? null);
+  /** Clusters: the namespaces asked for; null = the whole cluster. */
+  const [namespaces, setNamespaces] = useState<string[] | null>(null);
   const [reason, setReason] = useState('');
   const [minutes, setMinutes] = useState<number | null>(null);
 
@@ -120,7 +123,13 @@ export function RequestAccessDialog({
           mutation.mutate(
             kind === 'role'
               ? { roleId, ...common }
-              : { resourceType: type, resourceIds: [...selected], level: effectiveLevel, ...common },
+              : {
+                  resourceType: type,
+                  resourceIds: [...selected],
+                  level: effectiveLevel,
+                  ...(type === 'cluster' && namespaces?.length ? { namespaces } : {}),
+                  ...common,
+                },
           );
         }}
         className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl"
@@ -182,7 +191,7 @@ export function RequestAccessDialog({
                       <select
                         id="request-type"
                         value={type}
-                        onChange={(e) => { setType(e.target.value as ResourceType); setSelected(new Set()); }}
+                        onChange={(e) => { setType(e.target.value as ResourceType); setSelected(new Set()); setNamespaces(null); }}
                         className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       >
                         {(types.length ? types : RESOURCE_SECTIONS.slice(0, 1)).map((s) => <option key={s.type} value={s.type}>{s.title}</option>)}
@@ -222,6 +231,14 @@ export function RequestAccessDialog({
                       )}
                     </div>
                   </div>
+                  {type === 'cluster' && (
+                    <div data-testid="request-namespaces">
+                      <NamespaceChips namespaces={namespaces} onChange={setNamespaces} inputLabel="Add a namespace to ask for" />
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Add the namespaces you need, or leave it at all to ask for the whole cluster.
+                      </p>
+                    </div>
+                  )}
                 </>
               )}
 
