@@ -27,6 +27,8 @@ export interface PlannedUpdate {
   host: string | null;
   region: string;
   state: CloudInstanceState;
+  /** The provider's tags, stored as display-only provider tags (`cloud_tags`). */
+  cloudTags: string[];
 }
 
 export interface SyncPlan {
@@ -42,9 +44,10 @@ export interface SyncPlan {
  * Decide what a sync should do. Pure: rows in, plan out, no DB.
  *
  * Existing servers are matched on the provider's instance id. Matches get
- * host/region/state refreshed and nothing else — name, tags, credentials and
- * notes belong to the user after import. Unknown instances are created only
- * when the account auto-imports, and only if they have an address to SSH to.
+ * host/region/state and the provider tags refreshed and nothing else — name,
+ * tags, credentials and notes belong to the user after import. Unknown
+ * instances are created only when the account auto-imports, and only if they
+ * have an address to SSH to.
  */
 export function planSync(
   existing: ExistingCloudServer[],
@@ -64,6 +67,7 @@ export function planSync(
         host: pickHost(instance),
         region: instance.region,
         state: instance.state,
+        cloudTags: providerTags(instance),
       });
     } else if (autoImport) {
       if (pickHost(instance)) plan.create.push(instance);
@@ -80,9 +84,19 @@ export function planSync(
   return plan;
 }
 
-/** Tags an imported server starts with: provider, region, then the provider's own. */
+/**
+ * App tags an imported server starts with: provider and region only. The
+ * provider's own tags never become app tags — tag selectors grant access by
+ * app tags, and whoever can tag instances in the provider must not decide who
+ * reaches them here. They are kept apart as provider tags (`providerTags`).
+ */
 export function importTags(provider: CloudProvider, instance: CloudInstance): string[] {
-  return [...new Set([`cloud:${provider}`, instance.region, ...instance.tags])];
+  return [...new Set([`cloud:${provider}`, instance.region])];
+}
+
+/** The provider's own tags for an instance, deduplicated, for `servers.cloud_tags` (display only). */
+export function providerTags(instance: CloudInstance): string[] {
+  return [...new Set(instance.tags)];
 }
 
 export function summarize(plan: SyncPlan, discovered: number): SyncSummary {
@@ -113,6 +127,7 @@ export function applyPlan(account: CloudAccountRow, plan: SyncPlan, now: string)
           username: account.defaultUsername,
           defaultKeyId: account.defaultKeyId,
           tags: JSON.stringify(importTags(provider, instance)),
+          cloudTags: JSON.stringify(providerTags(instance)),
           notes: `Imported from ${label} (${instance.id}, ${instance.region})`,
           cloudAccountId: account.id,
           cloudProvider: provider,
@@ -132,6 +147,7 @@ export function applyPlan(account: CloudAccountRow, plan: SyncPlan, now: string)
           ...(update.host !== null && { host: update.host }),
           cloudRegion: update.region,
           cloudState: update.state,
+          cloudTags: JSON.stringify(update.cloudTags),
           cloudSyncedAt: now,
           updatedAt: now,
         })

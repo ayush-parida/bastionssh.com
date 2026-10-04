@@ -228,9 +228,13 @@ Under **Cloud Accounts**, register a provider credential once and stop adding se
 Each account has a default SSH username and key that imported servers start with. A sync then:
 
 - imports instances that are not known yet (public IP preferred, private IP as fallback; instances with neither are skipped),
-- refreshes the host, region and state of servers it already imported — your name, tags, credentials and notes are never overwritten,
+- refreshes the host, region, state and provider tags of servers it already imported — your name, tags, credentials and notes are never overwritten,
 - marks servers whose instance has disappeared as **missing** and never deletes them,
 - excludes **stopped** and **missing** cloud servers from health checks so they do not raise offline alerts.
+
+Imported servers get `cloud:<provider>` and the region as tags. The provider's own tags (AWS tags, GCP labels, Azure tags, DigitalOcean and Hetzner labels) are shown on the server as **provider tags** (dashed, with a cloud icon) and refreshed on every sync, but they are not the server's tags: custom role tag selectors and saved-command tag targets never match them, so whoever can tag instances in the provider cannot decide who reaches them in BastionSSH. Servers imported before this change keep the tags they were imported with (which included the provider's) — nothing records which came from the provider, so remove any you do not want used for access.
+
+Adding an account and changing its credentials are admin-only. A member who manages an account through a custom role can rename it, change its regions, username and auto-import, switch sync on or off, test and sync it, and delete it, but cannot swap in other credentials or choose the SSH key imported servers use.
 
 Sync runs on a schedule and on demand (**Sync now**). Deleting an account keeps the servers and only unlinks them.
 

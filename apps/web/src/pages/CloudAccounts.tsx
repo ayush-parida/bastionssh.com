@@ -251,6 +251,8 @@ export default function CloudAccountsPage() {
   }
 
   const busy = createMutation.isPending || updateMutation.isPending;
+  // Credentials are admin-only; an account's manager below admin edits the rest (custom roles spec §5)
+  const showCredentials = !editId || canAdd;
   // On edit a blank credential keeps the stored one, but a partly filled one must be completed
   const credentialRequired = !editId || credentialStarted(form);
 
@@ -306,29 +308,33 @@ export default function CloudAccountsPage() {
 
             {form.provider === 'aws' ? (
               <>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Access key ID</label>
-                  <input
-                    type="text"
-                    required={credentialRequired}
-                    autoComplete="off"
-                    value={form.accessKeyId}
-                    onChange={(e) => setForm((p) => ({ ...p, accessKeyId: e.target.value }))}
-                    placeholder="AKIA…"
-                    className={`${inputClass} font-mono`}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium">Secret access key</label>
-                  <input
-                    type="password"
-                    required={credentialRequired}
-                    autoComplete="new-password"
-                    value={form.secretAccessKey}
-                    onChange={(e) => setForm((p) => ({ ...p, secretAccessKey: e.target.value }))}
-                    className={`${inputClass} font-mono`}
-                  />
-                </div>
+                {showCredentials && (
+                  <>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Access key ID</label>
+                      <input
+                        type="text"
+                        required={credentialRequired}
+                        autoComplete="off"
+                        value={form.accessKeyId}
+                        onChange={(e) => setForm((p) => ({ ...p, accessKeyId: e.target.value }))}
+                        placeholder="AKIA…"
+                        className={`${inputClass} font-mono`}
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-sm font-medium">Secret access key</label>
+                      <input
+                        type="password"
+                        required={credentialRequired}
+                        autoComplete="new-password"
+                        value={form.secretAccessKey}
+                        onChange={(e) => setForm((p) => ({ ...p, secretAccessKey: e.target.value }))}
+                        className={`${inputClass} font-mono`}
+                      />
+                    </div>
+                  </>
+                )}
                 <div className="col-span-2">
                   <label className="mb-1 block text-sm font-medium">
                     Regions{' '}
@@ -345,7 +351,7 @@ export default function CloudAccountsPage() {
                   />
                 </div>
               </>
-            ) : form.provider === 'gcp' ? (
+            ) : !showCredentials ? null : form.provider === 'gcp' ? (
               <div className="col-span-2">
                 <label className="mb-1 block text-sm font-medium">Service account key (JSON)</label>
                 <textarea
@@ -405,10 +411,16 @@ export default function CloudAccountsPage() {
                 />
               </div>
             )}
-            <p className="text-muted-foreground col-span-2 -mt-2 text-xs">
-              {PERMISSION_HINT[form.provider]}
-              {editId ? ' Leave the credential blank to keep the existing one.' : ''}
-            </p>
+            {showCredentials ? (
+              <p className="text-muted-foreground col-span-2 -mt-2 text-xs">
+                {PERMISSION_HINT[form.provider]}
+                {editId ? ' Leave the credential blank to keep the existing one.' : ''}
+              </p>
+            ) : (
+              <p className="text-muted-foreground col-span-2 -mt-2 text-xs">
+                Only admins change this account’s credentials.
+              </p>
+            )}
 
             <div>
               <label className="mb-1 block text-sm font-medium">SSH username for imported servers</label>

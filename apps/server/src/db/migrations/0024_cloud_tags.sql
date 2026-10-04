@@ -1,0 +1,14 @@
+-- Provider tags (cloud roles fix): the tags a cloud provider reports for an
+-- instance are kept apart from the app's own servers.tags, because tag
+-- selectors grant access by servers.tags and whoever controls tags in the
+-- provider must not influence access here. cloud_tags is display-only, a JSON
+-- array refreshed on every sync and never matched by a tag selector.
+--
+-- No backfill: before this migration, cloud sync wrote the provider's tags
+-- into servers.tags on import only, mixed with `cloud:<provider>` and the
+-- region, and users may have edited them since. Nothing records which of
+-- today's tags came from the provider, so existing servers.tags are kept
+-- as-is (an admin can remove any they do not want); the next sync fills
+-- cloud_tags, and servers imported from now on get only `cloud:<provider>`
+-- and the region as app tags.
+ALTER TABLE `servers` ADD `cloud_tags` text DEFAULT '[]' NOT NULL;

@@ -138,4 +138,10 @@ export interface ServerCloudInfo {
   region: string | null;
   state: CloudServerState;
   syncedAt: string | null;
+  /**
+   * The provider's own tags for the instance, as of the last sync. Shown as
+   * provider tags only: they are not the server's `tags` and tag selectors
+   * in custom roles never match them.
+   */
+  tags: string[];
 }
