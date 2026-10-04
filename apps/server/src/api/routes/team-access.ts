@@ -30,7 +30,7 @@ import {
 } from '@smt/shared';
 import { rank, requireAuth } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { accessRequests, memberships, organizations, resourceGrants, roleMembers, roles, users } from '../../db/schema.js';
+import { accessRequests, memberships, organizations, resourceGrants, roleMembers, roles, ssoProviders, users } from '../../db/schema.js';
 import { audit } from '../../audit/index.js';
 import { MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import type { LiveAccessRevoked } from '../../auth/revoke.js';
@@ -45,7 +45,7 @@ import {
   rolePermissions,
   type DelegationResult,
 } from '../../auth/access/modules.js';
-import { clampModuleLevel, maxModuleLevel, parseModulePermissions } from '../../auth/access/levels.js';
+import { clampModuleLevel, maxModuleLevel, parseModulePermissions, TYPE_MODULES } from '../../auth/access/levels.js';
 import { defaultRoleId, isBuiltInRole, otherActiveOwners } from '../../auth/access/assign.js';
 import { baseActions } from '../../auth/command-access.js';
 import {
@@ -549,10 +549,16 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const modulesAfter = body.modulePermissions ? normalizeModules(body.modulePermissions) : undefined;
     const modulesChanged = modulesAfter !== undefined && (row.modulePermissions === null || !sameModules(modulesBefore, modulesAfter));
     // Changing what the role gives takes from its members what it drops and
-    // gives them what it adds: the actor must hold both
+    // gives them what it adds: the actor must hold both — and a resource
+    // module turned on or off un-parks or parks the role's grants there, so
+    // those count as given or taken too
     let delegation: DelegationResult | undefined;
     if (modulesChanged) {
-      delegation = canGrant(req, bothSets({ modules: modulesBefore }, { modules: modulesAfter }));
+      const on = (modules: ModulePermissions, type: ResourceType) => (modules[TYPE_MODULES[type]] ?? 'none') !== 'none';
+      const moved = principalGrants(req.orgId, 'role', id).filter(
+        (g) => on(modulesBefore, g.resourceType) !== on(modulesAfter!, g.resourceType),
+      );
+      delegation = canGrant(req, bothSets({ modules: modulesBefore, grants: wantedGrants(moved) }, { modules: modulesAfter }));
       if (refused(reply, delegation, `change what the ${row.name} role gives`)) return reply;
     }
 
@@ -665,6 +671,11 @@ export async function teamAccessRoutes(app: FastifyInstance) {
     const row = findRole(req.orgId, id);
     if (!row) return reply.status(404).send({ error: 'Role not found' });
     if (row.system) return reply.status(400).send({ error: 'Built-in roles cannot be deleted' });
+    // New members would fall back to Viewer — likely more than this role gave — so pick another first
+    const sso = getDb().select({ defaultRole: ssoProviders.defaultRole }).from(ssoProviders).where(eq(ssoProviders.orgId, req.orgId)).get();
+    if (defaultRoleId(req.orgId) === id || sso?.defaultRole === id) {
+      return reply.status(409).send({ error: `${row.name} is the default role for new members; choose another default first` });
+    }
     // Deleting takes from its members everything it gives
     const delegation = canGrant(req, rolePermissions(req.orgId, id)!);
     if (refused(reply, delegation, `delete the ${row.name} role`)) return reply;

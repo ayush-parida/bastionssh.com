@@ -189,6 +189,50 @@ describe('unified roles in Team & Access', () => {
     expect(audits('role.member_add', leads.id).at(-1)).toMatchObject({ userId: someone.userId, delegation: { ok: true, missing: [] } });
   });
 
+  it('weighs the grants a module change un-parks: turning a module on gives them, so the actor must hold them', async () => {
+    // Owner parks "All servers: manage" in a role (Servers off) and gives it to a team lead
+    const parked = (await as(owner).post('/api/team/roles', {
+      name: `Parked ops ${nanoid(4)}`,
+      modulePermissions: { dashboard: 'view' },
+      grants: [{ resourceType: 'server', selector: 'all', level: 'manage' }],
+    })).json() as { id: string };
+    const leads = (await as(owner).post('/api/team/roles', {
+      name: `Role editors ${nanoid(4)}`,
+      modulePermissions: { team_roles: 'manage' },
+    })).json() as { id: string };
+    const lead = seedUser(orgId, 'viewer');
+    for (const id of [parked.id, leads.id]) {
+      expect((await as(owner).post(`/api/team/roles/${id}/members`, { userId: lead.userId })).statusCode).toBe(201);
+    }
+    const level = async () =>
+      ((await as(lead).get('/api/team/access/mine?type=server')).json() as { levels: Record<string, string> }).levels[web1];
+    expect(await level()).toBe('view');
+
+    // They hold Servers: view (Viewer), but not the manage the grant would give them
+    const res = await as(lead).patch(`/api/team/roles/${parked.id}`, { modulePermissions: { dashboard: 'view', servers: 'view' } });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(res.json().error).toMatch(/all servers: manage/);
+    expect(await level()).toBe('view');
+
+    // An admin, who holds it, may
+    expect((await as(admin).patch(`/api/team/roles/${parked.id}`, { modulePermissions: { dashboard: 'view', servers: 'view' } })).statusCode).toBe(200);
+    expect(await level()).toBe('manage');
+  });
+
+  it('lists members only to those Team & Access shows them to, and keeps a default role from being deleted', async () => {
+    const nobody = seedUser(orgId, 'viewer');
+    getDb().delete(roleMembers).where(and(eq(roleMembers.orgId, orgId), eq(roleMembers.userId, nobody.userId))).run();
+    expect((await as(nobody).get('/api/team/members')).statusCode).toBe(404);
+    expect((await as(seedUser(orgId, 'viewer')).get('/api/team/members')).statusCode).toBe(200);
+
+    const guests = (await as(admin).post('/api/team/roles', { name: `Guests ${nanoid(4)}`, modulePermissions: { dashboard: 'view' } })).json() as { id: string };
+    expect((await as(admin).put('/api/team/default-role', { roleId: guests.id })).statusCode).toBe(200);
+    // Deleting it would send new members back to Viewer
+    expect((await as(admin).delete(`/api/team/roles/${guests.id}`)).statusCode).toBe(409);
+    await as(admin).put('/api/team/default-role', { roleId: builtIn('viewer') });
+    expect((await as(admin).delete(`/api/team/roles/${guests.id}`)).statusCode).toBe(204);
+  });
+
   it('gives an invitee exactly the picked roles, or the default role; No access sees nothing', async () => {
     const custom = (await as(admin).post('/api/team/roles', { name: `Lookers ${nanoid(4)}`, modulePermissions: { dashboard: 'view' } })).json() as { id: string };
     const email = `picked-${nanoid(4)}@example.com`;
@@ -203,7 +247,7 @@ describe('unified roles in Team & Access', () => {
     const set = await as(admin).put('/api/team/default-role', { roleId: builtIn('none') });
     expect(set.statusCode, set.body).toBe(200);
     expect((await as(admin).get('/api/team/default-role')).json()).toMatchObject({ roleId: builtIn('none'), name: 'No access' });
-    expect(audits('org.default_role_change', orgId)[0]).toMatchObject({ after: { roleId: builtIn('none') } });
+    expect(audits('org.default_role_change', orgId).at(-1)).toMatchObject({ after: { roleId: builtIn('none') } });
     const plainEmail = `plain-${nanoid(4)}@example.com`;
     const plain = await join((await as(admin).post('/api/team/invites', { email: plainEmail })).json(), plainEmail);
     expect(await visible(plain)).toEqual([]);

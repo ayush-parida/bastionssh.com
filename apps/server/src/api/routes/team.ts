@@ -7,6 +7,7 @@ import {
   type HeldRole,
   type MemberScope,
   type MemberServerAccess,
+  type ModuleKey,
   type ModulePermissions,
   type OrgMember,
   type OrgSecuritySettings,
@@ -498,11 +499,20 @@ async function changeScope(req: FastifyRequest, reply: FastifyReply, userId: str
   return { userId, scope };
 }
 
+/** preHandler: any of `modules` at `view`, else 404 as `requireModule` answers for a module that is off. */
+function requireAnyModule(modules: ModuleKey[]) {
+  return async function anyModuleGuard(req: FastifyRequest, reply: FastifyReply) {
+    if (!req.user) return reply.status(401).send({ error: 'Unauthorized' });
+    if (!modules.some((m) => hasModule(req, m, 'view'))) return reply.status(404).send({ error: 'Not found' });
+  };
+}
+
 /** Authenticated team management: who is in the org, and who has been asked. */
 export async function teamRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/members', async (req): Promise<OrgMember[]> => {
+  // Members (see members), or Roles & access (whom to give roles); neither: 404, as for a module that is off
+  app.get('/members', { preHandler: requireAnyModule(['team_members', 'team_roles']) }, async (req): Promise<OrgMember[]> => {
     const db = getDb();
     const rows = db
       .select({
