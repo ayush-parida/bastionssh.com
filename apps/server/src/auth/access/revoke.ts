@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { RESOURCE_TYPES, type ResourceType } from '@smt/shared';
 import { getDb } from '../../db/index.js';
+import { closeDisallowedPodShells } from '../../kube/exec.js';
 import { revokeLiveAccess, type LiveAccessRevoked, type LiveAccessScope } from '../revoke.js';
 import { accessibleIds, RESOURCE_TABLES, type AccessibleIds } from './filter.js';
 
@@ -10,7 +11,9 @@ import { accessibleIds, RESOURCE_TABLES, type AccessibleIds } from './filter.js'
  * else — terminals, SFTP/FTP sessions, Docker and Kubernetes streams and
  * shells — keeping what they still have. Shells (terminals, SFTP, pod and
  * container shells) need `operate`, so they also close where the member
- * keeps only `view`.
+ * keeps only `view`. Pod shells are weighed in their own namespace, which the
+ * per-type sets cannot show: a grant narrowed to `shop` operates there and
+ * nowhere else, and narrowing it further changes no set at all.
  *
  *   const before = snapshotAccess(orgId, userIds);
  *   …change roles, grants, memberships or scope…
@@ -70,7 +73,8 @@ export function keepSets(orgId: string, after: AccessSnapshot): LiveAccessScope 
     keepServerIds: ids(after.server.view, 'server'),
     keepClusterIds: ids(after.cluster.view, 'cluster'),
     keepShellServerIds: ids(after.server.operate, 'server'),
-    keepShellClusterIds: ids(after.cluster.operate, 'cluster'),
+    // On a cluster still seen, pod shells stay here and are weighed in their namespace (closeDisallowedPodShells)
+    keepShellClusterIds: ids(after.cluster.view, 'cluster'),
     keepFtpConnectionIds: ids(after.ftp_connection.view, 'ftp_connection'),
   };
 }
@@ -95,8 +99,14 @@ export function revokeAfterChange(
   for (const userId of new Set(userIds)) {
     const after = accessSnapshot(orgId, userId);
     const previous = before?.get(userId);
-    if (previous ? lostAccess(previous, after).length === 0 : unrestricted(after)) continue;
-    closed.set(userId, revokeLiveAccess(userId, keepSets(orgId, after)));
+    // Pod shells in a namespace the member no longer operates in, whatever the sets say
+    const podShells = closeDisallowedPodShells(orgId, userId);
+    if (previous ? lostAccess(previous, after).length === 0 : unrestricted(after)) {
+      if (podShells) closed.set(userId, { terminals: podShells, sftp: 0, docker: 0, kube: 0, agents: 0 });
+      continue;
+    }
+    const revoked = revokeLiveAccess(userId, keepSets(orgId, after));
+    closed.set(userId, podShells ? { ...revoked, terminals: revoked.terminals + podShells } : revoked);
   }
   return closed;
 }

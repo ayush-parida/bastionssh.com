@@ -872,11 +872,13 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   'body')` reads the Kubernetes matrix at the caller's level in the request's namespace, and
   `KubeContext.allowlist` is the cluster allowlist narrowed to the caller's granted
   namespaces (`permissionsIn(ns)` for per-namespace checks; `GET /clusters/:id` returns
-  `namespacePermissions`). Container and pod shells are closed by level too. Creating servers
-  stays admin-only; a server manager below admin cannot choose its SSH key or agent, move its
-  saved credential to a new host/port/user (only with a new password), or jump through a
-  server they cannot operate. Changing a server's tags is audited (`server.tags_change`) with
-  the roles whose tag grants it moves, and closes what members lost.
+  `namespacePermissions`). Container and pod shells are closed by level too; revocation weighs
+  pod shells in their own namespace, so narrowing a grant's namespaces closes the shells it no
+  longer covers. Creating servers stays admin-only; a server manager below admin cannot choose
+  its SSH key or agent, nor change where it connects (host, port, user, jump host) — even with
+  a new password, since any org key a terminal names would follow — but may set a new password
+  for the same endpoint. Changing a server's tags is audited (`server.tags_change`) with the
+  roles whose tag grants it moves, and closes what members lost.
 
 ---
 

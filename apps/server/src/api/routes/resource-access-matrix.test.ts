@@ -299,6 +299,15 @@ describe('server and cluster access matrix', () => {
       expect((await call(narrowed, 'PATCH', c(), { name: 'mine now' })).statusCode).toBe(403);
     });
 
+    it('needs the cluster as a whole to explain a cluster-scoped object, whatever namespace the body names', async () => {
+      // A Node has no namespace: the narrowed grant gives `view` on it, not `operate`
+      const node = await call(narrowed, 'POST', c('/explain'), { resource: 'nodes', namespace: 'shop', name: 'worker-1' });
+      expect(node.statusCode).toBe(403);
+      // Inside `shop` the gate lets it through (no AI provider here, so it stops at 400)
+      const inShop = await call(narrowed, 'POST', c('/explain'), { resource: 'deployments', namespace: 'shop', name: 'web' });
+      expect(inShop.statusCode).toBe(400);
+    });
+
     it('lists only the granted namespaces and their workloads', async () => {
       const namespaces = (await call(narrowed, 'GET', c('/namespaces'))).json() as { name: string }[];
       expect(namespaces.map((n) => n.name)).toEqual(['shop']);
@@ -318,12 +327,25 @@ describe('server and cluster access matrix', () => {
       expect((await call(who, 'PATCH', s(), { username: 'admin' })).statusCode).toBe(403);
       expect((await call(who, 'PATCH', s(), { agentId: 'some-agent' })).statusCode).toBe(403);
       expect((await call(who, 'PATCH', s(), { authType: 'key', defaultKeyId: 'any-key' })).statusCode).toBe(403);
-      // A jump host they cannot reach is as unknown as one that does not exist
-      expect((await call(who, 'PATCH', s(), { jumpServerId: otherServerId })).statusCode).toBe(400);
-      // A new endpoint with its own password: no saved credential goes there
-      const moved = await call(who, 'PATCH', s(), { host: '127.0.0.1', port: 1, authType: 'password', password: 'fresh' });
-      expect(moved.statusCode).toBe(200);
-      expect(getDb().select().from(servers).where(eq(servers.id, serverId)).get()!.host).toBe('127.0.0.1');
+      // A jump host, reachable or not, answers alike: never "unknown", so ids are not probed
+      expect((await call(who, 'PATCH', s(), { jumpServerId: otherServerId })).statusCode).toBe(403);
+      // A new password for the same endpoint is theirs to set
+      const rekeyed = await call(who, 'PATCH', s(), { authType: 'password', password: 'fresh' });
+      expect(rekeyed.statusCode).toBe(200);
+    });
+
+    it('never lets a role manager move where the server connects, even with a fresh password', async () => {
+      // Any org key a terminal names (keyId) would log in wherever the server now points
+      const who = cases.roleManage!.who;
+      const moved = await call(who, 'PATCH', s(), { host: '10.9.9.9', port: 22, authType: 'password', password: 'fresh' });
+      expect(moved.statusCode).toBe(403);
+      // A jump host they operate themselves: the same host, resolved from another network
+      const hop = seedOfflineServer('hop-1', ['web']);
+      expect((await call(who, 'PATCH', s(), { jumpServerId: hop, authType: 'password', password: 'fresh' })).statusCode).toBe(403);
+      const row = getDb().select().from(servers).where(eq(servers.id, serverId)).get()!;
+      expect(row).toMatchObject({ host: '127.0.0.1', port: 1, jumpServerId: null });
+      // Admins still can
+      expect((await call(admin, 'PATCH', `/api/servers/${hop}`, { jumpServerId: null, notes: 'x' })).statusCode).toBe(200);
     });
 
     it('keeps creating servers admin-only', async () => {

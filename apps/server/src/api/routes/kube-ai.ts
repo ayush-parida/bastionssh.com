@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
-import { KUBE_CLUSTER_SCOPE, type KubeExplainEvent } from '@smt/shared';
+import { KUBE_CLUSTER_SCOPE, KUBE_RESOURCES, type KubeExplainEvent, type KubeResource } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { canAccessCluster, clusterDenial } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
@@ -68,8 +68,13 @@ function providerFor(orgId: string, providerId?: string) {
  */
 async function requireExplain(req: FastifyRequest, reply: FastifyReply) {
   const { id } = (req.params ?? {}) as { id?: string };
-  const namespace = (req.body as { namespace?: unknown } | undefined)?.namespace;
-  const scoped = typeof namespace === 'string' && namespace && namespace !== KUBE_CLUSTER_SCOPE ? namespace : undefined;
+  const { resource, namespace } = (req.body ?? {}) as { resource?: unknown; namespace?: unknown };
+  // The namespace the object is read in: none for a cluster-scoped kind, whatever
+  // the body says (aiObjectRef drops it), so a Node needs the cluster as a whole
+  const clusterScoped =
+    typeof resource === 'string' && resource in KUBE_RESOURCES && !KUBE_RESOURCES[resource as KubeResource].namespaced;
+  const scoped =
+    !clusterScoped && typeof namespace === 'string' && namespace && namespace !== KUBE_CLUSTER_SCOPE ? namespace : undefined;
   const denied = id ? clusterDenial(req, id, 'explain', scoped) : { status: 404 as const, error: 'Cluster not found' };
   if (denied) return reply.status(denied.status).send({ error: denied.error });
 }

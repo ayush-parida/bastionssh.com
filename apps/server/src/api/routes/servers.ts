@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { CloudProvider, CloudServerState, DockerMode, DockerTransport, Server } from '@smt/shared';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
-import { accessibleServerFilter, canAccessServer, requireServer, serverDenial } from '../../auth/server-access.js';
+import { accessibleServerFilter, canAccessServer, requireServer } from '../../auth/server-access.js';
 import { revokeAfterChange, snapshotAccess } from '../../auth/access/revoke.js';
 import { activeAt } from '../../auth/access/resolve.js';
 import { getDb } from '../../db/index.js';
@@ -217,23 +217,23 @@ function tagCoverage(orgId: string, tags: string[]) {
  * A server's `manage` level may come from a custom role rather than the admin
  * base role (custom roles spec §5). Such a member may edit the server, but not
  * steer the org's credentials somewhere new with it: the SSH key a server
- * logs in with, its route through an agent, and a new host, port or user for
- * the saved credential stay admin decisions — moving the endpoint is fine
- * with a password given in the same edit, which then is the only credential
- * that goes there. A new jump host needs `operate` on it, as a terminal through
- * it would. Returns the refusal, or null.
+ * logs in with, and where its connections go — host, port, user, jump host or
+ * agent — stay admin decisions (ssh/jump.ts: only admins set a jump host).
+ * Moving the endpoint, even with a fresh password, would still let any org
+ * key a terminal or SFTP request names (`keyId`) log in wherever it now
+ * points, and a new route resolves the same host from another network. A
+ * new password for the same endpoint is fine. Returns the refusal, or null.
  */
 function editProblem(
   req: FastifyRequest,
   existing: typeof servers.$inferSelect,
   body: Partial<z.infer<typeof createServerSchema>>,
   jumpChanged: boolean,
-): { status: 400 | 403; error: string } | null {
+): { status: 403; error: string } | null {
   if (rank(req.role) >= rank('admin')) return null;
   if (body.agentId !== undefined && body.agentId !== existing.agentId) {
     return { status: 403, error: 'Only admins can route a server through an agent' };
   }
-  const newPassword = body.authType === 'password' && !!body.password;
   const keyChanged =
     body.authType === 'key' &&
     (!!existing.encryptedPassword || (body.defaultKeyId !== undefined && body.defaultKeyId !== existing.defaultKeyId));
@@ -242,19 +242,8 @@ function editProblem(
     (body.host !== undefined && body.host !== existing.host) ||
     (body.port !== undefined && body.port !== existing.port) ||
     (body.username !== undefined && body.username !== existing.username);
-  if (endpointChanged && !newPassword) {
-    return {
-      status: 403,
-      error: 'Only admins can move a server\'s saved credentials to a new host, port or user; enter a password with the change',
-    };
-  }
-  if (jumpChanged && body.jumpServerId) {
-    const denied = serverDenial(req, body.jumpServerId, 'terminal');
-    if (denied) {
-      return denied.status === 404
-        ? { status: 400, error: 'Unknown jump server' }
-        : { status: 403, error: 'Reaching a server through a jump host needs operate access to the jump host' };
-    }
+  if (endpointChanged || jumpChanged) {
+    return { status: 403, error: 'Only admins can change where a server connects: its host, port, user or jump host' };
   }
   return null;
 }
