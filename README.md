@@ -715,7 +715,7 @@ pnpm test:e2e      # Playwright browser tests (below)
 - Just the tests, against existing builds: `pnpm --filter @smt/e2e run test:e2e`, with any Playwright flags after it (e.g. `--headed`, `tests/02-passkeys.spec.ts`)
 - Without `SMT_REDIS_URL` the server logs Redis connection errors from its idle queues; they are harmless here. Set `SMT_REDIS_URL` to a Redis you can throw away to silence them, as CI does.
 - Reports and traces of failures land in `apps/e2e/playwright-report` and `apps/e2e/test-results`.
-- `E2E_SCREENSHOTS=<dir>` saves the Kubernetes pictures the tests pass through (cluster map, topology graph, diagnosis panel, Storage and Config tabs, scale panel and confirmation) as PNGs in that directory — the ones in [`docs/superpowers/specs/kubernetes-screenshots`](docs/superpowers/specs/kubernetes-screenshots) were made so.
+- `E2E_SCREENSHOTS=<dir>` saves the Kubernetes pictures the tests pass through (cluster map, topology graph, diagnosis panel, Storage and Config tabs, scale panel and confirmation) and the custom roles ones (role editor, a member's effective access, the access checker) as PNGs in that directory — the ones in [`docs/superpowers/specs/kubernetes-screenshots`](docs/superpowers/specs/kubernetes-screenshots) and [`docs/superpowers/specs/custom-roles-screenshots`](docs/superpowers/specs/custom-roles-screenshots) were made so.
 
 ### Live Kubernetes tests
 

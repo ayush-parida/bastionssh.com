@@ -83,6 +83,8 @@ test('a role with a tag selector and a cluster namespace gives a member exactly 
   await expect(detail.getByTestId('effective-server')).toContainText(web1.name);
   await expect(detail.getByTestId('effective-server')).toContainText(`via ${roleName}`);
   await expect(detail.getByTestId('effective-server')).not.toContainText(db1.name);
+  // The picture shows the effective access panel, further down the dialog
+  await detail.getByText('Effective access', { exact: true }).evaluate((el) => el.scrollIntoView({ block: 'start' }));
   await snap(page, 'member-access');
   await detail.getByRole('button', { name: 'Close' }).click();
 
