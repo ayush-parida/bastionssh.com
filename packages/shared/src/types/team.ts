@@ -1,4 +1,12 @@
 import type { Role } from './auth.js';
+import type {
+  AccessLevel,
+  EffectiveAccessEntry,
+  HeldRole,
+  MemberScope,
+  ResourceType,
+  RoleGrant,
+} from './roles.js';
 
 export type MembershipStatus = 'active' | 'suspended';
 
@@ -20,6 +28,10 @@ export interface OrgMember {
   lastActiveAt: string | null;
   /** Passkeys registered to the account (they are per account, not per org). Admins and owners only. */
   passkeyCount?: number;
+  /** `all`: the base role on every resource. `roles`: only what roles and personal grants cover. */
+  scope?: MemberScope;
+  /** Custom roles held now. Admins and owners only. */
+  roles?: HeldRole[];
 }
 
 /** Org-wide security policy, readable by every member; only owners change it. */
@@ -40,6 +52,16 @@ export interface MemberServerAccess {
   /** Kubernetes clusters granted to a restricted member (expired grants never appear). */
   clusterIds?: string[];
   clusterGrants?: ClusterGrant[];
+  /**
+   * `GET` only (custom roles spec §6): the base role, scope, roles held,
+   * personal grants, and every resource the member reaches with its level
+   * and why. The fields above stay as compatible aliases for one release.
+   */
+  role?: Role;
+  scope?: MemberScope;
+  roles?: HeldRole[];
+  personalGrants?: RoleGrant[];
+  effective?: Record<ResourceType, EffectiveAccessEntry[]>;
 }
 
 export interface ClusterGrant {
@@ -76,7 +98,7 @@ export interface UpdateMemberServerAccess {
 
 export type AccessRequestStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled';
 
-/** What a just-in-time request asks for: servers, or Kubernetes clusters. */
+/** What a base-role-level just-in-time request asks for: servers, or Kubernetes clusters. */
 export type AccessRequestResourceType = 'server' | 'cluster';
 
 export interface AccessRequest {
@@ -84,11 +106,15 @@ export interface AccessRequest {
   userId: string;
   userEmail: string;
   userDisplayName: string;
-  /** Servers or clusters; older requests are all servers. */
-  resourceType: AccessRequestResourceType;
-  /** The servers asked for (empty for a cluster request). */
+  /**
+   * What is asked for: `server` (the `servers` below), `cluster` (the
+   * `clusters` below), `role`, or another resource type. Older requests are
+   * all servers.
+   */
+  resourceType: ResourceType | 'role';
+  /** The servers asked for (empty for any other request). */
   servers: { id: string; name: string | null }[];
-  /** The clusters asked for (empty for a server request). */
+  /** The clusters asked for (empty for any other request). */
   clusters: { id: string; name: string | null }[];
   reason: string;
   durationMinutes: number;
@@ -102,13 +128,28 @@ export interface AccessRequest {
   createdAt: string;
   /** Pending: when the request lapses undecided. Approved: when the granted access ends. */
   expiresAt: string;
+  /** The custom role asked for (`resourceType` = `role`); name null once deleted. */
+  role?: { id: string; name: string | null } | null;
+  /** Resources asked for, any type (servers are also listed in `servers`). */
+  resources?: { id: string; name: string | null }[];
+  /** The level asked for; null for older server requests (the base role's level). */
+  level?: AccessLevel | null;
 }
 
+/**
+ * Body of `POST /access-requests`: servers or clusters (`serverIds` /
+ * `clusterIds`, at the base role's level, as before), a custom role
+ * (`roleId`), or resources of one type at a level (`resourceType` +
+ * `resourceIds` + `level`). `resourceType` beside `serverIds` or
+ * `clusterIds` (no level) is still read as the older server/cluster form.
+ */
 export interface CreateAccessRequest {
-  /** Default `server`: then `serverIds`; for `cluster`, `clusterIds`. */
-  resourceType?: AccessRequestResourceType;
   serverIds?: string[];
   clusterIds?: string[];
+  roleId?: string;
+  resourceType?: ResourceType;
+  resourceIds?: string[];
+  level?: AccessLevel;
   reason: string;
   durationMinutes: number;
 }

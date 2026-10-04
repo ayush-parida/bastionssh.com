@@ -30,6 +30,7 @@ import { cloudRoutes } from './routes/cloud.js';
 import { dnsRoutes } from './routes/dns.js';
 import { diagnosticsRoutes } from './routes/diagnostics.js';
 import { teamRoutes, publicInviteRoutes } from './routes/team.js';
+import { teamAccessRoutes } from './routes/team-access.js';
 import { accessRequestRoutes } from './routes/access-requests.js';
 import { publicPasswordResetRoutes } from './routes/password-reset.js';
 import { apiTokenRoutes } from './routes/tokens.js';
@@ -131,6 +132,7 @@ export async function buildApp() {
   await app.register(kubeFleetRoutes, { prefix: '/api/kube' });
   await app.register(kubeAiRoutes, { prefix: '/api/kube' });
   await app.register(teamRoutes, { prefix: '/api/team' });
+  await app.register(teamAccessRoutes, { prefix: '/api/team' });
   await app.register(accessRequestRoutes, { prefix: '/api/access-requests' });
   await app.register(apiTokenRoutes, { prefix: '/api/tokens' });
   await app.register(backupRoutes, { prefix: '/api/admin/backups' });

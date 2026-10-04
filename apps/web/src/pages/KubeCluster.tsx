@@ -28,6 +28,7 @@ import EventsTab from '@/components/kube/EventsTab.js';
 import NodesTab from '@/components/kube/NodesTab.js';
 import StorageTab from '@/components/kube/StorageTab.js';
 import ConfigTab from '@/components/kube/ConfigTab.js';
+import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 
 /** Each tab's body; every one lives in its own file so a phase can replace it alone. */
 const TAB_BODY: Record<KubeTab, React.ComponentType<{ clusterId: string; namespace: string }>> = {
@@ -128,6 +129,7 @@ export default function KubeClusterPage() {
           )}
         </div>
         {cluster && <DiagnoseButton target={{ kind: 'kube_cluster', id: cluster.id, name: cluster.name }} />}
+        {cluster && <WhoHasAccessButton type="cluster" id={cluster.id} name={cluster.name} />}
         <NamespacePicker clusterId={clusterId} value={namespace} onChange={setNamespace} />
       </div>
 

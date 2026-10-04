@@ -28,6 +28,8 @@ import { RequestAccessDialog, useRequestableServers } from '@/components/access/
 import { KeyAgeBadge, RotationHistory, rotationRequestError } from '@/components/keys/KeyRotation.js';
 import { ROTATION_CONFIRM, rotateServerKey, rotateServerKeys, toastRotation } from '@/lib/key-rotation.js';
 import { useHasRole } from '@/store/auth.js';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
+import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 import ServerDockerFields from '@/components/docker/ServerDockerFields.js';
 
 interface ServerFormState {
@@ -112,6 +114,8 @@ export default function ServersPage() {
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
   const [requesting, setRequesting] = useState(false);
   const isAdmin = useHasRole('admin');
+  // The level on each server (custom roles): hide what it does not allow
+  const access = useAccessLevels('server');
   // Servers ticked for a bulk key rotation, and the batch last started
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [batchId, setBatchId] = useState<string | null>(null);
@@ -627,12 +631,16 @@ export default function ServersPage() {
                 ))}
               </div>
               <div className="flex flex-wrap gap-2 mt-auto">
-                <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
-                  <Terminal size={12} /> Connect
-                </button>
-                <button onClick={() => navigate(`/servers/${s.id}/files`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
-                  <FolderOpen size={12} /> Files
-                </button>
+                {access.can(s.id, 'operate') && (
+                  <button onClick={() => handleConnect(s)} className="flex items-center gap-1.5 rounded-md bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/20">
+                    <Terminal size={12} /> Connect
+                  </button>
+                )}
+                {access.can(s.id, 'operate') && (
+                  <button onClick={() => navigate(`/servers/${s.id}/files`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
+                    <FolderOpen size={12} /> Files
+                  </button>
+                )}
                 <button onClick={() => navigate(`/servers/${s.id}/health`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                   <Activity size={12} /> Health
                 </button>
@@ -642,9 +650,12 @@ export default function ServersPage() {
                   </button>
                 )}
                 <DiagnoseButton target={{ kind: 'server', id: s.id, name: s.name }} onOpen={setDiagnosing} />
-                <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
-                  <Pencil size={12} /> Edit
-                </button>
+                {access.can(s.id, 'manage') && (
+                  <button onClick={() => handleEdit(s)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
+                    <Pencil size={12} /> Edit
+                  </button>
+                )}
+                <WhoHasAccessButton type="server" id={s.id} name={s.name} />
                 {isAdmin && canRotate(s) && (
                   <button
                     onClick={() => handleRotate(s)}
@@ -655,9 +666,11 @@ export default function ServersPage() {
                     <RotateCw size={12} className={rotateMutation.isPending && rotateMutation.variables === s.id ? 'animate-spin' : undefined} /> Rotate
                   </button>
                 )}
-                <button onClick={() => { if (confirm('Delete this server?')) deleteMutation.mutate(s.id); }} className="ml-auto flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-red-500 hover:bg-red-500/10">
-                  <Trash2 size={12} />
-                </button>
+                {access.can(s.id, 'manage') && (
+                  <button onClick={() => { if (confirm('Delete this server?')) deleteMutation.mutate(s.id); }} className="ml-auto flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-red-500 hover:bg-red-500/10">
+                    <Trash2 size={12} />
+                  </button>
+                )}
               </div>
             </div>
           ))}

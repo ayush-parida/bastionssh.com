@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { useHasRole } from '@/store/auth.js';
+import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 import {
   CLOUD_PROVIDER_LABEL,
   CLOUD_PROVIDERS,
@@ -539,6 +540,7 @@ export default function CloudAccountsPage() {
                     Sync now
                   </button>
                 )}
+                <WhoHasAccessButton type="cloud_account" id={a.id} name={a.name} />
                 {canManage && (
                   <>
                     <button

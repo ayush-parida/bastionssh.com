@@ -12,6 +12,8 @@ import type {
 } from '@smt/shared';
 import { Plus, Play, Trash2, Pencil, Terminal, X, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
+import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 
 interface FormState {
   name: string;
@@ -48,6 +50,8 @@ const TERMINAL_STATUSES = ['success', 'failure'];
 
 export default function CommandsPage() {
   const qc = useQueryClient();
+  // The level on each command (custom roles): hide what it does not allow
+  const access = useAccessLevels('saved_command');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(empty);
@@ -250,15 +254,22 @@ export default function CommandsPage() {
                   <pre className="text-xs font-mono text-muted-foreground bg-muted rounded px-2 py-1 overflow-x-auto">{cmd.command}</pre>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  <button onClick={() => openRun(cmd)} className="flex items-center gap-1.5 rounded-md bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-600 hover:bg-emerald-500/20">
-                    <Play size={12} /> Run
-                  </button>
-                  <button onClick={() => openEdit(cmd)} className="text-muted-foreground hover:text-foreground" title="Edit">
-                    <Pencil size={14} />
-                  </button>
-                  <button onClick={() => { if (confirm(`Delete ${cmd.name}?`)) deleteMutation.mutate(cmd.id); }} className="text-red-500 hover:text-red-600" title="Delete">
-                    <Trash2 size={14} />
-                  </button>
+                  {access.can(cmd.id, 'operate') && (
+                    <button onClick={() => openRun(cmd)} className="flex items-center gap-1.5 rounded-md bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-600 hover:bg-emerald-500/20">
+                      <Play size={12} /> Run
+                    </button>
+                  )}
+                  <WhoHasAccessButton type="saved_command" id={cmd.id} name={cmd.name} className="px-2" />
+                  {access.can(cmd.id, 'manage') && (
+                    <button onClick={() => openEdit(cmd)} className="text-muted-foreground hover:text-foreground" title="Edit">
+                      <Pencil size={14} />
+                    </button>
+                  )}
+                  {access.can(cmd.id, 'manage') && (
+                    <button onClick={() => { if (confirm(`Delete ${cmd.name}?`)) deleteMutation.mutate(cmd.id); }} className="text-red-500 hover:text-red-600" title="Delete">
+                      <Trash2 size={14} />
+                    </button>
+                  )}
                 </div>
               </div>
 

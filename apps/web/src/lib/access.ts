@@ -1,3 +1,50 @@
+import type { AccessLevel, ResourceType } from '@smt/shared';
+
+/** What each resource type is called, one and many. */
+export const RESOURCE_TYPE_LABELS: Record<ResourceType, { one: string; many: string }> = {
+  server: { one: 'server', many: 'servers' },
+  cluster: { one: 'cluster', many: 'clusters' },
+  ftp_connection: { one: 'FTP/SFTP connection', many: 'FTP/SFTP connections' },
+  storage_connection: { one: 'storage connection', many: 'storage connections' },
+  cloud_account: { one: 'cloud account', many: 'cloud accounts' },
+  saved_command: { one: 'saved command', many: 'saved commands' },
+  cron_job: { one: 'cron job', many: 'cron jobs' },
+};
+
+/** Section headings, in the order the editors show them. */
+export const RESOURCE_SECTIONS: { type: ResourceType; title: string }[] = [
+  { type: 'server', title: 'Servers' },
+  { type: 'cluster', title: 'Kubernetes clusters' },
+  { type: 'ftp_connection', title: 'FTP/SFTP connections' },
+  { type: 'storage_connection', title: 'Object storage' },
+  { type: 'cloud_account', title: 'Cloud accounts' },
+  { type: 'saved_command', title: 'Saved commands' },
+  { type: 'cron_job', title: 'Cron jobs' },
+];
+
+export const LEVELS: AccessLevel[] = ['view', 'operate', 'manage'];
+
+export const LEVEL_LABELS: Record<AccessLevel, string> = { view: 'View', operate: 'Operate', manage: 'Manage' };
+
+/**
+ * What a level lets someone do on each type, in plain words (spec §5), for
+ * the role preview and level pickers: "open terminals on 3 servers".
+ */
+export const LEVEL_VERBS: Record<ResourceType, Record<AccessLevel, string>> = {
+  server: { view: 'see', operate: 'open terminals and files on', manage: 'fully manage' },
+  cluster: { view: 'see the workloads of', operate: 'read logs, scale and exec into', manage: 'fully manage' },
+  ftp_connection: { view: 'see', operate: 'browse and transfer files on', manage: 'fully manage' },
+  storage_connection: { view: 'list objects in', operate: 'upload and download objects in', manage: 'fully manage' },
+  cloud_account: { view: 'see', operate: 'sync', manage: 'fully manage' },
+  saved_command: { view: 'see', operate: 'run', manage: 'edit and delete' },
+  cron_job: { view: 'see the history of', operate: 'run and pause', manage: 'edit and delete' },
+};
+
+/** True when `level` reaches `required` (view < operate < manage). */
+export function levelAtLeast(level: AccessLevel | null | undefined, required: AccessLevel): boolean {
+  return !!level && LEVELS.indexOf(level) >= LEVELS.indexOf(required);
+}
+
 /** Durations offered wherever time-bound access is picked, in minutes. */
 export const DURATION_OPTIONS: { minutes: number; label: string }[] = [
   { minutes: 30, label: '30 minutes' },

@@ -2,17 +2,30 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, asc, count, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import type {
-  AccessRequest,
-  AccessRequestResourceType,
-  AccessRequestSettings,
-  AccessRequestStatus,
-  RequestableClusters,
-  RequestableServers,
+import {
+  ACCESS_LEVELS,
+  RESOURCE_TYPES,
+  type AccessLevel,
+  type AccessRequest,
+  type AccessRequestSettings,
+  type AccessRequestStatus,
+  type RequestableAccess,
+  type RequestableClusters,
+  type RequestableServers,
+  type ResourceType,
 } from '@smt/shared';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
-import { accessRequests, kubeClusters, memberships, organizations, servers, users } from '../../db/schema.js';
+import {
+  accessRequests,
+  kubeClusters,
+  memberships,
+  organizations,
+  roleMembers,
+  roles,
+  servers,
+  users,
+} from '../../db/schema.js';
 import {
   activeGrants,
   extendClusterGrants,
@@ -22,14 +35,25 @@ import {
 } from '../../auth/access-grants.js';
 import { serverScope } from '../../auth/server-access.js';
 import { activeClusterGrants, clusterScope } from '../../auth/cluster-access.js';
+import { activeAt } from '../../auth/access/resolve.js';
+import {
+  addPersonalGrant,
+  effectiveAccessList,
+  isAccessLevel,
+  isResourceType,
+  levelFor,
+  listResources,
+  meetsLevel,
+  resolveAccess,
+  resourceExists,
+} from '../../auth/access/index.js';
 import { audit } from '../../audit/index.js';
 import { notifyNotice } from '../../notifications/index.js';
 import { config } from '../../config/index.js';
 
 /**
- * Just-in-time access. A restricted member asks for some servers — or some
- * Kubernetes clusters (custom roles spec §6: requests are resource-typed) —
- * for a while, with a reason; an admin (never the requester) approves — optionally for
+ * Just-in-time access. A restricted member asks for some servers for a while,
+ * with a reason; an admin (never the requester) approves — optionally for
  * less time — or denies. Approval adds time-bound grants that the expiry
  * sweep removes when they run out (auth/access-grants.ts).
  *
@@ -37,7 +61,12 @@ import { config } from '../../config/index.js';
  * an org setting, on by default: without names there is nothing to ask for.
  * Only names are ever shown — never hosts, tags or anything else. With it off,
  * members can only ask to extend access to servers they already have. The
- * same setting covers cluster names.
+ * same goes for Kubernetes clusters (`clusterIds`), under the same setting.
+ *
+ * Since custom roles, any member below admin may also ask for a custom role
+ * (approval adds them to it until the time is up) or for a level on
+ * resources of any type they can already see — or, for servers, that the org
+ * lists by name (approval adds time-bound personal grants at that level).
  */
 
 /** Hard ceiling for the org setting: a week. Anything longer is a permanent grant. */
@@ -56,59 +85,63 @@ const settingsSchema = z.object({
   maxRequestMinutes: z.number().int().min(15).max(MAX_POLICY_MINUTES).optional(),
 });
 
-const idList = z.array(z.string().min(1)).min(1).max(50);
-const createSchema = z
-  .object({
-    resourceType: z.enum(['server', 'cluster']).default('server'),
-    serverIds: idList.optional(),
-    clusterIds: idList.optional(),
-    reason: z.string().trim().min(3).max(500),
-    durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES),
-  })
-  .refine((v) => (v.resourceType === 'server' ? v.serverIds && !v.clusterIds : v.clusterIds && !v.serverIds), {
-    message: 'Give serverIds for a server request, clusterIds for a cluster request',
-  });
-
-/** Servers or clusters: the words, tables and grants each kind of request uses. */
-const KINDS = {
-  server: { table: servers, id: servers.id, name: servers.name, orgId: servers.orgId, noun: 'server', plural: 'Servers' },
-  cluster: {
-    table: kubeClusters,
-    id: kubeClusters.id,
-    name: kubeClusters.name,
-    orgId: kubeClusters.orgId,
-    noun: 'cluster',
-    plural: 'Clusters',
-  },
-} as const;
-
-function kindOf(row: Pick<RequestRow, 'resourceType'>): AccessRequestResourceType {
-  return row.resourceType === 'cluster' ? 'cluster' : 'server';
+/**
+ * The first cluster requests named their kind as `resourceType` beside
+ * `serverIds` / `clusterIds` (no level): read those as the base-role-level
+ * server or cluster request they are.
+ */
+function legacyKind(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return body;
+  const b = body as Record<string, unknown>;
+  if (b.resourceIds !== undefined || b.level !== undefined) return body;
+  // Only with the matching list: `cluster` beside `serverIds` stays an error
+  const matches =
+    (b.resourceType === 'server' && b.serverIds !== undefined && b.clusterIds === undefined) ||
+    (b.resourceType === 'cluster' && b.clusterIds !== undefined && b.serverIds === undefined);
+  if (!matches) return body;
+  const { resourceType: _kind, ...rest } = b;
+  return rest;
 }
 
-/** Ids of `kind` in the org, from `ids` (missing ones are left out), with their names. */
-function namesOf(orgId: string, kind: AccessRequestResourceType, ids: string[]): Map<string, string> {
-  if (!ids.length) return new Map();
-  const k = KINDS[kind];
-  return new Map(
-    getDb()
-      .select({ id: k.id, name: k.name })
-      .from(k.table)
-      .where(and(eq(k.orgId, orgId), inArray(k.id, ids)))
-      .all()
-      .map((r) => [r.id, r.name]),
-  );
-}
+const createSchema = z.preprocess(
+  legacyKind,
+  z
+    .object({
+      /** Servers at the base role's level, as before custom roles. */
+      serverIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+      /** Kubernetes clusters at the base role's level, as servers. */
+      clusterIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+      /** A custom role, held for the duration. */
+      roleId: z.string().min(1).optional(),
+      /** Resources of one type at a level (custom roles spec §6). */
+      resourceType: z.enum(RESOURCE_TYPES as [ResourceType, ...ResourceType[]]).optional(),
+      resourceIds: z.array(z.string().min(1)).min(1).max(50).optional(),
+      level: z.enum(ACCESS_LEVELS as [AccessLevel, ...AccessLevel[]]).optional(),
+      reason: z.string().trim().min(3).max(500),
+      durationMinutes: z.number().int().min(5).max(MAX_POLICY_MINUTES),
+    })
+    .refine(
+      (b) =>
+        [b.serverIds !== undefined, b.clusterIds !== undefined, b.roleId !== undefined, b.resourceType !== undefined].filter(
+          Boolean,
+        ).length === 1 &&
+        (b.resourceType === undefined || (b.resourceIds !== undefined && b.level !== undefined)),
+      { message: 'Ask for servers, clusters, a role, or resources of one type at a level' },
+    ),
+);
 
-/** A member's grants in force now on resources of `kind`, by id. */
-function grantsOf(orgId: string, userId: string, kind: AccessRequestResourceType): Map<string, { expiresAt: string | null }> {
+/** Base-role-level requests: servers or clusters, with the grants each kind uses. */
+type LegacyKind = 'server' | 'cluster';
+
+/** A member's grants in force now on servers or clusters, by id. */
+function grantsOf(orgId: string, userId: string, kind: LegacyKind): Map<string, { expiresAt: string | null }> {
   return kind === 'cluster'
     ? new Map(activeClusterGrants(orgId, userId).map((g) => [g.clusterId, g]))
     : new Map(activeGrants(orgId, userId).map((g) => [g.serverId, g]));
 }
 
-/** True when the caller already reaches every resource of `kind`. */
-function seesAllOf(req: FastifyRequest, kind: AccessRequestResourceType): boolean {
+/** True when the caller already reaches every server (or cluster). */
+function seesAllOf(req: FastifyRequest, kind: LegacyKind): boolean {
   return kind === 'cluster' ? clusterScope(req).all : serverScope(req).all;
 }
 
@@ -157,14 +190,61 @@ function parseServerIds(raw: string): string[] {
   }
 }
 
+/**
+ * What a request asks for. Server requests from before custom roles keep a
+ * plain id list in `server_ids` (the base role's level); a request for
+ * resources at a level stores `{ ids, level }` there, under its
+ * `resource_type`; a role request stores the role in `role_id`.
+ */
+interface RequestTarget {
+  type: ResourceType | 'role';
+  ids: string[];
+  level: AccessLevel | null;
+}
+
+function targetOf(row: RequestRow): RequestTarget {
+  if (row.resourceType === 'role') return { type: 'role', ids: [], level: null };
+  const type: ResourceType = isResourceType(row.resourceType) ? row.resourceType : 'server';
+  try {
+    const value = JSON.parse(row.serverIds) as unknown;
+    if (Array.isArray(value)) return { type, ids: parseServerIds(row.serverIds), level: null };
+    const { ids, level } = (value ?? {}) as { ids?: unknown; level?: unknown };
+    return {
+      type,
+      ids: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [],
+      level: isAccessLevel(level) ? level : 'view',
+    };
+  } catch {
+    return { type, ids: [], level: null };
+  }
+}
+
+/** `a, b and c`, or the role's name: what a request is for, for notifications. */
+function targetNames(request: AccessRequest): string {
+  if (request.resourceType === 'role') return `the ${request.role?.name ?? 'deleted'} role`;
+  const names = (request.resources ?? request.servers).map((s) => s.name ?? 'a deleted resource').join(', ');
+  return request.level ? `${names} (${request.level})` : names;
+}
+
 /** Rows as the API returns them, with people and server names resolved in bulk. */
 function present(orgId: string, rows: RequestRow[]): AccessRequest[] {
   if (rows.length === 0) return [];
   const db = getDb();
-  const idsOf = (kind: AccessRequestResourceType) => [
-    ...new Set(rows.filter((r) => kindOf(r) === kind).flatMap((r) => parseServerIds(r.serverIds))),
-  ];
-  const names = { server: namesOf(orgId, 'server', idsOf('server')), cluster: namesOf(orgId, 'cluster', idsOf('cluster')) };
+  const targets = new Map(rows.map((r) => [r.id, targetOf(r)]));
+  // Names of whatever is asked for, per type; a deleted resource has none
+  const names = new Map<string, string>();
+  for (const type of new Set([...targets.values()].map((t) => t.type))) {
+    if (type === 'role') continue;
+    const ids = [...new Set([...targets.values()].filter((t) => t.type === type).flatMap((t) => t.ids))];
+    if (!ids.length) continue;
+    for (const r of listResources(orgId, type)) if (ids.includes(r.id)) names.set(`${type}:${r.id}`, r.name);
+  }
+  const roleIds = [...new Set(rows.flatMap((r) => (r.roleId ? [r.roleId] : [])))];
+  const roleNames = new Map(
+    roleIds.length
+      ? db.select({ id: roles.id, name: roles.name }).from(roles).where(inArray(roles.id, roleIds)).all().map((r) => [r.id, r.name])
+      : [],
+  );
   const userIds = [...new Set(rows.flatMap((r) => [r.userId, ...(r.decidedBy ? [r.decidedBy] : [])]))];
   const people = new Map(
     db
@@ -175,17 +255,17 @@ function present(orgId: string, rows: RequestRow[]): AccessRequest[] {
       .map((u) => [u.id, u]),
   );
   return rows.map((r) => {
-    const kind = kindOf(r);
-    // A deleted server or cluster keeps its place in the request, without a name
-    const asked = parseServerIds(r.serverIds).map((id) => ({ id, name: names[kind].get(id) ?? null }));
+    const target = targets.get(r.id)!;
+    const resources =
+      target.type === 'role' ? [] : target.ids.map((id) => ({ id, name: names.get(`${target.type}:${id}`) ?? null }));
     return {
       id: r.id,
       userId: r.userId,
       userEmail: people.get(r.userId)?.email ?? '',
       userDisplayName: people.get(r.userId)?.displayName ?? '',
-      resourceType: kind,
-      servers: kind === 'server' ? asked : [],
-      clusters: kind === 'cluster' ? asked : [],
+      // A deleted server keeps its place in the request, without a name
+      servers: target.type === 'server' ? resources : [],
+      clusters: target.type === 'cluster' ? resources : [],
       reason: r.reason,
       durationMinutes: r.durationMinutes,
       status: r.status as AccessRequestStatus,
@@ -196,13 +276,12 @@ function present(orgId: string, rows: RequestRow[]): AccessRequest[] {
       decisionNote: r.decisionNote,
       createdAt: r.createdAt,
       expiresAt: r.expiresAt,
+      resourceType: target.type,
+      role: target.type === 'role' ? { id: r.roleId ?? '', name: r.roleId ? (roleNames.get(r.roleId) ?? null) : null } : null,
+      resources,
+      level: target.level,
     };
   });
-}
-
-/** The servers or clusters a presented request asks for. */
-function askedFor(request: AccessRequest): { id: string; name: string | null }[] {
-  return request.resourceType === 'cluster' ? request.clusters : request.servers;
 }
 
 function findRequest(orgId: string, id: string): RequestRow | undefined {
@@ -351,6 +430,54 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     };
   });
 
+  /**
+   * Custom roles and resources the caller could ask for (custom roles spec
+   * §6): every role by name, the resources they can already see (to ask for
+   * a higher level or longer), and servers by name when the org lists them.
+   * Never anything about a resource beyond its name.
+   */
+  app.get('/requestable', async (req): Promise<RequestableAccess> => {
+    const settings = accessRequestSettings(req.orgId);
+    if (resolveAccess(req).orgAdmin) return { canRequest: false, settings, roles: [], resources: [] };
+    const db = getDb();
+    const held = new Map(
+      db
+        .select({ roleId: roleMembers.roleId, expiresAt: roleMembers.expiresAt })
+        .from(roleMembers)
+        .where(
+          and(
+            eq(roleMembers.orgId, req.orgId),
+            eq(roleMembers.userId, req.user.id),
+            activeAt(roleMembers.expiresAt, new Date().toISOString()),
+          ),
+        )
+        .all()
+        .map((m) => [m.roleId, m.expiresAt]),
+    );
+    const roleRows = db
+      .select({ id: roles.id, name: roles.name, description: roles.description, color: roles.color })
+      .from(roles)
+      .where(eq(roles.orgId, req.orgId))
+      .orderBy(asc(roles.name))
+      .all();
+    const resources: RequestableAccess['resources'] = [];
+    for (const type of RESOURCE_TYPES) {
+      const levels = new Map(effectiveAccessList(req, type).map((e) => [e.resourceId, e.level]));
+      for (const r of listResources(req.orgId, type)) {
+        const level = levels.get(r.id) ?? null;
+        if (level !== null || (type === 'server' && settings.restrictedSeeServerNames)) {
+          resources.push({ type, id: r.id, name: r.name, level });
+        }
+      }
+    }
+    return {
+      canRequest: true,
+      settings,
+      roles: roleRows.map((r) => ({ ...r, held: held.has(r.id) ? { expiresAt: held.get(r.id) ?? null } : null })),
+      resources,
+    };
+  });
+
   /** Admins see the org's requests; everyone else only their own. Pending first, then newest. */
   app.get('/', async (req): Promise<AccessRequest[]> => {
     const query = listSchema.parse(req.query);
@@ -379,10 +506,19 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       const db = getDb();
       const settings = accessRequestSettings(req.orgId);
 
-      const kind = body.resourceType;
-      const noun = KINDS[kind].noun;
-      if (seesAllOf(req, kind)) {
-        return reply.status(400).send({ error: `You already have access to every ${noun}` });
+      // What is asked for, as stored and as named in the notification
+      let stored: { resourceType: string; serverIds: string; roleId: string | null };
+      let auditDetails: Record<string, unknown>;
+      let names: string;
+
+      // Servers or clusters at the base role's level, as before custom roles
+      const legacy: LegacyKind | null = body.serverIds ? 'server' : body.clusterIds ? 'cluster' : null;
+      if (legacy) {
+        if (seesAllOf(req, legacy)) {
+          return reply.status(400).send({ error: `You already have access to every ${legacy}` });
+        }
+      } else if (resolveAccess(req).orgAdmin) {
+        return reply.status(400).send({ error: 'Owners and admins already have access to everything' });
       }
       if (body.durationMinutes > settings.maxRequestMinutes) {
         return reply
@@ -390,15 +526,64 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           .send({ error: `Access can be requested for at most ${formatMinutes(settings.maxRequestMinutes)}` });
       }
 
-      const serverIds = [...new Set((kind === 'cluster' ? body.clusterIds : body.serverIds) ?? [])];
-      const known = namesOf(req.orgId, kind, serverIds);
-      const granted = grantsOf(req.orgId, req.user.id, kind);
-      // With names hidden, a server they cannot see answers exactly like one that does not exist
-      const unknown = serverIds.some((id) => !known.has(id) || (!settings.restrictedSeeServerNames && !granted.has(id)));
-      if (unknown) return reply.status(400).send({ error: `Unknown ${noun} in ${noun}Ids` });
-      const permanent = serverIds.find((id) => granted.get(id)?.expiresAt === null);
-      if (permanent) {
-        return reply.status(400).send({ error: `You already have permanent access to ${known.get(permanent)}` });
+      if (legacy) {
+        const serverIds = [...new Set((legacy === 'cluster' ? body.clusterIds : body.serverIds)!)];
+        const table = legacy === 'cluster' ? kubeClusters : servers;
+        const known = new Map(
+          db
+            .select({ id: table.id, name: table.name })
+            .from(table)
+            .where(and(eq(table.orgId, req.orgId), inArray(table.id, serverIds)))
+            .all()
+            .map((s) => [s.id, s.name]),
+        );
+        const granted = grantsOf(req.orgId, req.user.id, legacy);
+        // With names hidden, a server they cannot see answers exactly like one that does not exist
+        const unknown = serverIds.some((id) => !known.has(id) || (!settings.restrictedSeeServerNames && !granted.has(id)));
+        if (unknown) return reply.status(400).send({ error: `Unknown ${legacy} in ${legacy}Ids` });
+        const permanent = serverIds.find((id) => granted.get(id)?.expiresAt === null);
+        if (permanent) {
+          return reply.status(400).send({ error: `You already have permanent access to ${known.get(permanent)}` });
+        }
+        stored = { resourceType: legacy, serverIds: JSON.stringify(serverIds), roleId: null };
+        auditDetails = legacy === 'cluster' ? { resourceType: 'cluster', clusters: serverIds } : { servers: serverIds };
+        names = serverIds.map((s) => known.get(s)!).join(', ');
+      } else if (body.roleId) {
+        const role = db
+          .select({ id: roles.id, name: roles.name })
+          .from(roles)
+          .where(and(eq(roles.id, body.roleId), eq(roles.orgId, req.orgId)))
+          .get();
+        if (!role) return reply.status(400).send({ error: 'Unknown role' });
+        const held = db
+          .select({ expiresAt: roleMembers.expiresAt })
+          .from(roleMembers)
+          .where(and(eq(roleMembers.roleId, role.id), eq(roleMembers.userId, req.user.id)))
+          .get();
+        if (held && held.expiresAt === null) {
+          return reply.status(400).send({ error: `You already hold the ${role.name} role` });
+        }
+        stored = { resourceType: 'role', serverIds: '[]', roleId: role.id };
+        auditDetails = { roleId: role.id, role: role.name };
+        names = `the ${role.name} role`;
+      } else {
+        const type = body.resourceType!;
+        const level = body.level!;
+        const ids = [...new Set(body.resourceIds!)];
+        const known = new Map(listResources(req.orgId, type).map((r) => [r.id, r.name]));
+        for (const id of ids) {
+          const current = known.has(id) ? levelFor(req, type, id) : null;
+          // Only what the member can already see — or, for servers, what the org lists by name
+          const listed = current !== null || (type === 'server' && settings.restrictedSeeServerNames);
+          if (!known.has(id) || !listed) return reply.status(400).send({ error: 'Unknown resource in resourceIds' });
+          // Asking for what is already held for good, at that level, would change nothing
+          if (current?.via.some((v) => meetsLevel(v.level, level) && !v.expiresAt && v.namespaces == null)) {
+            return reply.status(400).send({ error: `You already have ${current.level} access to ${known.get(id)}` });
+          }
+        }
+        stored = { resourceType: type, serverIds: JSON.stringify({ ids, level }), roleId: null };
+        auditDetails = { type, resources: ids, level };
+        names = `${ids.map((id) => known.get(id)!).join(', ')} (${level})`;
       }
 
       const recent = db
@@ -438,8 +623,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           id,
           orgId: req.orgId,
           userId: req.user.id,
-          resourceType: kind,
-          serverIds: JSON.stringify(serverIds),
+          ...stored,
           reason: body.reason,
           durationMinutes: body.durationMinutes,
           createdAt: new Date(now).toISOString(),
@@ -448,12 +632,10 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         .run();
 
       await audit(req, 'access_request.create', 'access_request', id, req.user.email, {
-        resourceType: kind,
-        [kind === 'cluster' ? 'clusters' : 'servers']: serverIds,
+        ...auditDetails,
         minutes: body.durationMinutes,
       });
 
-      const names = serverIds.map((s) => known.get(s)!).join(', ');
       const reason = chatSafe(body.reason);
       notifyNotice(
         req.orgId,
@@ -463,7 +645,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
           message: `${req.user.email} asks for ${formatMinutes(body.durationMinutes)} of access to ${names}: ${reason}`,
           details: [
             ['Requested by', req.user.email],
-            [KINDS[kind].plural, names],
+            [body.roleId ? 'Role' : body.serverIds ? 'Servers' : body.clusterIds ? 'Clusters' : 'Resources', names],
             ['Duration', formatMinutes(body.durationMinutes)],
             ['Reason', reason],
             ['Review', reviewLink()],
@@ -512,17 +694,33 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       return reply.status(409).send({ error: 'The requester is suspended in this organization' });
     }
 
-    // Servers (or clusters) deleted since the request was made are simply skipped
-    const kind = kindOf(request);
-    const requested = parseServerIds(request.serverIds);
-    const serverIds = [...namesOf(req.orgId, kind, requested).keys()];
-    if (serverIds.length === 0) {
-      return reply.status(409).send({ error: `None of the requested ${KINDS[kind].noun}s exist any more` });
+    const target = targetOf(request);
+    let ids: string[] = [];
+    let role: { id: string; name: string } | undefined;
+    if (target.type === 'role') {
+      role = request.roleId
+        ? db
+            .select({ id: roles.id, name: roles.name })
+            .from(roles)
+            .where(and(eq(roles.id, request.roleId), eq(roles.orgId, req.orgId)))
+            .get()
+        : undefined;
+      if (!role) return reply.status(409).send({ error: 'The requested role no longer exists' });
+    } else {
+      // Resources deleted since the request was made are simply skipped
+      const type = target.type;
+      ids = target.ids.filter((id) => resourceExists(req.orgId, type, id));
+      if (ids.length === 0) {
+        return reply
+          .status(409)
+          .send({ error: `None of the requested ${type === 'server' ? 'servers' : 'resources'} exist any more` });
+      }
     }
 
     const now = new Date();
     const expiresAt = minutesFromNow(minutes, now.getTime());
     let extended: string[] = [];
+    let roleBefore: { expiresAt: string | null } | null = null;
     const won = db.transaction(() => {
       // Suspending or removing the member cancels the request; this closes
       // the gap between the check above and the decision
@@ -543,10 +741,30 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         return false;
       }
       const grant = { expiresAt, grantedBy: req.user.id, reason: request.reason };
-      extended =
-        kind === 'cluster'
-          ? extendClusterGrants(req.orgId, request.userId, serverIds, grant)
-          : extendGrants(req.orgId, request.userId, serverIds, grant);
+      if (role) {
+        // A temporary role membership; one already held for longer stays as it is
+        const where = and(eq(roleMembers.roleId, role.id), eq(roleMembers.userId, request.userId));
+        const held = db.select({ expiresAt: roleMembers.expiresAt }).from(roleMembers).where(where).get();
+        roleBefore = held ? { expiresAt: held.expiresAt } : null;
+        if (!held) {
+          db.insert(roleMembers)
+            .values({ roleId: role.id, userId: request.userId, orgId: req.orgId, expiresAt, addedBy: req.user.id, addedAt: now.toISOString() })
+            .run();
+          extended = [role.id];
+        } else if (held.expiresAt !== null && held.expiresAt < expiresAt) {
+          db.update(roleMembers).set({ expiresAt, addedBy: req.user.id }).where(where).run();
+          extended = [role.id];
+        }
+      } else if (target.level === null) {
+        // Servers (or clusters) asked for without a level: the base role's level, as before custom roles
+        extended =
+          target.type === 'cluster'
+            ? extendClusterGrants(req.orgId, request.userId, ids, grant)
+            : extendGrants(req.orgId, request.userId, ids, grant);
+      } else {
+        const level = target.level;
+        extended = ids.filter((id) => addPersonalGrant(req.orgId, request.userId, target.type as ResourceType, id, level, grant));
+      }
       return true;
     });
     if (!won) return reply.status(409).send({ error: 'This request is no longer pending' });
@@ -558,16 +776,32 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       .get();
     await audit(req, 'access_request.approve', 'access_request', request.id, requester?.email, {
       userId: request.userId,
-      resourceType: kind,
-      [kind === 'cluster' ? 'clusters' : 'servers']: serverIds,
+      ...(role
+        ? { roleId: role.id, role: role.name }
+        : target.type === 'server' && target.level === null
+          ? { servers: ids }
+          : target.type === 'cluster' && target.level === null
+            ? { resourceType: 'cluster', clusters: ids }
+            : { type: target.type, resources: ids, level: target.level }),
       extended,
       minutes,
       requestedMinutes: request.durationMinutes,
       expiresAt,
     });
+    if (role && extended.length) {
+      await audit(req, 'role.member_add', 'role', role.id, role.name, {
+        userId: request.userId,
+        email: requester?.email,
+        before: roleBefore,
+        after: { expiresAt },
+        accessRequestId: request.id,
+      });
+    }
 
     const [presented] = present(req.orgId, [findRequest(req.orgId, request.id)!]);
-    const names = askedFor(presented!).filter((s) => serverIds.includes(s.id)).map((s) => s.name ?? s.id).join(', ');
+    const names = role
+      ? `the ${role.name} role`
+      : targetNames({ ...presented!, resources: presented!.resources?.filter((s) => ids.includes(s.id)) });
     notifyNotice(
       req.orgId,
       {
@@ -576,7 +810,16 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         message: `${req.user.email} approved ${formatMinutes(minutes)} of access to ${names} for ${requester?.email ?? 'a member'}`,
         details: [
           ['Requested by', requester?.email ?? ''],
-          [KINDS[kind].plural, names],
+          [
+            role
+              ? 'Role'
+              : target.level === null
+                ? target.type === 'cluster'
+                  ? 'Clusters'
+                  : 'Servers'
+                : 'Resources',
+            names,
+          ],
           ['Duration', formatMinutes(minutes)],
           ['Until', expiresAt],
           ['Approved by', req.user.email],
@@ -603,13 +846,24 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     }
 
     const [presented] = present(req.orgId, [findRequest(req.orgId, request.id)!]);
-    const kind = presented!.resourceType;
     await audit(req, 'access_request.deny', 'access_request', request.id, presented!.userEmail, {
       userId: request.userId,
-      resourceType: kind,
-      [kind === 'cluster' ? 'clusters' : 'servers']: askedFor(presented!).map((s) => s.id),
+      servers: presented!.servers.map((s) => s.id),
+      ...(presented!.resourceType === 'cluster' && !presented!.level && { clusters: presented!.clusters.map((s) => s.id) }),
+      ...(presented!.role && { roleId: presented!.role.id }),
+      ...(presented!.resourceType !== 'server' && presented!.resourceType !== 'role' && {
+        type: presented!.resourceType,
+        resources: presented!.resources?.map((s) => s.id),
+      }),
+      ...(presented!.level && { level: presented!.level }),
     });
-    const names = askedFor(presented!).map((s) => s.name ?? s.id).join(', ');
+    const legacy = presented!.resourceType === 'server' && !presented!.level;
+    const legacyClusters = presented!.resourceType === 'cluster' && !presented!.level;
+    const names = legacy
+      ? presented!.servers.map((s) => s.name ?? s.id).join(', ')
+      : legacyClusters
+        ? presented!.clusters.map((s) => s.name ?? s.id).join(', ')
+        : targetNames(presented!);
     notifyNotice(
       req.orgId,
       {
@@ -618,7 +872,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         message: `${req.user.email} denied ${presented!.userEmail}'s request for access to ${names}`,
         details: [
           ['Requested by', presented!.userEmail],
-          [KINDS[kind].plural, names],
+          [legacy ? 'Servers' : legacyClusters ? 'Clusters' : presented!.resourceType === 'role' ? 'Role' : 'Resources', names],
           ['Denied by', req.user.email],
           ...(body.note ? ([['Note', body.note]] as [string, string][]) : []),
         ],
