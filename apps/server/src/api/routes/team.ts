@@ -7,6 +7,7 @@ import {
   type HeldRole,
   type MemberScope,
   type MemberServerAccess,
+  type ModulePermissions,
   type OrgMember,
   type OrgSecuritySettings,
   type PasswordResetLink,
@@ -75,15 +76,27 @@ import {
 import { config } from '../../config/index.js';
 import { cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
 import { activeAt } from '../../auth/access/resolve.js';
-import { customRoleFilter } from '../../auth/access/modules.js';
+import { canAssignRole, hasModule, requireModule } from '../../auth/access/modules.js';
 import { baseLevel, effectiveAccessList, principalGrants, revokeAfterChange, snapshotAccess } from '../../auth/access/index.js';
+import {
+  builtInRoleId,
+  defaultRoleId,
+  isBuiltInRole,
+  legacyRoleOf,
+  memberBaseRole,
+  memberModules,
+  orgRole,
+  setJoinedMemberRoles,
+} from '../../auth/access/assign.js';
 
 const roleSchema = z.enum(ROLES);
 
 const createInviteSchema = z.object({
   // trim() before email() — a pasted address often carries whitespace
   email: z.string().trim().email().max(254),
-  role: roleSchema.default('viewer'),
+  /** A base role (old callers); `roleIds` wins. Neither: the org's default role. */
+  role: roleSchema.optional(),
+  roleIds: z.array(z.string().min(1).max(200)).min(1).max(20).optional(),
 });
 
 /** A role, a scope (custom roles spec §6), or both. */
@@ -130,15 +143,82 @@ function inviteLink(token: string): string {
 }
 
 /**
+ * What an invite's `role` column holds: a base role, as every invite did
+ * before unified roles and as an invite for one built-in still does (the
+ * memberships trigger turns it into that role on joining), or a JSON list of
+ * role ids for anything else.
+ */
+function storedInviteRole(orgId: string, roleIds: string[]): string {
+  const system = roleIds.length === 1 ? orgRole(orgId, roleIds[0]!)?.system : undefined;
+  if (system === 'owner' || system === 'admin' || system === 'operator' || system === 'viewer') return system;
+  return JSON.stringify(roleIds);
+}
+
+/** The role ids an invite gives, or null for one that gives a base role. */
+function inviteRoleIds(invite: { role: string }): string[] | null {
+  if (!invite.role.startsWith('[')) return null;
+  try {
+    const ids: unknown = JSON.parse(invite.role);
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    // Unreadable gives nothing rather than too much
+    return [];
+  }
+}
+
+/** The roles an invite gives, named. */
+function inviteRoles(invite: { orgId: string; role: string }): { id: string; name: string }[] {
+  const ids = inviteRoleIds(invite) ?? [builtInRoleId(invite.orgId, isBuiltInRole(invite.role) ? invite.role : 'viewer')];
+  return ids.flatMap((id) => {
+    const role = orgRole(invite.orgId, id);
+    return role ? [{ id: role.id, name: role.name }] : [];
+  });
+}
+
+/** The base role an invite gives, for old callers and the membership row it writes. */
+function inviteBaseRole(invite: { orgId: string; role: string }): Role {
+  const ids = inviteRoleIds(invite);
+  return ids ? legacyRoleOf(invite.orgId, ids) : (invite.role as Role);
+}
+
+/**
+ * Join `userId` to the invite's org with the roles it gives: the membership
+ * row with its base role, then — for an invite of roles rather than a base
+ * role — exactly those roles. Inside the caller's transaction.
+ */
+function joinWithInviteRoles(invite: typeof invites.$inferSelect, userId: string) {
+  getDb().insert(memberships).values({ userId, orgId: invite.orgId, role: inviteBaseRole(invite) }).run();
+  const ids = inviteRoleIds(invite);
+  if (ids) setJoinedMemberRoles(invite.orgId, userId, ids, invite.invitedBy);
+}
+
+/**
  * Members who count toward "the org keeps an owner". A suspended owner cannot
  * sign in, so an org whose only owners are suspended is as good as orphaned.
  */
 function activeOrgMembers(orgId: string) {
-  return getDb()
-    .select({ userId: memberships.userId, role: memberships.role })
+  const db = getDb();
+  // Owners are whoever holds the Owner role now (unified roles), not what the membership row last recorded
+  const owners = new Set(
+    db
+      .select({ userId: roleMembers.userId })
+      .from(roleMembers)
+      .where(
+        and(
+          eq(roleMembers.orgId, orgId),
+          eq(roleMembers.roleId, builtInRoleId(orgId, 'owner')),
+          activeAt(roleMembers.expiresAt, new Date().toISOString()),
+        ),
+      )
+      .all()
+      .map((r) => r.userId),
+  );
+  return db
+    .select({ userId: memberships.userId })
     .from(memberships)
     .where(and(eq(memberships.orgId, orgId), eq(memberships.status, 'active')))
-    .all();
+    .all()
+    .map((m) => ({ userId: m.userId, role: owners.has(m.userId) ? 'owner' : 'member' }));
 }
 
 function findUserByEmail(email: string) {
@@ -193,11 +273,14 @@ function targetMember(
     reply.status(404).send({ error: 'Not a member of this organization' });
     return undefined;
   }
-  if (!outranks(req.role, member.role as Role, rule)) {
-    reply.status(403).send({ error: `You cannot ${verb} a member with the ${member.role} role` });
+  // What their roles amount to now — the membership row only records the base
+  // role they were last given through it, not roles assigned since
+  const role = memberBaseRole(req.orgId, userId);
+  if (!outranks(req.role, role, rule)) {
+    reply.status(403).send({ error: `You cannot ${verb} a member with the ${role} role` });
     return undefined;
   }
-  return member;
+  return { ...member, role };
 }
 
 function orgSettings(orgId: string): OrgSecuritySettings {
@@ -284,7 +367,7 @@ function userEmail(userId: string) {
   return getDb().select({ email: users.email }).from(users).where(eq(users.id, userId)).get()?.email;
 }
 
-/** Custom roles each of `userIds` holds now, by user. */
+/** The roles each of `userIds` holds now, built-ins included (unified roles), by user. */
 function heldRoles(orgId: string, userIds: string[]): Map<string, HeldRole[]> {
   const byUser = new Map<string, HeldRole[]>();
   if (!userIds.length) return byUser;
@@ -295,6 +378,7 @@ function heldRoles(orgId: string, userIds: string[]): Map<string, HeldRole[]> {
       name: roles.name,
       color: roles.color,
       expiresAt: roleMembers.expiresAt,
+      system: roles.system,
     })
     .from(roleMembers)
     .innerJoin(roles, eq(roles.id, roleMembers.roleId))
@@ -303,13 +387,13 @@ function heldRoles(orgId: string, userIds: string[]): Map<string, HeldRole[]> {
         eq(roleMembers.orgId, orgId),
         inArray(roleMembers.userId, userIds),
         activeAt(roleMembers.expiresAt, new Date().toISOString()),
-        // Built-in roles show as the base role, as before
-        customRoleFilter(),
       ),
     )
     .orderBy(roles.name)
     .all();
-  for (const { userId, ...role } of rows) byUser.set(userId, [...(byUser.get(userId) ?? []), role]);
+  for (const { userId, system, ...role } of rows) {
+    byUser.set(userId, [...(byUser.get(userId) ?? []), { ...role, system: isBuiltInRole(system) ? system : null }]);
+  }
   return byUser;
 }
 
@@ -471,7 +555,8 @@ export async function teamRoutes(app: FastifyInstance) {
         : [],
     );
     // Who has enrolled is an admin's concern (recovery, the policy warning), not everyone's
-    const seesPasskeys = rank(req.role) >= rank('admin');
+    // Those who act on members (reset passkeys, the policy warning); Members at operate
+    const seesPasskeys = hasModule(req, 'team_members', 'operate');
     const passkeyCounts = new Map(
       userIds.length && seesPasskeys
         ? db
@@ -484,18 +569,22 @@ export async function teamRoutes(app: FastifyInstance) {
         : [],
     );
 
-    // Custom roles held, like passkeys an admin's concern
-    const held = seesPasskeys ? heldRoles(req.orgId, userIds) : new Map<string, HeldRole[]>();
+    // Roles held: for whoever sees roles, or acts on members (only those whose roles they hold)
+    const seesRoles = seesPasskeys || hasModule(req, 'team_roles', 'view');
+    const held = seesRoles ? heldRoles(req.orgId, userIds) : new Map<string, HeldRole[]>();
+    const cache = new Map<string, ModulePermissions>();
 
     return rows.map((r) => ({
       ...r,
-      role: r.role as Role,
+      // What their roles amount to now (the row keeps the base role last written through it)
+      role: memberBaseRole(req.orgId, r.userId, cache),
       status: r.status === 'suspended' ? 'suspended' : 'active',
       serverAccess: r.serverAccess === 'restricted' ? 'restricted' : 'all',
       scope: r.scope === 'roles' && rank(r.role) < rank('admin') ? 'roles' : 'all',
       serverCount: grants.get(r.userId) ?? 0,
       lastActiveAt: lastSeen.get(r.userId) ?? null,
-      ...(seesPasskeys && { passkeyCount: passkeyCounts.get(r.userId) ?? 0, roles: held.get(r.userId) ?? [] }),
+      ...(seesPasskeys && { passkeyCount: passkeyCounts.get(r.userId) ?? 0 }),
+      ...(seesRoles && { roles: held.get(r.userId) ?? [] }),
     }));
   });
 
@@ -703,7 +792,7 @@ export async function teamRoutes(app: FastifyInstance) {
     return { userId, status: 'active' as const };
   });
 
-  app.get('/members/:userId/access', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.get('/members/:userId/access', { preHandler: requireModule('team_roles', 'view') }, async (req, reply) => {
     const { userId } = req.params as { userId: string };
     const db = getDb();
     const member = db
@@ -726,13 +815,14 @@ export async function teamRoutes(app: FastifyInstance) {
       grants,
       clusterIds: clusterGrants.map((g) => g.clusterId),
       clusterGrants,
-      role: member.role as Role,
+      role: memberBaseRole(req.orgId, userId),
       scope,
       roles: heldRoles(req.orgId, [userId]).get(userId) ?? [],
       personalGrants,
       effective: Object.fromEntries(
         RESOURCE_TYPES.map((type) => [type, effectiveAccessList(who, type)]),
       ) as MemberServerAccess['effective'],
+      modules: memberModules(req.orgId, userId),
     } satisfies MemberServerAccess;
   });
 
@@ -1064,7 +1154,7 @@ export async function teamRoutes(app: FastifyInstance) {
     return { revoked };
   });
 
-  app.get('/invites', { preHandler: requireRole('admin') }, async (req) => {
+  app.get('/invites', { preHandler: requireModule('team_members', 'operate') }, async (req) => {
     const rows = getDb()
       .select()
       .from(invites)
@@ -1077,20 +1167,30 @@ export async function teamRoutes(app: FastifyInstance) {
     return rows.map((invite) => ({
       id: invite.id,
       email: invite.email,
-      role: invite.role,
+      role: inviteBaseRole(invite),
+      roles: inviteRoles(invite),
       expiresAt: invite.expiresAt,
       createdAt: invite.createdAt,
       state: inviteState(invite),
     }));
   });
 
-  app.post('/invites', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/invites', { preHandler: requireModule('team_members', 'operate') }, async (req, reply) => {
     const body = createInviteSchema.parse(req.body);
     const email = body.email.trim().toLowerCase();
     const db = getDb();
 
-    if (!canGrantRole(req.role, body.role)) {
-      return reply.status(403).send({ error: `You cannot invite someone as ${body.role}` });
+    // The roles picked, else the base role (old callers), else the org's default role
+    const roleIds = [
+      ...new Set(body.roleIds ?? [body.role ? builtInRoleId(req.orgId, body.role) : defaultRoleId(req.orgId)]),
+    ];
+    for (const roleId of roleIds) {
+      const role = orgRole(req.orgId, roleId);
+      if (!role) return reply.status(400).send({ error: 'Unknown role' });
+      // Inviting someone with a role gives it to them: only what the inviter could give (spec §4.2)
+      if (!canAssignRole(req, roleId).ok) {
+        return reply.status(403).send({ error: `You cannot invite someone as ${body.roleIds ? role.name : (body.role ?? role.name)}` });
+      }
     }
 
     // Someone with an account elsewhere can be invited; they accept by signing in.
@@ -1117,24 +1217,27 @@ export async function teamRoutes(app: FastifyInstance) {
 
     const id = nanoid();
     const token = generateInviteToken();
+    const stored = storedInviteRole(req.orgId, roleIds);
     db.insert(invites)
       .values({
         id,
         orgId: req.orgId,
         email,
-        role: body.role,
+        role: stored,
         token,
         invitedBy: req.user.id,
         expiresAt: inviteExpiry(),
       })
       .run();
 
-    await audit(req, 'user.invite', 'invite', id, email, { role: body.role });
+    const invite = { orgId: req.orgId, role: stored };
+    await audit(req, 'user.invite', 'invite', id, email, { role: inviteBaseRole(invite), roles: inviteRoles(invite) });
     // The only time the link is ever returned.
     return reply.status(201).send({
       id,
       email,
-      role: body.role,
+      role: inviteBaseRole(invite),
+      roles: inviteRoles(invite),
       expiresAt: inviteExpiry(),
       state: 'valid' as const,
       link: inviteLink(token),
@@ -1142,7 +1245,7 @@ export async function teamRoutes(app: FastifyInstance) {
     });
   });
 
-  app.delete('/invites/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/invites/:id', { preHandler: requireModule('team_members', 'operate') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 
@@ -1180,7 +1283,8 @@ export async function publicInviteRoutes(app: FastifyInstance) {
     return {
       // Masked: holding the link must not reveal the address needed to redeem it.
       emailHint: maskEmail(invite.email),
-      role: invite.role,
+      role: inviteBaseRole(invite),
+      roles: inviteRoles(invite).map((r) => r.name),
       organizationName: org?.name ?? 'the organization',
       state: inviteState(invite),
       // Deliberately no hint of whether the address already has an account:
@@ -1227,9 +1331,7 @@ export async function publicInviteRoutes(app: FastifyInstance) {
         db.insert(users)
           .values({ id: userId, email: invite.email, displayName: body.displayName, passwordHash })
           .run();
-        db.insert(memberships)
-          .values({ userId, orgId: invite.orgId, role: invite.role })
-          .run();
+        joinWithInviteRoles(invite, userId);
         db.update(invites)
           .set({ acceptedAt: new Date().toISOString() })
           .where(eq(invites.id, invite.id))
@@ -1246,7 +1348,7 @@ export async function publicInviteRoutes(app: FastifyInstance) {
       return reply.status(201).send({
         user: { id: userId, email: invite.email, displayName: body.displayName },
         orgId: invite.orgId,
-        role: invite.role,
+        role: inviteBaseRole(invite),
       });
     },
   );
@@ -1318,7 +1420,7 @@ async function joinWithExistingAccount(
   }
 
   db.transaction(() => {
-    db.insert(memberships).values({ userId: account.id, orgId: invite.orgId, role: invite.role }).run();
+    joinWithInviteRoles(invite, account.id);
     // An admin-issued reset is only allowed for someone in a single org. Joining
     // a second one voids any that is still open.
     db.delete(passwordResets)
@@ -1348,7 +1450,7 @@ async function joinWithExistingAccount(
   // Unauthenticated route: say who acted for the audit row
   req.user = user;
   req.orgId = invite.orgId;
-  await audit(req, 'member.join', 'member', account.id, account.email, { role: invite.role });
+  await audit(req, 'member.join', 'member', account.id, account.email, { role: inviteBaseRole(invite), roles: inviteRoles(invite) });
   // Signing in with the password here is a sign-in like any other
   if (newDevice?.isNew) {
     await audit(req, 'user.login_new_device', 'user', account.id, account.email, {
@@ -1359,5 +1461,5 @@ async function joinWithExistingAccount(
     notifyNewDeviceSignIn(account, newDevice, req.ip);
   }
 
-  return reply.status(201).send({ user, orgId: invite.orgId, role: invite.role });
+  return reply.status(201).send({ user, orgId: invite.orgId, role: inviteBaseRole(invite) });
 }

@@ -4,7 +4,7 @@ import type { ResourceAccessList, ResourceType } from '@smt/shared';
 import { Users, X } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { LevelBadge, ViaBadge } from './AccessBadges.js';
 
 /**
@@ -47,7 +47,7 @@ export function WhoHasAccessButton({
   name: string;
   className?: string;
 }) {
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('team_roles', 'view');
   const [open, setOpen] = useState(false);
   if (!isAdmin) return null;
   return (

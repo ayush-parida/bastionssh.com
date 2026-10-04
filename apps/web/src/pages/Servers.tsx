@@ -27,7 +27,7 @@ import { ExpiryBadge } from '@/components/access/ExpiryBadge.js';
 import { RequestAccessDialog, useRequestableServers } from '@/components/access/RequestAccessDialog.js';
 import { KeyAgeBadge, RotationHistory, rotationRequestError } from '@/components/keys/KeyRotation.js';
 import { ROTATION_CONFIRM, rotateServerKey, rotateServerKeys, toastRotation } from '@/lib/key-rotation.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 import ServerDockerFields from '@/components/docker/ServerDockerFields.js';
@@ -113,7 +113,7 @@ export default function ServersPage() {
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
   const [requesting, setRequesting] = useState(false);
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('servers', 'manage');
   // The level on each server (custom roles): hide what it does not allow
   const access = useAccessLevels('server');
   // Servers ticked for a bulk key rotation, and the batch last started

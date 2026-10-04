@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, eq, ne, sql } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import type { SsoLookupResult, SsoSettings, SsoTestResult } from '@smt/shared';
+import type { SsoLookupResult, SsoRole, SsoSettings, SsoTestResult } from '@smt/shared';
 import { getDb } from '../../db/index.js';
 import { memberships, organizations, sessions, ssoProviders, userIdentities } from '../../db/schema.js';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
@@ -10,9 +10,12 @@ import { requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passk
 import { createSession } from '../../auth/session.js';
 import { notifyNewDeviceSignIn, recordSignInDevice } from '../../auth/login-security.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
+import { canAssignRole } from '../../auth/access/modules.js';
+import { builtInRoleId, legacyRoleOf, orgRole } from '../../auth/access/assign.js';
 import {
   asProviderKind,
   asSsoRole,
+  ssoDefaultRoleId,
   beginSsoLogin,
   completeSsoLogin,
   forgetProviderConfig,
@@ -50,6 +53,8 @@ const providerSchema = z.object({
   clientSecret: z.string().min(1).max(4000).optional(),
   allowedDomains: z.array(domainSchema).min(1).max(50),
   defaultRole: ssoRoleSchema.default('viewer'),
+  /** A role for new accounts (unified roles); wins over `defaultRole`. */
+  defaultRoleId: z.string().min(1).max(200).nullable().optional(),
   autoProvision: z.boolean().default(false),
   enforceSso: z.boolean().default(false),
   enabled: z.boolean().default(true),
@@ -89,6 +94,17 @@ function providerForOrg(orgId: string): SsoProvider | undefined {
   return getDb().select().from(ssoProviders).where(eq(ssoProviders.orgId, orgId)).get();
 }
 
+/**
+ * The default for new accounts both ways: the role (id) and the base role it
+ * amounts to for old callers. The column holds a base role, or a role id.
+ */
+function defaultRoleOf(provider: SsoProvider): { defaultRole: SsoRole; defaultRoleId: string } {
+  const roleId = ssoDefaultRoleId(provider);
+  if (roleId) return { defaultRole: legacyRoleOf(provider.orgId, [roleId]) as SsoRole, defaultRoleId: roleId };
+  const base = asSsoRole(provider.defaultRole);
+  return { defaultRole: base, defaultRoleId: builtInRoleId(provider.orgId, base) };
+}
+
 function toSettings(provider: SsoProvider | undefined, orgSlug: string): SsoSettings {
   if (!provider) return { configured: false, redirectUri: ssoRedirectUri() };
   return {
@@ -98,7 +114,7 @@ function toSettings(provider: SsoProvider | undefined, orgSlug: string): SsoSett
     issuer: provider.issuer,
     clientId: provider.clientId,
     allowedDomains: parseDomains(provider.allowedDomains),
-    defaultRole: asSsoRole(provider.defaultRole),
+    ...defaultRoleOf(provider),
     autoProvision: provider.autoProvision,
     enforceSso: provider.enforceSso,
     enabled: provider.enabled,
@@ -202,6 +218,16 @@ export async function ssoSettingsRoutes(app: FastifyInstance) {
     if (!body.groupsClaim && body.roleMappings.length) {
       return reply.status(400).send({ error: 'groupsClaim: Required when mapping groups to roles' });
     }
+    // A role as the default: one of the org's, never Owner, and one the configurer could give (spec §7)
+    let defaultRole: string = body.defaultRole;
+    if (body.defaultRoleId) {
+      const role = orgRole(req.orgId, body.defaultRoleId);
+      if (!role) return reply.status(400).send({ error: 'defaultRoleId: Unknown role' });
+      if (role.system === 'owner') return reply.status(400).send({ error: 'defaultRoleId: SSO never gives the Owner role' });
+      if (!canAssignRole(req, role.id).ok) return reply.status(403).send({ error: `You cannot give the ${role.name} role` });
+      // A built-in Admin, Operator or Viewer is stored as its base role, as before
+      defaultRole = role.system === 'admin' || role.system === 'operator' || role.system === 'viewer' ? role.system : role.id;
+    }
 
     const id = before?.id ?? nanoid();
     const now = new Date().toISOString();
@@ -214,7 +240,7 @@ export async function ssoSettingsRoutes(app: FastifyInstance) {
         ? await vault.encrypt(body.clientSecret, id)
         : before!.encryptedClientSecret,
       allowedDomains: JSON.stringify(allowedDomains),
-      defaultRole: body.defaultRole,
+      defaultRole,
       autoProvision: body.autoProvision,
       enforceSso: body.enforceSso,
       enabled: body.enabled,

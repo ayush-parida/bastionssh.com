@@ -2,12 +2,13 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { Role, User } from '@smt/shared';
 
-/** Least- to most-privileged; mirrors ROLES on the server. */
-const ROLE_RANK: Record<Role, number> = { viewer: 0, operator: 1, admin: 2, owner: 3 };
-
 interface AuthState {
   user: User | null;
   orgId: string | null;
+  /**
+   * The base role the sign-in answered with, kept for old callers. What the
+   * member may use comes from their roles: hooks/useModules.ts.
+   */
   role: Role | null;
   /** True when the server rejected the session, so the login screen can say why. */
   sessionExpired: boolean;
@@ -74,12 +75,3 @@ export const useAuthStore = create<AuthState>()(
     },
   ),
 );
-
-/**
- * Whether the current user meets a minimum role. UI-side only — every
- * privileged route is independently enforced on the server.
- */
-export function useHasRole(minimum: Role): boolean {
-  const role = useAuthStore((s) => s.role);
-  return role != null && ROLE_RANK[role] >= ROLE_RANK[minimum];
-}

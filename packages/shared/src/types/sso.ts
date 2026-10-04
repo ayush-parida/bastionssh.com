@@ -20,6 +20,11 @@ export interface SsoProviderConfig {
   clientId: string;
   allowedDomains: string[];
   defaultRole: SsoRole;
+  /**
+   * The role accounts created on first sign-in get (unified roles spec §5);
+   * `defaultRole` is what it amounts to for old callers. Never Owner.
+   */
+  defaultRoleId?: string;
   /** Create accounts for unknown users from an allowed domain on their first sign-in. */
   autoProvision: boolean;
   /** Members other than owners must sign in with SSO. */
@@ -45,6 +50,8 @@ export interface SsoProviderInput {
   clientSecret?: string;
   allowedDomains: string[];
   defaultRole: SsoRole;
+  /** Wins over `defaultRole`: any role but Owner the configurer may assign. */
+  defaultRoleId?: string | null;
   autoProvision: boolean;
   enforceSso: boolean;
   enabled: boolean;

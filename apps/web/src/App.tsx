@@ -1,12 +1,14 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth.js';
 import Layout from '@/components/layout/Layout.js';
+import { HomeRoute, ModuleGate } from '@/components/layout/ModuleGate.js';
+import { TEAM_MODULES } from '@/lib/modules.js';
+import { ModuleNotFound } from '@/pages/NoAccess.js';
 import LoginPage from '@/pages/Login.js';
 import AcceptInvitePage from '@/pages/AcceptInvite.js';
 import ResetPasswordPage from '@/pages/ResetPassword.js';
 import TeamPage from '@/pages/Team.js';
 import PasskeySetupPage from '@/pages/PasskeySetup.js';
-import DashboardPage from '@/pages/Dashboard.js';
 import ServersPage from '@/pages/Servers.js';
 import KeysPage from '@/pages/Keys.js';
 import CommandsPage from '@/pages/Commands.js';
@@ -78,37 +80,38 @@ export default function App() {
             </RequireAuth>
           }
         >
-          <Route index element={<DashboardPage />} />
-          <Route path="servers" element={<ServersPage />} />
-          <Route path="servers/:id/terminal" element={<TerminalPage />} />
-          <Route path="servers/:id/files" element={<FilesPage />} />
-          <Route path="servers/:id/health" element={<ServerHealthPage />} />
-          <Route path="servers/:id/docker" element={<ServerDockerPage />} />
-          <Route path="containers" element={<ContainersPage />} />
-          <Route path="kubernetes" element={<KubernetesPage />} />
-          <Route path="kubernetes/overview" element={<KubeOverviewPage />} />
-          <Route path="kubernetes/:clusterId" element={<KubeClusterPage />} />
-          <Route path="kubernetes/:clusterId/shell" element={<TerminalPage />} />
-          <Route path="kubernetes/:clusterId/:tab" element={<KubeClusterPage />} />
-          <Route path="kubernetes/:clusterId/objects/:resource/:ns/:name" element={<KubeClusterPage />} />
-          <Route path="agents" element={<AgentsPage />} />
-          <Route path="storage" element={<StoragePage />} />
-          <Route path="storage/:id" element={<StorageBucketsPage />} />
-          <Route path="storage/:id/buckets/:bucket" element={<StorageObjectsPage />} />
-          <Route path="ftp" element={<FtpPage />} />
-          <Route path="ftp/:id" element={<FtpFilesPage />} />
-          <Route path="cloud" element={<CloudAccountsPage />} />
-          <Route path="dns" element={<DnsLookupPage />} />
-          <Route path="monitoring" element={<MonitoringPage />} />
-          <Route path="keys" element={<KeysPage />} />
-          <Route path="commands" element={<CommandsPage />} />
-          <Route path="cron-jobs" element={<CronJobsPage />} />
-          <Route path="ai" element={<AIChatPage />} />
-          <Route path="audit" element={<AuditPage />} />
-          <Route path="recordings" element={<RecordingsPage />} />
-          <Route path="recordings/:id" element={<RecordingPlayerPage />} />
-          <Route path="team" element={<TeamPage />} />
+          <Route index element={<HomeRoute />} />
+          <Route path="servers" element={<ModuleGate modules={['servers']}><ServersPage /></ModuleGate>} />
+          <Route path="servers/:id/terminal" element={<ModuleGate modules={['servers']}><TerminalPage /></ModuleGate>} />
+          <Route path="servers/:id/files" element={<ModuleGate modules={['servers']}><FilesPage /></ModuleGate>} />
+          <Route path="servers/:id/health" element={<ModuleGate modules={['servers']}><ServerHealthPage /></ModuleGate>} />
+          <Route path="servers/:id/docker" element={<ModuleGate modules={['servers']}><ServerDockerPage /></ModuleGate>} />
+          <Route path="containers" element={<ModuleGate modules={['containers']}><ContainersPage /></ModuleGate>} />
+          <Route path="kubernetes" element={<ModuleGate modules={['kubernetes']}><KubernetesPage /></ModuleGate>} />
+          <Route path="kubernetes/overview" element={<ModuleGate modules={['kubernetes']}><KubeOverviewPage /></ModuleGate>} />
+          <Route path="kubernetes/:clusterId" element={<ModuleGate modules={['kubernetes']}><KubeClusterPage /></ModuleGate>} />
+          <Route path="kubernetes/:clusterId/shell" element={<ModuleGate modules={['kubernetes']}><TerminalPage /></ModuleGate>} />
+          <Route path="kubernetes/:clusterId/:tab" element={<ModuleGate modules={['kubernetes']}><KubeClusterPage /></ModuleGate>} />
+          <Route path="kubernetes/:clusterId/objects/:resource/:ns/:name" element={<ModuleGate modules={['kubernetes']}><KubeClusterPage /></ModuleGate>} />
+          <Route path="agents" element={<ModuleGate modules={['agents']}><AgentsPage /></ModuleGate>} />
+          <Route path="storage" element={<ModuleGate modules={['storage']}><StoragePage /></ModuleGate>} />
+          <Route path="storage/:id" element={<ModuleGate modules={['storage']}><StorageBucketsPage /></ModuleGate>} />
+          <Route path="storage/:id/buckets/:bucket" element={<ModuleGate modules={['storage']}><StorageObjectsPage /></ModuleGate>} />
+          <Route path="ftp" element={<ModuleGate modules={['ftp']}><FtpPage /></ModuleGate>} />
+          <Route path="ftp/:id" element={<ModuleGate modules={['ftp']}><FtpFilesPage /></ModuleGate>} />
+          <Route path="cloud" element={<ModuleGate modules={['cloud']}><CloudAccountsPage /></ModuleGate>} />
+          <Route path="dns" element={<ModuleGate modules={['diagnostics']}><DnsLookupPage /></ModuleGate>} />
+          <Route path="monitoring" element={<ModuleGate modules={['monitoring']}><MonitoringPage /></ModuleGate>} />
+          <Route path="keys" element={<ModuleGate modules={['ssh_keys']}><KeysPage /></ModuleGate>} />
+          <Route path="commands" element={<ModuleGate modules={['saved_commands']}><CommandsPage /></ModuleGate>} />
+          <Route path="cron-jobs" element={<ModuleGate modules={['cron_jobs']}><CronJobsPage /></ModuleGate>} />
+          <Route path="ai" element={<ModuleGate modules={['ai']}><AIChatPage /></ModuleGate>} />
+          <Route path="audit" element={<ModuleGate modules={['audit']}><AuditPage /></ModuleGate>} />
+          <Route path="recordings" element={<ModuleGate modules={['recordings']}><RecordingsPage /></ModuleGate>} />
+          <Route path="recordings/:id" element={<ModuleGate modules={['recordings']}><RecordingPlayerPage /></ModuleGate>} />
+          <Route path="team" element={<ModuleGate modules={TEAM_MODULES}><TeamPage /></ModuleGate>} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="*" element={<ModuleNotFound />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { relativeTime } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useIsOwner } from '@/hooks/useModules.js';
 import type { AuditForwardingInfo, AuditForwardingInput, AuditSettings as Settings, SyslogProtocol } from '@smt/shared';
 import { Archive, Send, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -46,7 +46,7 @@ function onError(err: Error) {
 /** Retention and forwarding for the org's audit log. Admins see it; owners change it. */
 export default function AuditSettings() {
   const qc = useQueryClient();
-  const isOwner = useHasRole('owner');
+  const isOwner = useIsOwner();
   const [retention, setRetention] = useState('');
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<ForwardForm>(formFrom(null));

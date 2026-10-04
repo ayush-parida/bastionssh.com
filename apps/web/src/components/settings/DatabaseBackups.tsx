@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { formatBytes, relativeTime } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useIsOwner } from '@/hooks/useModules.js';
 import type { CreatedDbBackup, DbBackupList, DbBackupReason } from '@smt/shared';
 import { DatabaseBackup, Download, Loader2, Plus } from 'lucide-react';
 import { toast } from 'sonner';
@@ -22,7 +22,7 @@ const REASON_LABELS: Record<DbBackupReason, string> = {
  * only: the server answers 403 to anyone else, and the section stays hidden.
  */
 export default function DatabaseBackups() {
-  const isOwner = useHasRole('owner');
+  const isOwner = useIsOwner();
   if (!isOwner) return null;
   return <BackupsSection />;
 }

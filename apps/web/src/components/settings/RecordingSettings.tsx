@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useIsOwner } from '@/hooks/useModules.js';
 
 function Switch({ on, disabled, onToggle }: { on: boolean; disabled?: boolean; onToggle: () => void }) {
   return (
@@ -34,7 +34,7 @@ function Switch({ on, disabled, onToggle }: { on: boolean; disabled?: boolean; o
 /** The org's session recording policy. Owners change it; everyone else sees it. */
 export default function RecordingSettings() {
   const qc = useQueryClient();
-  const isOwner = useHasRole('owner');
+  const isOwner = useIsOwner();
   const [retention, setRetention] = useState('');
 
   const { data: settings } = useQuery<Settings>({

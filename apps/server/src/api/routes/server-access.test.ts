@@ -265,9 +265,9 @@ describe('per-server access', () => {
       expect(res.statusCode).toBe(400);
     });
 
-    it('is admin-only', async () => {
+    it('needs Roles & access (404 without it, as for any module that is off)', async () => {
       const res = await as(unrestricted).get(`/api/team/members/${restricted.userId}/access`);
-      expect(res.statusCode).toBe(403);
+      expect(res.statusCode).toBe(404);
     });
 
     it('restricted with no grants sees nothing', async () => {

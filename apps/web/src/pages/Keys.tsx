@@ -4,7 +4,7 @@ import { api } from '@/lib/api.js';
 import type { SSHKey, CreateSSHKeyRequest, GenerateSSHKeyResponse, Server } from '@smt/shared';
 import { Plus, Copy, Trash2, Key as KeyIcon, RefreshCw, Upload, FileCheck, RotateCw, History } from 'lucide-react';
 import { toast } from 'sonner';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { KeyAgeBadge, RotationHistory, rotationRequestError } from '@/components/keys/KeyRotation.js';
 import { ROTATION_CONFIRM, rotateServerKeys } from '@/lib/key-rotation.js';
 
@@ -23,7 +23,7 @@ export default function KeysPage() {
   const [generatedKey, setGeneratedKey] = useState<GenerateSSHKeyResponse | null>(null);
   const [pemFileName, setPemFileName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('ssh_keys', 'manage');
   // Rotation history below the table: every rotation, or one key's
   const [historyKeyId, setHistoryKeyId] = useState<string | null>(null);
 

@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, snap, test } from './fixtures.js';
+import { createMember, ensureKubernetesShown, expect, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The Kubernetes pages (K1) against a stubbed Kubernetes API, like the Docker
@@ -153,6 +153,7 @@ async function stubKube(page: Page) {
 test.describe('Kubernetes cluster map', () => {
   let viewer: { email: string; password: string };
   test.beforeAll(async () => {
+    await ensureKubernetesShown();
     viewer = await createMember('viewer', 'kube');
   });
 

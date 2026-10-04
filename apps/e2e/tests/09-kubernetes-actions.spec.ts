@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, snap, test } from './fixtures.js';
+import { createMember, ensureKubernetesShown, expect, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The guided actions (K3) against a stubbed Kubernetes API: the scale
@@ -165,6 +165,7 @@ async function stubKube(page: Page) {
 test.describe('Kubernetes guided actions', () => {
   let operator: { email: string; password: string };
   test.beforeAll(async () => {
+    await ensureKubernetesShown();
     operator = await createMember('operator', 'kube-actions');
   });
 

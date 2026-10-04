@@ -3,6 +3,7 @@ import type {
   AccessLevel,
   EffectiveAccessEntry,
   HeldRole,
+  MemberModuleAccess,
   MemberScope,
   ResourceType,
   RoleGrant,
@@ -62,6 +63,8 @@ export interface MemberServerAccess {
   roles?: HeldRole[];
   personalGrants?: RoleGrant[];
   effective?: Record<ResourceType, EffectiveAccessEntry[]>;
+  /** Every module with the member's level there and the roles giving it (unified roles spec §5). */
+  modules?: MemberModuleAccess[];
 }
 
 export interface ClusterGrant {
@@ -224,7 +227,10 @@ export type InviteState = 'valid' | 'expired' | 'accepted';
 export interface Invite {
   id: string;
   email: string;
+  /** For old callers: the base role the invite gives, or `viewer` when it gives other roles (see `roles`). */
   role: Role;
+  /** The roles the invitee gets on joining (unified roles spec §5). */
+  roles?: { id: string; name: string }[];
   expiresAt: string;
   createdAt?: string;
   state: InviteState;
@@ -242,7 +248,10 @@ export interface CreatedInvite extends Invite {
 
 export interface CreateInviteRequest {
   email: string;
+  /** A base role (old callers). Ignored when `roleIds` is given. */
   role?: Role;
+  /** The roles to give; neither this nor `role` = the org's default role. */
+  roleIds?: string[];
 }
 
 /** What the accept page shows before an account exists. */
@@ -250,6 +259,8 @@ export interface InvitePreview {
   /** Partially masked, e.g. `de•@ex•••••.com` — the link must not reveal it. */
   emailHint: string;
   role: Role;
+  /** The names of the roles the invite gives. */
+  roles?: string[];
   organizationName: string;
   state: InviteState;
   // Deliberately says nothing about whether the address already has an

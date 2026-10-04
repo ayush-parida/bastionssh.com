@@ -76,6 +76,21 @@ export interface CustomRole {
   updatedAt: string;
   memberCount?: number;
   grants?: RoleGrant[];
+  /**
+   * Unified roles (spec §5), from `GET /team/roles`: the built-in role this
+   * is (null for every other role).
+   */
+  system?: BuiltInRole | null;
+  /** The role's module levels; a module left out is `none`. */
+  modulePermissions?: ModulePermissions;
+  /** False for Owner and No access, which are locked. */
+  editable?: boolean;
+  /** One of the "<Base> (modules only)" roles migration 0025 generated. */
+  generated?: boolean;
+  /** Built-in roles: changed from their defaults ("Reset to default" puts them back). */
+  customized?: boolean;
+  /** The caller may give this role to someone, or take it away (the delegation guard, spec §4.2). */
+  assignable?: boolean;
 }
 
 /** A member of a custom role; `expiresAt` null = permanent. */
@@ -158,6 +173,8 @@ export interface SaveCustomRole {
   color?: string | null;
   /** Create only: the role's resources. */
   grants?: GrantInput[];
+  /** The role's module levels (unified roles spec §3); a module left out is `none`. */
+  modulePermissions?: ModulePermissions;
 }
 
 /** Any resource access can be granted on, as pickers and lists name it. */
@@ -185,6 +202,8 @@ export interface HeldRole {
   name: string;
   color: string | null;
   expiresAt: string | null;
+  /** The built-in role it is, if any. */
+  system?: BuiltInRole | null;
 }
 
 /** `GET /team/access/explain`: the access checker's answer. */
@@ -638,4 +657,29 @@ export interface MeAccess {
 export interface PermissionSet {
   modules?: ModulePermissions;
   grants?: Pick<GrantInput, 'resourceType' | 'selector' | 'resourceId' | 'tag' | 'namespaces' | 'level'>[];
+}
+
+/** Where a member's level on a module comes from: one role they hold. */
+export interface ModuleAccessReason {
+  roleId: string;
+  name: string;
+  system: BuiltInRole | null;
+  level: Exclude<ModuleLevel, 'none'>;
+  expiresAt: string | null;
+}
+
+/** A member's level on one module, whether it is shown to them, and which roles give it. */
+export interface MemberModuleAccess {
+  module: ModuleKey;
+  level: ModuleLevel;
+  /** Shown in their navigation (spec §3.1): on, and for a resource module something in it. */
+  visible: boolean;
+  /** Every role giving the module, highest level first. */
+  via: ModuleAccessReason[];
+}
+
+/** `GET`/`PUT /team/default-role`: the role new members get when none is picked (invites, SSO). */
+export interface DefaultRole {
+  roleId: string;
+  name: string;
 }

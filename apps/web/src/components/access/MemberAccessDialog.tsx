@@ -1,24 +1,35 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { CustomRole, MemberScope, MemberServerAccess, OrgMember } from '@smt/shared';
+import { MODULES, type CustomRole, type MemberServerAccess, type ModuleLevel, type OrgMember } from '@smt/shared';
 import { ServerCog, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
+import { useModule } from '@/hooks/useModules.js';
+import { useAuthStore } from '@/store/auth.js';
 import { DURATION_OPTIONS, RESOURCE_SECTIONS } from '@/lib/access.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
 import { LevelBadge, RoleDot, ViaBadge } from './AccessBadges.js';
 import { GrantPreview, GrantsEditor, toEditable, toGrantInputs, useAccessResources, type EditableGrant } from './GrantsEditor.js';
 
 /**
- * Member detail (custom roles spec §7): base role, scope ("All resources" /
- * "Only resources from roles"), roles held with their expiry, personal
- * grants, and the effective access on every resource with where it comes
- * from. Admins only; owners and admins always manage everything.
+ * Member detail (unified roles spec §5): the roles they hold, as chips —
+ * add one (optionally for a while), take one away — their personal grants,
+ * and the effective access: every module with its level and the roles giving
+ * it, then every resource they reach with its level and why. Someone holding
+ * no role (or only No access) has nothing but their own account. Roles the
+ * viewer could not give themselves are not offered (the server refuses them
+ * too).
  */
+
+const MODULE_LABELS = new Map(MODULES.map((m) => [m.key, m.label]));
+
+const MODULE_LEVEL_LABELS: Record<Exclude<ModuleLevel, 'none'>, string> = { view: 'View', operate: 'Operate', manage: 'Manage' };
+
 export default function MemberAccessDialog({ member, onClose }: { member: OrgMember; onClose: () => void }) {
   const qc = useQueryClient();
-  const privileged = member.role === 'admin' || member.role === 'owner';
+  const canAssign = useModule('team_roles', 'manage');
+  const isSelf = useAuthStore((s) => s.user?.id) === member.userId;
   const { data: access, isLoading } = useQuery<MemberServerAccess>({
     queryKey: ['member-access', member.userId],
     queryFn: () => api.get(`/team/members/${member.userId}/access`),
@@ -29,9 +40,14 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
   const [roleToAdd, setRoleToAdd] = useState('');
   const [roleMinutes, setRoleMinutes] = useState<number | 'permanent'>('permanent');
 
+  const held = access?.roles ?? [];
+  const isOwner = held.some((r) => r.system === 'owner');
   const currentGrants = grants ?? toEditable(access?.personalGrants ?? []);
-  const roleColor = new Map((roles ?? []).map((r) => [r.id, r.color]));
-  const held = new Set((access?.roles ?? []).map((r) => r.roleId));
+  const roleById = new Map((roles ?? []).map((r) => [r.id, r]));
+  const heldIds = new Set(held.map((r) => r.roleId));
+  // Your own access is not yours to change; others' only with roles you could give
+  const editable = canAssign && !isSelf;
+  const addable = (roles ?? []).filter((r) => !heldIds.has(r.id) && r.assignable);
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['member-access', member.userId] });
@@ -39,11 +55,6 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
     qc.invalidateQueries({ queryKey: ['roles'] });
   };
 
-  const scopeMutation = useMutation({
-    mutationFn: (scope: MemberScope) => api.patch(`/team/members/${member.userId}`, { scope }),
-    onSuccess: () => { refresh(); toast.success('Scope updated'); },
-    onError: (err: Error) => toast.error(err.message),
-  });
   const grantsMutation = useMutation({
     mutationFn: () => api.put(`/team/members/${member.userId}/grants`, { grants: toGrantInputs(currentGrants) }),
     onSuccess: () => { setGrants(null); refresh(); toast.success('Personal grants saved'); },
@@ -64,7 +75,7 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
     onError: (err: Error) => toast.error(err.message),
   });
 
-  const scope = access?.scope ?? 'all';
+  const modules = (access?.modules ?? []).filter((m) => m.level !== 'none');
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6" onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}>
@@ -80,69 +91,47 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
           ) : (
             <>
               <section className="space-y-2">
-                <p className="text-sm">
-                  Base role <span className="rounded bg-muted px-2 py-0.5 text-xs capitalize">{access.role ?? member.role}</span>
-                  <span className="ml-2 text-xs text-muted-foreground">controls organization features; roles below only add resource levels.</span>
+                <p className="text-sm font-semibold">Roles</p>
+                <p className="text-xs text-muted-foreground">
+                  They get the most any of their roles gives. With none, they see nothing but their own account.
                 </p>
-                {privileged ? (
-                  <p className="text-sm text-muted-foreground">Owners and admins always manage every resource.</p>
-                ) : (
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {([
-                      ['all', 'All resources', `Their base role (${member.role}) on everything, plus what roles add.`],
-                      ['roles', 'Only resources from roles', 'Everything else is hidden — lists, terminals, files, commands, cron, clusters.'],
-                    ] as const).map(([value, label, hint]) => (
-                      <label key={value} className={cn('flex items-start gap-2 rounded-md border px-3 py-2 text-sm', scope === value ? 'border-primary bg-primary/5' : 'border-border')}>
-                        <input
-                          type="radio"
-                          name="scope"
-                          className="mt-1"
-                          checked={scope === value}
-                          disabled={scopeMutation.isPending}
-                          onChange={() => scopeMutation.mutate(value)}
-                        />
-                        <span>
-                          <span className="font-medium">{label}</span>
-                          <span className="block text-xs text-muted-foreground">{hint}</span>
-                        </span>
-                      </label>
-                    ))}
+                <div className="flex flex-wrap gap-2" data-testid="member-roles">
+                  {held.length === 0 && (
+                    <span className="rounded-md border border-dashed border-border px-2 py-1 text-sm text-muted-foreground">No access</span>
+                  )}
+                  {held.map((r) => (
+                    <span key={r.roleId} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-sm">
+                      <RoleDot color={r.color} /> {r.name}
+                      {r.system && <span className="text-[11px] text-muted-foreground">built-in</span>}
+                      {r.expiresAt && <ExpiryBadge expiresAt={r.expiresAt} />}
+                      {editable && roleById.get(r.roleId)?.assignable && (
+                        <button aria-label={`Remove role ${r.name}`} onClick={() => removeRole.mutate(r.roleId)} className="text-muted-foreground hover:text-red-500">
+                          <X size={12} />
+                        </button>
+                      )}
+                    </span>
+                  ))}
+                </div>
+                {editable && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select aria-label="Role to add" value={roleToAdd} onChange={(e) => setRoleToAdd(e.target.value)} className="rounded-md border border-input bg-background px-2 py-1.5 text-sm">
+                      <option value="">Add a role…</option>
+                      {addable.map((r) => (
+                        <option key={r.id} value={r.id}>{r.name}</option>
+                      ))}
+                    </select>
+                    <select aria-label="Role lasts" value={String(roleMinutes)} onChange={(e) => setRoleMinutes(e.target.value === 'permanent' ? 'permanent' : Number(e.target.value))} className="rounded-md border border-input bg-background px-2 py-1.5 text-sm">
+                      <option value="permanent">Permanent</option>
+                      {DURATION_OPTIONS.map((o) => <option key={o.minutes} value={o.minutes}>For {o.label}</option>)}
+                    </select>
+                    <button disabled={!roleToAdd || addRole.isPending} onClick={() => addRole.mutate()} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50">
+                      Add
+                    </button>
                   </div>
                 )}
               </section>
 
-              <section className="space-y-2">
-                <p className="text-sm font-semibold">Roles</p>
-                <div className="flex flex-wrap gap-2">
-                  {(access.roles ?? []).length === 0 && <span className="text-sm text-muted-foreground">No roles.</span>}
-                  {(access.roles ?? []).map((r) => (
-                    <span key={r.roleId} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-sm">
-                      <RoleDot color={r.color} /> {r.name}
-                      {r.expiresAt && <ExpiryBadge expiresAt={r.expiresAt} />}
-                      <button aria-label={`Remove role ${r.name}`} onClick={() => removeRole.mutate(r.roleId)} className="text-muted-foreground hover:text-red-500">
-                        <X size={12} />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <select aria-label="Role to add" value={roleToAdd} onChange={(e) => setRoleToAdd(e.target.value)} className="rounded-md border border-input bg-background px-2 py-1.5 text-sm">
-                    <option value="">Add to a role…</option>
-                    {(roles ?? []).filter((r) => !held.has(r.id)).map((r) => (
-                      <option key={r.id} value={r.id}>{r.name}</option>
-                    ))}
-                  </select>
-                  <select aria-label="Role lasts" value={String(roleMinutes)} onChange={(e) => setRoleMinutes(e.target.value === 'permanent' ? 'permanent' : Number(e.target.value))} className="rounded-md border border-input bg-background px-2 py-1.5 text-sm">
-                    <option value="permanent">Permanent</option>
-                    {DURATION_OPTIONS.map((o) => <option key={o.minutes} value={o.minutes}>For {o.label}</option>)}
-                  </select>
-                  <button disabled={!roleToAdd || addRole.isPending} onClick={() => addRole.mutate()} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50">
-                    Add
-                  </button>
-                </div>
-              </section>
-
-              {!privileged && (
+              {!isOwner && editable && (
                 <section className="space-y-2">
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-semibold">Personal grants</p>
@@ -154,7 +143,10 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
                       {grantsMutation.isPending ? 'Saving…' : 'Save personal grants'}
                     </button>
                   </div>
-                  <p className="text-xs text-muted-foreground">Just for this member, on top of their roles. Good for a one-off or time-bound need.</p>
+                  <p className="text-xs text-muted-foreground">
+                    Just for this member, on top of their roles. Good for a one-off or time-bound need. A grant counts while
+                    one of their roles has its module on.
+                  </p>
                   <GrantsEditor grants={currentGrants} onChange={setGrants} resources={resources} />
                   {grants && <GrantPreview grants={currentGrants} resources={resources} subject={member.displayName} />}
                 </section>
@@ -162,7 +154,35 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
 
               <section className="space-y-2">
                 <p className="text-sm font-semibold">Effective access</p>
-                <p className="text-xs text-muted-foreground">Every resource they can reach right now, at which level, and why.</p>
+                <p className="text-xs text-muted-foreground">What they can use and reach right now, at which level, and why.</p>
+
+                <div data-testid="effective-modules">
+                  <p className="mb-1 text-xs font-medium text-muted-foreground">Modules</p>
+                  {modules.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">None — only their own account.</p>
+                  ) : (
+                    <div className="rounded-md border border-border divide-y divide-border">
+                      {modules.map((m) => (
+                        <div key={m.module} className={cn('flex flex-wrap items-center gap-2 px-3 py-1.5 text-sm', !m.visible && 'opacity-70')}>
+                          <span className="min-w-0 flex-1 truncate">
+                            {MODULE_LABELS.get(m.module) ?? m.module}
+                            {!m.visible && <span className="ml-2 text-xs text-muted-foreground">hidden — nothing in it for them</span>}
+                          </span>
+                          <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium">
+                            {MODULE_LEVEL_LABELS[m.level as Exclude<ModuleLevel, 'none'>]}
+                          </span>
+                          {m.via.map((v) => (
+                            <span key={v.roleId} className="inline-flex items-center gap-1 rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-xs">
+                              <RoleDot color={roleById.get(v.roleId)?.color} /> via {v.name}
+                              <span className="text-muted-foreground">· {v.level}</span>
+                            </span>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 {RESOURCE_SECTIONS.map(({ type, title }) => {
                   const entries = access.effective?.[type] ?? [];
                   if (!entries.length) return null;
@@ -179,7 +199,7 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
                               )}
                             </span>
                             <LevelBadge level={e.level} />
-                            {e.via.map((v, i) => <ViaBadge key={i} reason={v} color={v.roleId ? roleColor.get(v.roleId) : null} />)}
+                            {e.via.map((v, i) => <ViaBadge key={i} reason={v} color={v.roleId ? roleById.get(v.roleId)?.color : null} />)}
                           </div>
                         ))}
                       </div>
@@ -187,7 +207,7 @@ export default function MemberAccessDialog({ member, onClose }: { member: OrgMem
                   );
                 })}
                 {RESOURCE_SECTIONS.every(({ type }) => !(access.effective?.[type] ?? []).length) && (
-                  <p className="text-sm text-muted-foreground">Nothing — they cannot see any resource.</p>
+                  <p className="text-sm text-muted-foreground">No resources — they cannot see any server, cluster or connection.</p>
                 )}
               </section>
             </>

@@ -3,8 +3,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { cn, relativeTime } from '@/lib/utils.js';
-import { useAuthStore, useHasRole } from '@/store/auth.js';
+import { useAuthStore } from '@/store/auth.js';
+import { useBaseRole, useModule } from '@/hooks/useModules.js';
 import type {
+  CustomRole,
+  DefaultRole,
   OrgMember,
   Invite,
   CreatedInvite,
@@ -30,13 +33,6 @@ import {
 import { toast } from 'sonner';
 import MemberAccessDialog from '@/components/access/MemberAccessDialog.js';
 import { RoleDot } from '@/components/access/AccessBadges.js';
-
-const ROLE_OPTIONS: { value: Role; label: string; hint: string }[] = [
-  { value: 'viewer', label: 'Viewer', hint: 'Read-only access' },
-  { value: 'operator', label: 'Operator', hint: 'Run commands and manage cron jobs' },
-  { value: 'admin', label: 'Admin', hint: 'Manage servers, keys and people' },
-  { value: 'owner', label: 'Owner', hint: 'Full control of the organization' },
-];
 
 /** Mirrors ROLES on the server; used only to hide actions the server would refuse. */
 const RANK: Role[] = ['viewer', 'operator', 'admin', 'owner'];
@@ -106,27 +102,75 @@ function StatusPill({ status }: { status: OrgMember['status'] }) {
   );
 }
 
-function accessSummary(m: OrgMember): string {
-  if (rank(m.role) >= rank('admin')) return 'Everything';
-  const roles = m.roles?.length ?? 0;
-  const scoped = (m.scope ?? (m.serverAccess === 'restricted' ? 'roles' : 'all')) === 'roles';
-  const parts = [scoped ? 'Only from roles' : 'All resources'];
-  if (roles) parts.push(`${roles} role${roles === 1 ? '' : 's'}`);
-  if (m.serverCount) parts.push(`${m.serverCount} server grant${m.serverCount === 1 ? '' : 's'}`);
-  return parts.join(' · ');
+/** A member's roles as chips, built-ins first; none at all reads as No access. */
+function RoleChips({ member }: { member: OrgMember }) {
+  if (!member.roles) {
+    return <span className="rounded bg-muted px-2 py-1 text-xs capitalize text-muted-foreground">{member.role}</span>;
+  }
+  const roles = [...member.roles].sort((a, b) => Number(!a.system) - Number(!b.system) || a.name.localeCompare(b.name));
+  return (
+    <span className="flex flex-wrap gap-1" data-testid="member-role-chips">
+      {roles.length === 0 && <span className="rounded border border-dashed border-border px-1.5 py-0.5 text-xs text-muted-foreground">No access</span>}
+      {roles.map((r) => (
+        <span key={r.roleId} className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs" title={r.expiresAt ? `Until ${new Date(r.expiresAt).toLocaleString()}` : undefined}>
+          <RoleDot color={r.color} /> {r.name}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/**
+ * Pick the roles an invite gives: the ones the inviter may give, the org's
+ * default role ticked to start with (unified roles spec §5).
+ */
+function InviteRolePicker({ roles, value, onChange }: { roles: CustomRole[]; value: string[]; onChange: (ids: string[]) => void }) {
+  const picked = new Set(value);
+  const offered = roles.filter((r) => r.assignable && r.system !== 'none');
+  const toggle = (id: string) => {
+    const next = new Set(picked);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange([...next]);
+  };
+  return (
+    <fieldset>
+      <legend className="block text-sm font-medium mb-1">Roles</legend>
+      <div className="flex flex-wrap gap-2" data-testid="invite-roles">
+        {offered.map((r) => (
+          <label key={r.id} className={cn('flex items-center gap-1.5 rounded-md border px-2 py-1 text-sm', picked.has(r.id) ? 'border-primary bg-primary/5' : 'border-border')}>
+            <input type="checkbox" checked={picked.has(r.id)} onChange={() => toggle(r.id)} aria-label={`Role ${r.name}`} />
+            <RoleDot color={r.color} /> {r.name}
+          </label>
+        ))}
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">Only roles you could give yourself are offered. None ticked: No access until someone gives them one.</p>
+    </fieldset>
+  );
 }
 
 export default function TeamMembers() {
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
-  const myRole = useAuthStore((s) => s.role);
-  const isAdmin = useHasRole('admin');
+  const myRole = useBaseRole();
+  const isAdmin = useModule('team_members', 'operate');
+  const seesAccess = useModule('team_roles', 'view');
   const [accessFor, setAccessFor] = useState<OrgMember | null>(null);
   // Like invite links, a reset link is shown once and never again
   const [resetLink, setResetLink] = useState<(PasswordResetLink & { email: string }) | null>(null);
   const [showInvite, setShowInvite] = useState(false);
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<Role>('viewer');
+  // Null until the inviter picks: the org's default role
+  const [roleIds, setRoleIds] = useState<string[] | null>(null);
+  const { data: defaultRole } = useQuery<DefaultRole>({
+    queryKey: ['default-role'],
+    queryFn: () => api.get('/team/default-role'),
+    enabled: isAdmin,
+  });
+  const { data: roles } = useQuery<CustomRole[]>({ queryKey: ['roles'], queryFn: () => api.get('/team/roles'), enabled: isAdmin });
+  const pickedRoles = roleIds ?? (defaultRole ? [defaultRole.roleId] : []);
+  // Nothing ticked is No access, explicitly
+  const inviteRoleIds = pickedRoles.length ? pickedRoles : (roles ?? []).filter((r) => r.system === 'none').map((r) => r.id);
   // The accept URL is returned once and never again — hold it until dismissed.
   const [createdInvite, setCreatedInvite] = useState<CreatedInvite | null>(null);
 
@@ -147,10 +191,11 @@ export default function TeamMembers() {
   };
 
   const inviteMutation = useMutation({
-    mutationFn: (body: { email: string; role: Role }) =>
+    mutationFn: (body: { email: string; roleIds: string[] }) =>
       api.post<CreatedInvite>('/team/invites', body),
     onSuccess: async (invite) => {
       refresh();
+      setRoleIds(null);
       setShowInvite(false);
       setEmail('');
       setCreatedInvite(invite);
@@ -162,13 +207,6 @@ export default function TeamMembers() {
   const revokeMutation = useMutation({
     mutationFn: (id: string) => api.delete(`/team/invites/${id}`),
     onSuccess: () => { refresh(); toast.success('Invite revoked'); },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-  const roleMutation = useMutation({
-    mutationFn: ({ userId, role }: { userId: string; role: Role }) =>
-      api.patch(`/team/members/${userId}`, { role }),
-    onSuccess: () => { refresh(); toast.success('Role updated'); },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -266,10 +304,10 @@ export default function TeamMembers() {
         <div className="mb-4 rounded-lg border border-border bg-card p-5">
           <h3 className="text-sm font-semibold mb-3">Invite someone</h3>
           <form
-            onSubmit={(e) => { e.preventDefault(); inviteMutation.mutate({ email, role }); }}
+            onSubmit={(e) => { e.preventDefault(); inviteMutation.mutate({ email, roleIds: inviteRoleIds }); }}
             className="space-y-3"
           >
-            <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-3">
               <div>
                 <label className="block text-sm font-medium mb-1">Email</label>
                 <input
@@ -281,18 +319,7 @@ export default function TeamMembers() {
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Role</label>
-                <select
-                  value={role}
-                  onChange={(e) => setRole(e.target.value as Role)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                >
-                  {ROLE_OPTIONS.map((r) => (
-                    <option key={r.value} value={r.value}>{r.label} — {r.hint}</option>
-                  ))}
-                </select>
-              </div>
+              <InviteRolePicker roles={roles ?? []} value={pickedRoles} onChange={setRoleIds} />
             </div>
             <p className="text-xs text-muted-foreground">
               No mail server is configured, so you get a link to share. It is shown once, expires in 7 days,
@@ -325,12 +352,11 @@ export default function TeamMembers() {
             <thead>
               <tr className="border-b border-border text-left text-xs text-muted-foreground">
                 <th className="px-4 py-2 font-medium">Member</th>
-                <th className="px-4 py-2 font-medium">Role</th>
+                <th className="px-4 py-2 font-medium">Roles</th>
                 <th className="px-4 py-2 font-medium">Status</th>
-                <th className="px-4 py-2 font-medium">Access</th>
                 {isAdmin && <th className="px-4 py-2 font-medium">Passkeys</th>}
                 <th className="px-4 py-2 font-medium">Last active</th>
-                {isAdmin && <th className="px-4 py-2" />}
+                {(isAdmin || seesAccess) && <th className="px-4 py-2" />}
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
@@ -338,8 +364,7 @@ export default function TeamMembers() {
                 const isSelf = m.userId === currentUser?.id;
                 // The server refuses actions on anyone ranked above you; don't offer them
                 const manageable = isAdmin && !isSelf && rank(m.role) <= rank(myRole);
-                const privileged = rank(m.role) >= rank('admin');
-                // Role changes, removal, suspend / reactivate and sign out need a higher
+                // Removal, suspend / reactivate and sign out need a higher
                 // rank, except owner on owner; a password or passkey reset always needs
                 // a strictly higher rank.
                 const canLockOut = rank(m.role) < rank(myRole) || (myRole === 'owner' && m.role === 'owner');
@@ -361,33 +386,14 @@ export default function TeamMembers() {
                       </div>
                     </td>
                     <td className="px-4 py-3">
-                      {manageable && canLockOut ? (
-                        <select
-                          value={m.role}
-                          onChange={(e) => roleMutation.mutate({ userId: m.userId, role: e.target.value as Role })}
-                          className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
-                        >
-                          {ROLE_OPTIONS.filter((r) => rank(r.value) <= rank(myRole)).map((r) => (
-                            <option key={r.value} value={r.value}>{r.label}</option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="rounded bg-muted px-2 py-1 text-xs capitalize text-muted-foreground">{m.role}</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3"><StatusPill status={m.status} /></td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground">
-                      <span className="whitespace-nowrap">{accessSummary(m)}</span>
-                      {!!m.roles?.length && (
-                        <span className="mt-1 flex flex-wrap gap-1">
-                          {m.roles.map((r) => (
-                            <span key={r.roleId} className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
-                              <RoleDot color={r.color} /> {r.name}
-                            </span>
-                          ))}
+                      <RoleChips member={m} />
+                      {!!m.serverCount && (
+                        <span className="mt-1 block text-xs text-muted-foreground">
+                          + {m.serverCount} personal server grant{m.serverCount === 1 ? '' : 's'}
                         </span>
                       )}
                     </td>
+                    <td className="px-4 py-3"><StatusPill status={m.status} /></td>
                     {isAdmin && (
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                         {m.passkeyCount || '—'}
@@ -396,11 +402,11 @@ export default function TeamMembers() {
                     <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                       {m.lastActiveAt ? relativeTime(m.lastActiveAt) : '—'}
                     </td>
-                    {isAdmin && (
+                    {(isAdmin || seesAccess) && (
                       <td className="px-4 py-3">
-                        {manageable && (
+                        {(manageable || (seesAccess && !isSelf)) && (
                           <div className="flex items-center justify-end gap-2">
-                            {!canLockOut ? null : m.status === 'active' ? (
+                            {!manageable || !canLockOut ? null : m.status === 'active' ? (
                               <button
                                 onClick={() => {
                                   if (confirm(`Suspend ${m.email}? They are signed out and cannot use this organization until reactivated.`))
@@ -420,15 +426,17 @@ export default function TeamMembers() {
                                 <UserCheck size={14} />
                               </button>
                             )}
-                            <button
-                              onClick={() => setAccessFor(m)}
-                              className="text-muted-foreground hover:text-foreground"
-                              title={privileged ? 'Roles and effective access (owners and admins manage everything)' : 'Access: scope, roles, grants and effective access'}
-                              aria-label={`Access for ${m.email}`}
-                            >
-                              <ServerCog size={14} />
-                            </button>
-                            {canReset && (
+                            {seesAccess && (
+                              <button
+                                onClick={() => setAccessFor(m)}
+                                className="text-muted-foreground hover:text-foreground"
+                                title="Access: roles, personal grants and effective access"
+                                aria-label={`Access for ${m.email}`}
+                              >
+                                <ServerCog size={14} />
+                              </button>
+                            )}
+                            {manageable && canReset && (
                               <button
                                 onClick={() => {
                                   if (confirm(`Create a one-time password reset link for ${m.email}?`)) resetMutation.mutate(m);
@@ -439,7 +447,7 @@ export default function TeamMembers() {
                                 <KeyRound size={14} />
                               </button>
                             )}
-                            {canReset && (m.passkeyCount ?? 0) > 0 && (
+                            {manageable && canReset && (m.passkeyCount ?? 0) > 0 && (
                               <button
                                 onClick={() => {
                                   if (confirm(`Remove all of ${m.email}'s passkeys and sign them out? They sign in with their password and create a new one.`))
@@ -451,7 +459,7 @@ export default function TeamMembers() {
                                 <Fingerprint size={14} />
                               </button>
                             )}
-                            {canLockOut && (
+                            {manageable && canLockOut && (
                               <button
                                 onClick={() => {
                                   if (confirm(`Sign ${m.email} out of every browser?`)) signOutMutation.mutate(m.userId);
@@ -462,7 +470,7 @@ export default function TeamMembers() {
                                 <LogOut size={14} />
                               </button>
                             )}
-                            {canLockOut && (
+                            {manageable && canLockOut && (
                               <button
                                 onClick={() => { if (confirm(`Remove ${m.email} from this organization?`)) removeMutation.mutate(m.userId); }}
                                 className="text-red-500 hover:text-red-600"
@@ -497,7 +505,7 @@ export default function TeamMembers() {
                 <div className="flex-1 min-w-0">
                   <p className="text-sm truncate">{invite.email}</p>
                   <p className="text-xs text-muted-foreground">
-                    {invite.role}
+                    {invite.roles?.length ? invite.roles.map((r) => r.name).join(', ') : invite.role}
                     {invite.state === 'expired'
                       ? ' · expired'
                       : ` · expires ${new Date(invite.expiresAt).toLocaleDateString()}`}

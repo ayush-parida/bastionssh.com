@@ -5,7 +5,7 @@ import type { OrgMember, Server, SessionRecording } from '@smt/shared';
 import { Boxes, Container, Film, Keyboard, Scissors, Terminal as TerminalIcon, Zap } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { formatBytes, relativeTime } from '@/lib/utils.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import RecordingSettings from '@/components/settings/RecordingSettings.js';
 
 export function recordingDuration(r: Pick<SessionRecording, 'startedAt' | 'endedAt'>): string {
@@ -27,7 +27,7 @@ export default function RecordingsPage() {
   const [params, setParams] = useSearchParams();
   const [page, setPage] = useState(1);
   const limit = 50;
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('recordings', 'manage');
 
   const serverId = params.get('serverId') ?? '';
   const userId = params.get('userId') ?? '';

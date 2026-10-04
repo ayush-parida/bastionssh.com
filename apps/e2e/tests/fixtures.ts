@@ -69,6 +69,24 @@ export async function createMember(
   return { email, password, displayName };
 }
 
+/**
+ * Make sure the org has a cluster. A module shows only to members with
+ * something in it (unified roles spec §3.1), so specs that stub the
+ * Kubernetes API in the browser still need one real cluster for the
+ * Kubernetes pages to be there at all. Nothing connects to it.
+ */
+export async function ensureKubernetesShown(): Promise<void> {
+  const owner = await ownerApi();
+  const clusters = (await (await owner.get('/api/kube/clusters')).json()) as unknown[];
+  if (!clusters.length) {
+    const res = await owner.post('/api/kube/clusters', {
+      data: { name: 'e2e-placeholder', apiUrl: 'https://192.0.2.99:6443', token: 'e2e-token' },
+    });
+    expect(res.status(), await res.text()).toBe(201);
+  }
+  await owner.dispose();
+}
+
 /** Sign in through the login form with just a password (no passkey on the account). */
 export async function signInWithPassword(page: Page, email: string, password: string): Promise<void> {
   // Headless Chromium has no passkey support of its own, so the login page's

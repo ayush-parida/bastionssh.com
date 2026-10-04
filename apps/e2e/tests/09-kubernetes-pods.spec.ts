@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, test } from './fixtures.js';
+import { createMember, ensureKubernetesShown, expect, signInWithPassword, test } from './fixtures.js';
 
 /**
  * Inside a pod (K4) against a stubbed Kubernetes API: the pod panel's
@@ -186,6 +186,7 @@ async function stubKube(page: Page, logs: URLSearchParams[]) {
 test.describe('Kubernetes pod panel', () => {
   let operator: { email: string; password: string };
   test.beforeAll(async () => {
+    await ensureKubernetesShown();
     operator = await createMember('operator', 'kube-pods');
   });
 

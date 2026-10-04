@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn, relativeTime } from '@/lib/utils.js';
 import { CLUSTER_DOT, CLUSTER_STATUS_LABEL, kubeKeys, kubeTabUrl } from '@/lib/kube.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { DiagnoseButton } from '@/components/diagnostics/Diagnostics.js';
 import ConfirmDialog from '@/components/docker/ConfirmDialog.js';
@@ -27,7 +27,7 @@ function viaLabel(c: KubeCluster): string {
  */
 export default function KubernetesPage() {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('kubernetes', 'manage');
   // Testing, editing and removing a cluster is managing it (custom roles spec §5)
   const access = useAccessLevels('cluster');
   const [editing, setEditing] = useState<KubeCluster | 'new' | null>(null);

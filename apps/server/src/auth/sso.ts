@@ -8,6 +8,7 @@ import { memberships, ssoLoginStates, ssoProviders, userIdentities, users } from
 import { config } from '../config/index.js';
 import { vault } from '../vault/index.js';
 import { rank } from './middleware.js';
+import { legacyRoleOf, orgRole, setJoinedMemberRoles } from './access/assign.js';
 
 /**
  * OpenID Connect single sign-on, one provider per org.
@@ -81,6 +82,24 @@ const SSO_ROLES: SsoRole[] = ['viewer', 'operator', 'admin'];
 
 export function asSsoRole(role: string): SsoRole {
   return SSO_ROLES.includes(role as SsoRole) ? (role as SsoRole) : 'viewer';
+}
+
+/**
+ * The role an SSO-created account gets when its default is a role rather
+ * than a base role (unified roles spec §5: the `default_role` column holds a
+ * role id then), or null for a base role. A role since deleted, or Owner,
+ * counts as nothing here — the base role fallback (`asSsoRole`) is Viewer.
+ */
+export function ssoDefaultRoleId(provider: Pick<SsoProvider, 'orgId' | 'defaultRole'>): string | null {
+  if (SSO_ROLES.includes(provider.defaultRole as SsoRole)) return null;
+  const role = orgRole(provider.orgId, provider.defaultRole);
+  return role && role.system !== 'owner' ? role.id : null;
+}
+
+/** The base role an SSO-created account's membership row records (`setJoinedMemberRoles` then gives its role). */
+function ssoBaseRole(provider: SsoProvider, mapped: SsoRole | null, defaultId: string | null): string {
+  if (mapped) return mapped;
+  return defaultId ? legacyRoleOf(provider.orgId, [defaultId]) : asSsoRole(provider.defaultRole);
 }
 
 export function parseRoleMappings(raw: string): SsoRoleMapping[] {
@@ -388,6 +407,8 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
   const db = getDb();
   const now = new Date().toISOString();
   const role = mappedRole(provider, claims);
+  // A mapped group decides the base role; otherwise the provider's default, which may be a role
+  const defaultId = role ? null : ssoDefaultRoleId(provider);
 
   // Synchronous from here on, so the checks and the writes cannot interleave
   // with another sign-in for the same person.
@@ -444,8 +465,9 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
         };
         db.insert(users).values(user).run();
         db.insert(memberships)
-          .values({ userId: user.id, orgId: provider.orgId, role: role ?? asSsoRole(provider.defaultRole), joinedAt: now })
+          .values({ userId: user.id, orgId: provider.orgId, role: ssoBaseRole(provider, role, defaultId), joinedAt: now })
           .run();
+        if (defaultId) setJoinedMemberRoles(provider.orgId, user.id, [defaultId], null);
         provisioned = true;
       }
       db.insert(userIdentities)
@@ -465,7 +487,7 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
       membership = {
         userId: user.id,
         orgId: provider.orgId,
-        role: role ?? asSsoRole(provider.defaultRole),
+        role: ssoBaseRole(provider, role, defaultId),
         status: 'active',
         suspendedAt: null,
         suspendedBy: null,
@@ -474,6 +496,7 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
         joinedAt: now,
       };
       db.insert(memberships).values(membership).run();
+      if (defaultId) setJoinedMemberRoles(provider.orgId, user.id, [defaultId], null);
       rejoined = true;
     }
     if (membership.status !== 'active') throw new SsoError('suspended', 'The membership is suspended', provider, email);

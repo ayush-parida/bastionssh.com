@@ -1,5 +1,5 @@
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, signInWithPassword, snap, test } from './fixtures.js';
+import { createMember, ensureKubernetesShown, expect, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The K2 views against a stubbed Kubernetes API: the topology graph (node
@@ -266,6 +266,7 @@ async function stubKube(page: Page) {
 test.describe('Kubernetes topology and diagnoses', () => {
   let viewer: { email: string; password: string };
   test.beforeAll(async () => {
+    await ensureKubernetesShown();
     viewer = await createMember('viewer', 'kube-graph');
   });
 

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import type { Agent, AgentStatus, CreatedAgent, CreateAgentRequest } from '@smt/shared';
 import { Plus, RadioTower, Copy, X, TriangleAlert, Ban } from 'lucide-react';
 import { toast } from 'sonner';
@@ -26,7 +26,7 @@ function parsePorts(input: string): number[] | null {
 
 export default function AgentsPage() {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('agents', 'manage');
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState('');
   const [ports, setPorts] = useState('22');

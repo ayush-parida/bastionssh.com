@@ -6,7 +6,7 @@ import SsoSettingsPanel from '@/components/settings/SsoSettings.js';
 import RolesPanel from '@/components/access/RolesPanel.js';
 import AccessChecker from '@/components/access/AccessChecker.js';
 import { cn } from '@/lib/utils.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 
 const TABS = [
   { id: 'members', label: 'Members' },
@@ -16,11 +16,11 @@ const TABS = [
 type TabId = (typeof TABS)[number]['id'];
 
 export default function TeamPage() {
-  const isAdmin = useHasRole('admin');
+  const seesRoles = useModule('team_roles', 'view');
   const [params, setParams] = useSearchParams();
-  // Roles and the checker are admin tools; everyone else only has the members tab
+  // Roles and the checker need Roles & access; everyone else only has the members tab
   const requested = params.get('tab') as TabId | null;
-  const tab: TabId = isAdmin && requested && TABS.some((t) => t.id === requested) ? requested : 'members';
+  const tab: TabId = seesRoles && requested && TABS.some((t) => t.id === requested) ? requested : 'members';
 
   return (
     <div className="p-6 max-w-5xl">
@@ -28,7 +28,7 @@ export default function TeamPage() {
       <p className="text-muted-foreground text-sm mb-6">
         Who can use this organization, what they may do, and which resources they can reach
       </p>
-      {isAdmin && (
+      {seesRoles && (
         <div role="tablist" aria-label="Team & Access" className="mb-8 flex gap-1 border-b border-border">
           {TABS.map((t) => (
             <button

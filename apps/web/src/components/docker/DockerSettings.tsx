@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { dockerKeys } from '@/lib/docker.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 
 export function Switch({ on, disabled, onToggle }: { on: boolean; disabled?: boolean; onToggle: () => void }) {
   return (
@@ -61,7 +61,7 @@ const ROWS: { key: keyof Settings; title: string; detail: string; icon: typeof C
 /** The org's Docker permissions. Owners and admins change them; nobody else sees this section. */
 export default function DockerSettings() {
   const qc = useQueryClient();
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('containers', 'manage');
   const { data: settings } = useQuery<Settings>({
     queryKey: dockerKeys.settings,
     queryFn: () => api.get('/docker/settings'),

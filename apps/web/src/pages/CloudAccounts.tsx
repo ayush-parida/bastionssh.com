@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 import {
@@ -127,7 +127,7 @@ function credentialFields(
 export default function CloudAccountsPage() {
   const qc = useQueryClient();
   // Adding needs an admin; on each one, what the caller's level allows (custom roles spec §5, §7)
-  const canAdd = useHasRole('admin');
+  const canAdd = useModule('cloud', 'manage');
   const access = useAccessLevels('cloud_account');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);

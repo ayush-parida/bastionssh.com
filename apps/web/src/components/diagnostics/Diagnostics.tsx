@@ -18,7 +18,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { diagnosticsPath, isConnectivityFailure, type DiagnoseTarget } from '@/lib/diagnostics.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 
 /** The resource type each kind of diagnostics target is, for the caller's level on it. */
 const TARGET_TYPES: Record<DiagnosticTargetKind, ResourceType> = {
@@ -270,7 +270,7 @@ export function DiagnoseButton({
 
 /** Settings: the public address outbound connections leave from. */
 export function EgressIpSection() {
-  const allowed = useHasRole('operator');
+  const allowed = useModule('diagnostics', 'operate');
   const qc = useQueryClient();
   const { data, isLoading, isFetching, refetch } = useQuery<EgressIpInfo>({
     queryKey: ['diagnostics-egress-ip'],

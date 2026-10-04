@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { formatBytes } from '@/lib/utils.js';
 import { isPasskeyCancel, passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
-import { useHasRole } from '@/store/auth.js';
+import { useIsOwner } from '@/hooks/useModules.js';
 import CastPlayer, { parseCast, playbackTime, type CastPlayerHandle } from '@/components/recordings/CastPlayer.js';
 import { recordingDuration } from '@/pages/Recordings.js';
 
@@ -15,7 +15,7 @@ export default function RecordingPlayerPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const isOwner = useHasRole('owner');
+  const isOwner = useIsOwner();
   const playerRef = useRef<CastPlayerHandle>(null);
 
   const { data: rec, error } = useQuery<SessionRecordingDetail>({

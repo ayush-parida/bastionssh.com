@@ -114,10 +114,11 @@ describe('custom roles and resource access', () => {
   });
 
   describe('roles', () => {
-    it('are created, read, renamed and deleted by admins only, audited with before and after', async () => {
+    it('are created, read, renamed and deleted by those with Roles & access, audited with before and after', async () => {
       const viewer = seedUser(orgId, 'viewer');
-      expect((await as(viewer).get('/api/team/roles')).statusCode).toBe(403);
-      expect((await as(viewer).post('/api/team/roles', { name: 'Sneaky' })).statusCode).toBe(403);
+      // Viewers have Roles & access off: the routes are not there for them (404), as for any module
+      expect((await as(viewer).get('/api/team/roles')).statusCode).toBe(404);
+      expect((await as(viewer).post('/api/team/roles', { name: 'Sneaky' })).statusCode).toBe(404);
 
       const role = await createRole('Ops', [{ resourceType: 'server', selector: 'id', resourceId: web1, level: 'operate' }]);
       expect((await as(admin).post('/api/team/roles', { name: 'Ops' })).statusCode).toBe(409);
@@ -136,12 +137,17 @@ describe('custom roles and resource access', () => {
       expect(audits('role.delete', role.id)[0]!.meta).toMatchObject({ before: { name: 'Operations' } });
     });
 
-    it('never hands out, edits or imitates a built-in role, whatever the case of its name', async () => {
+    it('never hands out Owner but by an owner, never edits the locked roles, deletes no built-in, and lets nothing imitate one', async () => {
       const ownerRole = `builtin:${orgId}:owner`;
-      expect((await as(admin).get(`/api/team/roles/${ownerRole}`)).statusCode).toBe(404);
-      expect((await as(admin).post(`/api/team/roles/${ownerRole}/members`, { userId: admin.userId })).statusCode).toBe(404);
-      expect((await as(admin).put(`/api/team/roles/${ownerRole}/grants`, { grants: [] })).statusCode).toBe(404);
-      expect((await as(admin).delete(`/api/team/roles/builtin:${orgId}:viewer`)).statusCode).toBe(404);
+      const someone = seedUser(orgId, 'viewer');
+      // Built-ins are listed and readable like any role…
+      expect((await as(admin).get(`/api/team/roles/${ownerRole}`)).json()).toMatchObject({ system: 'owner', editable: false });
+      // …but Owner is the owners' to give, and it and No access are locked
+      expect((await as(admin).post(`/api/team/roles/${ownerRole}/members`, { userId: someone.userId })).statusCode).toBe(403);
+      expect((await as(admin).put(`/api/team/roles/${ownerRole}/grants`, { grants: [] })).statusCode).toBe(403);
+      expect((await as(owner).patch(`/api/team/roles/builtin:${orgId}:none`, { modulePermissions: { servers: 'view' } })).statusCode).toBe(403);
+      expect((await as(admin).delete(`/api/team/roles/builtin:${orgId}:viewer`)).statusCode).toBe(400);
+      expect((await as(admin).patch(`/api/team/roles/builtin:${orgId}:viewer`, { name: 'Lookers' })).statusCode).toBe(400);
       for (const name of ['Owner', 'owner', ' ADMIN ', 'no access', 'Viewer (modules only)']) {
         expect((await as(admin).post('/api/team/roles', { name })).statusCode).toBe(409);
       }
@@ -206,7 +212,8 @@ describe('custom roles and resource access', () => {
 
       // The member detail shows the role and the effective access, with its reason
       const detail = (await as(admin).get(`/api/team/members/${alice.userId}/access`)).json();
-      expect(detail).toMatchObject({ scope: 'roles', serverAccess: 'restricted', roles: [{ roleId: role.id }] });
+      expect(detail).toMatchObject({ scope: 'roles', serverAccess: 'restricted' });
+      expect(detail.roles).toEqual(expect.arrayContaining([expect.objectContaining({ roleId: role.id, system: null })]));
       expect(detail.effective.server.map((e: { resourceId: string }) => e.resourceId).sort()).toEqual([web1, web2, edge].sort());
       expect(detail.effective.cluster).toEqual([expect.objectContaining({ resourceId: shop, level: 'view', namespaces: ['shop'] })]);
     });
@@ -415,15 +422,16 @@ describe('custom roles and resource access', () => {
         before: [],
         after: expect.arrayContaining([expect.objectContaining({ resourceId: web1, level: 'manage' })]),
       });
-      expect((await as(admin).put(`/api/team/members/${owner.userId}/grants`, { grants: [] })).statusCode).toBe(403);
-      expect((await as(owner).put(`/api/team/members/${admin.userId}/grants`, { grants: [] })).statusCode).toBe(400);
+      expect((await as(admin).put(`/api/team/members/${owner.userId}/grants`, { grants: [] })).statusCode).toBe(400);
+      // Admin is a role like any other: an admin may hold personal grants too
+      expect((await as(owner).put(`/api/team/members/${admin.userId}/grants`, { grants: [] })).statusCode).toBe(200);
     });
 
-    it('keeps the checker and who-has-access to admins', async () => {
+    it('keeps the checker and who-has-access to those with Roles & access', async () => {
       const viewer = seedUser(orgId, 'viewer');
-      expect((await as(viewer).get(`/api/team/access/explain?userId=${viewer.userId}&type=server&id=${web1}`)).statusCode).toBe(403);
-      expect((await as(viewer).get(`/api/team/access/resource?type=server&id=${web1}`)).statusCode).toBe(403);
-      expect((await as(viewer).get('/api/team/access/resources')).statusCode).toBe(403);
+      expect((await as(viewer).get(`/api/team/access/explain?userId=${viewer.userId}&type=server&id=${web1}`)).statusCode).toBe(404);
+      expect((await as(viewer).get(`/api/team/access/resource?type=server&id=${web1}`)).statusCode).toBe(404);
+      expect((await as(viewer).get('/api/team/access/resources')).statusCode).toBe(404);
       // Anyone may read their own levels
       expect((await as(viewer).get('/api/team/access/mine?type=server')).json().levels[web1]).toBe('view');
       expect((await as(admin).get(`/api/team/access/resource?type=server&id=missing`)).statusCode).toBe(404);

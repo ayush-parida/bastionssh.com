@@ -6,7 +6,7 @@ import { AlertTriangle, BellOff, BellRing, ChevronLeft, LayoutGrid, Radar, Refre
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { HEALTH_DOT, HEALTH_LABEL, TILE_LABEL, TILE_STYLE, kubeTabUrl } from '@/lib/kube.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 
 const fleetKey = ['kube', 'fleet'] as const;
 
@@ -172,7 +172,7 @@ function ClusterCard({ c }: { c: KubeFleetCluster }) {
  * unreachable cluster is a grey card, never an empty page.
  */
 export default function KubeOverviewPage() {
-  const isAdmin = useHasRole('admin');
+  const isAdmin = useModule('kubernetes', 'manage');
   const fleet = useQuery<KubeFleetOverview>({
     queryKey: fleetKey,
     queryFn: () => api.get('/kube/overview'),

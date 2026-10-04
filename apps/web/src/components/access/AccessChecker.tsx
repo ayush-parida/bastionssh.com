@@ -73,16 +73,10 @@ export default function AccessChecker() {
                   <span className="font-medium">{answer.user.displayName}</span>
                   <span className="text-muted-foreground">on {answer.resource.name}:</span>
                   <LevelBadge level={answer.level} />
-                  <span className="text-xs text-muted-foreground">
-                    scope: {answer.user.scope === 'roles' ? 'only resources from roles' : 'all resources'}
-                  </span>
                 </p>
                 {answer.via.length === 0 ? (
-                  <p className="text-muted-foreground">
-                    {answer.user.scope === 'roles'
-                      ? 'No role or personal grant covers it, and their scope is only resources from roles.'
-                      : 'Nothing gives them access.'}
-                  </p>
+                  // Roles are all there is now (unified roles): no scope to blame
+                  <p className="text-muted-foreground">No role or personal grant covers it.</p>
                 ) : (
                   <ul className="list-disc space-y-0.5 pl-5">
                     {answer.via.map((v, i) => (

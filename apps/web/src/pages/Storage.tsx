@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api.js';
-import { useHasRole } from '@/store/auth.js';
+import { useModule } from '@/hooks/useModules.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import {
   STORAGE_PROVIDER_PRESETS,
@@ -62,7 +62,7 @@ export default function StoragePage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   // Adding needs an admin; on each one, what the caller's level allows (custom roles spec §5, §7)
-  const canAdd = useHasRole('admin');
+  const canAdd = useModule('storage', 'manage');
   const access = useAccessLevels('storage_connection');
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
