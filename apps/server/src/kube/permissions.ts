@@ -47,13 +47,13 @@ export function kubeCan(req: Caller, capability: KubeCapability, clusterId?: str
 
 const REFUSED: Record<KubeCapability, string> = {
   view: 'You cannot view this cluster',
-  logs: 'Pod logs need the operator role or higher',
-  yaml: 'The YAML view needs the operator role or higher',
-  scale: 'Scaling and restarting workloads is turned off for operators, or needs the operator role',
-  deletePod: 'Deleting pods is turned off for operators, or needs the operator role',
-  rollback: 'Rolling back needs the admin role',
-  cordon: 'Cordoning nodes needs the admin role',
-  exec: 'Opening a shell in a pod is not allowed for your role',
+  logs: 'Pod logs need operate access here',
+  yaml: 'The YAML view needs operate access here',
+  scale: 'Scaling and restarting workloads needs manage access here, or operate access with it turned on',
+  deletePod: 'Deleting pods needs manage access here, or operate access with it turned on',
+  rollback: 'Rolling back needs manage access to this cluster',
+  cordon: 'Cordoning nodes needs manage access to this cluster',
+  exec: 'Opening a shell in a pod is not allowed for your role (operate, with shells turned on, or manage)',
   configure: 'Managing clusters needs manage access to Kubernetes',
 };
 

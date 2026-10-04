@@ -189,7 +189,7 @@ async function readObject(ctx: KubeContext, ref: { resource: KubeResource; names
 export async function aiDescribe(caller: Caller, clusterId: string, resource: unknown, namespace: unknown, name: unknown): Promise<string> {
   const ref = aiObjectRef(resource, namespace, name);
   return withKubeClient(caller, clusterId, async (ctx) => {
-    if (!ctx.permissionsIn(ref.namespace).yaml) throw new KubeError('Describing objects needs the operator role or higher', 403);
+    if (!ctx.permissionsIn(ref.namespace).yaml) throw new KubeError('Describing objects needs operate access here', 403);
     const object = aiObject(await readObject(ctx, ref), ctx.settings.showConfigMapValues);
     const health = healthLine(object);
     const head = `${object.kind} ${ref.namespace ? `${ref.namespace}/` : ''}${ref.name}${health ? `\nHealth: ${health}` : ''}`;
@@ -327,7 +327,7 @@ export async function aiPodLogs(
   }
   const tail = aiTail(opts.tail);
   return withKubeClient(caller, clusterId, async (ctx) => {
-    if (!ctx.permissionsIn(ref.namespace).logs) throw new KubeError('Pod logs need the operator role or higher', 403);
+    if (!ctx.permissionsIn(ref.namespace).logs) throw new KubeError('Pod logs need operate access here', 403);
     if (!ctx.namespaceAllowed(ref.namespace)) throw new KubeError('Not found', 404);
     const text = await readLogTail(ctx, ref.namespace!, ref.name, { container, previous: opts.previous === true, tail });
     if (!text.trim()) return opts.previous === true ? 'No log output from the previous run.' : 'No log output.';

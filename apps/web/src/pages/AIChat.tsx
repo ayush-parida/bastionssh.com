@@ -186,7 +186,7 @@ export default function AIChatPage() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground" data-testid="ai-unavailable">
         <Bot size={28} className="text-muted-foreground/60" />
-        <p>The AI assistant needs the operator role, or operate access to at least one server or cluster.</p>
+        <p>None of your roles gives you the AI Assistant. Ask someone who manages roles to turn it on for you.</p>
       </div>
     );
   }

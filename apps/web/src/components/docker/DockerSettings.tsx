@@ -84,8 +84,8 @@ export default function DockerSettings() {
     <section className="mt-10">
       <h2 className="mb-1 text-lg font-semibold">Docker</h2>
       <p className="mb-4 text-sm text-muted-foreground">
-        What members may do with Docker on the servers they can access. Viewers can list containers; logs, stats and
-        details need the operator role.
+        What members may do with Docker on the servers they can access. View access lists containers; logs, stats and
+        details need operate access to the server.
       </p>
       <div className="divide-y divide-border rounded-lg border border-border bg-card">
         {ROWS.map(({ key, title, detail, icon: Icon }) => (

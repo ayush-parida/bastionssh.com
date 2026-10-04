@@ -46,14 +46,14 @@ export function dockerCan(req: Caller, capability: DockerCapability, serverId?: 
 
 const REFUSED: Record<DockerCapability, string> = {
   view: 'You cannot view Docker on this server',
-  inspect: 'Container logs, stats and details need the operator role or higher',
-  control: 'Starting and stopping containers needs the operator role or higher',
-  exec: 'Opening a shell in a container is not allowed for your role',
-  remove: 'Removing containers and images is not allowed for your role',
-  pull: 'Pulling images needs the operator role or higher',
-  prune: 'Pruning is turned off, or needs the admin role',
-  revealEnv: 'Revealing environment variables needs the admin role',
-  configure: 'Docker settings need the admin role',
+  inspect: 'Container logs, stats and details need operate access to this server',
+  control: 'Starting and stopping containers needs operate access to this server',
+  exec: 'Opening a shell in a container is not allowed for your role (operate, with shells turned on, or manage)',
+  remove: 'Removing containers and images is not allowed for your role (operate, with removing turned on, or manage)',
+  pull: 'Pulling images needs operate access to this server',
+  prune: 'Pruning is turned off, or needs manage access to this server',
+  revealEnv: 'Revealing environment variables needs manage access to this server',
+  configure: 'Docker settings need manage access to Containers',
 };
 
 /**

@@ -66,8 +66,8 @@ export default function KubeSettings() {
     <section className="mt-10">
       <h2 className="mb-1 text-lg font-semibold">Kubernetes</h2>
       <p className="mb-4 text-sm text-muted-foreground">
-        What members may do on the clusters they can access. Viewers see maps, workloads and redacted details; logs and
-        YAML need the operator role. The cluster’s own credential still bounds everything.
+        What members may do on the clusters they can access. View access shows maps, workloads and redacted details;
+        logs and YAML need operate access. The cluster’s own credential still bounds everything.
       </p>
       <div className="divide-y divide-border rounded-lg border border-border bg-card">
         {ROWS.map(({ key, title, detail, icon: Icon }) => (

@@ -96,7 +96,7 @@ export default function ContainerDrawer({
               key={t.id}
               onClick={() => setTab(t.id)}
               disabled={!permissions[t.needs]}
-              title={permissions[t.needs] ? undefined : 'Needs the operator role or higher'}
+              title={permissions[t.needs] ? undefined : 'Needs operate access to this server'}
               className={cn(
                 'flex items-center gap-1 border-b-2 px-3 py-2 text-sm disabled:opacity-40',
                 tab === t.id ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground',
@@ -142,7 +142,7 @@ export default function ContainerDrawer({
               )}
               {!canInspect && (
                 <p className="mt-4 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Lock size={12} /> Logs, stats and details need the operator role or higher — logs often contain secrets.
+                  <Lock size={12} /> Logs, stats and details need operate access to this server — logs often contain secrets.
                 </p>
               )}
               {canInspect && container.state === 'running' && top.data && (

@@ -478,22 +478,31 @@ export default function RolesPanel() {
                   </span>
                 </p>
                 {r.description && <p className="text-xs text-muted-foreground">{r.description}</p>}
-                <div className="flex flex-wrap gap-1">
-                  {r.system === 'owner' ? (
-                    <span className="text-xs text-muted-foreground">Everything</span>
-                  ) : moduleChips(r.modulePermissions).length === 0 && (r.grants ?? []).length === 0 ? (
-                    <span className="text-xs text-muted-foreground">Nothing</span>
-                  ) : (
-                    <>
-                      {moduleChips(r.modulePermissions).map((chip) => (
-                        <span key={chip} className="rounded bg-primary/5 px-1.5 py-0.5 text-xs text-foreground/80">{chip}</span>
-                      ))}
-                      {(r.grants ?? []).map((g) => (
-                        <span key={g.id} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{grantChip(g, resources)}</span>
-                      ))}
-                    </>
-                  )}
-                </div>
+                {r.system === 'owner' ? (
+                  <p className="text-xs text-muted-foreground">Everything</p>
+                ) : moduleChips(r.modulePermissions).length === 0 && (r.grants ?? []).length === 0 ? (
+                  <p className="text-xs text-muted-foreground">Nothing</p>
+                ) : (
+                  <>
+                    {/* Labelled apart: what members may use, then which items they reach */}
+                    {moduleChips(r.modulePermissions).length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">Modules</span>
+                        {moduleChips(r.modulePermissions).map((chip) => (
+                          <span key={chip} className="rounded bg-primary/5 px-1.5 py-0.5 text-xs text-foreground/80">{chip}</span>
+                        ))}
+                      </div>
+                    )}
+                    {(r.grants ?? []).length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="w-20 shrink-0 text-xs font-medium text-muted-foreground">Resources</span>
+                        {(r.grants ?? []).map((g) => (
+                          <span key={g.id} className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{grantChip(g, resources)}</span>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
               <button
                 onClick={() => setEditing(r.id)}

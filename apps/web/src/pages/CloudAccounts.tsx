@@ -418,7 +418,7 @@ export default function CloudAccountsPage() {
               </p>
             ) : (
               <p className="text-muted-foreground col-span-2 -mt-2 text-xs">
-                Only admins change this account’s credentials.
+                Changing this account’s credentials needs manage access to Cloud Accounts.
               </p>
             )}
 

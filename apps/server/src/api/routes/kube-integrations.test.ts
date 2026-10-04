@@ -342,8 +342,8 @@ describe('kube integrations (K5)', () => {
       await expect(tools.execute('kube_list_workloads', { cluster_id: prod })).rejects.toThrow(/not available/);
       const aiRole = addModuleRole(orgId, viewer.userId, { ai: 'view' });
       await expect(tools.execute('kube_list_workloads', { cluster_id: prod })).resolves.toMatch(/Workloads:/);
-      await expect(tools.execute('kube_describe', { cluster_id: prod, resource: 'pods', namespace: 'shop', name: 'web-1' })).rejects.toThrow(/operator/);
-      await expect(tools.execute('kube_pod_logs', { cluster_id: prod, namespace: 'shop', pod: 'web-2' })).rejects.toThrow(/operator/);
+      await expect(tools.execute('kube_describe', { cluster_id: prod, resource: 'pods', namespace: 'shop', name: 'web-1' })).rejects.toThrow(/operate access/);
+      await expect(tools.execute('kube_pod_logs', { cluster_id: prod, namespace: 'shop', pod: 'web-2' })).rejects.toThrow(/operate access/);
       getDb().delete(roles).where(eq(roles.id, aiRole)).run();
     });
 

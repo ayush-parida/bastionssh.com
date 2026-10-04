@@ -88,7 +88,7 @@ export default function ComposeProjects({ serverId, permissions }: { serverId: s
                       <ScrollText size={12} /> Logs
                     </button>
                   ) : (
-                    <span className="flex items-center gap-1 text-xs text-muted-foreground" title="Logs need the operator role or higher">
+                    <span className="flex items-center gap-1 text-xs text-muted-foreground" title="Logs need operate access to this server">
                       <Lock size={11} /> Logs
                     </span>
                   )}
