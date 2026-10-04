@@ -497,6 +497,10 @@ export const servers = sqliteTable(
     cloudRegion: text('cloud_region'),
     cloudState: text('cloud_state'), // running | stopped | other | missing
     cloudSyncedAt: text('cloud_synced_at'),
+    // The provider's own tags for the instance (JSON array), refreshed on
+    // every sync. Display only: tag selectors match `tags`, never these, so
+    // whoever controls tags in the provider cannot change access here.
+    cloudTags: text('cloud_tags').notNull().default('[]'),
     // Pinned SSH host key. All null = nothing pinned, so the next connection
     // trusts what it sees (TOFU). See ssh/host-keys.ts.
     hostKeyFingerprint: text('host_key_fingerprint'), // SHA256:<base64, no padding>

@@ -13,11 +13,15 @@ vi.mock('../../cloud/providers/index.js', () => ({
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { servers } from '../../db/schema.js';
-import { eq } from 'drizzle-orm';
+import { auditLog, cloudAccounts, memberships, resourceGrants, roleMembers, roles, servers } from '../../db/schema.js';
+import { and, eq } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
+import type { AccessLevel } from '@smt/shared';
+import { vault } from '../../vault/index.js';
 import { CloudError } from '../../cloud/types.js';
 import { isMonitored } from '../../monitoring/scheduler.js';
 import { seedOrg, seedUser } from './test-utils.js';
+import { decodeCredentials } from './cloud.js';
 
 const inst = (over: Partial<CloudInstance>): CloudInstance => ({
   id: 'h1',
@@ -46,6 +50,44 @@ describe('cloud account routes', () => {
   let viewer: ReturnType<typeof seedUser>;
   let outsider: ReturnType<typeof seedUser>;
   let accountId: string;
+
+  /** A custom role holding `members`, with one grant. */
+  function roleWith(
+    members: ReturnType<typeof seedUser>[],
+    g: { resourceType: 'server' | 'cloud_account'; level: AccessLevel; selector: 'id' | 'tag'; resourceId?: string; tag?: string },
+  ) {
+    const id = nanoid();
+    getDb().insert(roles).values({ id, orgId, name: `role-${id}`, createdBy: admin.userId }).run();
+    for (const m of members) getDb().insert(roleMembers).values({ roleId: id, userId: m.userId, orgId }).run();
+    getDb()
+      .insert(resourceGrants)
+      .values({
+        id: nanoid(),
+        orgId,
+        principalType: 'role',
+        principalId: id,
+        resourceType: g.resourceType,
+        selector: g.selector,
+        resourceId: g.resourceId ?? null,
+        tag: g.tag ?? null,
+        level: g.level,
+        grantedBy: admin.userId,
+        createdAt: new Date().toISOString(),
+      })
+      .run();
+  }
+
+  /** A member who sees only what their roles grant. */
+  function roleScoped(base: 'viewer' | 'operator') {
+    const who = seedUser(orgId, base);
+    getDb().update(memberships).set({ scope: 'roles' }).where(and(eq(memberships.userId, who.userId), eq(memberships.orgId, orgId))).run();
+    return who;
+  }
+
+  async function storedToken(id: string) {
+    const row = getDb().select().from(cloudAccounts).where(eq(cloudAccounts.id, id)).get()!;
+    return decodeCredentials(await vault.decrypt(row.encryptedCredentials, row.id));
+  }
 
   beforeAll(async () => {
     await runMigrations();
@@ -144,18 +186,37 @@ describe('cloud account routes', () => {
     expect(res.json()).toEqual({ discovered: 3, created: 2, updated: 0, missing: 0, skipped: 1 });
 
     const list = await app.inject({ method: 'GET', url: '/api/servers', headers: viewer.headers });
-    const imported = (list.json() as { name: string; host: string; username: string; tags: string[]; cloud: { provider: string; instanceId: string; state: string } | null }[])
+    const imported = (list.json() as { name: string; host: string; username: string; tags: string[]; cloud: { provider: string; instanceId: string; state: string; tags: string[] } | null }[])
       .filter((s) => s.cloud?.provider === 'hetzner');
     expect(imported).toHaveLength(2);
     const web = imported.find((s) => s.cloud!.instanceId === 'h1')!;
     expect(web).toMatchObject({ name: 'web-1', host: '1.2.3.4', username: 'deploy' });
-    expect(web.tags).toEqual(['cloud:hetzner', 'fsn1', 'env:prod']);
+    // The provider's own tags are kept apart as provider tags, never as app tags
+    expect(web.tags).toEqual(['cloud:hetzner', 'fsn1']);
+    expect(web.cloud!.tags).toEqual(['env:prod']);
     const db = imported.find((s) => s.cloud!.instanceId === 'h2')!;
     expect(db.cloud!.state).toBe('stopped');
 
     const account = (await app.inject({ method: 'GET', url: '/api/cloud/accounts', headers: viewer.headers })).json()[0];
     expect(account.lastStatus).toBe('ok');
     expect(account.lastSummary).toEqual({ discovered: 3, created: 2, updated: 0, missing: 0, skipped: 1 });
+  });
+
+  it('never lets a provider tag match a tag selector', async () => {
+    const byProviderTag = roleScoped('viewer');
+    roleWith([byProviderTag], { resourceType: 'server', level: 'operate', selector: 'tag', tag: 'env:prod' });
+    const byAppTag = roleScoped('viewer');
+    roleWith([byAppTag], { resourceType: 'server', level: 'view', selector: 'tag', tag: 'cloud:hetzner' });
+    const web = getDb().select().from(servers).where(eq(servers.cloudInstanceId, 'h1')).get()!;
+
+    const hidden = await app.inject({ method: 'GET', url: '/api/servers', headers: byProviderTag.headers });
+    expect(hidden.json()).toEqual([]);
+    const direct = await app.inject({ method: 'GET', url: `/api/servers/${web.id}`, headers: byProviderTag.headers });
+    expect(direct.statusCode).toBe(404);
+
+    // App tags still select as before
+    const shown = await app.inject({ method: 'GET', url: '/api/servers', headers: byAppTag.headers });
+    expect((shown.json() as { id: string }[]).map((s) => s.id)).toContain(web.id);
   });
 
   it('keeps user edits, refreshes the host, and marks vanished instances missing', async () => {
@@ -168,7 +229,7 @@ describe('cloud account routes', () => {
     });
     expect(rename.statusCode).toBe(200);
 
-    provider.list.mockResolvedValueOnce([inst({ id: 'h1', publicIp: '9.9.9.9' })]);
+    provider.list.mockResolvedValueOnce([inst({ id: 'h1', publicIp: '9.9.9.9', tags: ['env:prod', 'team:web'] })]);
     const res = await app.inject({
       method: 'POST',
       url: `/api/cloud/accounts/${accountId}/sync`,
@@ -178,7 +239,8 @@ describe('cloud account routes', () => {
 
     const after = getDb().select().from(servers).where(eq(servers.cloudAccountId, accountId)).all();
     const web = after.find((s) => s.cloudInstanceId === 'h1')!;
-    expect(web).toMatchObject({ name: 'my-web', host: '9.9.9.9', tags: '["custom"]', cloudState: 'running' });
+    // Provider tags follow the provider; the app tags stay the user's
+    expect(web).toMatchObject({ name: 'my-web', host: '9.9.9.9', tags: '["custom"]', cloudTags: '["env:prod","team:web"]', cloudState: 'running' });
     const db = after.find((s) => s.cloudInstanceId === 'h2')!;
     expect(db.cloudState).toBe('missing');
     expect(db.host).toBe('5.6.7.8');
@@ -284,6 +346,50 @@ describe('cloud account routes', () => {
     expect(getDb().select().from(servers).where(eq(servers.cloudInstanceId, 'h9')).all()).toHaveLength(1);
   });
 
+  it('lets a manager below admin rename, toggle and sync an account, but not change its credentials', async () => {
+    const manager = seedUser(orgId, 'operator');
+    roleWith([manager], { resourceType: 'cloud_account', level: 'manage', selector: 'id', resourceId: accountId });
+    const patch = (who: { headers: Record<string, string> }, payload: object) =>
+      app.inject({ method: 'PATCH', url: `/api/cloud/accounts/${accountId}`, headers: who.headers, payload });
+
+    const rename = await patch(manager, { name: 'Hetzner (renamed)', syncEnabled: false, autoImport: true });
+    expect(rename.statusCode).toBe(200);
+    expect(rename.json()).toMatchObject({ name: 'Hetzner (renamed)', syncEnabled: false, autoImport: true });
+    const updateAudit = getDb()
+      .select()
+      .from(auditLog)
+      .where(and(eq(auditLog.action, 'cloud_account.update'), eq(auditLog.resourceId, accountId), eq(auditLog.actorId, manager.userId)))
+      .get()!;
+    expect(JSON.parse(updateAudit.metadata!)).toMatchObject({
+      before: { name: 'Hetzner prod', syncEnabled: true },
+      after: { name: 'Hetzner (renamed)', syncEnabled: false },
+      credentialsChanged: false,
+    });
+    expect(updateAudit.metadata).not.toContain('hcloud-token');
+
+    provider.list.mockResolvedValueOnce([]);
+    const sync = await app.inject({ method: 'POST', url: `/api/cloud/accounts/${accountId}/sync`, headers: manager.headers });
+    expect(sync.statusCode).toBe(200);
+
+    // Repointing the account at other provider credentials is refused, whatever else comes with it,
+    // before anything reaches the provider
+    provider.list.mockClear();
+    for (const payload of [{ token: 'attacker-owned-token-value' }, { name: 'x', token: 'attacker-owned-token-value' }, { aws: { accessKeyId: 'AKIAAAAAAAAAAAAAAAAA', secretAccessKey: 'secret-secret-secret' } }]) {
+      const res = await patch(manager, payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(403);
+    }
+    expect(provider.list).not.toHaveBeenCalled();
+    expect(await storedToken(accountId)).toEqual({ kind: 'token', token: 'hcloud-token-secret-value' });
+    expect(getDb().select().from(cloudAccounts).where(eq(cloudAccounts.id, accountId)).get()!.name).toBe('Hetzner (renamed)');
+
+    // An admin still can
+    provider.list.mockResolvedValueOnce([]);
+    const admins = await patch(admin, { token: 'hcloud-token-rotated-value', name: 'Hetzner prod', syncEnabled: true });
+    expect(admins.statusCode).toBe(200);
+    expect(admins.json().credentialHint).toBe('…alue');
+    expect(await storedToken(accountId)).toEqual({ kind: 'token', token: 'hcloud-token-rotated-value' });
+  });
+
   it('hides the account from another organisation', async () => {
     const res = await app.inject({
       method: 'POST',
@@ -307,5 +413,7 @@ describe('cloud account routes', () => {
     );
     expect(mine).toHaveLength(2);
     expect(mine.every((s) => s.cloud === null)).toBe(true);
+    const unlinked = getDb().select().from(servers).where(eq(servers.name, 'my-web')).get()!;
+    expect(unlinked.cloudTags).toBe('[]');
   });
 });

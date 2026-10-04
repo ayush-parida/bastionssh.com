@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
 const journal = JSON.parse(fs.readFileSync(path.join(dir, 'meta/_journal.json'), 'utf8')) as {
-  entries: { tag: string }[];
+  entries: { idx: number; tag: string; when: number }[];
 };
 
 /** Apply migration files the way drizzle does: one statement per breakpoint. */
@@ -1269,5 +1269,41 @@ describe('migration 0023 keeps every member’s effective access', () => {
     expect(expected.get('admin')).toMatchObject({ servers: serverIds, clusters: clusterIds });
     expect(expected.get('op-r-none')).toMatchObject({ servers: [], clusters: [] });
     expect(expected.get('op-susp')).toMatchObject({ servers: [], clusters: [] });
+  });
+});
+
+describe('migration journal', () => {
+  it('numbers entries in order with strictly increasing timestamps', () => {
+    // drizzle applies a migration only when its `when` is later than the last
+    // applied one, so a repeated or earlier value is silently skipped on upgrade
+    journal.entries.forEach((entry, i) => {
+      expect(entry.idx, entry.tag).toBe(i);
+      expect(entry.tag.startsWith(String(i).padStart(4, '0') + '_'), entry.tag).toBe(true);
+      if (i > 0) expect(entry.when, entry.tag).toBeGreaterThan(journal.entries[i - 1]!.when);
+    });
+  });
+});
+
+const CLOUD_TAGS_TAG = '0024_cloud_tags';
+
+describe('migration 0024 (provider tags kept apart)', () => {
+  it('adds an empty cloud_tags to every server and leaves existing tags as they are', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < CLOUD_TAGS_TAG));
+    db.exec(`
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, tags, created_by, created_at, updated_at, cloud_provider, cloud_instance_id, cloud_region)
+        VALUES ('s1', 'o1', 'imported', 'h', 'root', '["cloud:aws","us-east-1","env:prod"]', 'u', 'now', 'now', 'aws', 'i-1', 'us-east-1');
+      INSERT INTO servers (id, org_id, name, host, username, tags, created_by, created_at, updated_at)
+        VALUES ('s2', 'o1', 'manual', 'h', 'root', '["frontend"]', 'u', 'now', 'now');
+    `);
+
+    apply(db, [CLOUD_TAGS_TAG]);
+
+    // Which of an imported server's tags came from the provider was never recorded, so none are moved
+    expect(db.prepare('SELECT id, tags, cloud_tags FROM servers ORDER BY id').all()).toEqual([
+      { id: 's1', tags: '["cloud:aws","us-east-1","env:prod"]', cloud_tags: '[]' },
+      { id: 's2', tags: '["frontend"]', cloud_tags: '[]' },
+    ]);
   });
 });

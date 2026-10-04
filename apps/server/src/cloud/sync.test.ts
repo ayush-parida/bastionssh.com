@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { CloudInstance } from '@smt/shared';
-import { importTags, planSync, summarize } from './sync.js';
+import { importTags, planSync, providerTags, summarize } from './sync.js';
 
 const inst = (over: Partial<CloudInstance>): CloudInstance => ({
   id: 'a',
@@ -38,7 +38,7 @@ describe('planSync', () => {
     );
     expect(plan.create).toEqual([]);
     expect(plan.skipped).toEqual([]);
-    expect(plan.update).toEqual([{ serverId: 's1', host: '1.1.1.1', region: 'r1', state: 'running' }]);
+    expect(plan.update).toEqual([{ serverId: 's1', host: '1.1.1.1', region: 'r1', state: 'running', cloudTags: [] }]);
     expect(plan.markMissing).toEqual(['s2']);
   });
 
@@ -55,7 +55,7 @@ describe('planSync', () => {
       [inst({ id: 'a', publicIp: null, privateIp: null, state: 'stopped' })],
       true,
     );
-    expect(withNone.update[0]).toEqual({ serverId: 's1', host: null, region: 'r1', state: 'stopped' });
+    expect(withNone.update[0]).toEqual({ serverId: 's1', host: null, region: 'r1', state: 'stopped', cloudTags: [] });
   });
 
   it('does not mark an already-missing server again, and revives it when it returns', () => {
@@ -71,17 +71,31 @@ describe('planSync', () => {
       [inst({ id: 'gone' })],
       true,
     );
-    expect(back.update).toEqual([{ serverId: 's1', host: '1.1.1.1', region: 'r1', state: 'running' }]);
+    expect(back.update).toEqual([{ serverId: 's1', host: '1.1.1.1', region: 'r1', state: 'running', cloudTags: [] }]);
   });
 });
 
 describe('importTags', () => {
-  it('puts provider and region first and deduplicates', () => {
-    expect(importTags('aws', inst({ region: 'us-east-1', tags: ['Env:prod', 'us-east-1'] }))).toEqual([
+  it('is provider and region only: the provider’s own tags never become app tags', () => {
+    expect(importTags('aws', inst({ region: 'us-east-1', tags: ['Env:prod', 'us-east-1', 'frontend'] }))).toEqual([
       'cloud:aws',
       'us-east-1',
-      'Env:prod',
     ]);
+  });
+});
+
+describe('providerTags', () => {
+  it('keeps the provider’s tags apart, deduplicated', () => {
+    expect(providerTags(inst({ tags: ['Env:prod', 'frontend', 'Env:prod'] }))).toEqual(['Env:prod', 'frontend']);
+  });
+
+  it('refreshes provider tags on matched servers', () => {
+    const plan = planSync(
+      [{ id: 's1', cloudInstanceId: 'a', host: '1.1.1.1', cloudState: 'running' }],
+      [inst({ id: 'a', tags: ['team:web'] })],
+      true,
+    );
+    expect(plan.update[0]!.cloudTags).toEqual(['team:web']);
   });
 });
 

@@ -143,8 +143,14 @@ resources. Like the health monitor it runs in-process on a plain interval
   rejected credentials or missing roles, 504 for timeouts, 502 otherwise).
 - `sync.ts` — `planSync()` is pure: existing cloud servers plus discovered instances
   in, a plan of creates / updates / mark-missing / skipped out. `applyPlan()` writes
-  it in one transaction. A matched server only has host, region and state
-  refreshed; name, tags, credentials and notes belong to the user after import.
+  it in one transaction. A matched server only has host, region, state and provider
+  tags refreshed; name, tags, credentials and notes belong to the user after import.
+  An imported server's app tags (`tags`) start as `cloud:<provider>` and the region
+  only; the provider's own tags go to `cloud_tags` (migration 0024), shown in the UI
+  as provider tags and never matched by tag selectors or saved-command tag targets,
+  so tagging in the provider cannot grant access here. Servers imported before 0024
+  keep the provider tags they were given in `tags` (their provenance was never
+  recorded), and get `cloud_tags` filled on their next sync.
 - `index.ts` — credential encode/decode (vault-encrypted JSON), `testCredentials()`
   (run before an account is saved), `syncAccount()` (records the outcome on the
   account row either way), and `unlinkAccountServers()` for account deletion.
@@ -152,7 +158,7 @@ resources. Like the health monitor it runs in-process on a plain interval
   never stops the next.
 
 Servers carry `cloud_account_id`, `cloud_provider`, `cloud_instance_id`,
-`cloud_region`, `cloud_state` and `cloud_synced_at`, unique on
+`cloud_region`, `cloud_state`, `cloud_synced_at` and `cloud_tags`, unique on
 `(cloud_account_id, cloud_instance_id)`. Instances the provider no longer lists are
 marked `missing`, never deleted. The health sweep skips `stopped` and `missing`
 cloud servers so they do not raise offline alerts.
@@ -863,8 +869,11 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   `all`) keeps what it always allowed at view — browsing and downloading FTP files,
   downloading objects (`BASE_VIEW_ACTIONS`) — and pooled FTP sessions are kept where the
   member may still browse. A manager below admin cannot pick an org SSH key (FTP key auth,
-  a cloud account's import key), re-aim a key-auth connection, or send a stored FTP
-  password to a new endpoint (or with TLS checks off) without entering it again.
+  a cloud account's import key), change a cloud account's credentials (403 before the
+  provider is called; the provider itself never changes), re-aim a key-auth connection, or
+  send a stored FTP password to a new endpoint (or with TLS checks off) without entering it
+  again. `cloud_account.update` is audited with the settings and credential hint before and
+  after.
 - Saved commands and cron jobs (`auth/command-access.ts`): seeing one needs `view` on it, and
   a command bound to a server, or a job, is also hidden with its server. Running a command
   needs `operate` on it and on every target server (a tag fan-out is refused if any tagged
@@ -904,7 +913,8 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   its SSH key or agent, nor change where it connects (host, port, user, jump host) — even with
   a new password, since any org key a terminal names would follow — but may set a new password
   for the same endpoint. Changing a server's tags is audited (`server.tags_change`) with the
-  roles whose tag grants it moves, and closes what members lost.
+  roles whose tag grants it moves, and closes what members lost. Tag selectors match
+  `servers.tags` only, never a cloud server's provider tags (`cloud_tags`).
 - API (`api/routes/team-access.ts`, under `/api/team`): roles CRUD, `PUT /roles/:id/grants`
   (the list is replaced atomically by `grants.ts`), `POST`/`DELETE /roles/:id/members` (optional
   expiry), `PUT /members/:userId/grants` (personal grants), the access checker
@@ -962,7 +972,7 @@ User         1───* APIToken
 - **memberships** — `(user_id, org_id, role)`. Role is one of `owner | admin | operator | viewer`. `scope` is `all | roles` (§4.17); `server_access` mirrors it for one release.
 - **roles** — custom roles: `name` (unique per org), `description`, `color`. **role_members** — `(role_id, user_id)`, `expires_at`. **resource_grants** — `principal_type` (`role | user`), `principal_id`, `resource_type` (seven types), `selector` (`id | all | tag`), `resource_id`, `tag`, `namespaces` (clusters), `level` (`view | operate | manage`), `expires_at`, `granted_by`, `reason`.
 - **ssh_keys** — `name`, `type`, `public_key`, `encrypted_private_key`, `key_version`, `created_by`.
-- **servers** — `name`, `host`, `port`, `username`, `default_key_id`, `tags[]`, `notes`.
+- **servers** — `name`, `host`, `port`, `username`, `default_key_id`, `tags[]`, `notes`; cloud-imported ones also `cloud_tags[]` (the provider's tags, display only).
 - **saved_commands** — `server_id` (nullable for org-wide), `name`, `command`, `variables jsonb`, `category`.
 - **cron_jobs** — `server_id`, `command_id` or inline `command`, `schedule` (cron), `timezone`, `enabled`, `next_run_at`, `notify jsonb`.
 - **cron_runs** — `cron_job_id`, `started_at`, `finished_at`, `exit_code`, `stdout`, `stderr`, `status`.

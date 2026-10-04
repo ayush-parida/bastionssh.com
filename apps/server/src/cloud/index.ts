@@ -153,6 +153,7 @@ export function unlinkAccountServers(accountId: string): void {
       cloudRegion: null,
       cloudState: null,
       cloudSyncedAt: null,
+      cloudTags: '[]',
       updatedAt: new Date().toISOString(),
     })
     .where(eq(servers.cloudAccountId, accountId))

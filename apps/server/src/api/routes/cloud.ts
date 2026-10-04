@@ -123,6 +123,19 @@ function toPublic(row: CloudAccountRow): CloudAccount {
   };
 }
 
+/** What an update audits before and after: settings and the masked hint, never the secret. */
+function auditable(row: CloudAccountRow) {
+  return {
+    name: row.name,
+    credentialHint: row.credentialHint,
+    regions: parseRegions(row.regions),
+    defaultUsername: row.defaultUsername,
+    defaultKeyId: row.defaultKeyId,
+    autoImport: row.autoImport,
+    syncEnabled: row.syncEnabled,
+  };
+}
+
 function loadAccount(orgId: string, id: string): CloudAccountRow | undefined {
   return getDb()
     .select()
@@ -223,6 +236,17 @@ export async function cloudRoutes(app: FastifyInstance) {
       return reply.status(403).send({ error: 'Only admins choose the SSH key imported servers log in with' });
     }
 
+    // Credentials stay admin-only too: a manager below admin who could swap
+    // in their own provider credentials would choose which instances become
+    // servers here. They can still rename, toggle sync and auto-import, and
+    // sync. The provider itself never changes after creation.
+    if (
+      (Object.keys(credentialInputs) as (keyof CredentialInput)[]).some((field) => body[field] !== undefined) &&
+      rank(req.role) < rank('admin')
+    ) {
+      return reply.status(403).send({ error: 'Only admins change the credentials of a cloud account' });
+    }
+
     const provider = existing.provider as CloudProvider;
     let creds: CloudCredentials | null;
     try {
@@ -257,8 +281,13 @@ export async function cloudRoutes(app: FastifyInstance) {
       .where(eq(cloudAccounts.id, id))
       .run();
 
-    await audit(req, 'cloud_account.update', 'cloud_account', id, existing.name);
-    return toPublic(loadAccount(req.orgId, id)!);
+    const updated = loadAccount(req.orgId, id)!;
+    await audit(req, 'cloud_account.update', 'cloud_account', id, existing.name, {
+      before: auditable(existing),
+      after: auditable(updated),
+      credentialsChanged: creds !== null,
+    });
+    return toPublic(updated);
   });
 
   app.post('/accounts/:id/test', { preHandler: requireResource('cloud_account', 'test') }, async (req, reply) => {

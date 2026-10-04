@@ -67,7 +67,7 @@ Existing helpers (`canAccessServer`, `accessibleServerFilter`, `serverScope`, cl
 | Cluster (+ns) | Map, graph, workloads, events, diagnoses | Logs, YAML, scale/restart/delete-pod/exec (subject to org Kube toggles), Explain | Rollback, cordon, cluster settings/credentials, impersonation toggle |
 | FTP/SFTP connection | See it | Browse, upload, download, rename, delete files, test | Edit, host key, delete connection |
 | Storage connection | See it, list buckets/objects | Upload, download, delete objects | Edit, delete connection |
-| Cloud account | See it, last sync, instances | Trigger sync | Edit credentials, delete |
+| Cloud account | See it, last sync, instances | Trigger sync | Rename, regions, username, auto-import, sync on/off, test, delete; credentials (and the import SSH key) admin-only |
 | Saved command | See it | Run (also needs `operate` on each target server) | Edit, delete |
 | Cron job | See it, run history | Run now, enable/disable | Edit, delete (also needs `operate` on its server to create/move) |
 
@@ -96,11 +96,12 @@ Org toggles (Docker `operatorsCanExec`/`operatorsCanRemove`/`allowPrune`, Kubern
 
 1. Default-deny for `roles` scope; owners/admins unaffected; owners cannot be given `roles` scope.
 2. Only admins/owners manage roles and grants; an admin cannot add members to roles in a way that affects owners' org-level rights (roles never grant org-admin features).
-3. Tag selectors are evaluated at check time, so tagging a server is a privileged action: changing server tags requires `manage` on that server, and the audit row records which roles' coverage changed.
+3. Tag selectors are evaluated at check time, so tagging a server is a privileged action: changing server tags requires `manage` on that server, and the audit row records which roles' coverage changed. Tags a cloud provider reports for an imported instance are kept apart (`servers.cloud_tags`, migration 0024), shown as provider tags and never matched by a selector, so whoever controls tags in the provider cannot grant access here; imported servers' own tags start as `cloud:<provider>` and the region. Servers imported before 0024 keep their tags as they are, since nothing recorded which came from the provider.
 4. Every change to roles, grants, memberships and scope is audited with before/after; access checks themselves are not audited.
 5. Revocation is computed and applied in the same request that changes access (§2.8), and also by the existing expiry sweep for expiring grants and role memberships.
 6. Caching: per-request only; no cross-request cache, so changes apply on the next request.
 7. Read-only API tokens cap levels at `view`; SSO sessions follow the same membership/roles.
+8. A cloud account's credentials decide which instances are imported as servers, so changing them stays admin-only even for a member with `manage` on the account (403, before the provider is called); the provider never changes after creation. Account updates are audited with the settings and credential hint before and after.
 
 ## 9. Performance
 
@@ -134,6 +135,6 @@ Resolution loads at most a few small queries per request (membership, role membe
 
 1. **Roles can raise a member above their base role, on the role's resources only.** Org-admin features are never granted by roles.
 2. **Base roles unchanged:** viewer/operator/admin/owner stay; role-scoped members keep their base role for org-level features, and roles add resource levels on top. No new "Member" base role.
-3. **Tag selectors included** for servers, evaluated live; changing a server's tags requires `manage` on that server and is audited with the affected roles.
+3. **Tag selectors included** for servers, evaluated live; changing a server's tags requires `manage` on that server and is audited with the affected roles. They match the server's own tags only, never the provider tags cloud sync records (§8.3).
 4. **Kubernetes namespace narrowing included** per role entry and per personal grant.
 5. **Old per-member access endpoints** (`/members/:userId/access`, cluster access) stay as compatible aliases for one release, backed by personal grants.

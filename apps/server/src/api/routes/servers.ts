@@ -71,6 +71,7 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
     cloudRegion,
     cloudState,
     cloudSyncedAt,
+    cloudTags,
     hostKeyType,
     hostKeyTrustedAt,
     hostKeyTrustedBy,
@@ -102,6 +103,7 @@ export function sanitize(row: typeof servers.$inferSelect): Server {
             region: cloudRegion,
             state: (cloudState ?? 'other') as CloudServerState,
             syncedAt: cloudSyncedAt,
+            tags: parseTags(cloudTags),
           }
         : null,
     docker: {

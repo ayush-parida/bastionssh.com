@@ -15,7 +15,7 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, Container, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
+import { Activity, Cloud, Container, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -464,7 +464,7 @@ export default function ServersPage() {
             </div>
             <div className="col-span-2">
               <label className="block text-sm font-medium mb-1">
-                Tags <span className="text-muted-foreground text-xs">(comma separated — target these with saved commands)</span>
+                Tags <span className="text-muted-foreground text-xs">(comma separated — target these with saved commands and role tag selectors)</span>
               </label>
               <input
                 type="text"
@@ -628,6 +628,15 @@ export default function ServersPage() {
                   >
                     {tag}
                   </button>
+                ))}
+                {(s.cloud?.tags ?? []).map((tag) => (
+                  <span
+                    key={`provider:${tag}`}
+                    title={`Provider tag from ${CLOUD_PROVIDER_LABEL[s.cloud!.provider]} — shown for reference, never used for access`}
+                    className="flex items-center gap-1 rounded border border-dashed border-border px-1.5 py-0.5 text-xs text-muted-foreground"
+                  >
+                    <Cloud size={10} /> {tag}
+                  </span>
                 ))}
               </div>
               <div className="flex flex-wrap gap-2 mt-auto">
