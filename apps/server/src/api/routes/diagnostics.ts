@@ -4,6 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
 import { canAccessServer } from '../../auth/server-access.js';
 import { canAccessCluster } from '../../auth/cluster-access.js';
+import { requireResource } from '../../auth/access/index.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
 import { ftpConnections, kubeClusters, servers, storageConnections } from '../../db/schema.js';
@@ -29,15 +30,23 @@ const DIAGNOSE_RATE_LIMIT = {
   },
 };
 
+/** Routes gated per connection by their own preHandler rather than by base role. */
+const PER_CONNECTION = new Set(['/api/diagnostics/ftp/:id', '/api/diagnostics/storage/:id']);
+
 /**
  * Step-by-step connectivity checks for saved endpoints: DNS, TCP, the protocol
  * banner (and TLS), the host key, and — only when asked — a login with the
  * stored credentials. Operator and up, like opening a connection; per-server
- * access applies to servers.
+ * access applies to servers. FTP and storage connections are checked per
+ * connection instead (`operate` on it, which a custom role may give a viewer).
  */
 export async function diagnosticsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
-  app.addHook('preHandler', requireRole('operator'));
+  const operatorOnly = requireRole('operator');
+  app.addHook('preHandler', async (req, reply) => {
+    if (PER_CONNECTION.has(req.routeOptions.url ?? '')) return;
+    return operatorOnly(req, reply);
+  });
 
   const optionsFor = (req: FastifyRequest) => {
     const { auth } = bodySchema.parse(req.body ?? {});
@@ -68,7 +77,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/diagnostics/ftp/:id {auth?} */
-  app.post('/ftp/:id', DIAGNOSE_RATE_LIMIT, async (req, reply) => {
+  app.post('/ftp/:id', { ...DIAGNOSE_RATE_LIMIT, preHandler: requireResource('ftp_connection', 'test') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const opts = optionsFor(req);
     const connection = getDb()
@@ -88,7 +97,10 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/diagnostics/storage/:id {auth?} */
-  app.post('/storage/:id', DIAGNOSE_RATE_LIMIT, async (req, reply) => {
+  app.post(
+    '/storage/:id',
+    { ...DIAGNOSE_RATE_LIMIT, preHandler: requireResource('storage_connection', 'diagnose') },
+    async (req, reply) => {
     const { id } = req.params as { id: string };
     const opts = optionsFor(req);
     const connection = getDb()

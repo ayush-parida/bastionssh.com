@@ -22,9 +22,10 @@ export function backupObjectKey(prefix: string, name: string): string {
  * request, so it is looked up in whichever org registered it. Only uploads —
  * pruning what is already in the bucket is left to a lifecycle rule there.
  *
- * Encrypted with the backup key (crypt.ts): members of that org, viewers
- * included, can read the bucket through the Storage browser, and must not
- * get the whole instance's database that way.
+ * Encrypted with the backup key (crypt.ts): members of that org who can see
+ * the connection (viewers included, or through a custom role) can read the
+ * bucket through the Storage browser, and must not get the whole instance's
+ * database that way.
  */
 export async function uploadBackup(file: string, name: string, target: BackupUploadTarget): Promise<void> {
   const row = getDb()

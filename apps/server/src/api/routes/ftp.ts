@@ -11,7 +11,8 @@ import {
   type FtpProtocol,
   type FtpTestResult,
 } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
@@ -203,6 +204,33 @@ async function removePartialUpload(req: FastifyRequest, id: string, path: string
   }
 }
 
+/**
+ * Below admin, a connection's manager (`manage` through a custom role) edits
+ * it without reaching what the org keeps for admins: the org SSH keys stay
+ * admin-only (choosing one, or aiming a key-auth connection at another host,
+ * account or root, would use it beyond what an admin set up), and the stored password is never
+ * sent somewhere new — a new endpoint, or TLS checks turned off — unless the
+ * manager supplies it again. Returns why the edit is refused, or null.
+ */
+function managerRefusal(change: {
+  authChanged: boolean;
+  keyAuth: boolean;
+  endpointChanged: boolean;
+  usernameChanged: boolean;
+  jailChanged: boolean;
+  tlsLoosened: boolean;
+  newPassword: boolean;
+}): string | null {
+  if (change.authChanged && change.keyAuth) return 'Only admins choose the SSH key a connection logs in with';
+  if (change.keyAuth && (change.endpointChanged || change.usernameChanged || change.jailChanged)) {
+    return 'Only admins change where a connection that logs in with an SSH key connects, or its root';
+  }
+  if (!change.keyAuth && (change.endpointChanged || change.tlsLoosened) && !change.newPassword) {
+    return 'Enter the password again to change where this connection sends it';
+  }
+  return null;
+}
+
 /** An SFTP connection in the caller's org; host keys mean nothing for FTP/FTPS. */
 function loadSftpConnection(orgId: string, id: string): FtpConnectionRow {
   const connection = loadConnection(orgId, id);
@@ -226,13 +254,13 @@ export async function ftpRoutes(app: FastifyInstance) {
     return getDb()
       .select(publicColumns)
       .from(ftpConnections)
-      .where(eq(ftpConnections.orgId, req.orgId))
+      .where(and(eq(ftpConnections.orgId, req.orgId), accessibleFilter(req, 'ftp_connection', ftpConnections.id)))
       .orderBy(desc(ftpConnections.createdAt))
       .all()
       .map(toPublic);
   });
 
-  app.get('/connections/:id', async (req, reply) => {
+  app.get('/connections/:id', { preHandler: requireResource('ftp_connection', 'view') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const connection = publicConnection(req.orgId, id);
     if (!connection) return reply.status(404).send({ error: 'Not found' });
@@ -289,7 +317,7 @@ export async function ftpRoutes(app: FastifyInstance) {
     }
   });
 
-  app.patch('/connections/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.patch('/connections/:id', { preHandler: requireResource('ftp_connection', 'edit') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = updateSchema.parse(req.body);
     const db = getDb();
@@ -327,6 +355,19 @@ export async function ftpRoutes(app: FastifyInstance) {
         (body.username !== undefined && body.username !== existing.username) ||
         (body.verifyTls !== undefined && body.verifyTls !== existing.verifyTls) ||
         (authMethod === 'password' && body.password !== undefined);
+
+      const refused =
+        rank(req.role) < rank('admin') &&
+        managerRefusal({
+          authChanged,
+          keyAuth: authMethod === 'key',
+          endpointChanged,
+          usernameChanged: body.username !== undefined && body.username !== existing.username,
+          jailChanged: rootPath !== existing.rootPath || (existing.restrictToRoot && !restrictToRoot),
+          tlsLoosened: body.verifyTls === false && existing.verifyTls,
+          newPassword: body.password !== undefined,
+        });
+      if (refused) return reply.status(403).send({ error: refused });
 
       db.update(ftpConnections)
         .set({
@@ -377,7 +418,7 @@ export async function ftpRoutes(app: FastifyInstance) {
     }
   });
 
-  app.delete('/connections/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/connections/:id', { preHandler: requireResource('ftp_connection', 'delete') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const existing = db
@@ -394,7 +435,7 @@ export async function ftpRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  app.post('/connections/:id/test', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/connections/:id/test', { preHandler: requireResource('ftp_connection', 'test') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
       const connection = loadConnection(req.orgId, id);
@@ -433,13 +474,14 @@ export async function ftpRoutes(app: FastifyInstance) {
 
   // ── Host key (SFTP) ──────────────────────────────────────────────────────
   // Same model as a server's host key: trusted on first use, refused on change
-  // until an admin pins, accepts or forgets. Admin-only — whoever picks the
-  // trusted key picks who receives the password.
+  // until an admin pins, accepts or forgets. Needs `manage` on the connection
+  // (admins, or a custom role) — whoever picks the trusted key picks who
+  // receives the password.
 
   /** GET …/host-key */
   app.get(
     '/connections/:id/host-key',
-    { preHandler: requireRole('admin') },
+    { preHandler: requireResource('ftp_connection', 'host_key') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
@@ -457,7 +499,7 @@ export async function ftpRoutes(app: FastifyInstance) {
    */
   app.post(
     '/connections/:id/host-key/scan',
-    { preHandler: requireRole('admin') },
+    { preHandler: requireResource('ftp_connection', 'host_key') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
@@ -473,7 +515,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   /** PUT …/host-key {fingerprint} — pin a known-good fingerprint */
   app.put(
     '/connections/:id/host-key',
-    { preHandler: requireRole('admin') },
+    { preHandler: requireResource('ftp_connection', 'host_key') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const { fingerprint } = fingerprintBody.parse(req.body);
@@ -500,7 +542,7 @@ export async function ftpRoutes(app: FastifyInstance) {
    */
   app.post(
     '/connections/:id/host-key/accept',
-    { preHandler: requireRole('admin') },
+    { preHandler: requireResource('ftp_connection', 'host_key') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const { fingerprint } = fingerprintBody.parse(req.body);
@@ -532,7 +574,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   /** DELETE …/host-key — forget it; the next connection trusts on first use */
   app.delete(
     '/connections/:id/host-key',
-    { preHandler: requireRole('admin') },
+    { preHandler: requireResource('ftp_connection', 'host_key') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
@@ -553,7 +595,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   // ── Files ────────────────────────────────────────────────────────────────
 
   /** GET …/list?path=/var/www — `.` opens the connection's root or login directory */
-  app.get('/connections/:id/list', async (req, reply) => {
+  app.get('/connections/:id/list', { preHandler: requireResource('ftp_connection', 'browse') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const query = pathQuery.parse(req.query);
     try {
@@ -580,7 +622,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   });
 
   /** GET …/download?path=/var/www/index.html — stream the file down */
-  app.get('/connections/:id/download', async (req, reply) => {
+  app.get('/connections/:id/download', { preHandler: requireResource('ftp_connection', 'download') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const query = pathQuery.parse(req.query);
     const path = normalizeRemotePath(query.path);
@@ -642,7 +684,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   });
 
   /** PUT …/file?path=/var/www/index.html — stream a raw body up */
-  app.put('/connections/:id/file', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.put('/connections/:id/file', { preHandler: requireResource('ftp_connection', 'upload') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const query = pathQuery.parse(req.query);
     try {
@@ -724,7 +766,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   /** POST …/mkdir { path } */
   app.post(
     '/connections/:id/mkdir',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('ftp_connection', 'upload') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const body = mkdirSchema.parse(req.body);
@@ -745,7 +787,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   /** POST …/rename { from, to } */
   app.post(
     '/connections/:id/rename',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('ftp_connection', 'rename') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const body = renameSchema.parse(req.body);
@@ -771,7 +813,7 @@ export async function ftpRoutes(app: FastifyInstance) {
   /** DELETE …/file?path=/var/www/old&recursive= — a file, an empty directory, or a whole tree */
   app.delete(
     '/connections/:id/file',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('ftp_connection', 'delete_files') },
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const query = deleteQuery.parse(req.query);
