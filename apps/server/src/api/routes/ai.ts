@@ -7,6 +7,7 @@ import {
   canAccessServer,
 } from '../../auth/server-access.js';
 import { canAccessCluster } from '../../auth/cluster-access.js';
+import { cronJobFilter } from '../../auth/command-access.js';
 import { getDb } from '../../db/index.js';
 import { aiProviderConfigs, servers, savedCommands, cronJobs, kubeClusters } from '../../db/schema.js';
 import { eq, and } from 'drizzle-orm';
@@ -195,7 +196,7 @@ export async function aiRoutes(app: FastifyInstance) {
         enabled: cronJobs.enabled,
       })
       .from(cronJobs)
-      .where(and(eq(cronJobs.orgId, req.orgId), accessibleServerFilter(req, cronJobs.serverId)))
+      .where(and(eq(cronJobs.orgId, req.orgId), cronJobFilter(req)))
       .all();
 
     return { servers: allServers, commands: allCommands, cronJobs: allCrons };

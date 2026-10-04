@@ -865,6 +865,17 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   member may still browse. A manager below admin cannot pick an org SSH key (FTP key auth,
   a cloud account's import key), re-aim a key-auth connection, or send a stored FTP
   password to a new endpoint (or with TLS checks off) without entering it again.
+- Saved commands and cron jobs (`auth/command-access.ts`): seeing one needs `view` on it, and
+  a command bound to a server, or a job, is also hidden with its server. Running a command
+  needs `operate` on it and on every target server (a tag fan-out is refused if any tagged
+  server it sees is view-only); rewriting one needs `operate` on the servers of the cron jobs
+  that run it. A job: `view` for its history, `operate` to run it now (`POST
+  /api/cron-jobs/:id/run`) or switch it on/off, `manage` to edit or delete it; creating,
+  moving, changing what it runs, switching it on or running it now also needs `operate` on its
+  server (and on its saved command); switching it off does not.
+  Creating either needs `manage` on all of the type. Jobs run as their creator, who must
+  still operate the job, its server and its saved command at run time. Scope-`all` operators
+  keep their pre-roles rights (edit commands, edit/delete jobs, create both).
 - Until the team and access-request routes write `resource_grants` themselves, triggers from
   migration 0023 mirror `member_server_access` / `member_cluster_access` into personal grants
   (at the member's base-role level, following role changes) and `server_access` into `scope`.

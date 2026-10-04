@@ -5,13 +5,42 @@ import { getDb } from '../../db/index.js';
 import { cronJobs, cronRuns, savedCommands } from '../../db/schema.js';
 import { resolveServerAuth } from '../../ssh/credentials.js';
 import { execOnServer } from '../../ssh/broker.js';
-import { canAccessServer } from '../../auth/server-access.js';
+import { authorize } from '../../auth/access/index.js';
 import { COMMAND_TIMEOUT_MS, interpolate } from '../../commands/run.js';
 import logger from '../../logger.js';
 
 interface CronJobData {
   cronJobId: string;
   scheduledAt: string;
+  /** "Run now": runs even while the job is disabled. */
+  manual?: boolean;
+}
+
+/**
+ * Why the job's creator may not run it now, or null when they may. A job runs
+ * as its creator, so they need `operate` on the job, on its server and on the
+ * saved command it runs (custom roles spec §2.7) — checked before every run,
+ * so losing any of them (a role, a grant, the membership) stops the job.
+ */
+export function creatorRefusal(job: {
+  id: string;
+  orgId: string;
+  createdBy: string;
+  serverId: string;
+  savedCommandId: string | null;
+  inlineCommand: string | null;
+}): string | null {
+  const creator = { orgId: job.orgId, userId: job.createdBy };
+  if (!authorize(creator, 'server', job.serverId, 'run_command').ok) {
+    return 'The job creator no longer has access to this server';
+  }
+  if (!authorize(creator, 'cron_job', job.id, 'run').ok) {
+    return 'The job creator no longer has access to this cron job';
+  }
+  if (!job.inlineCommand && job.savedCommandId && !authorize(creator, 'saved_command', job.savedCommandId, 'run').ok) {
+    return 'The job creator no longer has access to its saved command';
+  }
+  return null;
 }
 
 export async function runCronJob(data: CronJobData) {
@@ -20,7 +49,7 @@ export async function runCronJob(data: CronJobData) {
   const runId = nanoid();
 
   const job = db.select().from(cronJobs).where(eq(cronJobs.id, data.cronJobId)).get();
-  if (!job || !job.enabled) return;
+  if (!job || (!job.enabled && !data.manual)) return;
 
   let cmd = job.inlineCommand;
   if (!cmd && job.savedCommandId) {
@@ -63,11 +92,10 @@ export async function runCronJob(data: CronJobData) {
   };
 
   try {
-    // A job runs as its creator: once they are suspended, removed or no longer
-    // granted the server, it records a failure instead of running.
-    if (!canAccessServer({ orgId: job.orgId, userId: job.createdBy }, job.serverId)) {
-      throw new Error('The job creator no longer has access to this server');
-    }
+    // A job runs as its creator: once they are suspended, removed or can no
+    // longer operate it, it records a failure instead of running.
+    const refusal = creatorRefusal(job);
+    if (refusal) throw new Error(refusal);
     // Shares the resolver used everywhere else, so a password-authenticated
     // server runs its schedule instead of silently doing nothing.
     const { server, auth } = await resolveServerAuth(job.orgId, job.serverId);
