@@ -461,6 +461,26 @@ describe('connections, storage and cloud accounts under custom roles', () => {
     }
   });
 
+  it('gates the HEAD twins of GET routes the same way (no existence leak, no download at view)', async () => {
+    const ftpId = await ftpConnection();
+    const storageId = await storageConnection();
+    const none = seedUser(orgId, 'operator');
+    scopeRoles(none.userId);
+    const viewer = seedUser(orgId, 'viewer');
+    scopeRoles(viewer.userId);
+    const r = role([viewer.userId]);
+    grant({ role: r }, 'ftp_connection', 'view', ftpId);
+    grant({ role: r }, 'storage_connection', 'view', storageId);
+    const urls = [
+      `/api/ftp/connections/${ftpId}/download?path=/home/deploy/index.html`,
+      `/api/storage/connections/${storageId}/buckets/media/object?key=a.txt`,
+    ];
+    for (const url of urls) {
+      expect((await inject({ method: 'HEAD', url, headers: none.headers })).statusCode).toBe(404);
+      expect((await inject({ method: 'HEAD', url, headers: viewer.headers })).statusCode).toBe(403);
+    }
+  });
+
   describe('a manager below admin', () => {
     async function manager(type: ConnectionType, id: string) {
       const u = seedUser(orgId, 'operator');
