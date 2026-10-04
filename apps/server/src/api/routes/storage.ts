@@ -5,6 +5,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { STORAGE_PROVIDERS, type StorageConnection, type StorageProvider } from '@smt/shared';
 import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
@@ -126,12 +127,17 @@ export async function storageRoutes(app: FastifyInstance) {
     return getDb()
       .select(publicColumns)
       .from(storageConnections)
-      .where(eq(storageConnections.orgId, req.orgId))
+      .where(
+        and(
+          eq(storageConnections.orgId, req.orgId),
+          accessibleFilter(req, 'storage_connection', storageConnections.id),
+        ),
+      )
       .orderBy(desc(storageConnections.createdAt))
       .all();
   });
 
-  app.get('/connections/:id', async (req, reply) => {
+  app.get('/connections/:id', { preHandler: requireResource('storage_connection', 'view') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const connection = publicConnection(req.orgId, id);
     if (!connection) return reply.status(404).send({ error: 'Not found' });
@@ -170,7 +176,7 @@ export async function storageRoutes(app: FastifyInstance) {
     }
   });
 
-  app.patch('/connections/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.patch('/connections/:id', { preHandler: requireResource('storage_connection', 'edit') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = updateSchema.parse(req.body);
     const db = getDb();
@@ -223,7 +229,7 @@ export async function storageRoutes(app: FastifyInstance) {
     }
   });
 
-  app.delete('/connections/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/connections/:id', { preHandler: requireResource('storage_connection', 'delete') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const existing = db
@@ -239,7 +245,7 @@ export async function storageRoutes(app: FastifyInstance) {
     return reply.status(204).send();
   });
 
-  app.post('/connections/:id/test', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/connections/:id/test', { preHandler: requireResource('storage_connection', 'test') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
       const { connection, client } = await resolveConnection(req.orgId, id);
@@ -264,7 +270,7 @@ export async function storageRoutes(app: FastifyInstance) {
 
   // ── Buckets ──────────────────────────────────────────────────────────────
 
-  app.get('/connections/:id/buckets', async (req, reply) => {
+  app.get('/connections/:id/buckets', { preHandler: requireResource('storage_connection', 'list') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
       const { client } = await resolveConnection(req.orgId, id);
@@ -274,7 +280,7 @@ export async function storageRoutes(app: FastifyInstance) {
     }
   });
 
-  app.post('/connections/:id/buckets', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/connections/:id/buckets', { preHandler: requireResource('storage_connection', 'buckets') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = createBucketSchema.parse(req.body);
     try {
@@ -292,7 +298,7 @@ export async function storageRoutes(app: FastifyInstance) {
 
   app.delete(
     '/connections/:id/buckets/:bucket',
-    { preHandler: requireRole('admin') },
+    { preHandler: requireResource('storage_connection', 'buckets') },
     async (req, reply) => {
       const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
       const query = deleteBucketQuery.parse(req.query);
@@ -316,7 +322,10 @@ export async function storageRoutes(app: FastifyInstance) {
   // ── Objects ──────────────────────────────────────────────────────────────
 
   /** GET …/objects?prefix=photos/&token= — one page of folders and objects */
-  app.get('/connections/:id/buckets/:bucket/objects', async (req, reply) => {
+  app.get(
+    '/connections/:id/buckets/:bucket/objects',
+    { preHandler: requireResource('storage_connection', 'list') },
+    async (req, reply) => {
     const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
     const query = listQuery.parse(req.query);
     try {
@@ -335,7 +344,10 @@ export async function storageRoutes(app: FastifyInstance) {
   });
 
   /** GET …/object?key=photos/cat.jpg — stream the object down */
-  app.get('/connections/:id/buckets/:bucket/object', async (req, reply) => {
+  app.get(
+    '/connections/:id/buckets/:bucket/object',
+    { preHandler: requireResource('storage_connection', 'download') },
+    async (req, reply) => {
     const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
     const query = keyQuery.parse(req.query);
     try {
@@ -370,7 +382,7 @@ export async function storageRoutes(app: FastifyInstance) {
   /** PUT …/object?key=photos/cat.jpg&contentType=image/jpeg — stream a raw body up */
   app.put(
     '/connections/:id/buckets/:bucket/object',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('storage_connection', 'upload') },
     async (req, reply) => {
       const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
       const query = uploadQuery.parse(req.query);
@@ -424,7 +436,7 @@ export async function storageRoutes(app: FastifyInstance) {
   /** POST …/folder { prefix } — create a folder marker */
   app.post(
     '/connections/:id/buckets/:bucket/folder',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('storage_connection', 'upload') },
     async (req, reply) => {
       const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
       const body = folderSchema.parse(req.body);
@@ -448,7 +460,7 @@ export async function storageRoutes(app: FastifyInstance) {
   /** POST …/rename { from, to } — copy + delete a single object */
   app.post(
     '/connections/:id/buckets/:bucket/rename',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('storage_connection', 'upload') },
     async (req, reply) => {
       const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
       const body = renameSchema.parse(req.body);
@@ -477,7 +489,7 @@ export async function storageRoutes(app: FastifyInstance) {
   /** DELETE …/object?key=photos/cat.jpg — or ?key=photos/&recursive=true for a prefix */
   app.delete(
     '/connections/:id/buckets/:bucket/object',
-    { preHandler: requireRole('operator') },
+    { preHandler: requireResource('storage_connection', 'delete_objects') },
     async (req, reply) => {
       const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
       const query = deleteObjectQuery.parse(req.query);

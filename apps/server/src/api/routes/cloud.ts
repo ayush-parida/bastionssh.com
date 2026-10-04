@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { CloudAccount, CloudProvider, CloudSyncStatus } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { getDb } from '../../db/index.js';
 import { cloudAccounts, sshKeys } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
@@ -152,7 +153,7 @@ export async function cloudRoutes(app: FastifyInstance) {
     return getDb()
       .select()
       .from(cloudAccounts)
-      .where(eq(cloudAccounts.orgId, req.orgId))
+      .where(and(eq(cloudAccounts.orgId, req.orgId), accessibleFilter(req, 'cloud_account', cloudAccounts.id)))
       .orderBy(desc(cloudAccounts.createdAt))
       .all()
       .map(toPublic);
@@ -203,7 +204,7 @@ export async function cloudRoutes(app: FastifyInstance) {
     return reply.status(201).send(toPublic(created));
   });
 
-  app.patch('/accounts/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.patch('/accounts/:id', { preHandler: requireResource('cloud_account', 'edit') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = updateSchema.parse(req.body);
     const existing = loadAccount(req.orgId, id);
@@ -211,6 +212,15 @@ export async function cloudRoutes(app: FastifyInstance) {
 
     if (body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
       return reply.status(400).send({ error: 'Default SSH key not found or retired' });
+    }
+    // An account's manager below admin (a custom role) edits it, but the org's
+    // SSH keys stay admin-only: imported servers log in with this one
+    if (
+      body.defaultKeyId !== undefined &&
+      body.defaultKeyId !== existing.defaultKeyId &&
+      rank(req.role) < rank('admin')
+    ) {
+      return reply.status(403).send({ error: 'Only admins choose the SSH key imported servers log in with' });
     }
 
     const provider = existing.provider as CloudProvider;
@@ -251,7 +261,7 @@ export async function cloudRoutes(app: FastifyInstance) {
     return toPublic(loadAccount(req.orgId, id)!);
   });
 
-  app.post('/accounts/:id/test', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/accounts/:id/test', { preHandler: requireResource('cloud_account', 'test') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const existing = loadAccount(req.orgId, id);
     if (!existing) return reply.status(404).send({ error: 'Not found' });
@@ -260,7 +270,7 @@ export async function cloudRoutes(app: FastifyInstance) {
     return result;
   });
 
-  app.post('/accounts/:id/sync', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/accounts/:id/sync', { preHandler: requireResource('cloud_account', 'sync') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const existing = loadAccount(req.orgId, id);
     if (!existing) return reply.status(404).send({ error: 'Not found' });
@@ -273,7 +283,7 @@ export async function cloudRoutes(app: FastifyInstance) {
     }
   });
 
-  app.delete('/accounts/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/accounts/:id', { preHandler: requireResource('cloud_account', 'delete') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const existing = loadAccount(req.orgId, id);
     if (!existing) return reply.status(404).send({ error: 'Not found' });

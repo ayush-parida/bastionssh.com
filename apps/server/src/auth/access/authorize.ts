@@ -3,7 +3,14 @@ import { and, eq } from 'drizzle-orm';
 import type { AccessLevel, AccessReason, ResourceType } from '@smt/shared';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
-import { levelRank, meetsLevel, RESOURCE_LABELS, requiredLevel, type ResourceAction } from './levels.js';
+import {
+  baseAllowsAtView,
+  levelRank,
+  meetsLevel,
+  RESOURCE_LABELS,
+  requiredLevel,
+  type ResourceAction,
+} from './levels.js';
 import { resourceExists } from './filter.js';
 import {
   resolveAccess,
@@ -118,7 +125,10 @@ export function authorize<T extends ResourceType>(
   const required = requiredLevel(type, action);
   const found = levelFor(who, type, id, opts);
   if (!found) return { ok: false, status: 404, level: null, required, via: [] };
-  const ok = meetsLevel(found.level, required);
+  // The base role (scope `all`) keeps what it always allowed at view (levels.ts BASE_VIEW_ACTIONS)
+  const ok =
+    meetsLevel(found.level, required) ||
+    (found.via.some((reason) => reason.kind === 'base') && baseAllowsAtView(type, action));
   return { ok, status: ok ? 200 : 403, level: found.level, required, via: found.via };
 }
 

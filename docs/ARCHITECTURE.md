@@ -857,6 +857,14 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   narrowed to namespaces gives its level in those namespaces only; on the cluster as a whole
   (no namespace asked) it gives `view` at most. A cluster manager below admin may re-route the
   cluster only through a server they can operate, never through an agent.
+- FTP/SFTP connections, storage connections and cloud accounts: lists are filtered with
+  `accessibleFilter`, every by-id route (and FTP/storage diagnostics) is gated with
+  `requireResource` at the §5 level; creating one stays admin-only. The base role (scope
+  `all`) keeps what it always allowed at view — browsing and downloading FTP files,
+  downloading objects (`BASE_VIEW_ACTIONS`) — and pooled FTP sessions are kept where the
+  member may still browse. A manager below admin cannot pick an org SSH key (FTP key auth,
+  a cloud account's import key), re-aim a key-auth connection, or send a stored FTP
+  password to a new endpoint (or with TLS checks off) without entering it again.
 - Until the team and access-request routes write `resource_grants` themselves, triggers from
   migration 0023 mirror `member_server_access` / `member_cluster_access` into personal grants
   (at the member's base-role level, following role changes) and `server_access` into `scope`.

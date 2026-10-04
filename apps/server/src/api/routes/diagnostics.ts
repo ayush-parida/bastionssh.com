@@ -32,9 +32,10 @@ const DIAGNOSE_RATE_LIMIT = {
 /**
  * Step-by-step connectivity checks for saved endpoints: DNS, TCP, the protocol
  * banner (and TLS), the host key, and — only when asked — a login with the
- * stored credentials. Operator and up, like opening a connection; on servers
- * and clusters that is `operate` on the one diagnosed (custom roles spec §5),
- * from the base role or a custom role — 404 when the caller cannot reach it.
+ * stored credentials. Operator and up, like opening a connection; on servers,
+ * clusters, FTP and storage connections that is `operate` on the one diagnosed
+ * (custom roles spec §5), from the base role or a custom role — 404 when the
+ * caller cannot reach it.
  */
 export async function diagnosticsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
@@ -67,7 +68,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/diagnostics/ftp/:id {auth?} */
-  app.post('/ftp/:id', { preHandler: operator, ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
+  app.post('/ftp/:id', { preHandler: requireResource('ftp_connection', 'test'), ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const opts = optionsFor(req);
     const connection = getDb()
@@ -87,7 +88,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   });
 
   /** POST /api/diagnostics/storage/:id {auth?} */
-  app.post('/storage/:id', { preHandler: operator, ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
+  app.post('/storage/:id', { preHandler: requireResource('storage_connection', 'diagnose'), ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const opts = optionsFor(req);
     const connection = getDb()
