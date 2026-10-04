@@ -230,7 +230,7 @@ function statusOf(req: FastifyRequest, row: typeof servers.$inferSelect): Docker
       version: row.dockerVersion,
       apiVersion: row.dockerApiVersion,
     },
-    permissions: permissionsFor(req),
+    permissions: permissionsFor(req, row.id),
   };
 }
 

@@ -382,7 +382,7 @@ export async function kubeRoutes(app: FastifyInstance) {
     const { id } = clusterParams.parse(req.params);
     try {
       const row = kubeCluster(req, id);
-      return { cluster: toCluster(row, namesFor(req.orgId, row)), permissions: kubePermissionsFor(req) };
+      return { cluster: toCluster(row, namesFor(req.orgId, row)), permissions: kubePermissionsFor(req, row.id) };
     } catch (err) {
       return sendKubeError(reply, err);
     }

@@ -267,6 +267,10 @@ export const memberships = sqliteTable(
     // 'restricted' limits operators and viewers to the servers in member_server_access;
     // owners and admins always see every server regardless.
     serverAccess: text('server_access').notNull().default('all'), // all | restricted
+    // 'roles' limits operators and viewers to what their custom roles and personal
+    // grants cover (auth/access/). Mirrors server_access until that is dropped:
+    // a trigger sets it whenever server_access is written.
+    scope: text('scope').notNull().default('all'), // all | roles
     joinedAt: text('joined_at')
       .notNull()
       .$defaultFn(() => new Date().toISOString()),
@@ -639,6 +643,95 @@ export const memberClusterAccess = sqliteTable(
   }),
 );
 
+// ── Custom roles ──────────────────────────────────────────────────────────────
+
+/** A named bundle of resource grants, held by several members (auth/access/). */
+export const roles = sqliteTable(
+  'roles',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    color: text('color'),
+    createdBy: text('created_by').notNull(),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+    updatedAt: text('updated_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    orgNameIdx: uniqueIndex('roles_org_name_idx').on(t.orgId, t.name),
+  }),
+);
+
+/** Who holds a custom role. Null expires_at = permanent; past = no longer counts, swept. */
+export const roleMembers = sqliteTable(
+  'role_members',
+  {
+    roleId: text('role_id')
+      .notNull()
+      .references(() => roles.id, { onDelete: 'cascade' }),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    expiresAt: text('expires_at'),
+    addedBy: text('added_by'),
+    addedAt: text('added_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    roleUserIdx: uniqueIndex('role_members_role_user_idx').on(t.roleId, t.userId),
+    orgUserIdx: index('role_members_org_user_idx').on(t.orgId, t.userId),
+    expiresIdx: index('role_members_expires_idx').on(t.expiresAt),
+  }),
+);
+
+/**
+ * Access to a resource (or every resource of a type, or every server with a
+ * tag) at a level, for a role's members or one user. `resource_id` is not a
+ * foreign key: it points at one of seven tables by `resource_type`. Rows with
+ * a `legacy-` id mirror member_server_access / member_cluster_access (see
+ * migration 0023) and follow the member's base role.
+ */
+export const resourceGrants = sqliteTable(
+  'resource_grants',
+  {
+    id: text('id').primaryKey(),
+    orgId: text('org_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    principalType: text('principal_type').notNull(), // role | user
+    principalId: text('principal_id').notNull(),
+    resourceType: text('resource_type').notNull(), // server | cluster | ftp_connection | storage_connection | cloud_account | saved_command | cron_job
+    selector: text('selector').notNull().default('id'), // id | all | tag
+    resourceId: text('resource_id'), // selector = id
+    tag: text('tag'), // selector = tag (servers only)
+    namespaces: text('namespaces'), // JSON array, clusters only; null = every namespace
+    level: text('level').notNull(), // view | operate | manage
+    // Null = permanent. Past = no longer counts; the expiry sweep deletes it.
+    expiresAt: text('expires_at'),
+    grantedBy: text('granted_by'),
+    reason: text('reason'),
+    createdAt: text('created_at')
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (t) => ({
+    principalIdx: index('resource_grants_principal_idx').on(t.orgId, t.principalType, t.principalId),
+    resourceIdx: index('resource_grants_resource_idx').on(t.resourceType, t.resourceId),
+    expiresIdx: index('resource_grants_expires_idx').on(t.expiresAt),
+  }),
+);
+
 /** A restricted member asking for time-bound access to some servers. */
 export const accessRequests = sqliteTable(
   'access_requests',
@@ -663,6 +756,9 @@ export const accessRequests = sqliteTable(
       .$defaultFn(() => new Date().toISOString()),
     // Pending: when the request lapses undecided. Approved: when the granted access ends.
     expiresAt: text('expires_at').notNull(),
+    // What is asked for: servers (server_ids), or a custom role (role_id)
+    resourceType: text('resource_type').notNull().default('server'), // server | role | any ResourceType
+    roleId: text('role_id').references(() => roles.id, { onDelete: 'cascade' }),
   },
   (t) => ({
     orgStatusIdx: index('access_requests_org_status_idx').on(t.orgId, t.status),

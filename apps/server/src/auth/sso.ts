@@ -470,6 +470,7 @@ export function resolveSsoAccount(provider: SsoProvider, claims: IdTokenClaims):
         suspendedAt: null,
         suspendedBy: null,
         serverAccess: 'all',
+        scope: 'all',
         joinedAt: now,
       };
       db.insert(memberships).values(membership).run();

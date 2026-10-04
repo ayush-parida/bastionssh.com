@@ -69,6 +69,29 @@ export function evictConnection(connectionId: string): void {
   }
 }
 
+/**
+ * Drop a user's pooled sessions after their access is revoked. Scoped to one
+ * org when `orgId` is given; connections in `keepConnectionIds` stay open.
+ * An operation in flight on a dropped session fails. Returns how many closed.
+ */
+export function evictFtpUser(
+  userId: string,
+  scope: { orgId?: string; keepConnectionIds?: Iterable<string> } = {},
+): number {
+  const keep = new Set(scope.keepConnectionIds ?? []);
+  let closed = 0;
+  for (const [key, slot] of pool) {
+    const [orgId, connectionId, owner] = key.split(':');
+    if (owner !== userId) continue;
+    if (scope.orgId && orgId !== scope.orgId) continue;
+    if (connectionId && keep.has(connectionId)) continue;
+    pool.delete(key);
+    closeSlot(slot);
+    closed++;
+  }
+  return closed;
+}
+
 /** Load a connection scoped to the caller's org. */
 export function loadConnection(orgId: string, id: string): FtpConnectionRow {
   const connection = getDb()

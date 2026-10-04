@@ -110,8 +110,8 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     // A shell in a container also needs the Docker exec permission still (role, org setting)
     // …and a shell in a pod the Kubernetes one, plus access to its cluster
     const refused =
-      (owned?.container && !dockerCan(req, 'exec')) ||
-      (owned?.pod && (!kubeCan(req, 'exec') || !canAccessCluster(req, owned.pod.clusterId)));
+      (owned?.container && !dockerCan(req, 'exec', owned.server.id)) ||
+      (owned?.pod && (!kubeCan(req, 'exec', owned.pod.clusterId) || !canAccessCluster(req, owned.pod.clusterId)));
     if ((owned?.server.id && !canAccessServer(req, owned.server.id)) || refused) {
       await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
       socket.close(4404, 'Session not found');

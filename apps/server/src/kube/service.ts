@@ -177,7 +177,7 @@ export async function withKubeClient<T>(req: Caller, clusterId: string, fn: (ctx
       cluster,
       client,
       source: await cacheSourceFor(cluster, req),
-      permissions: kubePermissionsFor(req),
+      permissions: kubePermissionsFor(req, cluster.id),
       settings: kubeSettings(req.orgId),
       allowlist,
       namespaceAllowed: (namespace) => !allowed || !namespace || allowed.has(namespace),

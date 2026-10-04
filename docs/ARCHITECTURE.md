@@ -829,6 +829,34 @@ below.
   alert state is in memory: a restart re-announces alerts still firing under the same
   dedup key.
 
+### 4.17 Custom Roles and the Access Engine (`/server/auth/access`)
+
+Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
+
+- Every member has a base role and a **scope**: `all` (the base role applies to every
+  resource, as before) or `roles` (only what their custom roles and personal grants cover;
+  default deny). Owners and admins have `manage` on everything; roles never grant org-admin
+  features. A resource's level is the highest of the base level (scope `all`), each role and
+  each personal grant covering it: `view < operate < manage` (`levels.ts` maps every action
+  per resource type to the level it needs).
+- `resolve.ts` loads the membership, active role memberships and unexpired grants in three
+  queries, memoized on the request (for at most a second). `authorize.ts` (`levelFor`,
+  `authorize`, `requireResource`) answers 404 when a resource is unreachable and 403 when the
+  level is too low; `filter.ts` gives the SQL fragment (`accessibleFilter`, with server tag
+  selectors matched against `servers.tags` via `json_each` at query time) and the in-memory
+  equivalent; `explain.ts` lists the reasons; `revoke.ts` (`revokeAfterChange`) diffs
+  before/after snapshots and calls `revokeLiveAccess` with keep sets — visible resources keep
+  their streams, shells (terminals, SFTP, pod and container shells) need `operate`, FTP
+  sessions are kept per connection.
+- `auth/server-access.ts` and `auth/cluster-access.ts` keep their exports as wrappers. The
+  Docker and Kubernetes matrices are read at the caller's level on the server or cluster in
+  the route (`operate` as operator with the org toggles, `manage` as admin).
+- Until the team and access-request routes write `resource_grants` themselves, triggers from
+  migration 0023 mirror `member_server_access` / `member_cluster_access` into personal grants
+  (at the member's base-role level, following role changes) and `server_access` into `scope`.
+- The access-grant expiry sweep also removes expired role memberships and grants and closes
+  what they gave.
+
 ---
 
 ## 5. Data Model (Logical)
@@ -856,7 +884,8 @@ User         1───* APIToken
 
 - **organizations** — root tenant scope inside an instance.
 - **users** — global; can belong to multiple orgs.
-- **memberships** — `(user_id, org_id, role)`. Role is one of `owner | admin | operator | viewer`.
+- **memberships** — `(user_id, org_id, role)`. Role is one of `owner | admin | operator | viewer`. `scope` is `all | roles` (§4.17); `server_access` mirrors it for one release.
+- **roles** — custom roles: `name` (unique per org), `description`, `color`. **role_members** — `(role_id, user_id)`, `expires_at`. **resource_grants** — `principal_type` (`role | user`), `principal_id`, `resource_type` (seven types), `selector` (`id | all | tag`), `resource_id`, `tag`, `namespaces` (clusters), `level` (`view | operate | manage`), `expires_at`, `granted_by`, `reason`.
 - **ssh_keys** — `name`, `type`, `public_key`, `encrypted_private_key`, `key_version`, `created_by`.
 - **servers** — `name`, `host`, `port`, `username`, `default_key_id`, `tags[]`, `notes`.
 - **saved_commands** — `server_id` (nullable for org-wide), `name`, `command`, `variables jsonb`, `category`.

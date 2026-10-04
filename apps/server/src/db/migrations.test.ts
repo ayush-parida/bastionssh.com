@@ -1005,3 +1005,245 @@ describe('migration 0022 (kubernetes)', () => {
     expect(columns('organizations')).toContain('kube_settings');
   });
 });
+
+const ROLES_TAG = '0023_custom_roles';
+
+describe('migration 0023 (custom roles)', () => {
+  const PAST = '2000-01-01T00:00:00.000Z';
+  const FUTURE = '2999-01-01T00:00:00.000Z';
+
+  /** Users, an org, two servers and a cluster, on the schema just before 0023. */
+  function seedBefore(db: Database.Database) {
+    db.exec(`
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('op', 'op@x.test', 'Op', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('vw', 'vw@x.test', 'Vw', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('ad', 'ad@x.test', 'Ad', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, joined_at, server_access) VALUES ('op', 'o1', 'operator', 'now', 'restricted');
+      INSERT INTO memberships (user_id, org_id, role, joined_at, server_access) VALUES ('vw', 'o1', 'viewer', 'now', 'all');
+      INSERT INTO memberships (user_id, org_id, role, joined_at, server_access) VALUES ('ad', 'o1', 'admin', 'now', 'restricted');
+      INSERT INTO servers (id, org_id, name, host, username, tags, created_by, created_at, updated_at) VALUES ('s1', 'o1', 'a', 'h', 'root', '[]', 'op', 'now', 'now');
+      INSERT INTO servers (id, org_id, name, host, username, tags, created_by, created_at, updated_at) VALUES ('s2', 'o1', 'b', 'h', 'root', '[]', 'op', 'now', 'now');
+      INSERT INTO kube_clusters (id, org_id, name, api_url, auth_type, encrypted_credential, credential_hint, created_by, created_at, updated_at)
+        VALUES ('k1', 'o1', 'prod', 'https://10.0.0.5:6443', 'token', 'x', 'hint', 'op', 'now', 'now');
+      INSERT INTO member_server_access (org_id, user_id, server_id, expires_at, granted_by, reason, created_at) VALUES ('o1', 'op', 's1', NULL, 'ad', 'on call', '2024-01-01');
+      INSERT INTO member_server_access (org_id, user_id, server_id, expires_at, created_at) VALUES ('o1', 'op', 's2', '${FUTURE}', '2024-01-02');
+      INSERT INTO member_cluster_access (org_id, user_id, cluster_id, expires_at, created_at) VALUES ('o1', 'op', 'k1', '${FUTURE}', '2024-01-03');
+      INSERT INTO member_server_access (org_id, user_id, server_id, created_at) VALUES ('o1', 'vw', 's1', '2024-01-04');
+    `);
+  }
+
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(ROLES_TAG);
+  });
+
+  it('turns restricted members role-scoped and per-member grants into personal grants at the base-role level', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < ROLES_TAG));
+    seedBefore(db);
+    db.exec(`INSERT INTO access_requests (id, org_id, user_id, server_ids, reason, duration_minutes, created_at, expires_at)
+      VALUES ('r1', 'o1', 'op', '["s2"]', 'why', 60, 'now', '${FUTURE}')`);
+
+    apply(db, [ROLES_TAG]);
+
+    expect(db.prepare('SELECT user_id, scope FROM memberships ORDER BY user_id').all()).toEqual([
+      { user_id: 'ad', scope: 'roles' },
+      { user_id: 'op', scope: 'roles' },
+      { user_id: 'vw', scope: 'all' },
+    ]);
+    const grants = db
+      .prepare(
+        'SELECT principal_type, principal_id, resource_type, selector, resource_id, tag, namespaces, level, expires_at, granted_by, reason, created_at FROM resource_grants ORDER BY created_at',
+      )
+      .all();
+    expect(grants).toEqual([
+      { principal_type: 'user', principal_id: 'op', resource_type: 'server', selector: 'id', resource_id: 's1', tag: null, namespaces: null, level: 'operate', expires_at: null, granted_by: 'ad', reason: 'on call', created_at: '2024-01-01' },
+      { principal_type: 'user', principal_id: 'op', resource_type: 'server', selector: 'id', resource_id: 's2', tag: null, namespaces: null, level: 'operate', expires_at: FUTURE, granted_by: null, reason: null, created_at: '2024-01-02' },
+      { principal_type: 'user', principal_id: 'op', resource_type: 'cluster', selector: 'id', resource_id: 'k1', tag: null, namespaces: null, level: 'operate', expires_at: FUTURE, granted_by: null, reason: null, created_at: '2024-01-03' },
+      { principal_type: 'user', principal_id: 'vw', resource_type: 'server', selector: 'id', resource_id: 's1', tag: null, namespaces: null, level: 'view', expires_at: null, granted_by: null, reason: null, created_at: '2024-01-04' },
+    ]);
+    // The old tables are kept for rollback; existing requests are for servers
+    expect(db.prepare('SELECT count(*) AS n FROM member_server_access').get()).toEqual({ n: 3 });
+    expect(db.prepare('SELECT resource_type, role_id FROM access_requests').get()).toEqual({ resource_type: 'server', role_id: null });
+  });
+
+  it('mirrors later writes to the old per-member tables and follows base-role and scope changes', () => {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag));
+    seedBefore(db);
+    const grant = (user: string, id: string) =>
+      db.prepare('SELECT level, expires_at FROM resource_grants WHERE principal_id = ? AND resource_id = ?').get(user, id);
+
+    // Inserted after the migration (as the team routes still do): mirrored at once
+    expect(grant('op', 's1')).toEqual({ level: 'operate', expires_at: null });
+    expect(grant('vw', 's1')).toEqual({ level: 'view', expires_at: null });
+    expect(db.prepare("SELECT scope FROM memberships WHERE user_id = 'op'").get()).toEqual({ scope: 'roles' });
+
+    db.exec(`UPDATE member_server_access SET expires_at = '${PAST}' WHERE user_id = 'op' AND server_id = 's1'`);
+    expect(grant('op', 's1')).toEqual({ level: 'operate', expires_at: PAST });
+
+    // Demoted: mirrored grants mean "the base role here", so they follow it down
+    db.exec("UPDATE memberships SET role = 'viewer' WHERE user_id = 'op'");
+    expect(grant('op', 's2')).toEqual({ level: 'view', expires_at: FUTURE });
+    expect(db.prepare("SELECT level FROM resource_grants WHERE principal_id = 'op' AND resource_type = 'cluster'").get()).toEqual({ level: 'view' });
+
+    db.exec("DELETE FROM member_server_access WHERE user_id = 'op' AND server_id = 's2'");
+    expect(grant('op', 's2')).toBeUndefined();
+
+    db.exec("UPDATE memberships SET server_access = 'all' WHERE user_id = 'op'");
+    expect(db.prepare("SELECT scope FROM memberships WHERE user_id = 'op'").get()).toEqual({ scope: 'all' });
+    db.exec("UPDATE memberships SET server_access = 'restricted' WHERE user_id = 'op'");
+    expect(db.prepare("SELECT scope FROM memberships WHERE user_id = 'op'").get()).toEqual({ scope: 'roles' });
+
+    // A grant goes with its server (cascade on the old table), and everything with the membership
+    db.exec("DELETE FROM servers WHERE id = 's1'");
+    expect(grant('vw', 's1')).toBeUndefined();
+    db.exec(`
+      INSERT INTO roles (id, org_id, name, created_by, created_at, updated_at) VALUES ('r1', 'o1', 'Web', 'ad', 'now', 'now');
+      INSERT INTO role_members (role_id, user_id, org_id, added_at) VALUES ('r1', 'op', 'o1', 'now');
+      INSERT INTO resource_grants (id, org_id, principal_type, principal_id, resource_type, selector, level, created_at)
+        VALUES ('g1', 'o1', 'user', 'op', 'ftp_connection', 'all', 'view', 'now');
+    `);
+    db.exec("DELETE FROM memberships WHERE user_id = 'op'");
+    expect(db.prepare("SELECT count(*) AS n FROM resource_grants WHERE principal_id = 'op'").get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM role_members').get()).toEqual({ n: 0 });
+
+    // Role names are unique per org; members once per role; roles go with the org
+    expect(() =>
+      db.exec("INSERT INTO roles (id, org_id, name, created_by, created_at, updated_at) VALUES ('r2', 'o1', 'Web', 'ad', 'now', 'now')"),
+    ).toThrow(/UNIQUE/);
+    db.exec("DELETE FROM organizations WHERE id = 'o1'");
+    expect(db.prepare('SELECT count(*) AS n FROM roles').get()).toEqual({ n: 0 });
+    expect(db.prepare('SELECT count(*) AS n FROM resource_grants').get()).toEqual({ n: 0 });
+  });
+
+  it("applies through drizzle's migrator on a fresh database", () => {
+    const sqlite = freshDb();
+    migrate(drizzle(sqlite), { migrationsFolder: dir });
+    const columns = (table: string) =>
+      (sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+    expect(columns('roles')).toEqual(expect.arrayContaining(['id', 'org_id', 'name', 'description', 'color', 'created_by']));
+    expect(columns('role_members')).toEqual(expect.arrayContaining(['role_id', 'user_id', 'org_id', 'expires_at', 'added_by', 'added_at']));
+    expect(columns('resource_grants')).toEqual(
+      expect.arrayContaining(['principal_type', 'principal_id', 'resource_type', 'selector', 'resource_id', 'tag', 'namespaces', 'level', 'expires_at']),
+    );
+    expect(columns('memberships')).toContain('scope');
+    expect(columns('access_requests')).toEqual(expect.arrayContaining(['resource_type', 'role_id']));
+  });
+});
+
+describe('migration 0023 keeps every member’s effective access', () => {
+  it('gives each existing member exactly the servers, clusters and Docker/Kubernetes rights they had', async () => {
+    // The app's own database (in memory under test), migrated by hand up to 0022
+    const { getRawDb } = await import('./index.js');
+    const raw = getRawDb();
+    apply(raw, journal.entries.map((e) => e.tag).filter((t) => t < ROLES_TAG));
+
+    const now = Date.now();
+    const soon = new Date(now + 3_600_000).toISOString();
+    const gone = new Date(now - 3_600_000).toISOString();
+    raw.exec(`
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o2', 'Other', 'other', 'now', 'now');
+    `);
+    // owner, admin (restricted is ignored for admins), operators and viewers, restricted or not, one suspended
+    const members: [string, string, string, string][] = [
+      ['owner', 'owner', 'all', 'active'],
+      ['admin', 'admin', 'restricted', 'active'],
+      ['op-all', 'operator', 'all', 'active'],
+      ['op-r', 'operator', 'restricted', 'active'],
+      ['op-r-none', 'operator', 'restricted', 'active'],
+      ['vw-all', 'viewer', 'all', 'active'],
+      ['vw-r', 'viewer', 'restricted', 'active'],
+      ['op-susp', 'operator', 'restricted', 'suspended'],
+    ];
+    for (const [id, role, access, status] of members) {
+      raw.exec(`INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('${id}', '${id}@x.test', '${id}', 'now', 'now')`);
+      raw.exec(`INSERT INTO memberships (user_id, org_id, role, status, server_access, joined_at) VALUES ('${id}', 'o1', '${role}', '${status}', '${access}', 'now')`);
+    }
+    const serverIds = ['s1', 's2', 's3', 's4'];
+    for (const s of serverIds) {
+      raw.exec(`INSERT INTO servers (id, org_id, name, host, username, tags, created_by, created_at, updated_at) VALUES ('${s}', 'o1', '${s}', 'h', 'root', '["web"]', 'owner', 'now', 'now')`);
+    }
+    raw.exec(`INSERT INTO servers (id, org_id, name, host, username, created_by, created_at, updated_at) VALUES ('x1', 'o2', 'x1', 'h', 'root', 'owner', 'now', 'now')`);
+    const clusterIds = ['k1', 'k2'];
+    for (const k of clusterIds) {
+      raw.exec(`INSERT INTO kube_clusters (id, org_id, name, api_url, auth_type, encrypted_credential, credential_hint, created_by, created_at, updated_at)
+        VALUES ('${k}', 'o1', '${k}', 'https://10.0.0.5:6443', 'token', 'x', 'hint', 'owner', 'now', 'now')`);
+    }
+    const grant = (user: string, server: string, expires: string | null) =>
+      raw.exec(`INSERT INTO member_server_access (org_id, user_id, server_id, expires_at, created_at) VALUES ('o1', '${user}', '${server}', ${expires ? `'${expires}'` : 'NULL'}, 'now')`);
+    const clusterGrant = (user: string, cluster: string, expires: string | null) =>
+      raw.exec(`INSERT INTO member_cluster_access (org_id, user_id, cluster_id, expires_at, created_at) VALUES ('o1', '${user}', '${cluster}', ${expires ? `'${expires}'` : 'NULL'}, 'now')`);
+    grant('op-r', 's1', null); // permanent
+    grant('op-r', 's2', soon); // time-bound, still running
+    grant('op-r', 's3', gone); // expired, not yet swept
+    clusterGrant('op-r', 'k1', soon);
+    clusterGrant('op-r', 'k2', gone);
+    grant('vw-r', 's4', null);
+    clusterGrant('vw-r', 'k2', null);
+    grant('op-all', 's1', soon); // left over from when they were restricted
+    grant('admin', 's1', null);
+    grant('op-susp', 's1', null);
+
+    // The rule before custom roles, verbatim: admins and unrestricted members see everything,
+    // restricted ones their unexpired grants, suspended members nothing
+    const nowIso = new Date().toISOString();
+    const before = (userId: string, table: 'member_server_access' | 'member_cluster_access', all: string[]) => {
+      const m = raw.prepare("SELECT role, status, server_access FROM memberships WHERE user_id = ? AND org_id = 'o1'").get(userId) as {
+        role: string;
+        status: string;
+        server_access: string;
+      };
+      if (m.status !== 'active') return [];
+      if (m.role === 'admin' || m.role === 'owner' || m.server_access !== 'restricted') return all;
+      const column = table === 'member_server_access' ? 'server_id' : 'cluster_id';
+      return (raw
+        .prepare(`SELECT ${column} AS id FROM ${table} WHERE org_id = 'o1' AND user_id = ? AND (expires_at IS NULL OR expires_at > ?)`)
+        .all(userId, nowIso) as { id: string }[]).map((r) => r.id);
+    };
+    const expected = new Map(
+      members.map(([id, role]) => [
+        id,
+        { role, servers: before(id, 'member_server_access', serverIds).sort(), clusters: before(id, 'member_cluster_access', clusterIds).sort() },
+      ]),
+    );
+
+    apply(raw, [ROLES_TAG]);
+
+    const { canAccessServer, serverScope, filterAccessible } = await import('../auth/server-access.js');
+    const { canAccessCluster, clusterScope } = await import('../auth/cluster-access.js');
+    const { permissionsFor } = await import('../docker/permissions.js');
+    const { kubePermissionsFor } = await import('../kube/permissions.js');
+    const { dockerPermissions, kubePermissions } = await import('@smt/shared');
+    const { dockerSettings } = await import('../docker/settings.js');
+    const { kubeSettings } = await import('../kube/settings.js');
+
+    for (const [userId, { role, servers, clusters }] of expected) {
+      const who = { orgId: 'o1', userId };
+      expect(serverIds.filter((s) => canAccessServer(who, s)), userId).toEqual(servers);
+      expect(clusterIds.filter((k) => canAccessCluster(who, k)), userId).toEqual(clusters);
+      expect(canAccessServer(who, 'x1'), userId).toBe(false);
+      const scope = serverScope(who);
+      expect(scope.all ? serverIds : [...scope.serverIds].sort(), userId).toEqual(servers);
+      const cScope = clusterScope(who);
+      expect(cScope.all ? clusterIds : [...cScope.clusterIds].sort(), userId).toEqual(clusters);
+      expect(filterAccessible(who, serverIds, (s) => s), userId).toEqual(servers);
+
+      // On every server and cluster they can use, Docker and Kubernetes allow what their role did
+      const req = { orgId: 'o1', role: role as 'viewer', user: { id: userId, email: '', displayName: '' } };
+      for (const s of servers) {
+        expect(permissionsFor(req, s), `${userId} on ${s}`).toEqual(dockerPermissions(role as 'viewer', dockerSettings('o1')));
+      }
+      for (const k of clusters) {
+        expect(kubePermissionsFor(req, k), `${userId} on ${k}`).toEqual(kubePermissions(role as 'viewer', kubeSettings('o1')));
+      }
+    }
+    // Spot checks on the expectations themselves
+    expect(expected.get('op-r')).toMatchObject({ servers: ['s1', 's2'], clusters: ['k1'] });
+    expect(expected.get('vw-r')).toMatchObject({ servers: ['s4'], clusters: ['k2'] });
+    expect(expected.get('admin')).toMatchObject({ servers: serverIds, clusters: clusterIds });
+    expect(expected.get('op-r-none')).toMatchObject({ servers: [], clusters: [] });
+    expect(expected.get('op-susp')).toMatchObject({ servers: [], clusters: [] });
+  });
+});

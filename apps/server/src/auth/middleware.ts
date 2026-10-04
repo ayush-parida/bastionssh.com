@@ -31,6 +31,8 @@ declare module 'fastify' {
     role: Role;
     /** True when the caller authenticated with an API token rather than a session. */
     viaApiToken: boolean;
+    /** An API token without the `write` scope: every resource level is capped at `view` (auth/access/). */
+    apiTokenReadOnly: boolean;
     /** The session cookie that authenticated this request; null for API tokens. */
     sessionId: string | null;
     /** The session signed in or stepped up with a passkey. Always false for API tokens. */
@@ -281,6 +283,7 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   // A token can only narrow what its owner may do, never widen it.
   req.role = scopes ? effectiveRole(membershipRole, scopes) : membershipRole;
   req.viaApiToken = scopes !== null;
+  req.apiTokenReadOnly = !!scopes && !scopes.includes('write');
   req.sessionId = session?.id ?? null;
   req.passkeyVerified = session?.passkeyVerified ?? false;
   req.ssoOrgId = ssoOrgId;
