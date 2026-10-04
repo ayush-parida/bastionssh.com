@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import type { DnsLookupResult } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { accessibleServerFilter } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
@@ -18,8 +19,9 @@ function sendError(reply: FastifyReply, err: unknown) {
 
 export async function dnsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // DNS Lookup & Diagnostics at `view` (unified roles spec §3.2): read-only, so every built-in role but No access has it
+  app.addHook('preHandler', requireModule('diagnostics'));
 
-  // Read-only, so any signed-in role may look a domain up.
   app.get('/lookup', async (req, reply): Promise<DnsLookupResult | undefined> => {
     const { domain } = lookupQuery.parse(req.query);
 

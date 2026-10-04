@@ -35,7 +35,7 @@ import { podQueryFor, toPodTile, toWorkload } from './views.js';
  *   Kubernetes actions; the guided buttons do (K3).
  */
 
-type Caller = Pick<FastifyRequest, 'orgId' | 'user' | 'role'>;
+type Caller = Pick<FastifyRequest, 'orgId' | 'user'> & Partial<Pick<FastifyRequest, 'apiTokenReadOnly'>>;
 type Json = Record<string, unknown>;
 
 /** Events returned by `kube_events` by default, and at most. */

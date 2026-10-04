@@ -425,7 +425,7 @@ describe('passkeys', () => {
       const person = await seedPerson(orgId, 'operator');
       const browser = await seedSession(person.userId);
 
-      const blocked = await get('/api/servers', browser.headers);
+      const blocked = await get('/api/me/modules', browser.headers);
       expect(blocked.statusCode).toBe(403);
       expect(blocked.json().code).toBe('PASSKEY_REQUIRED');
       expect((await get('/api/auth/sessions', browser.headers)).json().code).toBe('PASSKEY_REQUIRED');
@@ -445,13 +445,13 @@ describe('passkeys', () => {
       const person = await seedPerson(orgId, 'operator');
       addPasskey(person.userId);
       const browser = await verifiedSession(person.userId);
-      expect((await get('/api/servers', browser.headers)).statusCode).toBe(200);
+      expect((await get('/api/me/modules', browser.headers)).statusCode).toBe(200);
     });
 
     it('refuses API tokens not minted from a passkey-verified session', async () => {
       const person = await seedPerson(orgId, 'operator');
       // seedUser's token predates any passkey
-      const old = await get('/api/servers', person.headers);
+      const old = await get('/api/me/modules', person.headers);
       expect(old.statusCode).toBe(403);
       expect(old.json()).toMatchObject({ code: 'PASSKEY_REQUIRED', error: expect.stringMatching(/new token/) });
       expect((await get('/api/auth/me', person.headers)).statusCode).toBe(403);
@@ -461,7 +461,7 @@ describe('passkeys', () => {
       const minted = await post('/api/tokens', { name: 'ci', scopes: ['read'] }, browser.headers);
       expect(minted.statusCode).toBe(201);
       expect(minted.json().passkeyVerified).toBe(true);
-      const res = await get('/api/servers', { authorization: `Bearer ${minted.json().token}` });
+      const res = await get('/api/me/modules', { authorization: `Bearer ${minted.json().token}` });
       expect(res.statusCode).toBe(200);
     });
 
@@ -472,7 +472,7 @@ describe('passkeys', () => {
       expect(minted.statusCode).toBe(201);
       expect(minted.json().passkeyVerified).toBe(false);
       const bearer = { authorization: `Bearer ${minted.json().token}` };
-      expect((await get('/api/servers', bearer)).statusCode).toBe(200);
+      expect((await get('/api/me/modules', bearer)).statusCode).toBe(200);
 
       // Moved to a strict org: the same token no longer works
       addMembership(person.userId, orgId, 'operator');
@@ -480,7 +480,7 @@ describe('passkeys', () => {
         .delete(memberships)
         .where(and(eq(memberships.userId, person.userId), eq(memberships.orgId, relaxed)))
         .run();
-      const res = await get('/api/servers', bearer);
+      const res = await get('/api/me/modules', bearer);
       expect(res.statusCode).toBe(403);
       expect(res.json().code).toBe('PASSKEY_REQUIRED');
     });
@@ -492,7 +492,7 @@ describe('passkeys', () => {
       const browser = await seedSession(person.userId);
 
       expect((await post('/api/auth/switch-org', { orgId: relaxed }, browser.headers)).statusCode).toBe(200);
-      expect((await get('/api/servers', browser.headers)).statusCode).toBe(200);
+      expect((await get('/api/me/modules', browser.headers)).statusCode).toBe(200);
       // ...and minting a token there still needs a passkey, since a token is not tied to one org
       const token = await post('/api/tokens', { name: 'ci', scopes: ['read'] }, browser.headers);
       expect(token.statusCode).toBe(403);
@@ -559,7 +559,7 @@ describe('passkeys', () => {
       expect(res.json()).toMatchObject({ passkey: { name: 'MacBook', deviceType: 'multiDevice', backedUp: true }, passkeyVerified: true });
       expect(sessionRow(browser.sessionId)?.passkeyVerified).toBe(true);
       expect(passkeyRows(person.userId)[0]).toMatchObject({ credentialId: 'cred-first', transports: '["internal"]' });
-      expect((await get('/api/servers', browser.headers)).statusCode).toBe(200);
+      expect((await get('/api/me/modules', browser.headers)).statusCode).toBe(200);
 
       // Other password-only sessions are gone; a passkey-verified one stays
       expect(sessionRow(otherUnverified.sessionId)).toBeUndefined();

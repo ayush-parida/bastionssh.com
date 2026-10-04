@@ -26,6 +26,7 @@ import {
   parseModulePermissions,
   TYPE_MODULES,
 } from './levels.js';
+import { reachesAnyFor } from './filter.js';
 
 /**
  * Everything one member may use, loaded once: their membership (status), the
@@ -331,7 +332,39 @@ function load(subject: Subject, now: string): ResolvedAccess {
       push(access.types[type].byTag, grant.tag, contribution);
     }
   }
+
+  // Before modules, the AI assistant was open to anyone who could operate an
+  // existing server or cluster namespace. Members who could only through a
+  // custom role from then (no module permissions) or a personal grant keep
+  // it at `view` (spec §2.6); roles made with modules decide it themselves.
+  if (modules.ai === 'none') {
+    const legacy = new Set([...heldById.values()].filter((r) => r.modulePermissions === null).map((r) => r.roleId));
+    if (operatesThrough(access, (c) => c.reason.kind === 'grant' || (c.reason.kind === 'role' && legacy.has(c.reason.roleId!)))) {
+      modules.ai = 'view';
+      access.modules = readOnly ? capped(modules) : modules;
+    }
+  }
   return access;
+}
+
+/**
+ * True when the contributions `from` picks reach at least one existing server,
+ * or cluster namespace, at `operate` (filter.ts `reachesAnyFor` on just those).
+ */
+function operatesThrough(access: ResolvedAccess, from: (c: Contribution) => boolean): boolean {
+  const pick = (list: Contribution[]) => list.filter((c) => from(c) && levelRank(c.level) >= levelRank('operate'));
+  const only = (map: Map<string, Contribution[]>) =>
+    new Map([...map].map(([key, list]) => [key, pick(list)] as const).filter(([, list]) => list.length));
+  const types = emptyTypes();
+  let any = false;
+  for (const type of ['server', 'cluster'] as const) {
+    const t = access.types[type];
+    types[type] = { every: pick(t.every), byId: only(t.byId), byTag: only(t.byTag) };
+    any ||= types[type].every.length > 0 || types[type].byId.size > 0 || types[type].byTag.size > 0;
+  }
+  if (!any) return false;
+  const narrowed: ResolvedAccess = { ...access, types, memo: new Map() };
+  return reachesAnyFor(narrowed, 'server', 'operate') || reachesAnyFor(narrowed, 'cluster', 'operate');
 }
 
 /** The subject's access, memoized for the request (see the module comment). */

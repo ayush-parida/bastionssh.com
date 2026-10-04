@@ -141,14 +141,16 @@ describe('kube routes', () => {
 
   describe('settings', () => {
     it('lets everyone read them and owners and admins change them, audited', async () => {
-      expect((await get(viewer, '/api/kube/settings')).json()).toEqual({
+      expect((await get(owner, '/api/kube/settings')).json()).toEqual({
         operatorsCanExec: true,
         operatorsCanDeletePods: true,
         operatorsCanScale: true,
         showConfigMapValues: true,
         clusterAlerts: false,
       });
-      expect((await send(operator, 'PATCH', '/api/kube/settings', { operatorsCanExec: false })).statusCode).toBe(403);
+      // No cluster yet: Kubernetes is hidden from viewers and operators (unified roles spec §3.1)
+      expect((await get(viewer, '/api/kube/settings')).statusCode).toBe(404);
+      expect((await send(operator, 'PATCH', '/api/kube/settings', { operatorsCanExec: false })).statusCode).toBe(404);
       const res = await send(owner, 'PATCH', '/api/kube/settings', { operatorsCanExec: false });
       expect(res.json()).toMatchObject({ operatorsCanExec: false });
       expect(audited('org.kube_settings')).toHaveLength(1);
@@ -164,15 +166,21 @@ describe('kube routes', () => {
       expect((res.json() as KubeconfigSummary).contexts).toEqual([
         expect.objectContaining({ name: 'fake', authType: 'token', hasCa: true, problem: null }),
       ]);
-      expect((await send(operator, 'POST', '/api/kube/kubeconfig/contexts', { kubeconfig: fakeKubeconfig(api) })).statusCode).toBe(403);
+      // Hidden from operators while there is no cluster to see
+      expect((await send(operator, 'POST', '/api/kube/kubeconfig/contexts', { kubeconfig: fakeKubeconfig(api) })).statusCode).toBe(404);
     });
 
     it('lets only admins add a cluster, and never returns the credential', async () => {
       for (const who of [viewer, operator]) {
-        expect((await send(who, 'POST', '/api/kube/clusters', { kubeconfig: fakeKubeconfig(api) })).statusCode).toBe(403);
+        expect((await send(who, 'POST', '/api/kube/clusters', { kubeconfig: fakeKubeconfig(api) })).statusCode).toBe(404);
       }
       const res = await send(admin, 'POST', '/api/kube/clusters', { name: 'prod', kubeconfig: fakeKubeconfig(api, { namespace: 'shop' }) });
       expect(res.statusCode).toBe(201);
+      // Once they see a cluster the module is shown, and adding one needs Kubernetes at `manage`
+      for (const who of [viewer, operator]) {
+        expect((await send(who, 'POST', '/api/kube/clusters', { kubeconfig: fakeKubeconfig(api) })).statusCode).toBe(403);
+        expect((await send(who, 'PATCH', '/api/kube/settings', { operatorsCanExec: false })).statusCode).toBe(403);
+      }
       const cluster = res.json() as KubeCluster;
       clusterId = cluster.id;
       expect(cluster).toMatchObject({
@@ -381,7 +389,8 @@ describe('kube routes', () => {
     });
 
     it('hides clusters from restricted members and other orgs as not found', async () => {
-      expect((await get(restricted, '/api/kube/clusters')).json()).toEqual([]);
+      // Seeing no cluster, Kubernetes is hidden from them altogether
+      expect((await get(restricted, '/api/kube/clusters')).statusCode).toBe(404);
       expect((await get(restricted, c())).statusCode).toBe(404);
       expect((await get(restricted, c('/overview'))).statusCode).toBe(404);
       expect((await get(restricted, c('/stream?view=overview'))).statusCode).toBe(404);

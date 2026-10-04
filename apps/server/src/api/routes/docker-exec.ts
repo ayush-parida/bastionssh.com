@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DockerExecSession } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { audit, auditActorOf, auditAs } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { startTerminalRecording } from '../../recordings/index.js';
@@ -46,6 +47,8 @@ const execSchema = z
 
 export async function dockerExecRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Docker on one server is the server's Docker tab: the Servers module (unified roles spec §3.1)
+  app.addHook('preHandler', requireModule('servers'));
 
   /** POST /servers/:id/containers/:cid/exec `{ cmd?, user?, tty?, cols, rows }` → a terminal session. */
   app.post('/servers/:id/containers/:cid/exec', { preHandler: requireDocker('exec') }, async (req, reply) => {

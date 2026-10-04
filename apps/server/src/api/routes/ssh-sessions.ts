@@ -1,6 +1,8 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
+import { hasModule } from '../../auth/access/modules.js';
+import { requireAnyModule } from '../../auth/access/any-module.js';
 import { canOnServer, serverDenial } from '../../auth/server-access.js';
 import { SSHBroker } from '../../ssh/broker.js';
 import { getDb } from '../../db/index.js';
@@ -23,6 +25,9 @@ const createSessionSchema = z.object({
 
 export async function sshSessionRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Shells on servers and in containers are the Servers module, in pods Kubernetes (unified
+  // roles spec §3.1): one of them must be on, and each route checks its own
+  app.addHook('preHandler', requireAnyModule(['servers', 'kubernetes']));
   // Every route here opens or drives an interactive shell, which needs `operate` on its
   // server (custom roles spec §5) — from the base role or a custom role — checked per route
 
@@ -31,6 +36,7 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     const body = createSessionSchema.parse(req.body);
     const db = getDb();
 
+    if (!hasModule(req, 'servers')) return reply.status(404).send({ error: 'Server not found' });
     const denied = serverDenial(req, body.serverId, 'terminal');
     if (denied) return reply.status(denied.status).send({ error: denied.error });
     const server = db
@@ -107,12 +113,15 @@ export async function sshSessionRoutes(app: FastifyInstance) {
     const owned = SSHBroker.getSessionForUser(id, req.user.id, req.orgId);
     // A server shell needs `operate` on the server still; a shell in a container the
     // Docker exec permission at the caller's level there (role, org setting), and a
-    // shell in a pod the Kubernetes one in the pod's namespace (none there: refused)
+    // shell in a pod the Kubernetes one in the pod's namespace (none there: refused).
+    // Each also needs its module on: Kubernetes for pods, Servers for the rest
     const refused = owned?.pod
-      ? !kubeCan(req, 'exec', owned.pod.clusterId, owned.pod.namespace)
-      : owned?.container
-        ? !canOnServer(req, owned.server.id, 'view') || !dockerCan(req, 'exec', owned.server.id)
-        : !!owned && !canOnServer(req, owned.server.id, 'terminal');
+      ? !hasModule(req, 'kubernetes') || !kubeCan(req, 'exec', owned.pod.clusterId, owned.pod.namespace)
+      : !!owned &&
+        (!hasModule(req, 'servers') ||
+          (owned.container
+            ? !canOnServer(req, owned.server.id, 'view') || !dockerCan(req, 'exec', owned.server.id)
+            : !canOnServer(req, owned.server.id, 'terminal')));
     if (refused) {
       await SSHBroker.close(id, { userId: req.user.id, orgId: req.orgId });
       socket.close(4404, 'Session not found');

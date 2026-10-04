@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
 import { authorize, accessibleIds, type ResourceAction } from '../../auth/access/index.js';
 import {
@@ -136,6 +137,7 @@ function mayRewriteCommand(req: FastifyRequest, reply: FastifyReply, commandId: 
 
 export async function savedCommandRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('saved_commands'));
 
   app.get('/', async (req) => {
     const db = getDb();

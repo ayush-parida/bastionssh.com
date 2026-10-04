@@ -4,7 +4,8 @@ import type { Readable } from 'node:stream';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { STORAGE_PROVIDERS, type StorageConnection, type StorageProvider } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
@@ -115,6 +116,7 @@ function publicConnection(orgId: string, id: string): StorageConnection | undefi
 
 export async function storageRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('storage'));
 
   // Uploads arrive as a raw body so large objects never buffer in memory.
   app.addContentTypeParser('application/octet-stream', (_req, payload, done) => {
@@ -144,7 +146,7 @@ export async function storageRoutes(app: FastifyInstance) {
     return connection;
   });
 
-  app.post('/connections', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/connections', { preHandler: requireModule('storage', 'manage') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
     try {
       const endpoint = resolveEndpoint(body.provider, body.endpoint);

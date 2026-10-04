@@ -59,6 +59,15 @@ export function roleForLevel(level: AccessLevel): Role {
 }
 
 /**
+ * `roleForLevel` for a module level: the matrix that applies where no single
+ * resource is asked about (the container fleet, adding a cluster). Off reads
+ * as the least, a viewer; the module's own gate answers 404 first.
+ */
+export function roleForModuleLevel(level: ModuleLevel): Role {
+  return roleForLevel(level === 'none' ? 'view' : level);
+}
+
+/**
  * The level each action needs, per resource type (spec §5). Dependent objects
  * follow their parent: Docker, recordings, diagnostics and host keys are
  * server actions; Kubernetes views and actions are cluster actions.

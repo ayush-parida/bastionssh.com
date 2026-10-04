@@ -11,6 +11,7 @@ import {
   type KubePodShellTarget,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { audit, auditActorOf, auditAs } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { startTerminalRecording } from '../../recordings/index.js';
@@ -99,6 +100,7 @@ function containerState(pod: KubeObject, container: string): { running?: unknown
 
 export async function kubePodRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   /** GET /clusters/:id/pods/:ns/:name — containers as lanes, lifecycle, usage against requests and limits. */
   app.get('/clusters/:id/pods/:ns/:name', { preHandler: requireKube('view', 'param') }, async (req, reply) => {

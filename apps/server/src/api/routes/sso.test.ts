@@ -519,7 +519,7 @@ describe('single sign-on (OIDC)', () => {
       const me = await app.inject({ method: 'GET', url: '/api/auth/me', headers: browser.headers });
       expect(me.statusCode).toBe(403);
       expect(me.json().code).toBe('SSO_REQUIRED');
-      const servers = await app.inject({ method: 'GET', url: '/api/servers', headers: browser.headers });
+      const servers = await app.inject({ method: 'GET', url: '/api/me/modules', headers: browser.headers });
       expect(servers.statusCode).toBe(403);
       const logout = await app.inject({ method: 'POST', url: '/api/auth/logout', headers: browser.headers });
       expect(logout.statusCode).toBe(200);
@@ -529,7 +529,7 @@ describe('single sign-on (OIDC)', () => {
       const member = await seedPerson(org.orgId, 'operator');
       const signed = await ssoSignIn(org.slug, 'sub-enforced', member.email);
       expect(signed.error).toBeNull();
-      const servers = await app.inject({ method: 'GET', url: '/api/servers', headers: signed.headers });
+      const servers = await app.inject({ method: 'GET', url: '/api/me/modules', headers: signed.headers });
       expect(servers.statusCode).toBe(200);
     });
 
@@ -544,14 +544,14 @@ describe('single sign-on (OIDC)', () => {
       const cookie = { cookie: `smt_session=${res.cookies.find((c) => c.name === 'smt_session')!.value}` };
       const switched = await app.inject({ method: 'POST', url: '/api/auth/switch-org', headers: cookie, payload: { orgId: org.orgId } });
       expect(switched.statusCode).toBe(200);
-      const after = await app.inject({ method: 'GET', url: '/api/servers', headers: cookie });
+      const after = await app.inject({ method: 'GET', url: '/api/me/modules', headers: cookie });
       expect(after.statusCode).toBe(403);
       expect(after.json().code).toBe('SSO_REQUIRED');
     });
 
     it('leaves API tokens alone', async () => {
       const member = await seedPerson(org.orgId, 'operator');
-      const res = await app.inject({ method: 'GET', url: '/api/servers', headers: member.headers });
+      const res = await app.inject({ method: 'GET', url: '/api/me/modules', headers: member.headers });
       expect(res.statusCode).toBe(200);
     });
   });
@@ -652,7 +652,7 @@ describe('single sign-on (OIDC)', () => {
       getDb().update(organizations).set({ requirePasskey: true }).where(eq(organizations.id, orgId)).run();
 
       const plain = await ssoSignIn(slug, 'sub-pk1', `${nanoid(8).toLowerCase()}@corp.test`, { claims: { amr: ['pwd', 'mfa'] } });
-      const blocked = await app.inject({ method: 'GET', url: '/api/servers', headers: plain.headers });
+      const blocked = await app.inject({ method: 'GET', url: '/api/me/modules', headers: plain.headers });
       expect(blocked.statusCode).toBe(403);
       expect(blocked.json().code).toBe('PASSKEY_REQUIRED');
       // A fresh SSO-only account may enroll its first passkey (no password to ask for)
@@ -666,7 +666,7 @@ describe('single sign-on (OIDC)', () => {
 
       const hwk = await ssoSignIn(slug, 'sub-pk2', `${nanoid(8).toLowerCase()}@corp.test`, { claims: { amr: ['hwk', 'mfa'] } });
       expect(getDb().select().from(sessions).where(eq(sessions.id, hwk.session!)).get()!.passkeyVerified).toBe(true);
-      expect((await app.inject({ method: 'GET', url: '/api/servers', headers: hwk.headers })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'GET', url: '/api/me/modules', headers: hwk.headers })).statusCode).toBe(200);
     });
 
     it('give a password-less account no backup codes, which only finish a password sign-in', async () => {

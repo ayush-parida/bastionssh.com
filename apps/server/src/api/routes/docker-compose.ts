@@ -3,6 +3,7 @@ import type { IncomingMessage } from 'node:http';
 import { z } from 'zod';
 import { DOCKER_COMPOSE_VERBS, type DockerComposeProject, type DockerComposeVerb, type DockerLogLine } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { audit } from '../../audit/index.js';
 import { boolQuery } from '../query.js';
 import { DockerError } from '../../docker/errors.js';
@@ -139,6 +140,8 @@ function mergeLogs(
 
 export async function dockerComposeRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Docker on one server is the server's Docker tab: the Servers module (unified roles spec §3.1)
+  app.addHook('preHandler', requireModule('servers'));
 
   /** GET /servers/:id/compose — projects with their services and state. */
   app.get('/servers/:id/compose', { preHandler: requireDocker('view') }, async (req, reply) => {

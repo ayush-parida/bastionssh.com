@@ -171,8 +171,8 @@ describe('custom roles and resource access', () => {
         { resourceType: 'cluster', selector: 'id', resourceId: shop, namespaces: ['shop'], level: 'view' },
       ]);
       const alice = await roleScoped('viewer');
-      const nobody = (await as(alice).get('/api/servers')).json() as { id: string }[];
-      expect(nobody).toHaveLength(0);
+      // Seeing no server, the Servers module is hidden from her (unified roles spec §3.1)
+      expect((await as(alice).get('/api/servers')).statusCode).toBe(404);
 
       const added = await as(admin).post(`/api/team/roles/${role.id}/members`, { userId: alice.userId });
       expect(added.statusCode).toBe(201);
@@ -290,7 +290,7 @@ describe('custom roles and resource access', () => {
         before: { scope: 'all' },
         after: { scope: 'roles' },
       });
-      expect((await as(erin).get('/api/servers')).json()).toHaveLength(0);
+      expect((await as(erin).get('/api/servers')).statusCode).toBe(404);
     });
 
     it('audits base-role and old-endpoint access changes with before and after', async () => {

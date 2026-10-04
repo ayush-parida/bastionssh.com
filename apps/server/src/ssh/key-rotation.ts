@@ -5,6 +5,8 @@ import { getDb } from '../db/index.js';
 import { cloudAccounts, ftpConnections, keyRotations, servers, sshKeys } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import { auditAs, type AuditActor } from '../audit/index.js';
+import { authorize } from '../auth/access/authorize.js';
+import { hasModule } from '../auth/access/modules.js';
 import { execOnServer } from './broker.js';
 import { generateKeyPair } from './keygen.js';
 import { evictServer } from './sftp.js';
@@ -453,7 +455,10 @@ export interface RotateOptions {
 /**
  * Run a queued rotation to the end and return the final record. Never throws
  * for a failed rotation — the outcome is on the record — so a batch can carry
- * on with the next server.
+ * on with the next server. A queued rotation runs only while whoever asked
+ * for it may still rotate keys there — the Servers module and `manage` on the
+ * server (unified roles spec §7) — since a bulk batch may start long after
+ * the request was checked.
  */
 export async function runRotation(
   rotationId: string,
@@ -465,6 +470,14 @@ export async function runRotation(
   if (!initial) throw new KeyRotationError('Rotation not found', 404);
   if (initial.status !== 'pending' || !initial.serverId) return rotationView(initial);
   const serverId = initial.serverId;
+  const asker = { orgId: initial.orgId, userId: actor.userId };
+  if (!hasModule(asker, 'servers') || !authorize(asker, 'server', serverId, 'rotate_keys').ok) {
+    db.update(keyRotations)
+      .set({ status: 'failed', error: 'Whoever asked for this rotation can no longer rotate keys on this server', finishedAt: new Date().toISOString() })
+      .where(eq(keyRotations.id, rotationId))
+      .run();
+    return rotationView(loadRotation(rotationId)!);
+  }
   if (running.has(serverId)) {
     db.update(keyRotations)
       .set({ status: 'failed', error: 'Another rotation of this server is running', finishedAt: new Date().toISOString() })

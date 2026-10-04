@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import type { Readable } from 'node:stream';
 import posix from 'node:path/posix';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { requireServer, serverDenial } from '../../auth/server-access.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
@@ -42,6 +43,8 @@ function sendError(reply: FastifyReply, err: unknown) {
 
 export async function sftpRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Files on a server are part of the Servers module (unified roles spec §3.1)
+  app.addHook('preHandler', requireModule('servers'));
   // Reading and writing files alike need `operate` on the server (custom roles spec §5):
   // 404 when the caller cannot reach it, 403 when they only see it
   app.addHook('preHandler', requireServer('sftp', 'serverId'));

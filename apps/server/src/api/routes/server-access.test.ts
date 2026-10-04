@@ -278,7 +278,8 @@ describe('per-server access', () => {
         headers: admin.headers,
         payload: { serverAccess: 'restricted', serverIds: [] },
       });
-      expect((await as(empty).get('/api/servers')).json()).toEqual([]);
+      // Seeing no server, the Servers module is hidden from them (unified roles spec §3.1)
+      expect((await as(empty).get('/api/servers')).statusCode).toBe(404);
       const members = (await as(admin).get('/api/team/members')).json();
       const row = members.find((m: { userId: string }) => m.userId === restricted.userId);
       expect(row).toMatchObject({ serverAccess: 'restricted', serverCount: 1 });

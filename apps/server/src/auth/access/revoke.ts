@@ -2,8 +2,11 @@ import { eq } from 'drizzle-orm';
 import { RESOURCE_TYPES, type ResourceType } from '@smt/shared';
 import { getDb } from '../../db/index.js';
 import { closeDisallowedPodShells } from '../../kube/exec.js';
+import { abortAgentStreams } from '../../ai/streams.js';
+import { abortAiEventStreams } from '../../api/sse.js';
 import { revokeLiveAccess, type LiveAccessRevoked, type LiveAccessScope } from '../revoke.js';
 import { accessibleIds, RESOURCE_TABLES, type AccessibleIds } from './filter.js';
+import { moduleLevel } from './modules.js';
 import type { AccessSubject } from './resolve.js';
 
 /**
@@ -16,7 +19,10 @@ import type { AccessSubject } from './resolve.js';
  * per-type sets cannot show: a grant narrowed to `shop` operates there and
  * nowhere else, and narrowing it further changes no set at all. Pooled
  * FTP/SFTP-connection sessions follow browsing, which is `view`, so they stay
- * open on every connection the member still sees.
+ * open on every connection the member still sees. Module-scoped live features
+ * close with their module (unified roles spec §7): AI assistant streams once
+ * the member's AI Assistant module is off. A resource module turned off parks
+ * that module's grants, so its resources show up as lost above.
  *
  *   const before = snapshotAccess(orgId, userIds);
  *   …change roles, grants, memberships or scope…
@@ -105,12 +111,17 @@ export function revokeAfterChange(
     const previous = before?.get(userId);
     // Pod shells in a namespace the member no longer operates in, whatever the sets say
     const podShells = closeDisallowedPodShells(orgId, userId);
+    // AI streams (chat, Kubernetes Explain) of a member whose AI Assistant module is now off, whatever else they keep
+    const aiStreams =
+      moduleLevel({ orgId, userId }, 'ai') === 'none'
+        ? abortAgentStreams(userId, { orgId }) + abortAiEventStreams(userId, orgId)
+        : 0;
     if (previous ? lostAccess(previous, after).length === 0 : unrestricted(after)) {
-      if (podShells) closed.set(userId, { terminals: podShells, sftp: 0, docker: 0, kube: 0, agents: 0 });
+      if (podShells || aiStreams) closed.set(userId, { terminals: podShells, sftp: 0, docker: 0, kube: 0, agents: aiStreams });
       continue;
     }
     const revoked = revokeLiveAccess(userId, keepSets(orgId, after));
-    closed.set(userId, podShells ? { ...revoked, terminals: revoked.terminals + podShells } : revoked);
+    closed.set(userId, { ...revoked, terminals: revoked.terminals + podShells, agents: revoked.agents + aiStreams });
   }
   return closed;
 }

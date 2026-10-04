@@ -12,7 +12,8 @@ import type {
   KubeTestResult,
   KubeconfigSummary,
 } from '@smt/shared';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { hasModule, requireModule } from '../../auth/access/modules.js';
 import { authorize } from '../../auth/access/authorize.js';
 import { clusterNamespaces, filterAccessibleClusters, grantedNamespaces } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
@@ -330,27 +331,27 @@ async function connectionFor(req: FastifyRequest, body: ClusterInput, existing: 
 }
 
 /**
- * A cluster's `manage` level may come from a custom role rather than the
- * admin base role (custom roles spec §5). Such a member may edit the cluster,
- * but not borrow what only admins hold to do it: pointing the cluster at a
- * route through a server — a new server, or a new address behind the same
- * one — needs `operate` on that server (it tunnels through the server's
- * SSH), and through an agent it stays admin-only, as agents are.
+ * Whoever adds, edits or tests a cluster — with the Kubernetes module at
+ * `manage`, or `manage` on the cluster from a grant — may not borrow what
+ * they do not hold to do it (unified roles spec §4.2): pointing the cluster
+ * at a route through a server — a new server, or a new address behind the
+ * same one — needs `operate` on that server (it tunnels through the server's
+ * SSH), and through an agent the Agents module at `manage`. A new cluster
+ * (`existing` null) is a new route throughout.
  */
 function checkRouteChange(
   req: FastifyRequest,
-  existing: ClusterRow,
+  existing: ClusterRow | null,
   conn: Awaited<ReturnType<typeof connectionFor>>,
 ): void {
-  if (rank(req.role) >= rank('admin')) return;
-  const moved = conn.apiUrl !== existing.apiUrl;
+  const moved = !existing || conn.apiUrl !== existing.apiUrl;
   if (conn.viaServerId && (moved || conn.viaServerId !== existing.viaServerId)) {
     const result = authorize(req, 'server', conn.viaServerId, 'terminal');
     if (result.status === 404) throw new KubeError('Server not found', 404);
     if (!result.ok) throw new KubeError('Routing a cluster through a server needs operate access to that server', 403);
   }
-  if (conn.viaAgentId && (moved || conn.viaAgentId !== existing.viaAgentId)) {
-    throw new KubeError('Only admins can route a cluster through an agent', 403);
+  if (conn.viaAgentId && (moved || conn.viaAgentId !== existing.viaAgentId) && !hasModule(req, 'agents', 'manage')) {
+    throw new KubeError('Routing a cluster through an agent needs manage access to Agents', 403);
   }
 }
 
@@ -390,14 +391,15 @@ const TEST_RATE_LIMIT = {
 
 export async function kubeRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   // ── Org settings ──────────────────────────────────────────────
 
-  /** The org's Kubernetes permissions. Every member may read them — the UI hides what they cannot do. */
+  /** The org's Kubernetes permissions. Every member with Kubernetes may read them — the UI hides what they cannot do. */
   app.get('/settings', async (req): Promise<KubeSettings> => kubeSettings(req.orgId));
 
-  /** Owners and admins: what operators may do, and whether ConfigMap values are shown. */
-  app.patch('/settings', { preHandler: requireRole('admin') }, async (req): Promise<KubeSettings> => {
+  /** Kubernetes at `manage`: what operators may do, and whether ConfigMap values are shown. */
+  app.patch('/settings', { preHandler: requireModule('kubernetes', 'manage') }, async (req): Promise<KubeSettings> => {
     const body = settingsSchema.parse(req.body);
     const before = kubeSettings(req.orgId);
     const after = updateKubeSettings(req.orgId, body);
@@ -458,6 +460,7 @@ export async function kubeRoutes(app: FastifyInstance) {
     const body = clusterInputSchema.parse(req.body);
     try {
       const conn = await connectionFor(req, body, null);
+      checkRouteChange(req, null, conn);
       if (!conn.name) throw new KubeError('Give the cluster a name', 400);
       const id = nanoid();
       const now = new Date().toISOString();
@@ -571,6 +574,7 @@ export async function kubeRoutes(app: FastifyInstance) {
     const body = clusterInputSchema.parse(req.body ?? {});
     try {
       const conn = await connectionFor(req, body, null);
+      checkRouteChange(req, null, conn);
       const result = await runTest(req, conn);
       await audit(req, 'kube_cluster.test', 'kube_cluster', undefined, conn.name ?? conn.apiUrl, {
         apiUrl: conn.apiUrl,
@@ -596,6 +600,7 @@ export async function kubeRoutes(app: FastifyInstance) {
       const existing = kubeCluster(req, id);
       const edits = Object.keys(body).length > 0;
       const conn = await connectionFor(req, body, existing);
+      if (edits) checkRouteChange(req, existing, conn);
       const result = await runTest(req, conn);
       if (!edits) {
         const failed = result.steps.find((s) => s.status === 'fail');

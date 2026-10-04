@@ -17,6 +17,7 @@ import {
   type KubeWorkloadList,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { canAccessCluster } from '../../auth/cluster-access.js';
 import { snapshotKube, subscribeKube, type CacheSubscription, type ScopeSpec } from '../../kube/cache.js';
 import type { KubeObject } from '../../kube/client.js';
@@ -192,6 +193,7 @@ function related(ref: Omit<KubeObjectRef, 'kind'> & { kind?: string }, relation:
 
 export async function kubeViewRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   /** GET /clusters/:id/overview — the cluster map: nodes with their pods, and pods waiting for a node. */
   app.get('/clusters/:id/overview', { preHandler: requireKube('view') }, async (req, reply) => {

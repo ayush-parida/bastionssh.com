@@ -172,7 +172,8 @@ describe('AI chat command approval', () => {
     const id = `call-${agent.nextId}`;
     expect((await decide(id, colleague.headers, true)).statusCode).toBe(404);
     expect((await decide(id, outsider.headers, true)).statusCode).toBe(404);
-    expect((await decide(id, viewer.headers, true)).statusCode).toBe(403);
+    // Viewers have no AI Assistant module: its routes are not there for them
+    expect((await decide(id, viewer.headers, true)).statusCode).toBe(404);
     expect(pendingApprovalCount()).toBe(1);
 
     expect((await decide(id, operator.headers, true)).statusCode).toBe(200);
@@ -435,14 +436,13 @@ describe('AI chat for members raised by custom roles', () => {
     const plainViewer = seedUser(orgId, 'viewer');
     agent.script = [];
     for (const who of [viewing, dangling, plainViewer]) {
-      // The web hides the assistant from them
+      // Without the AI Assistant module the assistant is not there for them (unified roles spec §3.2)
       const access = await app.inject({ method: 'GET', url: '/api/ai/access', headers: who.headers });
-      expect(access.json()).toEqual({ chat: false });
+      expect(access.statusCode).toBe(404);
       const res = await chat(who.headers);
-      expect(res.statusCode).toBe(403);
-      expect(res.json().error).toMatch(/operate access/);
+      expect(res.statusCode).toBe(404);
       const decided = await app.inject({ method: 'POST', url: '/api/ai/approvals/x', headers: who.headers, payload: { approved: true } });
-      expect(decided.statusCode).toBe(403);
+      expect(decided.statusCode).toBe(404);
     }
     expect(agent.messages).toEqual([]);
   });

@@ -19,6 +19,8 @@ vi.mock('../recordings/index.js', () => ({
 }));
 vi.mock('../ssh/credentials.js', () => ({ resolveServerAuth: credentials.resolveServerAuth }));
 vi.mock('../db/index.js', () => ({ getDb: vi.fn() }));
+// The AI Assistant module is on here; ai.test.ts covers turning it off mid-conversation
+vi.mock('./access.js', () => ({ canUseAssistant: () => true, ASSISTANT_OFF: 'off' }));
 vi.mock('../auth/server-access.js', () => ({
   canAccessServer: access.canAccessServer,
   canOnServer: access.canOnServer,

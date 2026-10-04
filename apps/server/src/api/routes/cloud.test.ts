@@ -111,7 +111,8 @@ describe('cloud account routes', () => {
       headers: viewer.headers,
       payload: hetznerBody,
     });
-    expect(res.statusCode).toBe(403);
+    // With no account to see, Cloud Accounts is hidden from them (unified roles spec §3.1)
+    expect(res.statusCode).toBe(404);
   });
 
   it('rejects credentials the provider refuses, before storing anything', async () => {
@@ -209,8 +210,9 @@ describe('cloud account routes', () => {
     roleWith([byAppTag], { resourceType: 'server', level: 'view', selector: 'tag', tag: 'cloud:hetzner' });
     const web = getDb().select().from(servers).where(eq(servers.cloudInstanceId, 'h1')).get()!;
 
+    // Seeing no server, they do not have the Servers module shown at all
     const hidden = await app.inject({ method: 'GET', url: '/api/servers', headers: byProviderTag.headers });
-    expect(hidden.json()).toEqual([]);
+    expect(hidden.statusCode).toBe(404);
     const direct = await app.inject({ method: 'GET', url: `/api/servers/${web.id}`, headers: byProviderTag.headers });
     expect(direct.statusCode).toBe(404);
 

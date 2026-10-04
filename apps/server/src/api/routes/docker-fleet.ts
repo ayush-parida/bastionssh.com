@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { DockerFleetResponse } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { requireDocker } from '../../docker/permissions.js';
 import { fleetContainers } from '../../docker/fleet.js';
 import { boolQuery } from '../query.js';
@@ -32,6 +33,8 @@ const fleetQuery = z.object({
 
 export async function dockerFleetRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Containers across servers: the Containers module (unified roles spec §3.1)
+  app.addHook('preHandler', requireModule('containers'));
 
   /** GET /containers?serverIds=a,b&all=1 — partial results, one row per server with its error. */
   app.get('/containers', { preHandler: requireDocker('view') }, async (req, reply): Promise<DockerFleetResponse> => {

@@ -12,6 +12,7 @@ import {
   type KubeStorageView,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { snapshotKube } from '../../kube/cache.js';
 import type { KubeClient, KubeObject } from '../../kube/client.js';
 import { KubeError } from '../../kube/errors.js';
@@ -176,6 +177,7 @@ async function withLogTails(ctx: KubeContext, diagnoses: KubeDiagnosis[], pods: 
 
 export async function kubeGraphRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   /** GET /clusters/:id/graph?namespace= — the app topology: nodes coloured by health, edges from real relationships. */
   app.get('/clusters/:id/graph', { preHandler: requireKube('view') }, async (req, reply) => {

@@ -11,6 +11,7 @@ import {
   type DockerPruneResult,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { passkeyCount, requireBrowserSession, STEP_UP_MESSAGE } from '../../auth/passkey.js';
 import { audit } from '../../audit/index.js';
 import { boolQuery } from '../query.js';
@@ -120,6 +121,8 @@ function imagePath(ref: string): string {
 
 export async function dockerActionRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Docker on one server is the server's Docker tab: the Servers module (unified roles spec §3.1)
+  app.addHook('preHandler', requireModule('servers'));
 
   // ── Container lifecycle ───────────────────────────────────────
 

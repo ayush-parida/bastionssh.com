@@ -77,7 +77,7 @@ describe('team & access', () => {
       expect(viaCookie.statusCode).toBe(403);
       expect(viaCookie.json().error).toMatch(/suspended/);
 
-      const viaToken = await app.inject({ method: 'GET', url: '/api/servers', headers: member.headers });
+      const viaToken = await app.inject({ method: 'GET', url: '/api/me/modules', headers: member.headers });
       expect(viaToken.statusCode).toBe(403);
       expect(viaToken.json().error).toMatch(/suspended/);
 
@@ -95,7 +95,7 @@ describe('team & access', () => {
         headers: admin.headers,
       });
       expect(back.statusCode).toBe(200);
-      expect((await app.inject({ method: 'GET', url: '/api/servers', headers: member.headers })).statusCode).toBe(200);
+      expect((await app.inject({ method: 'GET', url: '/api/me/modules', headers: member.headers })).statusCode).toBe(200);
       expect(auditActions(member.userId)).toEqual(expect.arrayContaining(['member.suspend', 'member.reactivate']));
     });
 

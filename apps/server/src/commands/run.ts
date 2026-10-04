@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm';
 import { getDb } from '../db/index.js';
 import { commandRuns, savedCommands } from '../db/schema.js';
 import { authorize } from '../auth/access/authorize.js';
+import { hasModule } from '../auth/access/modules.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
 import { execOnServer } from '../ssh/broker.js';
 import { startExecRecording, withExecRecording } from '../recordings/index.js';
@@ -48,14 +49,18 @@ export function extractVariables(template: string): string[] {
 
 /**
  * Why `who` may no longer run `command` on `serverId`, or null when they may:
- * what the run route checked — the command visible (with its bound server)
- * and runnable, and `operate` on the target server.
+ * what the run route checked — the Saved Commands and Servers modules on
+ * (unified roles spec §7), the command visible (with its bound server) and
+ * runnable, and `operate` on the target server.
  */
 export function runnerRefusal(
   who: { orgId: string; userId: string },
   command: { id: string; serverId: string | null },
   serverId: string,
 ): string | null {
+  if (!hasModule(who, 'saved_commands') || !hasModule(who, 'servers')) {
+    return 'Whoever started this run no longer has access to saved commands';
+  }
   if (!authorize(who, 'server', serverId, 'run_command').ok) {
     return 'Whoever started this run no longer has access to run commands on this server';
   }

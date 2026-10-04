@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
 import { KUBE_CLUSTER_SCOPE, KUBE_RESOURCES, type KubeExplainEvent, type KubeResource } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
+import { canUseAssistant } from '../../ai/access.js';
 import { canAccessCluster, clusterDenial } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
@@ -64,9 +66,12 @@ function providerFor(orgId: string, providerId?: string) {
 /**
  * Explaining an object needs `operate` on the cluster (custom roles spec §5),
  * in the object's namespace when it has one — from the base role or a custom
- * role. 404 when the caller cannot reach the cluster or that namespace.
+ * role. 404 when the caller cannot reach the cluster or that namespace. It
+ * asks the AI provider, so it is also the AI Assistant's (unified roles spec
+ * §3.2): 404 for a member without it.
  */
 async function requireExplain(req: FastifyRequest, reply: FastifyReply) {
+  if (!canUseAssistant(req)) return reply.status(404).send({ error: 'Not found' });
   const { id } = (req.params ?? {}) as { id?: string };
   const { resource, namespace } = (req.body ?? {}) as { resource?: unknown; namespace?: unknown };
   // The namespace the object is read in: none for a cluster-scoped kind, whatever
@@ -81,6 +86,7 @@ async function requireExplain(req: FastifyRequest, reply: FastifyReply) {
 
 export async function kubeAiRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   /** POST /clusters/:id/explain — stream a plain-language explanation of one object. */
   app.post('/clusters/:id/explain', { preHandler: requireExplain, config: EXPLAIN_RATE_LIMIT }, async (req, reply) => {
@@ -110,7 +116,7 @@ export async function kubeAiRoutes(app: FastifyInstance) {
     const sse = openEventStream<KubeExplainEvent>(
       req,
       reply,
-      { feature: 'kube', resourceId: id },
+      { feature: 'kube', resourceId: id, ai: true },
       (error, status) => ({ type: 'error', error, ...(status !== undefined && { status }) }),
       TOO_MANY_KUBE_STREAMS,
     );

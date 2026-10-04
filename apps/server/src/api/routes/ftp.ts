@@ -11,7 +11,8 @@ import {
   type FtpProtocol,
   type FtpTestResult,
 } from '@smt/shared';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { hasModule, requireModule } from '../../auth/access/modules.js';
 import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
@@ -205,10 +206,11 @@ async function removePartialUpload(req: FastifyRequest, id: string, path: string
 }
 
 /**
- * Below admin, a connection's manager (`manage` through a custom role) edits
- * it without reaching what the org keeps for admins: the org SSH keys stay
- * admin-only (choosing one, or aiming a key-auth connection at another host,
- * account or root, would use it beyond what an admin set up), and the stored password is never
+ * A connection's manager without the FTP module at `manage` (their `manage`
+ * comes from a grant) edits it without reaching what the org keeps for those
+ * who add connections: the org SSH keys stay with them (choosing one, or
+ * aiming a key-auth connection at another host, account or root, would use
+ * it beyond what they set up), and the stored password is never
  * sent somewhere new — a new endpoint, or TLS checks turned off — unless the
  * manager supplies it again. Returns why the edit is refused, or null.
  */
@@ -221,9 +223,9 @@ function managerRefusal(change: {
   tlsLoosened: boolean;
   newPassword: boolean;
 }): string | null {
-  if (change.authChanged && change.keyAuth) return 'Only admins choose the SSH key a connection logs in with';
+  if (change.authChanged && change.keyAuth) return 'Choosing the SSH key a connection logs in with needs manage access to FTP';
   if (change.keyAuth && (change.endpointChanged || change.usernameChanged || change.jailChanged)) {
-    return 'Only admins change where a connection that logs in with an SSH key connects, or its root';
+    return 'Changing where a connection that logs in with an SSH key connects, or its root, needs manage access to FTP';
   }
   if (!change.keyAuth && (change.endpointChanged || change.tlsLoosened) && !change.newPassword) {
     return 'Enter the password again to change where this connection sends it';
@@ -242,6 +244,7 @@ function loadSftpConnection(orgId: string, id: string): FtpConnectionRow {
 
 export async function ftpRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('ftp'));
 
   // Uploads arrive as a raw body so large files never buffer in memory.
   app.addContentTypeParser('application/octet-stream', (_req, payload, done) => {
@@ -267,7 +270,7 @@ export async function ftpRoutes(app: FastifyInstance) {
     return connection;
   });
 
-  app.post('/connections', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/connections', { preHandler: requireModule('ftp', 'manage') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
     try {
       const host = assertSafeHost(body.host);
@@ -357,7 +360,7 @@ export async function ftpRoutes(app: FastifyInstance) {
         (authMethod === 'password' && body.password !== undefined);
 
       const refused =
-        rank(req.role) < rank('admin') &&
+        !hasModule(req, 'ftp', 'manage') &&
         managerRefusal({
           authChanged,
           keyAuth: authMethod === 'key',

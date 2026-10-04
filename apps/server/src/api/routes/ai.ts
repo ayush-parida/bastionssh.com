@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
-import { reachesAny } from '../../auth/access/filter.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import {
   accessibleSavedCommandFilter,
   accessibleServerFilter,
@@ -19,6 +19,7 @@ import { AGENT_TOOLS, ToolExecutor, buildSystemPrompt } from '../../ai/tools.js'
 import { classifyCommand } from '../../ai/command-safety.js';
 import { resolveApproval, waitForApproval } from '../../ai/approvals.js';
 import { registerAgentStream } from '../../ai/streams.js';
+import { ASSISTANT_OFF, canUseAssistant } from '../../ai/access.js';
 import { audit } from '../../audit/index.js';
 import type { AIAccess, AIAgentEvent } from '@smt/shared';
 
@@ -33,24 +34,17 @@ function kubeClusterName(orgId: string, clusterId: string): string | undefined {
 
 /**
  * The assistant acts for the user — commands on servers, reads of clusters —
- * so it is for members who can operate somewhere: operators and up by base
- * role, or anyone a custom role or personal grant lets operate at least one
- * server or cluster (a namespace of one counts). It widens nothing: every
- * tool checks the caller's level on its own target (run_command needs
- * operate on the server and approval for changes; Docker and Kubernetes
- * reads follow their matrices), and the prompt lists only what they can see.
+ * so it is the AI Assistant module (unified roles spec §3.2; ai/access.ts).
+ * It widens nothing: every tool checks the caller's level on its own target
+ * (run_command needs operate on the server and approval for changes; Docker
+ * and Kubernetes reads follow their matrices), and the prompt lists only
+ * what they can see. With the module off every route here is a 404
+ * (`requireModule`); a read-only API token is refused the chat itself.
  */
-function canUseAssistant(req: FastifyRequest): boolean {
-  if (rank(req.role) >= rank('operator')) return true;
-  return reachesAny(req, 'server', 'operate') || reachesAny(req, 'cluster', 'operate');
-}
-
 async function requireAssistant(req: FastifyRequest, reply: FastifyReply) {
-  if (!req.role) return reply.status(401).send({ error: 'Unauthorized' });
+  if (!req.user) return reply.status(401).send({ error: 'Unauthorized' });
   if (canUseAssistant(req)) return;
-  return reply.status(403).send({
-    error: 'The AI assistant needs the operator role, or operate access to at least one server or cluster',
-  });
+  return reply.status(403).send({ error: ASSISTANT_OFF });
 }
 
 /** While a command waits for approval, keep proxies from closing the idle stream. */
@@ -93,6 +87,7 @@ const chatSchema = z.object({
 
 export async function aiRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('ai'));
 
   // ── Provider management ──────────────────────────────────────
   app.get('/providers', async (req) => {
@@ -112,7 +107,7 @@ export async function aiRoutes(app: FastifyInstance) {
       .all();
   });
 
-  app.post('/providers', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/providers', { preHandler: requireModule('ai', 'manage') }, async (req, reply) => {
     const body = createProviderSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -136,7 +131,7 @@ export async function aiRoutes(app: FastifyInstance) {
       .send({ id, name: body.name, provider: body.provider, model: body.model });
   });
 
-  app.patch('/providers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.patch('/providers/:id', { preHandler: requireModule('ai', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const existing = db
@@ -170,7 +165,7 @@ export async function aiRoutes(app: FastifyInstance) {
     return reply.send({ id, ...updates });
   });
 
-  app.delete('/providers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/providers/:id', { preHandler: requireModule('ai', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const config = db
