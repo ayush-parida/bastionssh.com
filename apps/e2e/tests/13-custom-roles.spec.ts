@@ -101,9 +101,10 @@ test('a role with a tag selector and a cluster namespace gives a member exactly 
   await expect(memberPage.getByText(web1.name, { exact: true })).toBeVisible();
   await expect(memberPage.getByText(web2.name, { exact: true })).toBeVisible();
   await expect(memberPage.getByText(db1.name, { exact: true })).toHaveCount(0);
-  // A viewer raised to operate by the role may open a terminal there, and use the assistant
+  // A viewer raised to operate by the role may open a terminal there; the AI
+  // Assistant is a module of its own, which this role does not turn on
   await expect(memberPage.getByRole('button', { name: 'Connect' })).toHaveCount(2);
-  await expect(memberPage.getByRole('link', { name: 'AI Assistant' })).toBeVisible();
+  await expect(memberPage.getByRole('link', { name: 'AI Assistant' })).toHaveCount(0);
 
   const clusters = (await (await memberPage.request.get('/api/kube/clusters')).json()) as { id: string }[];
   expect(clusters.map((c) => c.id)).toEqual([cluster.id]);

@@ -211,7 +211,7 @@ test('built-in Viewer edited to drop Kubernetes hides it for viewers, and Reset 
 
   await signInWithPassword(page, ADMIN_EMAIL, ADMIN_PASSWORD);
   await page.goto('/team?tab=roles');
-  await page.getByRole('button', { name: 'Edit role Viewer' }).click();
+  await page.getByRole('button', { name: 'Edit role Viewer', exact: true }).click();
   const editor = page.getByRole('dialog', { name: 'Role Viewer' });
   // Built-ins keep their names
   await expect(editor.getByLabel('Name', { exact: true })).toBeDisabled();
