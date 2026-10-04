@@ -14,7 +14,9 @@ import {
   type RequestableServers,
   type ResourceType,
 } from '@smt/shared';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { canAssignRole, canGrant, hasModule, isOwner, requireModule } from '../../auth/access/modules.js';
+import { managesEverything, membersWithModule } from '../../auth/access/members.js';
 import { getDb } from '../../db/index.js';
 import {
   accessRequests,
@@ -46,7 +48,6 @@ import {
   levelFor,
   listResources,
   meetsLevel,
-  resolveAccess,
   resourceExists,
 } from '../../auth/access/index.js';
 import { audit } from '../../audit/index.js';
@@ -338,16 +339,19 @@ function findRequest(orgId: string, id: string): RequestRow | undefined {
     .get();
 }
 
-/** Active admins and owners in the org, bar `exceptUserId` — who hears about a new request. */
+/**
+ * Active members who may decide requests (Roles & access at `manage`: owners
+ * and admins at their defaults), bar `exceptUserId` — who hears about a new one.
+ */
 function adminEmails(orgId: string, exceptUserId: string): string[] {
+  const approvers = membersWithModule(orgId, 'team_roles', 'manage').filter((userId) => userId !== exceptUserId);
+  if (!approvers.length) return [];
   return getDb()
-    .select({ email: users.email, role: memberships.role, userId: memberships.userId })
-    .from(memberships)
-    .innerJoin(users, eq(memberships.userId, users.id))
-    .where(and(eq(memberships.orgId, orgId), eq(memberships.status, 'active')))
+    .select({ email: users.email })
+    .from(users)
+    .where(inArray(users.id, approvers))
     .all()
-    .filter((m) => rank(m.role) >= rank('admin') && m.userId !== exceptUserId)
-    .map((m) => m.email);
+    .map((u) => u.email);
 }
 
 /**
@@ -406,7 +410,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
   /** The org's request policy. Every member may read it — the request form needs the limit. */
   app.get('/settings', async (req): Promise<AccessRequestSettings> => accessRequestSettings(req.orgId));
 
-  app.patch('/settings', { preHandler: requireRole('admin') }, async (req) => {
+  app.patch('/settings', { preHandler: requireModule('team_roles', 'manage') }, async (req) => {
     const body = settingsSchema.parse(req.body);
     const before = accessRequestSettings(req.orgId);
     const after = { ...before, ...body };
@@ -420,7 +424,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         })
         .where(eq(organizations.id, req.orgId))
         .run();
-      await audit(req, 'org.access_request_policy', 'organization', req.orgId, undefined, { from: before, to: after });
+      await audit(req, 'org.access_request_policy', 'organization', req.orgId, undefined, { from: before, to: after, before, after });
     }
     return after;
   });
@@ -484,7 +488,8 @@ export async function accessRequestRoutes(app: FastifyInstance) {
    */
   app.get('/requestable', async (req): Promise<RequestableAccess> => {
     const settings = accessRequestSettings(req.orgId);
-    if (resolveAccess(req).orgAdmin) return { canRequest: false, settings, roles: [], resources: [] };
+    // Nothing left to ask for: owners, and admins at their defaults
+    if (managesEverything(req)) return { canRequest: false, settings, roles: [], resources: [] };
     const db = getDb();
     const held = new Map(
       db
@@ -524,10 +529,10 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     };
   });
 
-  /** Admins see the org's requests; everyone else only their own. Pending first, then newest. */
+  /** Roles & access at `view` sees the org's requests; everyone else only their own. Pending first, then newest. */
   app.get('/', async (req): Promise<AccessRequest[]> => {
     const query = listSchema.parse(req.query);
-    const seesAll = rank(req.role) >= rank('admin') && query.mine !== 'true';
+    const seesAll = hasModule(req, 'team_roles', 'view') && query.mine !== 'true';
     const rows = getDb()
       .select()
       .from(accessRequests)
@@ -563,7 +568,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
         if (seesAllOf(req, legacy)) {
           return reply.status(400).send({ error: `You already have access to every ${legacy}` });
         }
-      } else if (resolveAccess(req).orgAdmin) {
+      } else if (managesEverything(req)) {
         return reply.status(400).send({ error: 'Owners and admins already have access to everything' });
       }
       if (body.durationMinutes > settings.maxRequestMinutes) {
@@ -729,7 +734,12 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     return present(req.orgId, [findRequest(req.orgId, id)!])[0];
   });
 
-  app.post('/:id/approve', { preHandler: requireRole('admin') }, async (req, reply) => {
+  /**
+   * Approve, maybe for less time or fewer namespaces. Roles & access at
+   * `manage`, and the approver must hold what the approval gives for as long
+   * (unified roles spec §4.2): the role, or the level on each resource.
+   */
+  app.post('/:id/approve', { preHandler: requireModule('team_roles', 'manage') }, async (req, reply) => {
     const body = approveSchema.parse(req.body ?? {});
     const request = decidable(req, reply, 'approve');
     if (!request) return reply;
@@ -741,7 +751,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
 
     const db = getDb();
     const member = db
-      .select({ status: memberships.status })
+      .select({ status: memberships.status, role: memberships.role })
       .from(memberships)
       .where(and(eq(memberships.userId, request.userId), eq(memberships.orgId, req.orgId)))
       .get();
@@ -786,6 +796,29 @@ export async function accessRequestRoutes(app: FastifyInstance) {
 
     const now = new Date();
     const expiresAt = minutesFromNow(minutes, now.getTime());
+    // The delegation guard: a role, or the level asked for (the requester's
+    // base level for a request without one) on each resource, until it ends
+    const delegation = role
+      ? canAssignRole(req, role.id, { expiresAt })
+      : canGrant(
+          req,
+          {
+            grants: ids.map((resourceId) => ({
+              resourceType: target.type as ResourceType,
+              selector: 'id' as const,
+              resourceId,
+              namespaces,
+              level: target.level ?? baseLevel(member.role),
+            })),
+          },
+          { expiresAt },
+        );
+    if (!delegation.ok) {
+      return reply.status(403).send({
+        error: `You cannot approve access you do not hold: ${delegation.missing.join('; ')}`,
+        missing: delegation.missing,
+      });
+    }
     let extended: string[] = [];
     let roleBefore: { expiresAt: string | null } | null = null;
     /** The level granted when the namespaces narrow a request at the base role's level. */
@@ -870,6 +903,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
       minutes,
       requestedMinutes: request.durationMinutes,
       expiresAt,
+      delegation: isOwner(req) ? 'owner' : 'within the actor’s own access',
     });
     if (role && extended.length) {
       await audit(req, 'role.member_add', 'role', role.id, role.name, {
@@ -914,7 +948,7 @@ export async function accessRequestRoutes(app: FastifyInstance) {
     return presented;
   });
 
-  app.post('/:id/deny', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/:id/deny', { preHandler: requireModule('team_roles', 'manage') }, async (req, reply) => {
     const body = denySchema.parse(req.body ?? {});
     const request = decidable(req, reply, 'deny');
     if (!request) return reply;

@@ -595,7 +595,7 @@ describe('backup codes', () => {
 
       const audits = getDb().select().from(auditLog).where(eq(auditLog.resourceId, org)).all();
       expect(audits.filter((a) => a.action === 'org.backup_code_policy').map((a) => JSON.parse(a.metadata!))).toEqual([
-        { backupCodeRecoveryOnly: false },
+        { backupCodeRecoveryOnly: false, before: { backupCodeRecoveryOnly: true }, after: { backupCodeRecoveryOnly: false } },
       ]);
     });
 
@@ -621,6 +621,8 @@ describe('backup codes', () => {
       const audits = getDb().select().from(auditLog).where(eq(auditLog.resourceId, org)).all();
       expect(JSON.parse(audits.filter((a) => a.action === 'org.backup_code_policy').at(-1)!.metadata!)).toEqual({
         backupCodeRecoveryOnly: true,
+        before: { backupCodeRecoveryOnly: false },
+        after: { backupCodeRecoveryOnly: true },
         live: { members: 1, terminals: 1, sftp: 0, docker: 0, kube: 0, agents: 0 },
       });
     });

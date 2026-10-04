@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fs from 'fs';
 import type { CreatedDbBackup, DbBackupList } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule, requireOwner } from '../../auth/access/modules.js';
 import { requireBrowserSession, requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { audit } from '../../audit/index.js';
 import { backupFile, backupNow, backupSettings, instanceOrgId, listAppBackups } from '../../backup/index.js';
@@ -22,7 +23,9 @@ async function requireInstanceOwner(req: FastifyRequest, reply: FastifyReply) {
 
 export async function backupRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
-  app.addHook('preHandler', requireRole('owner'));
+  // Organization settings at `manage`, and owners only (unified roles spec §4.3)
+  app.addHook('preHandler', requireModule('settings', 'manage'));
+  app.addHook('preHandler', requireOwner());
   app.addHook('preHandler', requireInstanceOwner);
 
   // Not audited: the page refetches the list, and a listing reveals nothing

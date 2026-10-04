@@ -506,7 +506,7 @@ describe('team & access', () => {
 
       const demote = await changeRole(b.userId, 'viewer', a.headers);
       expect(demote.statusCode).toBe(403);
-      expect(demote.json().error).toMatch(/admin role/);
+      expect(demote.json().error).toMatch(/as much access as you/);
       expect((await act('DELETE', b.userId, a.headers)).statusCode).toBe(403);
       expect(roleOf(org, b.userId)).toBe('admin');
 

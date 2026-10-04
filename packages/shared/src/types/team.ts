@@ -1,6 +1,7 @@
 import type { Role } from './auth.js';
 import type {
   AccessLevel,
+  BuiltInRole,
   EffectiveAccessEntry,
   HeldRole,
   MemberScope,
@@ -224,10 +225,13 @@ export type InviteState = 'valid' | 'expired' | 'accepted';
 export interface Invite {
   id: string;
   email: string;
+  /** The base role the invited roles amount to (compatible alias; see `roles`). */
   role: Role;
   expiresAt: string;
   createdAt?: string;
   state: InviteState;
+  /** The roles the invitee gets on joining (unified roles spec §5). */
+  roles?: { id: string; name: string; system: BuiltInRole | null }[];
 }
 
 /**
@@ -242,7 +246,10 @@ export interface CreatedInvite extends Invite {
 
 export interface CreateInviteRequest {
   email: string;
+  /** A base role, as before unified roles: its built-in role. */
   role?: Role;
+  /** The roles to give (wins over `role`); neither = the org's default role. */
+  roleIds?: string[];
 }
 
 /** What the accept page shows before an account exists. */

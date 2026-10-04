@@ -403,7 +403,8 @@ describe('kube routes', () => {
       expect((await get(restricted, c('/overview'))).statusCode).toBe(200);
       // Server-only changes leave cluster grants alone
       await send(admin, 'PUT', `/api/team/members/${restricted.userId}/access`, { serverAccess: 'restricted', serverIds: [] });
-      expect((await get(restricted, `/api/team/members/${restricted.userId}/access`)).statusCode).toBe(403);
+      // Roles & access is off for them: not there at all
+      expect((await get(restricted, `/api/team/members/${restricted.userId}/access`)).statusCode).toBe(404);
       expect((await get(admin, `/api/team/members/${restricted.userId}/access`)).json().clusterIds).toEqual([clusterId]);
 
       // Time is up: not found at once, and the sweep removes the row

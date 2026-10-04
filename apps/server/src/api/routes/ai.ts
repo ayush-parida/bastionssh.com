@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { rank, requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { reachesAny } from '../../auth/access/filter.js';
 import {
   accessibleSavedCommandFilter,
@@ -112,7 +113,7 @@ export async function aiRoutes(app: FastifyInstance) {
       .all();
   });
 
-  app.post('/providers', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/providers', { preHandler: requireModule('ai', 'manage') }, async (req, reply) => {
     const body = createProviderSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
@@ -136,7 +137,7 @@ export async function aiRoutes(app: FastifyInstance) {
       .send({ id, name: body.name, provider: body.provider, model: body.model });
   });
 
-  app.patch('/providers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.patch('/providers/:id', { preHandler: requireModule('ai', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const existing = db
@@ -170,7 +171,7 @@ export async function aiRoutes(app: FastifyInstance) {
     return reply.send({ id, ...updates });
   });
 
-  app.delete('/providers/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/providers/:id', { preHandler: requireModule('ai', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
     const config = db

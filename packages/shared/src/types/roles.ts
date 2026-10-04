@@ -76,6 +76,14 @@ export interface CustomRole {
   updatedAt: string;
   memberCount?: number;
   grants?: RoleGrant[];
+  /** Unified roles: the built-in role this is, null for every other role. */
+  system?: BuiltInRole | null;
+  /** Unified roles: the role's module levels (a module left out is `none`). */
+  modules?: ModulePermissions;
+  /** False for Owner and No access, which are locked. */
+  editable?: boolean;
+  /** False for the built-in roles. */
+  deletable?: boolean;
 }
 
 /** A member of a custom role; `expiresAt` null = permanent. */
@@ -158,6 +166,12 @@ export interface SaveCustomRole {
   color?: string | null;
   /** Create only: the role's resources. */
   grants?: GrantInput[];
+  /**
+   * The role's module levels (unified roles spec §3), replacing what it had.
+   * Left out on create: the resource modules of its grants at `view`, as a
+   * role from before module permissions did.
+   */
+  modules?: ModulePermissions;
 }
 
 /** Any resource access can be granted on, as pickers and lists name it. */
@@ -179,12 +193,14 @@ export interface EffectiveAccessEntry extends EffectiveAccess {
   name: string;
 }
 
-/** A custom role a member holds. */
+/** A role a member holds. */
 export interface HeldRole {
   roleId: string;
   name: string;
   color: string | null;
   expiresAt: string | null;
+  /** Set for built-in roles (unified roles). */
+  system?: BuiltInRole | null;
 }
 
 /** `GET /team/access/explain`: the access checker's answer. */
@@ -638,4 +654,42 @@ export interface MeAccess {
 export interface PermissionSet {
   modules?: ModulePermissions;
   grants?: Pick<GrantInput, 'resourceType' | 'selector' | 'resourceId' | 'tag' | 'namespaces' | 'level'>[];
+}
+
+// ── Team & Access with unified roles (spec §4.2, §5) ─────────────────────────
+
+/** One role a member is to hold, optionally until a time. */
+export interface MemberRoleInput {
+  roleId: string;
+  /** When it ends; null/absent = permanent. Wins over `expiresInMinutes`. */
+  expiresAt?: string | null;
+  expiresInMinutes?: number | null;
+}
+
+/**
+ * Body of `PUT /team/members/:userId/roles`: the member's roles, replaced
+ * wholesale. An empty list leaves them with No access. Every role given or
+ * taken away passes the delegation guard.
+ */
+export interface SetMemberRoles {
+  roles: MemberRoleInput[];
+}
+
+/** `GET` / `PUT /team/members/:userId/roles`: the roles the member holds now. */
+export interface MemberRoles {
+  userId: string;
+  roles: HeldRole[];
+}
+
+/** Body of `POST /team/roles/:id/clone`. */
+export interface CloneRole {
+  /** Defaults to "<name> (copy)". */
+  name?: string;
+}
+
+/** `GET` / `PUT /team/default-role`: the role new members get when none is picked (invites, SSO). */
+export interface DefaultRoleSetting {
+  roleId: string;
+  name: string;
+  system: BuiltInRole | null;
 }

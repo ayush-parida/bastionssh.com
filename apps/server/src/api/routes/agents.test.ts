@@ -88,10 +88,10 @@ describe('agent routes', () => {
     await app?.close();
   });
 
-  it('is admin-only', async () => {
-    expect((await app.inject({ method: 'GET', url: '/api/agents', headers: operator.headers })).statusCode).toBe(403);
+  it('is the Agents module: not there at all for an operator, who has it off', async () => {
+    expect((await app.inject({ method: 'GET', url: '/api/agents', headers: operator.headers })).statusCode).toBe(404);
     const res = await app.inject({ method: 'POST', url: '/api/agents', headers: operator.headers, payload: { name: 'x' } });
-    expect(res.statusCode).toBe(403);
+    expect(res.statusCode).toBe(404);
     expect((await app.inject({ method: 'GET', url: '/api/agents' })).statusCode).toBe(401);
   });
 

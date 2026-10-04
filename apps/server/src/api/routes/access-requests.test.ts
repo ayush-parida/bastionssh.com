@@ -143,7 +143,7 @@ describe('time-limited access', () => {
 
     it('hides the names of ungranted servers when the org turns names off', async () => {
       const member = await restrictedMember();
-      expect((await as(unrestricted).patch('/api/access-requests/settings', { restrictedSeeServerNames: false })).statusCode).toBe(403);
+      expect((await as(unrestricted).patch('/api/access-requests/settings', { restrictedSeeServerNames: false })).statusCode).toBe(404);
       const off = await as(admin).patch('/api/access-requests/settings', { restrictedSeeServerNames: false });
       expect(off.statusCode).toBe(200);
       try {
@@ -250,9 +250,10 @@ describe('time-limited access', () => {
     it('is admin-only', async () => {
       const member = await restrictedMember();
       const id = (await request(member)).json().id;
-      expect((await as(unrestricted).post(`/api/access-requests/${id}/approve`)).statusCode).toBe(403);
-      expect((await as(unrestricted).post(`/api/access-requests/${id}/deny`)).statusCode).toBe(403);
-      expect((await as(member).post(`/api/access-requests/${id}/approve`)).statusCode).toBe(403);
+      // Roles & access is off for them: deciding is not there at all
+      expect((await as(unrestricted).post(`/api/access-requests/${id}/approve`)).statusCode).toBe(404);
+      expect((await as(unrestricted).post(`/api/access-requests/${id}/deny`)).statusCode).toBe(404);
+      expect((await as(member).post(`/api/access-requests/${id}/approve`)).statusCode).toBe(404);
       expect(grantRow(member.userId, serverB)).toBeUndefined();
     });
 
