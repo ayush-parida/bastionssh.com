@@ -16,7 +16,7 @@ import {
 import { getDb } from '../../db/index.js';
 import { cronJobs, roleMembers, roles, savedCommands, servers } from '../../db/schema.js';
 import { contributionsFor } from './authorize.js';
-import { accessibleFilter, accessibleIds, reachesAny, RESOURCE_TABLES } from './filter.js';
+import { accessibleFilter, accessibleIds, accessibleIdsFor, reachesAny, RESOURCE_TABLES } from './filter.js';
 import { clampModuleLevel, meetsLevel, meetsModuleLevel, moduleDefinition, parseModulePermissions, TYPE_MODULES } from './levels.js';
 import { activeAt, resolveAccess, type AccessSubject, type Contribution, type ResolvedAccess } from './resolve.js';
 import { principalGrants } from './grants.js';
@@ -148,7 +148,11 @@ function moduleVisible(access: ResolvedAccess, module: ModuleKey): boolean {
   const key = `visible:${module}`;
   const cached = access.memo.get(key) as boolean | undefined;
   if (cached !== undefined) return cached;
-  const visible = seesAnyItem(access, type);
+  // `manage` on every saved command or cron job also creates them (auth/command-access.ts `mayCreate`)
+  const creates =
+    (type === 'saved_command' || type === 'cron_job') &&
+    accessibleIdsFor(access, type, 'manage').all;
+  const visible = creates || seesAnyItem(access, type);
   access.memo.set(key, visible);
   return visible;
 }
@@ -329,6 +333,8 @@ export function rolePermissions(orgId: string, roleId: string): PermissionSet | 
     for (const g of grants) {
       modules[TYPE_MODULES[g.resourceType]] = 'view';
       if (g.resourceType === 'server') modules.containers = 'view';
+      // Operating a server or cluster through it opens the AI assistant (resolve.ts)
+      if ((g.resourceType === 'server' || g.resourceType === 'cluster') && g.level !== 'view') modules.ai = 'view';
     }
   }
   return {

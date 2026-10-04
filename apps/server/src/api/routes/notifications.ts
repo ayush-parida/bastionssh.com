@@ -9,7 +9,8 @@ import {
   type NotificationCapabilities,
   type NotificationChannelType,
 } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { getDb } from '../../db/index.js';
 import { notificationChannels } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
@@ -103,6 +104,8 @@ const publicColumns = {
 
 export async function notificationRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Notification channels are part of Monitoring & Alerts: seen with it, changed at `manage`
+  app.addHook('preHandler', requireModule('monitoring'));
 
   app.get('/capabilities', async (): Promise<NotificationCapabilities> => ({
     email: emailAvailable(),
@@ -117,7 +120,7 @@ export async function notificationRoutes(app: FastifyInstance) {
       .all();
   });
 
-  app.post('/channels', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/channels', { preHandler: requireModule('monitoring', 'manage') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
     let resolved: { target: string; hint: string };
     try {
@@ -153,7 +156,7 @@ export async function notificationRoutes(app: FastifyInstance) {
       .send(db.select(publicColumns).from(notificationChannels).where(eq(notificationChannels.id, id)).get());
   });
 
-  app.patch('/channels/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.patch('/channels/:id', { preHandler: requireModule('monitoring', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = updateSchema.parse(req.body);
     const db = getDb();
@@ -213,7 +216,7 @@ export async function notificationRoutes(app: FastifyInstance) {
     return db.select(publicColumns).from(notificationChannels).where(eq(notificationChannels.id, id)).get();
   });
 
-  app.post('/channels/:id/test', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/channels/:id/test', { preHandler: requireModule('monitoring', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const result = await sendTestNotification(req.orgId, id);
     if (!result.ok && result.error === 'Channel not found') {
@@ -225,7 +228,7 @@ export async function notificationRoutes(app: FastifyInstance) {
     return result;
   });
 
-  app.delete('/channels/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/channels/:id', { preHandler: requireModule('monitoring', 'manage') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 

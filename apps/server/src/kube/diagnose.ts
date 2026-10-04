@@ -27,7 +27,7 @@ import type { ApiRoute } from './transport.js';
  *   reached through it in the Kubernetes step.
  */
 
-type Caller = Pick<FastifyRequest, 'orgId' | 'user' | 'role'>;
+type Caller = Pick<FastifyRequest, 'orgId' | 'user'> & Partial<Pick<FastifyRequest, 'apiTokenReadOnly'>>;
 
 const REMEDIATION: Record<string, string> = {
   reach: 'Check the API server address and port, and that the route (server or agent) can reach it.',

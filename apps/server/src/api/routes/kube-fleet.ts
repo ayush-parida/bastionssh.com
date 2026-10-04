@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { KubeFleetOverview } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { fleetOverview } from '../../kube/fleet.js';
 import { requireKube } from '../../kube/permissions.js';
 
@@ -13,6 +14,7 @@ import { requireKube } from '../../kube/permissions.js';
  */
 export async function kubeFleetRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   /** GET /overview — one row per cluster: its numbers and worst problems, or its error. */
   app.get('/overview', { preHandler: requireKube('view') }, async (req, reply): Promise<KubeFleetOverview> => {

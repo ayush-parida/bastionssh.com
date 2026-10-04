@@ -10,15 +10,15 @@ import {
   canAccessServer,
   canOnServer,
 } from '../auth/server-access.js';
-import { rank } from '../auth/middleware.js';
 import { cronJobFilter } from '../auth/command-access.js';
-import { resolveAccess } from '../auth/access/resolve.js';
+import { hasModule } from '../auth/access/modules.js';
+import { ASSISTANT_OFF, canUseAssistant } from './access.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
 import { permissionsFor } from '../docker/permissions.js';
 import { aiContainerLogs, aiInspect, aiListContainers } from '../docker/ai-tools.js';
 import { filterAccessibleClusters } from '../auth/cluster-access.js';
 import { aiDescribe, aiEvents, aiListWorkloads, aiPodLogs } from '../kube/ai-tools.js';
-import { type AITool, type DockerCapability, type HostKeyStatus, type Role } from '@smt/shared';
+import { type AITool, type DockerCapability, type HostKeyStatus } from '@smt/shared';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -271,6 +271,7 @@ export class ToolExecutor {
   ) {}
 
   async execute(name: string, input: Record<string, unknown>): Promise<string> {
+    this.ensureAssistant();
     switch (name) {
       case 'run_command':
         return (await this.runCommand(input)).output;
@@ -353,6 +354,7 @@ export class ToolExecutor {
   async runCommand(
     input: Record<string, unknown>,
   ): Promise<{ output: string; exitCode: number; serverId: string | undefined; recordingId?: string }> {
+    this.ensureAssistant();
     const command = (input.command as string | undefined)?.trim();
     if (!command) throw new Error('"command" is required');
 
@@ -429,8 +431,7 @@ export class ToolExecutor {
     if (!serverId) throw new Error('No server specified: pass server_id');
     if (!this.canUse(serverId)) throw new Error('Server not found');
     // The matrix at the user's level on this server, as the Docker tab reads it
-    const role = (this.memberRole() ?? 'viewer') as Role;
-    const caller = { orgId: this.orgId, role, user: { id: this.userId, email: '', displayName: '' } };
+    const caller = { orgId: this.orgId, user: { id: this.userId, email: '', displayName: '' } };
     if (!permissionsFor(caller, serverId)[capability]) {
       throw new Error('Your role does not allow reading container logs or details');
     }
@@ -439,13 +440,12 @@ export class ToolExecutor {
 
   /**
    * The user the agent acts for, as the Kubernetes service takes them: their
-   * role (the §7 matrix; read from the membership on every call) and email
+   * levels (the §7 matrix, read from their roles on every call) and email
    * (a cluster with impersonation on is told who is asking).
    */
   private kubeRequester() {
     const email = getDb().select({ email: users.email }).from(users).where(eq(users.id, this.userId)).get()?.email ?? '';
-    const role = (this.memberRole() ?? 'viewer') as Role;
-    return { orgId: this.orgId, user: { id: this.userId, email }, role } as Parameters<typeof aiListWorkloads>[0];
+    return { orgId: this.orgId, user: { id: this.userId, email, displayName: '' } } as Parameters<typeof aiListWorkloads>[0];
   }
 
   /**
@@ -460,10 +460,13 @@ export class ToolExecutor {
     return clusterId;
   }
 
-  /** What the user's roles amount to as a base role (auth/access/levels.ts `legacyRoleFor`), read afresh every call. */
-  private memberRole(): string | undefined {
-    const access = resolveAccess({ orgId: this.orgId, userId: this.userId });
-    return access.active ? access.role : undefined;
+  /**
+   * The agent acts for the user only while they may use the assistant:
+   * checked before every tool, so a role change that turns the AI Assistant
+   * module off (or ends their membership) stops the next call (spec §7).
+   */
+  private ensureAssistant(): void {
+    if (!canUseAssistant({ orgId: this.orgId, userId: this.userId })) throw new Error(ASSISTANT_OFF);
   }
 
   private canUse(serverId: string): boolean {
@@ -530,8 +533,8 @@ export class ToolExecutor {
     const db = getDb();
     const limit = Math.min((input.limit as number | undefined) ?? 10, 50);
 
-    // The audit log route is admin-only; below that, the agent only sees the caller's own actions
-    const ownOnly = rank(this.memberRole() ?? 'viewer') < rank('admin');
+    // As the audit log route: the whole log needs the Audit Log module; without it, only the caller's own actions
+    const ownOnly = !hasModule({ orgId: this.orgId, userId: this.userId }, 'audit', 'view');
 
     const rows = db
       .select()

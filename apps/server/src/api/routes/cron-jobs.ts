@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { authorize, type ResourceAction } from '../../auth/access/index.js';
 import {
   baseRoleAllows,
@@ -132,6 +133,7 @@ function loadJob(
 
 export async function cronJobRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('cron_jobs'));
 
   app.get('/', async (req) => {
     const db = getDb();

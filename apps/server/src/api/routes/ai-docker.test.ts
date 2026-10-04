@@ -88,7 +88,7 @@ import { vault } from '../../vault/index.js';
 import { AGENT_TOOLS, ToolExecutor } from '../../ai/tools.js';
 import { startFakeDaemon, type FakeDaemon } from '../../docker/fake-daemon.test-helper.js';
 import { AI_MAX_OUTPUT, formatContainers, keepHead, keepTail, TRUNCATED_MARKER } from '../../docker/ai-tools.js';
-import { seedOrg, seedServer, seedUser } from './test-utils.js';
+import { addModuleRole, seedOrg, seedServer, seedUser } from './test-utils.js';
 
 function parseEvents(body: string): AIAgentEvent[] {
   return body
@@ -254,6 +254,10 @@ describe('AI Docker tools', () => {
 
   it('keep logs and inspect from viewers, like the Docker tab', async () => {
     const tools = new ToolExecutor(orgId, viewer.userId, undefined, alpha);
+    // Viewers have no AI Assistant: the agent does nothing for them
+    await expect(tools.execute('docker_list_containers', {})).rejects.toThrow(/not available/);
+    // Given the module, the Docker matrix still reads at their level on the server
+    addModuleRole(orgId, viewer.userId, { ai: 'view' });
     expect(await tools.execute('docker_list_containers', {})).toContain('- web');
     await expect(tools.execute('docker_container_logs', { container: 'web' })).rejects.toThrow(/role does not allow/);
     await expect(tools.execute('docker_inspect', { container: 'web' })).rejects.toThrow(/role does not allow/);

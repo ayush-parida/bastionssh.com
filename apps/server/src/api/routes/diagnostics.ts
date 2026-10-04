@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { and, eq } from 'drizzle-orm';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { hasModule, requireModule } from '../../auth/access/modules.js';
 import { canOnServer, requireServer } from '../../auth/server-access.js';
 import { requireResource } from '../../auth/access/authorize.js';
 import { audit } from '../../audit/index.js';
@@ -32,16 +33,18 @@ const DIAGNOSE_RATE_LIMIT = {
 /**
  * Step-by-step connectivity checks for saved endpoints: DNS, TCP, the protocol
  * banner (and TLS), the host key, and — only when asked — a login with the
- * stored credentials. Operator and up, like opening a connection; on servers,
- * clusters, FTP and storage connections that is `operate` on the one diagnosed
- * (custom roles spec §5), from the base role or a custom role — 404 when the
- * caller cannot reach it.
+ * stored credentials. Part of DNS Lookup & Diagnostics (unified roles spec
+ * §3.2); on servers, clusters, FTP and storage connections it needs `operate`
+ * on the one diagnosed, like opening a connection (custom roles spec §5) —
+ * 404 when the caller cannot reach it. A presented host key that differs
+ * from the pinned one is shown to whoever manages host keys there: the
+ * server's `manage`, or the connection's or cluster's module at `manage`.
  */
 export async function diagnosticsRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
-  const operator = requireRole('operator');
+  app.addHook('preHandler', requireModule('diagnostics'));
 
-  const optionsFor = (req: FastifyRequest, revealHostKey = rank(req.role) >= rank('admin')) => {
+  const optionsFor = (req: FastifyRequest, revealHostKey: boolean) => {
     const { auth } = bodySchema.parse(req.body ?? {});
     // A presented key that differs from the pinned one is evidence for whoever manages host keys
     return { auth, revealHostKey, actorUserId: req.user.id };
@@ -70,7 +73,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   /** POST /api/diagnostics/ftp/:id {auth?} */
   app.post('/ftp/:id', { preHandler: requireResource('ftp_connection', 'test'), ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const opts = optionsFor(req);
+    const opts = optionsFor(req, hasModule(req, 'ftp', 'manage'));
     const connection = getDb()
       .select()
       .from(ftpConnections)
@@ -90,7 +93,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   /** POST /api/diagnostics/storage/:id {auth?} */
   app.post('/storage/:id', { preHandler: requireResource('storage_connection', 'diagnose'), ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const opts = optionsFor(req);
+    const opts = optionsFor(req, hasModule(req, 'storage', 'manage'));
     const connection = getDb()
       .select()
       .from(storageConnections)
@@ -110,7 +113,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   /** POST /api/diagnostics/clusters/:id {auth?} — a Kubernetes cluster; `auth` adds the Kubernetes API step */
   app.post('/clusters/:id', { preHandler: requireResource('cluster', 'diagnose'), ...DIAGNOSE_RATE_LIMIT }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const opts = optionsFor(req);
+    const opts = optionsFor(req, hasModule(req, 'kubernetes', 'manage'));
     const cluster = getDb()
       .select()
       .from(kubeClusters)
@@ -130,7 +133,7 @@ export async function diagnosticsRoutes(app: FastifyInstance) {
   /** GET /api/diagnostics/egress-ip[?refresh=true] — the source address firewalls must allow */
   app.get(
     '/egress-ip',
-    { preHandler: operator, config: { rateLimit: { ...DIAGNOSE_RATE_LIMIT.config.rateLimit, max: 30 } } },
+    { preHandler: requireModule('diagnostics', 'operate'), config: { rateLimit: { ...DIAGNOSE_RATE_LIMIT.config.rateLimit, max: 30 } } },
     async (req) => {
       const { refresh } = egressQuery.parse(req.query);
       return getEgressIp({ refresh });

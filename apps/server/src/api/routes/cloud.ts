@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { CloudAccount, CloudProvider, CloudSyncStatus } from '@smt/shared';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { hasModule, requireModule } from '../../auth/access/modules.js';
 import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { getDb } from '../../db/index.js';
 import { cloudAccounts, sshKeys } from '../../db/schema.js';
@@ -159,8 +160,16 @@ function sendError(reply: FastifyReply, err: unknown) {
   throw err;
 }
 
+/**
+ * Imported servers log in with the account's default SSH key, so choosing
+ * one also needs the SSH Keys module at `operate` ("use keys in forms",
+ * unified roles spec §3.2). The built-in Admin has it.
+ */
+const KEYS_NEEDED = 'Choosing the SSH key imported servers log in with needs operate access to SSH Keys';
+
 export async function cloudRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('cloud'));
 
   app.get('/accounts', async (req): Promise<CloudAccount[]> => {
     return getDb()
@@ -172,8 +181,11 @@ export async function cloudRoutes(app: FastifyInstance) {
       .map(toPublic);
   });
 
-  app.post('/accounts', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/accounts', { preHandler: requireModule('cloud', 'manage') }, async (req, reply) => {
     const body = createSchema.parse(req.body);
+    if (body.defaultKeyId && !hasModule(req, 'ssh_keys', 'operate')) {
+      return reply.status(403).send({ error: KEYS_NEEDED });
+    }
     if (body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
       return reply.status(400).send({ error: 'Default SSH key not found or retired' });
     }
@@ -226,25 +238,29 @@ export async function cloudRoutes(app: FastifyInstance) {
     if (body.defaultKeyId && !keyBelongsToOrg(req.orgId, body.defaultKeyId)) {
       return reply.status(400).send({ error: 'Default SSH key not found or retired' });
     }
-    // An account's manager below admin (a custom role) edits it, but the org's
-    // SSH keys stay admin-only: imported servers log in with this one
+    // An account's manager without the Cloud Accounts module at `manage` (a
+    // grant) edits it, but the org's SSH keys stay with those who add
+    // accounts: imported servers log in with this one
     if (
       body.defaultKeyId !== undefined &&
       body.defaultKeyId !== existing.defaultKeyId &&
-      rank(req.role) < rank('admin')
+      !hasModule(req, 'cloud', 'manage')
     ) {
-      return reply.status(403).send({ error: 'Only admins choose the SSH key imported servers log in with' });
+      return reply.status(403).send({ error: 'Choosing the SSH key imported servers log in with needs manage access to Cloud Accounts' });
+    }
+    if (body.defaultKeyId && body.defaultKeyId !== existing.defaultKeyId && !hasModule(req, 'ssh_keys', 'operate')) {
+      return reply.status(403).send({ error: KEYS_NEEDED });
     }
 
-    // Credentials stay admin-only too: a manager below admin who could swap
-    // in their own provider credentials would choose which instances become
-    // servers here. They can still rename, toggle sync and auto-import, and
-    // sync. The provider itself never changes after creation.
+    // Credentials stay with them too: a manager who could swap in their own
+    // provider credentials would choose which instances become servers here.
+    // They can still rename, toggle sync and auto-import, and sync. The
+    // provider itself never changes after creation.
     if (
       (Object.keys(credentialInputs) as (keyof CredentialInput)[]).some((field) => body[field] !== undefined) &&
-      rank(req.role) < rank('admin')
+      !hasModule(req, 'cloud', 'manage')
     ) {
-      return reply.status(403).send({ error: 'Only admins change the credentials of a cloud account' });
+      return reply.status(403).send({ error: 'Changing the credentials of a cloud account needs manage access to Cloud Accounts' });
     }
 
     const provider = existing.provider as CloudProvider;

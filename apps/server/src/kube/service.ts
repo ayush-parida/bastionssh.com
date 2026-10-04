@@ -2,6 +2,7 @@ import type { FastifyRequest } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import type { KubeConnectVia, KubePermissions, KubeSettings } from '@smt/shared';
 import { canAccessCluster, clusterNamespaces } from '../auth/cluster-access.js';
+import { resolveAccess } from '../auth/access/resolve.js';
 import { getDb } from '../db/index.js';
 import { kubeClusters } from '../db/schema.js';
 import { vault } from '../vault/index.js';
@@ -30,7 +31,7 @@ import { openApiSocket, type ApiRoute } from './transport.js';
 
 export type ClusterRow = typeof kubeClusters.$inferSelect;
 
-type Caller = Pick<FastifyRequest, 'orgId' | 'user' | 'role'>;
+type Caller = Pick<FastifyRequest, 'orgId' | 'user'> & Partial<Pick<FastifyRequest, 'apiTokenReadOnly'>>;
 
 export interface KubeContext {
   cluster: ClusterRow;
@@ -101,9 +102,21 @@ export function credentialPlaintext(credential: KubeCredential): string {
   return credential.type === 'token' ? credential.token : JSON.stringify({ cert: credential.cert, key: credential.key });
 }
 
+/**
+ * The group a person is impersonated as: what their roles amount to as a base
+ * role (owner, admin, operator or viewer — auth/access/levels.ts
+ * `legacyRoleFor`), so RBAC bindings made for `bastion:<role>` before unified
+ * roles keep matching; a read-only API token as a viewer, as before. A name
+ * for the cluster's RBAC, not an access decision here.
+ */
+function impersonatedRole(req: Caller): string {
+  const access = resolveAccess(req);
+  return access.readOnly ? 'viewer' : access.role;
+}
+
 /** What the API server sees when impersonation is on: the person and their role. */
-export function identityOf(req: Pick<FastifyRequest, 'user' | 'role'>): KubeIdentity {
-  return { user: `bastion:${req.user.email}`, groups: [`bastion:${req.role}`] };
+export function identityOf(req: Caller): KubeIdentity {
+  return { user: `bastion:${req.user.email}`, groups: [`bastion:${impersonatedRole(req)}`] };
 }
 
 export interface ClientParams {
@@ -165,7 +178,7 @@ export async function cacheSourceFor(row: ClusterRow, req: Caller): Promise<Cach
   // Cache entries carry the cluster's updatedAt, so an edit never serves old data from another route
   const version = row.updatedAt;
   return {
-    key: impersonate ? `${row.id}@${version}:${req.user.id}:${req.role}` : `${row.id}@${version}`,
+    key: impersonate ? `${row.id}@${version}:${req.user.id}:${impersonate.groups.join(',')}` : `${row.id}@${version}`,
     orgId: row.orgId,
     clusterId: row.id,
     identityUserId: impersonate ? req.user.id : null,

@@ -264,6 +264,9 @@ describe('docker routes', () => {
       const org = seedOrg('org-docker-settings');
       const orgAdmin = seedUser(org, 'admin');
       const orgOperator = seedUser(org, 'operator');
+      // Containers is shown to the operator once there is a server to see
+      expect((await get(orgOperator, '/api/docker/settings')).statusCode).toBe(404);
+      seedServer(org, orgAdmin.userId, 'settings-1');
       expect((await get(orgOperator, '/api/docker/settings')).json()).toEqual({
         operatorsCanExec: true,
         operatorsCanRemove: false,

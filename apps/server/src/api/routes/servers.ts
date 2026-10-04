@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { CloudProvider, CloudServerState, DockerMode, DockerTransport, Server } from '@smt/shared';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
-import { accessibleServerFilter, canAccessServer, requireServer } from '../../auth/server-access.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { hasModule, requireModule } from '../../auth/access/modules.js';
+import { accessibleServerFilter, canAccessServer, requireServer, serverDenial } from '../../auth/server-access.js';
 import { revokeAfterChange, snapshotAccess } from '../../auth/access/revoke.js';
 import { activeAt } from '../../auth/access/resolve.js';
 import { getDb } from '../../db/index.js';
@@ -145,6 +146,28 @@ function keyBelongsToOrg(orgId: string, keyId: string): boolean {
 /** One route per server: its jump host or its agent carries the connection, not both. */
 const ROUTE_CONFLICT = 'A server connects through a jump host or a connectivity agent, not both';
 
+/**
+ * Whoever decides where a server connects decides where every org SSH key
+ * logs in: a terminal names any org key (`keyId`), not only the server's
+ * own. So adding a server, or changing its key, host, port, user or jump
+ * host, also needs the SSH Keys module at `operate` ("use keys in forms",
+ * unified roles spec §3.2) — the built-in Admin holds it; a custom role with
+ * Servers at `manage` alone does not get the org's keys with it.
+ */
+const KEYS_NEEDED = 'Choosing where a server connects, or the SSH key it logs in with, needs operate access to SSH Keys';
+
+/**
+ * Why the caller may not tunnel through `jumpServerId`, or null: a jump host
+ * logs in with its own credentials, so it needs `operate` on it, as routing a
+ * cluster through a server does. One they cannot see reads as unknown.
+ */
+function jumpDenial(req: FastifyRequest, jumpServerId: string): { status: 400 | 403; error: string } | null {
+  const denied = serverDenial(req, jumpServerId, 'terminal');
+  if (!denied) return null;
+  if (denied.status === 404) return { status: 400, error: 'Unknown jump host' };
+  return { status: 403, error: 'Connecting through a jump host needs operate access to that server' };
+}
+
 /** A server may only route through a live (unrevoked) agent of its own org. */
 function agentUsableByOrg(orgId: string, agentId: string): boolean {
   return (
@@ -216,11 +239,13 @@ function tagCoverage(orgId: string, tags: string[]) {
 }
 
 /**
- * A server's `manage` level may come from a custom role rather than the admin
- * base role (custom roles spec §5). Such a member may edit the server, but not
- * steer the org's credentials somewhere new with it: the SSH key a server
- * logs in with, and where its connections go — host, port, user, jump host or
- * agent — stay admin decisions (ssh/jump.ts: only admins set a jump host).
+ * A server's `manage` level may come from a grant rather than from the
+ * Servers module at `manage` (custom roles spec §5). Such a member may edit
+ * the server, but not steer the org's credentials somewhere new with it: the
+ * SSH key a server logs in with, and where its connections go — host, port,
+ * user, jump host — stay with those who may add servers (Servers: manage,
+ * and SSH Keys: operate — `KEYS_NEEDED`), and routing through an agent with
+ * those who manage agents (Agents: manage).
  * Moving the endpoint, even with a fresh password, would still let any org
  * key a terminal or SFTP request names (`keyId`) log in wherever it now
  * points, and a new route resolves the same host from another network. A
@@ -232,26 +257,31 @@ function editProblem(
   body: Partial<z.infer<typeof createServerSchema>>,
   jumpChanged: boolean,
 ): { status: 403; error: string } | null {
-  if (rank(req.role) >= rank('admin')) return null;
-  if (body.agentId !== undefined && body.agentId !== existing.agentId) {
-    return { status: 403, error: 'Only admins can route a server through an agent' };
+  if (body.agentId !== undefined && body.agentId !== existing.agentId && !hasModule(req, 'agents', 'manage')) {
+    return { status: 403, error: 'Routing a server through an agent needs manage access to Agents' };
   }
   const keyChanged =
     body.authType === 'key' &&
     (!!existing.encryptedPassword || (body.defaultKeyId !== undefined && body.defaultKeyId !== existing.defaultKeyId));
-  if (keyChanged) return { status: 403, error: 'Only admins can choose the SSH key a server logs in with' };
   const endpointChanged =
     (body.host !== undefined && body.host !== existing.host) ||
     (body.port !== undefined && body.port !== existing.port) ||
     (body.username !== undefined && body.username !== existing.username);
-  if (endpointChanged || jumpChanged) {
-    return { status: 403, error: 'Only admins can change where a server connects: its host, port, user or jump host' };
+  if (!hasModule(req, 'servers', 'manage')) {
+    if (keyChanged) return { status: 403, error: 'Choosing the SSH key a server logs in with needs manage access to Servers' };
+    if (endpointChanged || jumpChanged) {
+      return { status: 403, error: 'Changing where a server connects — its host, port, user or jump host — needs manage access to Servers' };
+    }
+  }
+  if ((keyChanged || endpointChanged || jumpChanged) && !hasModule(req, 'ssh_keys', 'operate')) {
+    return { status: 403, error: KEYS_NEEDED };
   }
   return null;
 }
 
 export async function serverRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('servers'));
 
   app.get('/', async (req) => {
     const db = getDb();
@@ -263,7 +293,8 @@ export async function serverRoutes(app: FastifyInstance) {
       .map(sanitize);
   });
 
-  app.post('/', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.post('/', { preHandler: requireModule('servers', 'manage') }, async (req, reply) => {
+    if (!hasModule(req, 'ssh_keys', 'operate')) return reply.status(403).send({ error: KEYS_NEEDED });
     const body = createServerSchema.parse(req.body);
     if (
       body.authType === 'key' &&
@@ -276,8 +307,13 @@ export async function serverRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: ROUTE_CONFLICT });
     }
     if (body.jumpServerId) {
+      const denied = jumpDenial(req, body.jumpServerId);
+      if (denied) return reply.status(denied.status).send({ error: denied.error });
       const problem = jumpHostProblem(req.orgId, undefined, body.jumpServerId);
       if (problem) return reply.status(400).send({ error: problem });
+    }
+    if (body.agentId && !hasModule(req, 'agents', 'manage')) {
+      return reply.status(403).send({ error: 'Routing a server through an agent needs manage access to Agents' });
     }
     if (body.agentId && !agentUsableByOrg(req.orgId, body.agentId)) {
       return reply.status(400).send({ error: 'Unknown or revoked agent' });
@@ -377,6 +413,8 @@ export async function serverRoutes(app: FastifyInstance) {
     }
 
     if (jumpChanged && body.jumpServerId) {
+      const denied = jumpDenial(req, body.jumpServerId);
+      if (denied) return reply.status(denied.status).send({ error: denied.error });
       const problem = jumpHostProblem(req.orgId, id, body.jumpServerId);
       if (problem) return reply.status(400).send({ error: problem });
     }

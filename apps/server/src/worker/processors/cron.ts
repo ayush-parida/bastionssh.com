@@ -5,7 +5,7 @@ import { getDb } from '../../db/index.js';
 import { cronJobs, cronRuns, savedCommands } from '../../db/schema.js';
 import { resolveServerAuth } from '../../ssh/credentials.js';
 import { execOnServer } from '../../ssh/broker.js';
-import { authorize } from '../../auth/access/index.js';
+import { authorize, hasModule } from '../../auth/access/index.js';
 import { COMMAND_TIMEOUT_MS, interpolate } from '../../commands/run.js';
 import logger from '../../logger.js';
 
@@ -21,8 +21,10 @@ interface CronJobData {
  * as its creator, so they need `operate` on the job, on its server and on the
  * saved command it runs (custom roles spec §2.7), and must still see the
  * server that command is bound to, if any (a command is hidden with its
- * server) — checked before every run, so losing any of them (a role, a grant,
- * the membership) stops the job.
+ * server), with the Cron Jobs and Servers modules (and Saved Commands, for a
+ * saved command) on — checked before every run, so losing any of them (a
+ * role, a module, a grant, the membership) stops the job (unified roles
+ * spec §7).
  */
 export function creatorRefusal(job: {
   id: string;
@@ -33,6 +35,9 @@ export function creatorRefusal(job: {
   inlineCommand: string | null;
 }): string | null {
   const creator = { orgId: job.orgId, userId: job.createdBy };
+  if (!hasModule(creator, 'cron_jobs') || !hasModule(creator, 'servers')) {
+    return 'The job creator no longer has access to cron jobs';
+  }
   if (!authorize(creator, 'server', job.serverId, 'run_command').ok) {
     return 'The job creator no longer has access to this server';
   }
@@ -40,6 +45,7 @@ export function creatorRefusal(job: {
     return 'The job creator no longer has access to this cron job';
   }
   if (!job.inlineCommand && job.savedCommandId) {
+    if (!hasModule(creator, 'saved_commands')) return 'The job creator no longer has access to its saved command';
     const command = getDb()
       .select({ serverId: savedCommands.serverId })
       .from(savedCommands)

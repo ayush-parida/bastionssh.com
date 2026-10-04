@@ -4,6 +4,7 @@ import { and, desc, eq, inArray, or } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import type { BulkRotateKeysResponse } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { accessibleServerFilter, requireServer, serverDenial } from '../../auth/server-access.js';
 import { requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { getDb } from '../../db/index.js';
@@ -28,13 +29,14 @@ const historyQuery = z.object({
 
 /**
  * SSH key rotation (see ssh/key-rotation.ts). Rotating changes who can log in
- * to a server, so it needs `manage` on every server rotated (admins, or a
- * custom role that manages them — custom roles spec §5) and a passkey step-up
- * whenever the caller has a passkey; the history is readable by anyone who
- * can see the server.
+ * to a server, so it needs `manage` on every server rotated (custom roles
+ * spec §5) and a passkey step-up whenever the caller has a passkey; the
+ * history is readable by anyone who can see the server. All of it is part of
+ * the Servers module (unified roles spec §3.1).
  */
 export async function keyRotationRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('servers'));
 
   /** GET /api/keys/rotations?serverId=&keyId=&batchId=&limit= — newest first */
   app.get('/keys/rotations', async (req) => {

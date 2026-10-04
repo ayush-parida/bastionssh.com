@@ -17,7 +17,8 @@ import type {
   DockerTransport,
   DockerVolume,
 } from '@smt/shared';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { canAccessServer } from '../../auth/server-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
@@ -236,14 +237,21 @@ function statusOf(req: FastifyRequest, row: typeof servers.$inferSelect): Docker
 
 export async function dockerRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // Docker on one server is the server's Docker tab (the Servers module); the
+  // org's Docker settings belong to Containers (unified roles spec §3.1)
+  const serversModule = requireModule('servers');
+  const containersModule = requireModule('containers');
+  app.addHook('preHandler', (req, reply) =>
+    (req.routeOptions.url?.includes('/servers/:id') ? serversModule : containersModule)(req, reply),
+  );
 
   // ── Org settings ──────────────────────────────────────────────
 
-  /** The org's Docker permissions. Every member may read them — the UI hides what they cannot do. */
+  /** The org's Docker permissions. Every member with Containers may read them — the UI hides what they cannot do. */
   app.get('/settings', async (req): Promise<DockerSettings> => dockerSettings(req.orgId));
 
-  /** Owners and admins: what operators may do, and whether pruning is allowed. */
-  app.patch('/settings', { preHandler: requireRole('admin') }, async (req): Promise<DockerSettings> => {
+  /** Containers at `manage`: what operators may do, and whether pruning is allowed. */
+  app.patch('/settings', { preHandler: requireModule('containers', 'manage') }, async (req): Promise<DockerSettings> => {
     const body = settingsSchema.parse(req.body);
     const before = dockerSettings(req.orgId);
     const after = updateDockerSettings(req.orgId, body);

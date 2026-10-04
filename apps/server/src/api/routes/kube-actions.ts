@@ -11,6 +11,7 @@ import {
   type KubeScalableKind,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { audit } from '../../audit/index.js';
 import {
   actionPreview,
@@ -104,6 +105,7 @@ async function auditAction(req: FastifyRequest, ctx: KubeContext, action: AuditA
 
 export async function kubeActionRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('kubernetes'));
 
   /**
    * GET /clusters/:id/actions/preview/:resource/:ns/:name — the object's

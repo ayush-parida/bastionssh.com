@@ -21,6 +21,8 @@ const REVOKED = 'Access revoked';
 export interface StreamTarget {
   feature: 'docker' | 'kube';
   resourceId: string;
+  /** Streams from the AI provider (Kubernetes Explain): they end with the member's AI Assistant module. */
+  ai?: boolean;
 }
 
 interface ActiveStream extends StreamTarget {
@@ -161,6 +163,17 @@ export function abortEventStreams(
     if (entry.userId !== userId || entry.feature !== feature) continue;
     if (scope.orgId && entry.orgId !== scope.orgId) continue;
     if (keep.has(entry.resourceId)) continue;
+    entry.controller.abort(new Error(REVOKED));
+    aborted++;
+  }
+  return aborted;
+}
+
+/** End a user's open AI-backed streams (`ai` targets) in one org — their AI Assistant module went off. */
+export function abortAiEventStreams(userId: string, orgId: string): number {
+  let aborted = 0;
+  for (const entry of [...streams]) {
+    if (entry.userId !== userId || entry.orgId !== orgId || !entry.ai) continue;
     entry.controller.abort(new Error(REVOKED));
     aborted++;
   }

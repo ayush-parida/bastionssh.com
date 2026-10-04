@@ -14,6 +14,7 @@ import type {
 } from '@smt/shared';
 import { METRIC_RANGES } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
+import { requireModule } from '../../auth/access/modules.js';
 import { accessibleServerFilter, requireServer, serverDenial } from '../../auth/server-access.js';
 import { getDb } from '../../db/index.js';
 import { serverAlerts, serverHealth, serverMetrics, servers } from '../../db/schema.js';
@@ -194,9 +195,13 @@ function downsample<T>(rows: T[], max = MAX_POINTS): T[] {
 
 export async function monitoringRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  // The fleet and its alerts are Monitoring & Alerts; one server's health is
+  // part of the Servers module (unified roles spec §3.1, §3.2)
+  const monitoring = requireModule('monitoring');
+  const serversModule = requireModule('servers');
 
   /** Fleet-wide health, alert feed and counts — the Monitoring page's single fetch. */
-  app.get('/overview', async (req): Promise<MonitoringOverview> => {
+  app.get('/overview', { preHandler: monitoring }, async (req): Promise<MonitoringOverview> => {
     const db = getDb();
     const orgServers = db
       .select()
@@ -282,7 +287,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Current health plus the newest full sample for one server. */
-  app.get('/servers/:id', { preHandler: requireServer('health') }, async (req, reply): Promise<ServerHealthDetail | undefined> => {
+  app.get('/servers/:id', { preHandler: [serversModule, requireServer('health')] }, async (req, reply): Promise<ServerHealthDetail | undefined> => {
     const { id } = req.params as { id: string };
     const db = getDb();
 
@@ -318,7 +323,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Time series for the charts on the server health page. */
-  app.get('/servers/:id/metrics', { preHandler: requireServer('metrics') }, async (req, reply) => {
+  app.get('/servers/:id/metrics', { preHandler: [serversModule, requireServer('metrics')] }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { range } = metricsQuerySchema.parse(req.query);
     const db = getDb();
@@ -342,7 +347,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Probe a server right now instead of waiting for the next sweep. */
-  app.post('/servers/:id/check', { preHandler: requireServer('health_check') }, async (req, reply) => {
+  app.post('/servers/:id/check', { preHandler: [serversModule, requireServer('health_check')] }, async (req, reply) => {
     const { id } = req.params as { id: string };
     // A jump hop on the way is audited under the requesting user
     const outcome = await checkServerById(req.orgId, id, req.user.id);
@@ -353,7 +358,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /** Turn monitoring on or off for a server — a server setting, so `manage` on it. */
-  app.patch('/servers/:id', { preHandler: requireServer('edit') }, async (req, reply) => {
+  app.patch('/servers/:id', { preHandler: [serversModule, requireServer('edit')] }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { enabled } = monitoringSettingsSchema.parse(req.body);
     const db = getDb();
@@ -380,7 +385,7 @@ export async function monitoringRoutes(app: FastifyInstance) {
     return healthFor(updated, health);
   });
 
-  app.get('/alerts', async (req) => {
+  app.get('/alerts', { preHandler: monitoring }, async (req) => {
     const { status, limit } = alertsQuerySchema.parse(req.query);
     const db = getDb();
 
@@ -411,10 +416,11 @@ export async function monitoringRoutes(app: FastifyInstance) {
   });
 
   /**
-   * Acknowledge an alert — it stays open but stops demanding attention. Like
-   * a health check, it needs `operate` on the alert's server.
+   * Acknowledge an alert — it stays open but stops demanding attention. It
+   * needs Monitoring & Alerts at `operate` and, like a health check,
+   * `operate` on the alert's server.
    */
-  app.post('/alerts/:id/acknowledge', async (req, reply) => {
+  app.post('/alerts/:id/acknowledge', { preHandler: requireModule('monitoring', 'operate') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 

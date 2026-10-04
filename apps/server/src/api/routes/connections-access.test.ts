@@ -412,6 +412,11 @@ describe('connections, storage and cloud accounts under custom roles', () => {
           const hidden = await create[type]();
           const who = subject.make(type, id);
           const res = await inject({ method: 'GET', url: LISTS[type], headers: who.headers });
+          // Reaching none of them, the module is hidden and its list not there (unified roles spec §3.1)
+          if (subject.level === 'none' && !subject.base && !subject.name.includes('every one')) {
+            expect(res.statusCode).toBe(404);
+            return;
+          }
           expect(res.statusCode).toBe(200);
           const ids = (res.json() as { id: string }[]).map((row) => row.id);
           expect(ids.includes(id)).toBe(subject.level !== 'none');

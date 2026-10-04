@@ -233,15 +233,20 @@ describe('server and cluster access matrix', () => {
   ];
 
   it('lists only what each member reaches', async () => {
+    // A member reaching nothing of a type has its module hidden: the list is a 404 (unified roles spec §3.1)
+    const ids = async (who: Who, url: string): Promise<string[]> => {
+      const res = await call(who, 'GET', url);
+      return res.statusCode === 404 ? [] : res.json().map((x: { id: string }) => x.id);
+    };
     for (const m of members) {
-      const listed = (await call(m.who(), 'GET', '/api/servers')).json().map((x: { id: string }) => x.id);
+      const listed = await ids(m.who(), '/api/servers');
       expect(listed.includes(serverId), `${m.name} server list`).toBe(m.server !== 'none');
-      const clusters = (await call(m.who(), 'GET', '/api/kube/clusters')).json().map((x: { id: string }) => x.id);
+      const clusters = await ids(m.who(), '/api/kube/clusters');
       expect(clusters.includes(clusterId), `${m.name} cluster list`).toBe(m.cluster !== 'none');
     }
     // A server tagged otherwise is covered by nothing a role-scoped member holds
     for (const name of ['roleView', 'roleOperate', 'roleManage', 'personalOperate', 'personalManage', 'nothing']) {
-      const listed = (await call(cases[name]!.who, 'GET', '/api/servers')).json().map((x: { id: string }) => x.id);
+      const listed = await ids(cases[name]!.who, '/api/servers');
       expect(listed, name).not.toContain(otherServerId);
     }
   });

@@ -9,7 +9,8 @@ import type {
   SessionRecording,
   SessionRecordingDetail,
 } from '@smt/shared';
-import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { hasModule, requireModule, requireOwner } from '../../auth/access/modules.js';
 import { serverScope } from '../../auth/server-access.js';
 import { requireStepUpIfPasskeys } from '../../auth/passkey.js';
 import { getDb } from '../../db/index.js';
@@ -56,14 +57,15 @@ const settingsSchema = z
   .refine((v) => Object.keys(v).length > 0, 'Nothing to change');
 
 /**
- * Who sees which recordings: admins and owners the whole org, everyone else
- * only their own — and never one on a server they may not access, so a
- * narrowed grant hides old recordings too. A recording whose server was
- * deleted stays visible only to those with access to every server.
+ * Who sees which recordings (unified roles spec §3.2): with the Recordings
+ * module at `operate` or above everyone's, at `view` only their own — and
+ * never one on a server they may not access, so a narrowed grant hides old
+ * recordings too. A recording whose server was deleted stays visible only to
+ * those with access to every server.
  */
 function visibleTo(req: FastifyRequest): SQL {
   const conditions: (SQL | undefined)[] = [eq(sessionRecordings.orgId, req.orgId)];
-  if (rank(req.role) < rank('admin')) conditions.push(eq(sessionRecordings.userId, req.user.id));
+  if (!hasModule(req, 'recordings', 'operate')) conditions.push(eq(sessionRecordings.userId, req.user.id));
   const scope = serverScope(req);
   if (!scope.all) conditions.push(inArray(sessionRecordings.serverId, scope.serverIds));
   return and(...conditions)!;
@@ -106,10 +108,19 @@ function castFilename(row: RecordingRow): string {
   return `${name}-${row.startedAt.slice(0, 19).replace(/:/g, '-')}.cast`;
 }
 
+/**
+ * Changing the recording policy and deleting recordings need the Recordings
+ * module at `manage` and stay with owners, as before unified roles: switching
+ * recording off, shortening retention or removing a recording is exactly what
+ * someone covering their tracks would do.
+ */
+const OWNER_MANAGES = [requireModule('recordings', 'manage'), requireOwner()];
+
 export async function recordingRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
+  app.addHook('preHandler', requireModule('recordings'));
 
-  /** Org recording policy. Every member may read it — the terminal says when input is captured. */
+  /** Org recording policy. Every member with Recordings may read it — the terminal says when input is captured. */
   app.get('/settings', async (req): Promise<RecordingSettings> => recordingSettings(req.orgId));
 
   /**
@@ -117,7 +128,7 @@ export async function recordingRoutes(app: FastifyInstance) {
    * what someone covering their tracks would do. Applies to sessions opened
    * from now on; live ones keep the policy they started with.
    */
-  app.patch('/settings', { preHandler: requireRole('owner') }, async (req, reply) => {
+  app.patch('/settings', { preHandler: OWNER_MANAGES }, async (req, reply) => {
     const body = settingsSchema.parse(req.body);
     if (!requireStepUpIfPasskeys(req, reply, req.orgId)) return;
 
@@ -225,7 +236,7 @@ export async function recordingRoutes(app: FastifyInstance) {
   });
 
   /** DELETE /api/recordings/:id — owners only, and never one that is still recording */
-  app.delete('/:id', { preHandler: requireRole('owner') }, async (req, reply) => {
+  app.delete('/:id', { preHandler: OWNER_MANAGES }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const found = findVisible(req, id);
     if (!found) return reply.status(404).send({ error: 'Recording not found' });

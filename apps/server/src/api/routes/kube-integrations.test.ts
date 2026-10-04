@@ -60,7 +60,7 @@ import { nanoid } from 'nanoid';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { auditLog, kubeClusters } from '../../db/schema.js';
+import { auditLog, kubeClusters, roles } from '../../db/schema.js';
 import { vault } from '../../vault/index.js';
 import { AGENT_TOOLS, ToolExecutor } from '../../ai/tools.js';
 import { resetKubeCache } from '../../kube/cache.js';
@@ -69,7 +69,7 @@ import { clusterAlertLimits, forgetClusterAlerts, openClusterAlerts, sweepCluste
 import { REDACTED } from '../../kube/redact.js';
 import { activeKubeStreamCount } from '../../kube/sse.js';
 import { FAKE_TOKEN, deployment, fakeKubeconfig, node, pod, startFakeApi, type FakeApi } from '../../kube/fake-api.test-helper.js';
-import { seedOrg, seedUser } from './test-utils.js';
+import { addModuleRole, seedOrg, seedUser } from './test-utils.js';
 
 type Who = ReturnType<typeof seedUser>;
 
@@ -338,9 +338,13 @@ describe('kube integrations (K5)', () => {
 
     it('keep viewers to what the UI shows them: no YAML-like describe, no logs', async () => {
       const tools = executor(viewer);
+      // Viewers have no AI Assistant; given it, the Kubernetes matrix still reads at their level
+      await expect(tools.execute('kube_list_workloads', { cluster_id: prod })).rejects.toThrow(/not available/);
+      const aiRole = addModuleRole(orgId, viewer.userId, { ai: 'view' });
       await expect(tools.execute('kube_list_workloads', { cluster_id: prod })).resolves.toMatch(/Workloads:/);
       await expect(tools.execute('kube_describe', { cluster_id: prod, resource: 'pods', namespace: 'shop', name: 'web-1' })).rejects.toThrow(/operator/);
       await expect(tools.execute('kube_pod_logs', { cluster_id: prod, namespace: 'shop', pod: 'web-2' })).rejects.toThrow(/operator/);
+      getDb().delete(roles).where(eq(roles.id, aiRole)).run();
     });
 
     it('answer "not found" for clusters the member may not use, and respect the namespace allowlist', async () => {
@@ -420,7 +424,11 @@ describe('kube integrations (K5)', () => {
     });
 
     it('is for operators and up, on clusters and namespaces they may see', async () => {
+      // Explain asks the AI provider: without the AI Assistant module it is not there (viewers)
+      expect((await explain(viewer, prod, { resource: 'pods', namespace: 'shop', name: 'web-2' })).status).toBe(404);
+      const aiRole = addModuleRole(orgId, viewer.userId, { ai: 'view' });
       expect((await explain(viewer, prod, { resource: 'pods', namespace: 'shop', name: 'web-2' })).status).toBe(403);
+      getDb().delete(roles).where(eq(roles.id, aiRole)).run();
       expect((await explain(restricted, narrow, { resource: 'pods', namespace: 'kube-system', name: 'coredns-1' })).status).toBe(404);
       expect((await explain(operator, narrow, { resource: 'pods', namespace: 'shop', name: 'web-2' })).status).toBe(404);
       expect((await explain(operator, prod, { resource: 'pods', namespace: 'shop', name: 'nope' })).status).toBe(404);

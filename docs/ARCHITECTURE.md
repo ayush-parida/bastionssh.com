@@ -875,6 +875,31 @@ Admin holds by default, and so on), until every route gates on modules. The pre-
 custom-role routes, held-role lists and access requests see custom roles only
 (`customRoleFilter`); built-in names are reserved.
 
+**Resource and feature modules on module gates.** Every route of Servers (terminal sessions,
+SFTP, the Docker tab, health, host keys, key rotation), Containers (the fleet, Docker
+settings), Kubernetes, FTP, Object Storage, Cloud Accounts, Saved Commands, Cron Jobs,
+Recordings, Monitoring & Alerts (with notification channels), DNS & Diagnostics and the AI
+Assistant first passes `requireModule` (a plugin hook; shell sessions take either Servers or
+Kubernetes, `requireAnyModule`), so a module off or hidden is a 404 even where grants exist,
+then its resource check. Creating items and module-wide settings need the module at `manage`
+(for saved commands and cron jobs `manage` on every one of them still does, as before); what admins
+alone could change on an item they manage through a grant (a server's endpoint or key, an FTP
+connection's key, a cloud account's credentials) needs the module at `manage`, and routing
+through an agent Agents at `manage`. Whatever lets an org SSH key log in somewhere new — adding
+a server or changing where one connects (a terminal names any org key), a key-auth FTP
+connection's key or endpoint, a cloud account's default key — also needs SSH Keys at
+`operate`, and a jump host needs `operate` on that server, so a custom role with a resource
+module at `manage` never gets the org's keys or another server's login with it. Recordings: `view` own, `operate` everyone's; the policy and
+deleting stay owner-only. The Docker and Kubernetes matrices read the module level where no
+single resource is asked. The AI Assistant is the `ai` module (`ai/access.ts`), which members who
+operated a server or cluster namespace through a pre-0025 custom role or a personal grant keep
+at `view` (`resolve.ts`); Kubernetes Explain needs it too. Cron runs, queued saved-command
+runs, queued key rotations and every AI tool call re-check the module as well as the resource,
+and `revokeAfterChange` ends AI chat and Explain streams once a member's AI Assistant module is
+off.
+`resource-modules.test.ts` walks the app's route table to prove No access (and parked grants)
+get 404 on every one of these routes, and holds the module × level matrix.
+
 The rest of this section describes the resource engine as custom roles introduced it; "base
 role" there now means the built-in role a member holds.
 

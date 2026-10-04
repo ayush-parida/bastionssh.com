@@ -169,8 +169,14 @@ describe('saved commands and cron jobs under custom roles', () => {
     it.each(SUBJECTS)('%s sees exactly what they reach', async (who) => {
       const names = { [c1]: 'c1', [c2]: 'c2', [j1]: 'j1', [j2]: 'j2', [j3]: 'j3' } as Record<string, string>;
       const label = (rows: { id: string }[]) => rows.map((r) => names[r.id]).filter(Boolean).sort();
-      expect(label((await send(who, 'GET', '/api/commands')).json())).toEqual(visible[who].commands);
-      expect(label((await send(who, 'GET', '/api/cron-jobs')).json())).toEqual(visible[who].jobs);
+      // Reaching nothing, the module is hidden and its list not there at all (unified roles spec §3.1)
+      const list = async (url: string) => {
+        const res = await send(who, 'GET', url);
+        return res.statusCode === 404 ? [] : label(res.json());
+      };
+      expect(await list('/api/commands')).toEqual(visible[who].commands);
+      expect(await list('/api/cron-jobs')).toEqual(visible[who].jobs);
+      if (who === 'nothing') expect((await send(who, 'GET', '/api/commands')).statusCode).toBe(404);
     });
   });
 
@@ -243,7 +249,8 @@ describe('saved commands and cron jobs under custom roles', () => {
       method: 'POST',
       url: () => '/api/commands',
       body: () => ({ name: 'new', command: 'true' }),
-      expect: { admin: 201, opAll: 201, viewAll: 403, roleOp: 403, grantView: 403, grantManage: 403, nothing: 403 },
+      // `nothing` sees no command: the module is hidden from them
+      expect: { admin: 201, opAll: 201, viewAll: 403, roleOp: 403, grantView: 403, grantManage: 403, nothing: 404 },
     },
   ];
 
@@ -286,7 +293,7 @@ describe('saved commands and cron jobs under custom roles', () => {
       method: 'POST',
       url: () => '/api/cron-jobs',
       body: () => ({ serverId: s1, name: 'new', schedule: '0 * * * *', inlineCommand: 'true', enabled: false }),
-      expect: { admin: 201, opAll: 201, viewAll: 403, roleOp: 403, grantView: 403, grantManage: 403, nothing: 403 },
+      expect: { admin: 201, opAll: 201, viewAll: 403, roleOp: 403, grantView: 403, grantManage: 403, nothing: 404 },
     },
     {
       name: 'delete an ungranted job',

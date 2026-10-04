@@ -48,7 +48,7 @@ export const kubeFleetLimits = {
   problems: 8,
 };
 
-type Caller = Pick<FastifyRequest, 'orgId' | 'user' | 'role'>;
+type Caller = Pick<FastifyRequest, 'orgId' | 'user'> & Partial<Pick<FastifyRequest, 'apiTokenReadOnly'>>;
 
 /** Health kinds with replicas worth counting on the overview (Jobs and CronJobs come and go by design). */
 export const FLEET_WORKLOADS: { kind: KubeWorkloadKind; resource: KubeResource }[] = [

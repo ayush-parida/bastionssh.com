@@ -1,8 +1,9 @@
 import { nanoid } from 'nanoid';
 import { getDb } from '../../db/index.js';
-import { apiTokens, memberships, organizations, servers, users } from '../../db/schema.js';
+import { apiTokens, memberships, organizations, roleMembers, roles, servers, users } from '../../db/schema.js';
 import { generateApiToken } from '../../auth/token.js';
 import { createSession } from '../../auth/session.js';
+import type { ModulePermissions } from '@smt/shared';
 import type { Role } from '../../auth/middleware.js';
 
 /** Test-only seeding helpers shared by the route suites. */
@@ -52,5 +53,17 @@ export function seedServer(orgId: string, createdBy: string, name = 'web-1', tag
     .insert(servers)
     .values({ id, orgId, name, host: '10.0.0.1', username: 'root', createdBy, tags: JSON.stringify(tags) })
     .run();
+  return id;
+}
+
+/**
+ * Give `userId` a custom role holding these module levels (unified roles), on
+ * top of what they have; returns the role's id.
+ */
+export function addModuleRole(orgId: string, userId: string, modules: ModulePermissions, name = `modules-${nanoid(6)}`) {
+  const id = nanoid();
+  const db = getDb();
+  db.insert(roles).values({ id, orgId, name, createdBy: userId, modulePermissions: JSON.stringify(modules) }).run();
+  db.insert(roleMembers).values({ roleId: id, userId, orgId }).run();
   return id;
 }

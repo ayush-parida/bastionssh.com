@@ -1,7 +1,8 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { KUBE_CLUSTER_SCOPE, kubePermissions, type KubeCapability, type KubePermissions, type Role } from '@smt/shared';
 import { levelFor } from '../auth/access/authorize.js';
-import { roleForLevel } from '../auth/access/levels.js';
+import { roleForLevel, roleForModuleLevel } from '../auth/access/levels.js';
+import { moduleLevel } from '../auth/access/modules.js';
 import type { AccessSubject } from '../auth/access/resolve.js';
 import { kubeSettings } from './settings.js';
 
@@ -11,28 +12,29 @@ import { kubeSettings } from './settings.js';
  * given cluster the matrix is read at the caller's level there (custom roles
  * spec §5): `operate` as an operator, org toggles included, `manage` as an
  * admin — and in a namespace, at their level in that namespace, so a role
- * narrowed to `shop` operates there and nowhere else. `req.role` is already
- * capped for read-only API tokens, and so are levels. Cluster access is
- * checked first — a cluster the caller cannot access is a 404 whatever their
- * role. The cluster's own credential bounds the rest: RBAC on the cluster
- * may still say no.
+ * narrowed to `shop` operates there and nowhere else. Levels are capped for
+ * read-only API tokens. Cluster access is checked first — a cluster the
+ * caller cannot access is a 404 whatever their role. The cluster's own
+ * credential bounds the rest: RBAC on the cluster may still say no.
  */
 
-type Caller = Pick<FastifyRequest, 'orgId' | 'role'> & Partial<Pick<FastifyRequest, 'user' | 'apiTokenReadOnly'>>;
+type Caller = Pick<FastifyRequest, 'orgId' | 'user'> & Partial<Pick<FastifyRequest, 'apiTokenReadOnly'>>;
 
 /**
  * The caller's level on `clusterId` as a role when they can reach it, else
- * their base role. With `namespace`, only grants covering that namespace
- * count; one none covers reads as the least, a viewer.
+ * (no cluster: adding one, the fleet) their level on the Kubernetes module —
+ * `manage` there is what adds clusters (unified roles spec §3.1). With
+ * `namespace`, only grants covering that namespace count; one none covers
+ * reads as the least, a viewer.
  */
 function roleOn(req: Caller, clusterId?: string, namespace?: string): Role {
   // The request itself, so the answer is shared with the route's own access check
-  if (clusterId && req.user) {
+  if (clusterId) {
     const found = levelFor(req as AccessSubject, 'cluster', clusterId, { namespace });
     if (found) return roleForLevel(found.level);
     if (namespace !== undefined) return 'viewer';
   }
-  return req.role as Role;
+  return roleForModuleLevel(moduleLevel(req as AccessSubject, 'kubernetes'));
 }
 
 export function kubePermissionsFor(req: Caller, clusterId?: string, namespace?: string): KubePermissions {
@@ -52,7 +54,7 @@ const REFUSED: Record<KubeCapability, string> = {
   rollback: 'Rolling back needs the admin role',
   cordon: 'Cordoning nodes needs the admin role',
   exec: 'Opening a shell in a pod is not allowed for your role',
-  configure: 'Managing clusters needs the admin role',
+  configure: 'Managing clusters needs manage access to Kubernetes',
 };
 
 /** Where a route names the namespace it acts in: the `:ns` route parameter, or `namespace` in the JSON body. */
@@ -76,10 +78,10 @@ function namespaceOf(req: FastifyRequest, from: NamespaceSource | undefined): st
  */
 export function requireKube(capability: KubeCapability, namespaceFrom?: NamespaceSource) {
   return async function kubeGuard(req: FastifyRequest, reply: FastifyReply) {
-    if (!req.role) return reply.status(401).send({ error: 'Unauthorized' });
+    if (!req.user) return reply.status(401).send({ error: 'Unauthorized' });
     const clusterId = (req.params as { id?: string } | undefined)?.id;
     const namespace = namespaceOf(req, namespaceFrom);
-    if (clusterId && req.user) {
+    if (clusterId) {
       if (!levelFor(req, 'cluster', clusterId)) return reply.status(404).send({ error: 'Cluster not found' });
       if (namespace !== undefined && !levelFor(req, 'cluster', clusterId, { namespace })) {
         return reply.status(404).send({ error: 'Not found' });
