@@ -407,5 +407,110 @@ describe('custom roles and resource access', () => {
       expect(res.statusCode).toBe(400);
       expect((await as(admin).get('/api/access-requests/requestable')).json()).toMatchObject({ canRequest: false });
     });
+
+    describe('cluster namespaces', () => {
+      /** A role-scoped member who sees `shop` as a whole, at view. */
+      async function shopViewer(base: 'viewer' | 'operator' = 'viewer'): Promise<Who> {
+        const member = await roleScoped(base);
+        getDb()
+          .insert(resourceGrants)
+          .values({
+            id: nanoid(),
+            orgId,
+            principalType: 'user',
+            principalId: member.userId,
+            resourceType: 'cluster',
+            selector: 'id',
+            resourceId: shop,
+            level: 'view',
+            grantedBy: admin.userId,
+            createdAt: new Date().toISOString(),
+          })
+          .run();
+        return member;
+      }
+      const ask = (who: Who, body: object) =>
+        as(who).post('/api/access-requests', { reason: 'incident 7', durationMinutes: 60, ...body });
+      const operateIn = (who: Who, namespace?: string) =>
+        levelFor({ orgId, userId: who.userId }, 'cluster', shop, namespace === undefined ? {} : { namespace })?.level ?? null;
+      const personalClusterGrants = (who: Who) =>
+        getDb()
+          .select()
+          .from(resourceGrants)
+          .where(and(eq(resourceGrants.principalId, who.userId), eq(resourceGrants.resourceType, 'cluster'), eq(resourceGrants.level, 'operate')))
+          .all();
+
+      it('lets a member ask for some namespaces and the approver narrow them; approval grants only those', async () => {
+        const jules = await shopViewer();
+        const created = await ask(jules, { resourceType: 'cluster', resourceIds: [shop], level: 'operate', namespaces: ['web', 'shop'] });
+        expect(created.statusCode, created.body).toBe(201);
+        expect(created.json()).toMatchObject({ resourceType: 'cluster', level: 'operate', namespaces: ['shop', 'web'], approvedNamespaces: null });
+        const id = created.json().id as string;
+
+        // Never wider than asked
+        const widened = await as(admin).post(`/api/access-requests/${id}/approve`, { namespaces: ['shop', 'ops'] });
+        expect(widened.statusCode).toBe(400);
+        expect(widened.json().error).toMatch(/narrow/);
+        expect(personalClusterGrants(jules)).toEqual([]);
+
+        const approved = await as(admin).post(`/api/access-requests/${id}/approve`, { namespaces: ['shop'] });
+        expect(approved.statusCode, approved.body).toBe(200);
+        expect(approved.json()).toMatchObject({ status: 'approved', namespaces: ['shop', 'web'], approvedNamespaces: ['shop'] });
+
+        const [grant] = personalClusterGrants(jules);
+        expect(grant).toMatchObject({ namespaces: '["shop"]', selector: 'id', resourceId: shop });
+        expect(grant!.expiresAt).not.toBeNull();
+        expect(operateIn(jules, 'shop')).toBe('operate');
+        expect(operateIn(jules, 'web')).toBe('view');
+        // The cluster as a whole stays at view
+        expect(operateIn(jules)).toBe('view');
+        expect(audits('access_request.approve', id)[0]!.meta).toMatchObject({
+          namespaces: { before: ['shop', 'web'], after: ['shop'] },
+          level: 'operate',
+        });
+      });
+
+      it('narrows a whole-cluster request when the approver picks namespaces, and keeps a narrowed one narrowed', async () => {
+        const kai = await shopViewer();
+        const whole = await ask(kai, { resourceType: 'cluster', resourceIds: [shop], level: 'operate' });
+        expect(whole.json()).toMatchObject({ namespaces: null });
+        expect((await as(admin).post(`/api/access-requests/${whole.json().id}/approve`, { namespaces: ['shop'] })).statusCode).toBe(200);
+        expect(operateIn(kai, 'shop')).toBe('operate');
+        expect(operateIn(kai, 'ops')).toBe('view');
+        expect(operateIn(kai)).toBe('view');
+
+        const lea = await shopViewer();
+        const narrowed = await ask(lea, { resourceType: 'cluster', resourceIds: [shop], level: 'operate', namespaces: ['web'] });
+        expect((await as(admin).post(`/api/access-requests/${narrowed.json().id}/approve`)).statusCode).toBe(200);
+        expect(operateIn(lea, 'web')).toBe('operate');
+        expect(operateIn(lea, 'shop')).toBe('view');
+        expect(operateIn(lea)).toBe('view');
+      });
+
+      it('grants a base-level cluster request narrowed to namespaces at the base role, in those namespaces only', async () => {
+        const max = await roleScoped('operator');
+        const created = await ask(max, { clusterIds: [shop], namespaces: ['shop'] });
+        expect(created.statusCode, created.body).toBe(201);
+        expect(created.json()).toMatchObject({ resourceType: 'cluster', level: null, namespaces: ['shop'], clusters: [{ id: shop }] });
+        expect((await as(admin).post(`/api/access-requests/${created.json().id}/approve`)).statusCode).toBe(200);
+        expect(operateIn(max, 'shop')).toBe('operate');
+        expect(operateIn(max, 'ops')).toBeNull();
+        expect(operateIn(max)).toBe('view');
+      });
+
+      it('refuses namespaces anywhere but on cluster requests', async () => {
+        const nia = seedUser(orgId, 'viewer');
+        const server = await ask(nia, { resourceType: 'server', resourceIds: [web1], level: 'operate', namespaces: ['shop'] });
+        expect(server.statusCode).toBe(400);
+        const plain = await ask(nia, { resourceType: 'server', resourceIds: [web1], level: 'operate' });
+        expect(plain.statusCode).toBe(201);
+        const approve = await as(admin).post(`/api/access-requests/${plain.json().id}/approve`, { namespaces: ['shop'] });
+        expect(approve.statusCode).toBe(400);
+        expect(levelFor({ orgId, userId: nia.userId }, 'server', web1)?.level).toBe('view');
+        // Not a namespace at all
+        const bad = await ask(await shopViewer(), { resourceType: 'cluster', resourceIds: [shop], level: 'operate', namespaces: ['Not_A_Namespace'] });
+        expect(bad.statusCode).toBe(400);
+      });
+    });
   });
 });

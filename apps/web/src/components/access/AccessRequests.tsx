@@ -8,6 +8,7 @@ import { cn, relativeTime } from '@/lib/utils.js';
 import { DURATION_OPTIONS, formatMinutes, RESOURCE_TYPE_LABELS } from '@/lib/access.js';
 import { useAuthStore, useHasRole } from '@/store/auth.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
+import { NamespaceChips } from './GrantsEditor.js';
 import { durationChoices, RequestAccessDialog, useRequestableAccess, useRequestableServers } from './RequestAccessDialog.js';
 
 const STATUS_STYLE: Record<AccessRequestStatus, string> = {
@@ -33,14 +34,23 @@ function requestedText(request: AccessRequest): string {
   const labels = RESOURCE_TYPE_LABELS[type];
   const names = (request.resources ?? request.servers).map((s) => s.name ?? `deleted ${labels.one}`).join(', ');
   const prefix = type === 'server' ? '' : `${labels.many[0]!.toUpperCase()}${labels.many.slice(1)}: `;
-  return `${prefix}${names}${request.level ? ` (${request.level})` : ''}`;
+  return `${prefix}${names}${namespacesText(request)}${request.level ? ` (${request.level})` : ''}`;
+}
+
+/** ` in namespaces a, b` — what was granted once approved, else what was asked; empty for a whole cluster. */
+function namespacesText(request: AccessRequest): string {
+  const granted = request.status === 'approved' ? request.approvedNamespaces : null;
+  const namespaces = granted ?? request.namespaces;
+  if (!namespaces?.length) return '';
+  const asked = granted && request.namespaces ? ` (asked for ${request.namespaces.join(', ')})` : granted ? ' (asked for the whole cluster)' : '';
+  return ` in namespace${namespaces.length === 1 ? '' : 's'} ${namespaces.join(', ')}${asked}`;
 }
 
 /** One request: who, what, why, and where it stands. */
 function RequestRow({ request, actions }: { request: AccessRequest; actions?: React.ReactNode }) {
   const accessEnds = request.status === 'approved' ? request.expiresAt : null;
   return (
-    <div className="flex items-start gap-3 px-4 py-3">
+    <div className="flex items-start gap-3 px-4 py-3" data-testid="access-request">
       <div className="flex-1 min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-medium truncate">{request.userDisplayName || request.userEmail}</span>
@@ -67,11 +77,56 @@ function RequestRow({ request, actions }: { request: AccessRequest; actions?: Re
   );
 }
 
-/** Approve (optionally for less time) or deny a pending request. */
+/**
+ * Cluster requests: which namespaces to grant. Asked-for namespaces can only
+ * be unticked (narrowed); a whole-cluster request can be narrowed to some.
+ */
+function NamespacePicker({
+  request,
+  value,
+  onChange,
+}: {
+  request: AccessRequest;
+  value: string[] | null;
+  onChange: (namespaces: string[] | null) => void;
+}) {
+  const asked = request.namespaces;
+  if (!asked?.length) {
+    return (
+      <div className="flex items-center gap-1" title="Leave at all to grant the whole cluster, as asked">
+        <NamespaceChips namespaces={value} onChange={onChange} inputLabel="Narrow to namespace" />
+      </div>
+    );
+  }
+  const chosen = value ?? asked;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      <span className="text-muted-foreground">Grant in:</span>
+      {asked.map((ns) => (
+        <label key={ns} className="flex items-center gap-1 font-mono">
+          <input
+            type="checkbox"
+            aria-label={`Grant namespace ${ns}`}
+            checked={chosen.includes(ns)}
+            onChange={(e) => onChange(e.target.checked ? asked.filter((n) => n === ns || chosen.includes(n)) : chosen.filter((n) => n !== ns))}
+          />
+          {ns}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** Approve (optionally for less time, or fewer namespaces) or deny a pending request. */
 function DecideActions({ request }: { request: AccessRequest }) {
   const qc = useQueryClient();
   const [minutes, setMinutes] = useState(request.durationMinutes);
+  /** Cluster requests: the namespaces to grant; null = as asked. */
+  const [namespaces, setNamespaces] = useState<string[] | null>(null);
+  const isCluster = request.resourceType === 'cluster';
   const choices = DURATION_OPTIONS.filter((o) => o.minutes < request.durationMinutes);
+  // Unticking every asked-for namespace leaves nothing to grant
+  const nothingPicked = isCluster && namespaces !== null && namespaces.length === 0;
 
   const mutation = useMutation({
     mutationFn: ({ verb, body }: { verb: 'approve' | 'deny'; body: DecideAccessRequest }) =>
@@ -87,35 +142,44 @@ function DecideActions({ request }: { request: AccessRequest }) {
   });
 
   return (
-    <div className="flex shrink-0 items-center gap-2">
-      <select
-        value={minutes}
-        onChange={(e) => setMinutes(Number(e.target.value))}
-        title="Approve for"
-        className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
-      >
-        <option value={request.durationMinutes}>{formatMinutes(request.durationMinutes)} (as asked)</option>
-        {choices.map((o) => (
-          <option key={o.minutes} value={o.minutes}>{o.label}</option>
-        ))}
-      </select>
-      <button
-        onClick={() => mutation.mutate({ verb: 'approve', body: { durationMinutes: minutes } })}
-        disabled={mutation.isPending}
-        className="flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-600/90 disabled:opacity-50"
-      >
-        <Check size={12} /> Approve
-      </button>
-      <button
-        onClick={() => {
-          const note = prompt('Deny this request? Optionally say why:');
-          if (note !== null) mutation.mutate({ verb: 'deny', body: note.trim() ? { note: note.trim() } : {} });
-        }}
-        disabled={mutation.isPending}
-        className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50"
-      >
-        <X size={12} /> Deny
-      </button>
+    <div className="flex shrink-0 flex-col items-end gap-2">
+      {isCluster && <NamespacePicker request={request} value={namespaces} onChange={setNamespaces} />}
+      <div className="flex items-center gap-2">
+        <select
+          value={minutes}
+          onChange={(e) => setMinutes(Number(e.target.value))}
+          title="Approve for"
+          className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
+        >
+          <option value={request.durationMinutes}>{formatMinutes(request.durationMinutes)} (as asked)</option>
+          {choices.map((o) => (
+            <option key={o.minutes} value={o.minutes}>{o.label}</option>
+          ))}
+        </select>
+        <button
+          onClick={() =>
+            mutation.mutate({
+              verb: 'approve',
+              body: { durationMinutes: minutes, ...(isCluster && namespaces?.length ? { namespaces } : {}) },
+            })
+          }
+          disabled={mutation.isPending || nothingPicked}
+          title={nothingPicked ? 'Pick at least one namespace, or deny the request' : undefined}
+          className="flex items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-emerald-600/90 disabled:opacity-50"
+        >
+          <Check size={12} /> Approve
+        </button>
+        <button
+          onClick={() => {
+            const note = prompt('Deny this request? Optionally say why:');
+            if (note !== null) mutation.mutate({ verb: 'deny', body: note.trim() ? { note: note.trim() } : {} });
+          }}
+          disabled={mutation.isPending}
+          className="flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50"
+        >
+          <X size={12} /> Deny
+        </button>
+      </div>
     </div>
   );
 }

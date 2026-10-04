@@ -10,6 +10,8 @@ import type { AIAgentEvent } from '@smt/shared';
 const agent = vi.hoisted(() => ({
   script: [] as Array<{ name: string; input: Record<string, unknown> }>,
   nextId: 0,
+  /** The messages of the last agent loop, system prompt first. */
+  messages: [] as Array<{ role: string; content: string }>,
 }));
 const broker = vi.hoisted(() => ({
   getSessionForUser: vi.fn(),
@@ -21,10 +23,11 @@ vi.mock('../../ai/registry.js', () => ({
   getAIProvider: () => ({
     async *chat() {},
     async *agentLoop(
-      _messages: unknown,
+      messages: Array<{ role: string; content: string }>,
       _tools: unknown,
       execute: (name: string, input: Record<string, unknown>, id: string) => Promise<string>,
     ) {
+      agent.messages = messages;
       for (const call of agent.script) {
         const id = `call-${++agent.nextId}`;
         yield { type: 'tool_call', id, name: call.name, input: call.input };
@@ -56,7 +59,8 @@ vi.mock('../../ssh/credentials.js', () => ({
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { auditLog } from '../../db/schema.js';
+import { auditLog, kubeClusters, memberships, resourceGrants, roleMembers, roles } from '../../db/schema.js';
+import { nanoid } from 'nanoid';
 import { and, eq } from 'drizzle-orm';
 import { pendingApprovalCount } from '../../ai/approvals.js';
 import { abortAgentStreams, activeAgentStreamCount } from '../../ai/streams.js';
@@ -280,5 +284,162 @@ describe('AI chat command approval', () => {
 
   it('404s an unknown approval id', async () => {
     expect((await decide('nope', operator.headers, true)).statusCode).toBe(404);
+  });
+});
+
+describe('AI chat for members raised by custom roles', () => {
+  let app: Awaited<ReturnType<typeof buildApp>>;
+  let orgId: string;
+  let admin: ReturnType<typeof seedUser>;
+  let operated: string;
+  let viewed: string;
+  let hidden: string;
+
+  const chat = (headers: Record<string, string>) =>
+    app.inject({
+      method: 'POST',
+      url: '/api/ai/chat',
+      headers,
+      payload: { messages: [{ role: 'user', content: 'go' }] },
+    });
+
+  /** A viewer limited to what roles give them, holding a role with `grants`. */
+  function member(grants: Array<{ type: 'server' | 'cluster'; id: string; level: 'view' | 'operate'; namespaces?: string[] }>) {
+    const who = seedUser(orgId, 'viewer');
+    const db = getDb();
+    db.update(memberships).set({ scope: 'roles' }).where(and(eq(memberships.userId, who.userId), eq(memberships.orgId, orgId))).run();
+    const roleId = nanoid();
+    db.insert(roles).values({ id: roleId, orgId, name: `role-${roleId}`, createdBy: admin.userId }).run();
+    db.insert(roleMembers).values({ roleId, userId: who.userId, orgId }).run();
+    for (const g of grants) {
+      db.insert(resourceGrants)
+        .values({
+          id: nanoid(),
+          orgId,
+          principalType: 'role',
+          principalId: roleId,
+          resourceType: g.type,
+          selector: 'id',
+          resourceId: g.id,
+          namespaces: g.namespaces ? JSON.stringify(g.namespaces) : null,
+          level: g.level,
+          grantedBy: admin.userId,
+          createdAt: new Date().toISOString(),
+        })
+        .run();
+    }
+    return who;
+  }
+
+  beforeAll(async () => {
+    await runMigrations();
+    orgId = seedOrg('org-ai-roles');
+    admin = seedUser(orgId, 'admin');
+    operated = seedServer(orgId, admin.userId, 'ops-web');
+    viewed = seedServer(orgId, admin.userId, 'seen-db');
+    hidden = seedServer(orgId, admin.userId, 'secret-vault');
+
+    app = await buildApp();
+    await app.ready();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/ai/providers',
+      headers: admin.headers,
+      payload: { name: 'stub', provider: 'anthropic', model: 'm', apiKey: 'k', isDefault: true },
+    });
+    expect(created.statusCode).toBe(201);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    agent.messages = [];
+    broker.execOnServer.mockResolvedValue({ stdout: 'done', stderr: '', exitCode: 0 });
+  });
+
+  it('lets a viewer who operates one server chat; each command still needs operate on its server', async () => {
+    const raised = member([
+      { type: 'server', id: operated, level: 'operate' },
+      { type: 'server', id: viewed, level: 'view' },
+    ]);
+    agent.script = [
+      { name: 'run_command', input: { command: 'uptime', server_id: operated } },
+      { name: 'run_command', input: { command: 'uptime', server_id: viewed } },
+      { name: 'run_command', input: { command: 'uptime', server_id: hidden } },
+    ];
+
+    const res = await chat(raised.headers);
+    expect(res.statusCode).toBe(200);
+    const results = parseEvents(res.body).filter((e) => e.type === 'tool_result');
+    expect(results[0]).toMatchObject({ output: 'done', isError: false });
+    expect(results[1]).toMatchObject({ isError: true, output: expect.stringMatching(/needs operate access/) });
+    // Out of reach reads as not there
+    expect(results[2]).toMatchObject({ isError: true, output: 'Server not found' });
+    expect(broker.execOnServer).toHaveBeenCalledTimes(1);
+    expect(broker.execOnServer.mock.calls[0]![0]).toMatchObject({ id: operated });
+
+    // The prompt lists what they can see, and nothing else
+    const prompt = agent.messages[0]!;
+    expect(prompt.role).toBe('system');
+    expect(prompt.content).toContain('ops-web');
+    expect(prompt.content).toContain('seen-db');
+    expect(prompt.content).not.toContain('secret-vault');
+    expect(prompt.content).not.toContain(hidden);
+  });
+
+  it('still asks for approval before a change, and the raised member can give it', async () => {
+    const raised = member([{ type: 'server', id: operated, level: 'operate' }]);
+    agent.script = [{ name: 'run_command', input: { command: 'systemctl restart nginx', server_id: operated } }];
+
+    const pending = chat(raised.headers);
+    await until(() => pendingApprovalCount() === 1);
+    expect(broker.execOnServer).not.toHaveBeenCalled();
+    const id = `call-${agent.nextId}`;
+    const approved = await app.inject({ method: 'POST', url: `/api/ai/approvals/${id}`, headers: raised.headers, payload: { approved: true } });
+    expect(approved.statusCode).toBe(200);
+
+    const events = parseEvents((await pending).body);
+    expect(events.map((e) => e.type)).toEqual(['tool_call', 'approval_required', 'approval_resolved', 'tool_result', 'done']);
+    expect(broker.execOnServer).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a viewer who operates one namespace of a cluster chat', async () => {
+    const clusterId = nanoid();
+    getDb()
+      .insert(kubeClusters)
+      .values({
+        id: clusterId,
+        orgId,
+        name: 'shop-prod',
+        apiUrl: 'https://192.0.2.20:6443',
+        authType: 'token',
+        encryptedCredential: 'x',
+        credentialHint: 'token',
+        createdBy: admin.userId,
+      })
+      .run();
+    const raised = member([{ type: 'cluster', id: clusterId, level: 'operate', namespaces: ['shop'] }]);
+    agent.script = [];
+    const res = await chat(raised.headers);
+    expect(res.statusCode).toBe(200);
+    expect(agent.messages[0]!.content).toContain('shop-prod');
+  });
+
+  it('refuses members who can only view, or whose operate grant points at nothing', async () => {
+    const viewing = member([{ type: 'server', id: viewed, level: 'view' }]);
+    const dangling = member([{ type: 'server', id: 'deleted-server', level: 'operate' }]);
+    const plainViewer = seedUser(orgId, 'viewer');
+    agent.script = [];
+    for (const who of [viewing, dangling, plainViewer]) {
+      const res = await chat(who.headers);
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error).toMatch(/operate access/);
+      const decided = await app.inject({ method: 'POST', url: '/api/ai/approvals/x', headers: who.headers, payload: { approved: true } });
+      expect(decided.statusCode).toBe(403);
+    }
+    expect(agent.messages).toEqual([]);
   });
 });

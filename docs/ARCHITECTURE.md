@@ -798,13 +798,16 @@ below.
 - **AI tools** (`ai-tools.ts`, `ai/tools.ts`): `kube_list_workloads`, `kube_describe`,
   `kube_events`, `kube_pod_logs` — read-only, plain text, through `withKubeClient` like
   every route (cluster access → "Cluster not found", the namespace allowlist, the §7
-  matrix: `kube_describe` needs `yaml`, `kube_pod_logs` needs `logs`, both operator+; the
-  chat itself is operator+). Objects go through `redactObject` and lose the last-applied
+  matrix: `kube_describe` needs `yaml`, `kube_pod_logs` needs `logs`, both operate in the
+  object's namespace; the chat itself needs the operator role or `operate` on at least one
+  server or cluster namespace — see §4.17). Objects go through `redactObject` and lose the last-applied
   annotation; logs are a `tailLines` (≤ 500) read with `limitBytes`, newest lines kept
   under the 64 KB cap. The system prompt lists the clusters the user may use. The chat
   route audits each call as `ai.kube_read` against the cluster (tool, object — never the
   output). The assistant never changes a cluster.
-- **Explain** (`POST /api/kube/clusters/:id/explain`, `api/routes/kube-ai.ts`): operator+,
+- **Explain** (`POST /api/kube/clusters/:id/explain`, `api/routes/kube-ai.ts`): `operate` in
+  the object's namespace (the cluster as a whole for cluster-scoped objects); the web shows the
+  button per object from `namespacePermissions` (`permissionsIn` in `lib/kube.ts`),
   rate-limited (10/min). `explainMaterial` gathers the redacted object (capped), its
   health, events about it and its troubled pods, the state of a workload's troubled pods
   and — with `logs` — a short tail of the first troubled container (the previous run for a
@@ -898,7 +901,15 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   'body')` reads the Kubernetes matrix at the caller's level in the request's namespace, and
   `KubeContext.allowlist` is the cluster allowlist narrowed to the caller's granted
   namespaces (`permissionsIn(ns)` for per-namespace checks; `GET /clusters/:id` returns
-  `namespacePermissions`). Container and pod shells are closed by level too; revocation weighs
+  `namespacePermissions` for each namespace a narrowed member sees, and for a member who
+  sees the whole cluster but holds namespace-narrowed grants, for those namespaces
+  (`grantedNamespaces`), so the web can offer e.g. Explain where a role raised them). For a
+  member narrowed to some namespaces, the cluster itself
+  (`GET /clusters`, `GET /clusters/:id`) shows only their namespaces as `namespacesAllowlist`
+  (the allowlist intersected with their grants), a `defaultNamespace` among them, no
+  via-server or agent id or name, and for a routed cluster a generic `lastError` (an SSH
+  failure names the server); admins and anyone reaching the whole cluster see it all.
+  Container and pod shells are closed by level too; revocation weighs
   pod shells in their own namespace, so narrowing a grant's namespaces closes the shells it no
   longer covers. Creating servers stays admin-only; a server manager below admin cannot choose
   its SSH key or agent, nor change where it connects (host, port, user, jump host) — even with
@@ -923,14 +934,26 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   or for resources of any type at a level (`server_ids` holds `{ ids, level }` under
   `resource_type`; approval adds time-bound personal grants, never shortening what is held).
   Members may ask for what they already see (a higher level, or longer), servers by name when
-  the org lists them, and any role by name (`GET /access-requests/requestable`).
+  the org lists them, and any role by name (`GET /access-requests/requestable`). A cluster
+  request may carry `namespaces` (stored beside the ids; `level: null` when asked at the base
+  role's level), and the approver may pass `namespaces` too — any for a whole-cluster request,
+  a subset of those asked for otherwise, never more. Approval then adds personal grants
+  narrowed to those namespaces (a base-level request narrowed this way is granted at the
+  requester's base-role level at approval), keeps what was granted as `approvedNamespaces`,
+  and audits the namespaces asked for and granted as before/after.
+- AI chat (`POST /api/ai/chat`, `/api/ai/approvals/:id`) is open to operators and up, and to
+  anyone a role or personal grant lets operate at least one existing server or cluster (a
+  namespace of one counts; `reachesAny` in `filter.ts`). It widens nothing: `run_command`
+  needs operate on its target server (approval still required for changes), the Docker and
+  Kubernetes tools read their matrices at the caller's level there, and the system prompt
+  and `GET /api/ai/context` list only what the caller can see.
 - Web: Team & Access has Members (member detail: scope, roles, personal grants, effective
   access with "via" badges), Roles (editor with per-type pickers, tag selectors with a live
   count, namespace chips, a plain-language preview) and Access checker tabs; server, cluster,
   connection, cloud, command and cron pages have a "who has access" button for admins
   (`components/access/`); `hooks/useAccessLevels.ts` hides actions the level does not allow
-  (per item on the server, cluster, FTP, storage, cloud, command and cron pages, the
-  diagnose button and Explain); adding a server, cluster, connection or account stays with admins.
+  (per item on the server, cluster, FTP, storage, cloud, command and cron pages, and the
+  diagnose button; Explain reads the cluster view's per-namespace permissions); adding a server, cluster, connection or account stays with admins.
 
 ---
 
@@ -1089,7 +1112,7 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | FTP connections             | viewer   | admin       |
 | FTP list / download         | viewer   | —           |
 | FTP upload / mkdir / rename / delete | — | operator |
-| AI chat                     | —        | operator    |
+| AI chat                     | —        | operator, or operate on a server or cluster (namespace) through a role or grant |
 | Docker lists, info, events  | viewer   | —           |
 | Docker logs, stats, top, inspect | operator | —      |
 | Docker org settings, server probe | viewer (settings) | admin |
@@ -1109,7 +1132,7 @@ every role before it. An unrecognized role string degrades to `viewer`, never up
 | Kubernetes roll back, cordon / uncordon (K3) | — | admin |
 | Kubernetes pod logs / shell (K4) | operator (logs) | operator if `operatorsCanExec`, else admin |
 | Kubernetes fleet overview (K5) | viewer (granted clusters) | — |
-| Kubernetes AI tools and Explain (K5; describe needs YAML, logs need logs) | operator | — |
+| Kubernetes AI tools and Explain (K5; describe needs YAML, logs need logs) | operator (operate in the object's namespace) | — |
 | Kubernetes cluster alerts setting (K5) | viewer | admin |
 
 Two deliberate departures from a naive reading of "viewer = read-only":
@@ -1117,7 +1140,8 @@ Two deliberate departures from a naive reading of "viewer = read-only":
 - **Opening an interactive session is `operator`, not `viewer`.** A shell is arbitrary
   code execution; granting it to viewers would make the role meaningless.
 - **AI chat is `operator`.** The agent exposes a `run_command` tool, so chat access is
-  transitively command execution.
+  transitively command execution. A viewer whose custom role or personal grant lets them
+  operate somewhere may chat too; `run_command` still needs operate on its target server.
 
 The UI hides controls the caller cannot use (`useHasRole` in `/web/store/auth.ts`), but
 that is cosmetic only — every rule above is enforced server-side and independently.

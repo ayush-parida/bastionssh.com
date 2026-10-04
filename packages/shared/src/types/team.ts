@@ -134,6 +134,10 @@ export interface AccessRequest {
   resources?: { id: string; name: string | null }[];
   /** The level asked for; null for older server requests (the base role's level). */
   level?: AccessLevel | null;
+  /** Clusters only: the namespaces asked for; null or absent = the whole cluster. */
+  namespaces?: string[] | null;
+  /** Clusters only, once approved: the namespaces granted, when the approver narrowed or kept a namespace list. */
+  approvedNamespaces?: string[] | null;
 }
 
 /**
@@ -150,6 +154,11 @@ export interface CreateAccessRequest {
   resourceType?: ResourceType;
   resourceIds?: string[];
   level?: AccessLevel;
+  /**
+   * Clusters only (`clusterIds`, or `resourceType: 'cluster'`): ask for these
+   * namespaces rather than the whole cluster.
+   */
+  namespaces?: string[];
   reason: string;
   durationMinutes: number;
 }
@@ -157,6 +166,11 @@ export interface CreateAccessRequest {
 export interface DecideAccessRequest {
   /** Approve only: grant for less time than was asked. */
   durationMinutes?: number;
+  /**
+   * Approve only, cluster requests: grant these namespaces only — any for a
+   * whole-cluster request, a subset of those asked for otherwise.
+   */
+  namespaces?: string[];
   note?: string;
 }
 

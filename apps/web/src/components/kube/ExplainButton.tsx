@@ -5,9 +5,7 @@ import type { KubeExplainContext, KubeExplainEvent, KubeObjectRef } from '@smt/s
 import { Loader2, Sparkles, X } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { readSSE } from '@/lib/sse.js';
-import { kubePath } from '@/lib/kube.js';
-import { useHasRole } from '@/store/auth.js';
-import { useAccessLevels } from '@/hooks/useAccessLevels.js';
+import { kubePath, permissionsIn, useKubeCluster } from '@/lib/kube.js';
 
 type State =
   | { phase: 'idle' }
@@ -24,8 +22,9 @@ function sentSummary(c: KubeExplainContext): string {
 }
 
 /**
- * AI "Explain this" for one object (spec §5.4, K5). Operators and up, like
- * the assistant. The server gathers the redacted object, its events, the
+ * AI "Explain this" for one object (spec §5.4, K5). Needs `operate` where the
+ * object lives — in its namespace for members whose access is narrowed to
+ * some namespaces — like the YAML view. The server gathers the redacted object, its events, the
  * state of its troubled pods and a short log tail, and streams the
  * provider's plain-language explanation here; the dialog says what was
  * sent. The AI only explains — fixing stays with the guided buttons.
@@ -37,10 +36,9 @@ export default function ExplainButton({
   clusterId: string;
   objectRef: Pick<KubeObjectRef, 'resource' | 'namespace' | 'name'>;
 }) {
-  // The base role, or `operate` on the cluster from a custom role (the server
-  // checks the object's namespace too)
-  const isOperator = useHasRole('operator');
-  const canExplain = useAccessLevels('cluster').can(clusterId, 'operate') || isOperator;
+  // `operate` in the object's namespace (or on the cluster, for cluster-scoped
+  // objects) — what the YAML view needs too; the server checks the same
+  const canExplain = !!permissionsIn(useKubeCluster(clusterId).data, objectRef.namespace)?.yaml;
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<State>({ phase: 'idle' });
   const abortRef = useRef<AbortController | null>(null);

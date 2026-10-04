@@ -64,7 +64,7 @@ Existing helpers (`canAccessServer`, `accessibleServerFilter`, `serverScope`, cl
 | Type | view | operate | manage |
 | --- | --- | --- | --- |
 | Server | See it, health, metrics, host-key status, Docker lists/status, recordings of own sessions | Terminal, SFTP read/write, run commands, Docker logs/stats/actions/exec (subject to org Docker toggles), diagnostics with login | Edit server, host keys (pin/accept/forget), key rotation, Docker remove/prune/env reveal, delete server |
-| Cluster (+ns) | Map, graph, workloads, events, diagnoses | Logs, YAML, scale/restart/delete-pod/exec (subject to org Kube toggles), Explain | Rollback, cordon, cluster settings/credentials, impersonation toggle |
+| Cluster (+ns) | Map, graph, workloads, events, diagnoses (narrowed to namespaces: only those namespaces, no via-server/agent identity, nor a routed cluster's last error) | Logs, YAML, scale/restart/delete-pod/exec (subject to org Kube toggles), Explain (in the object's namespace; the web shows it per object) | Rollback, cordon, cluster settings/credentials, impersonation toggle |
 | FTP/SFTP connection | See it | Browse, upload, download, rename, delete files, test | Edit, host key, delete connection |
 | Storage connection | See it, list buckets/objects | Upload, download, delete objects | Edit, delete connection |
 | Cloud account | See it, last sync, instances | Trigger sync | Edit credentials, delete |
@@ -73,12 +73,14 @@ Existing helpers (`canAccessServer`, `accessibleServerFilter`, `serverScope`, cl
 
 Org toggles (Docker `operatorsCanExec`/`operatorsCanRemove`/`allowPrune`, Kubernetes `operatorsCan*`) apply to `operate`; `manage` implies them.
 
+The AI assistant (chat and command approvals) is open to base operators and up and to anyone with `operate` on at least one server or cluster namespace; each tool then needs its own level on its target (`run_command`: operate on the server, approval for changes), and the prompt lists only what the member can view.
+
 ## 6. API
 
 - Roles (admin): `GET/POST /api/team/roles`, `GET/PATCH/DELETE /api/team/roles/:id`, `PUT /api/team/roles/:id/grants` (replace the grant list atomically), `POST/DELETE /api/team/roles/:id/members` (with optional `expiresAt`).
 - Members (admin): `PATCH /api/team/members/:userId` gains `scope`; `GET /api/team/members/:userId/access` returns roles, personal grants and the effective access per type; `PUT …/grants` for personal grants (replaces today's server/cluster access endpoints, which stay as compatible aliases for one release).
 - Access checker (admin): `GET /api/team/access/explain?userId=&type=&id=` → level + reasons; `GET /api/team/access/resource?type=&id=` → who has access and via what.
-- Access requests: members can request a **role** or a **resource** (type + id + level + duration); approval creates a temporary role membership or personal grant.
+- Access requests: members can request a **role** or a **resource** (type + id + level + duration; clusters optionally with namespaces); approval creates a temporary role membership or personal grant. Approvers may narrow a cluster request to fewer namespaces (or a whole-cluster request to some), never widen it; the grant is narrowed accordingly.
 - Every list endpoint for the seven types filters with `accessibleFilter`; every by-id route uses `authorize` (404 when no access, 403 when visible but the action needs a higher level).
 
 ## 7. Web

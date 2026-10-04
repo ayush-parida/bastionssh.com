@@ -192,8 +192,16 @@ function Picker({
   );
 }
 
-/** Namespace chips for a cluster entry; none = every namespace. */
-function NamespaceChips({ namespaces, onChange }: { namespaces: string[] | null; onChange: (ns: string[] | null) => void }) {
+/** Namespace chips for a cluster entry (or a cluster access request); none = every namespace. */
+export function NamespaceChips({
+  namespaces,
+  onChange,
+  inputLabel = 'Add namespace',
+}: {
+  namespaces: string[] | null;
+  onChange: (ns: string[] | null) => void;
+  inputLabel?: string;
+}) {
   const [draft, setDraft] = useState('');
   const add = () => {
     const ns = draft.trim().toLowerCase();
@@ -214,7 +222,7 @@ function NamespaceChips({ namespaces, onChange }: { namespaces: string[] | null;
         </span>
       ))}
       <input
-        aria-label="Add namespace"
+        aria-label={inputLabel}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }}
