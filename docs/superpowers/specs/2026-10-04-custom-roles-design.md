@@ -64,7 +64,7 @@ Existing helpers (`canAccessServer`, `accessibleServerFilter`, `serverScope`, cl
 | Type | view | operate | manage |
 | --- | --- | --- | --- |
 | Server | See it, health, metrics, host-key status, Docker lists/status, recordings of own sessions | Terminal, SFTP read/write, run commands, Docker logs/stats/actions/exec (subject to org Docker toggles), diagnostics with login | Edit server, host keys (pin/accept/forget), key rotation, Docker remove/prune/env reveal, delete server |
-| Cluster (+ns) | Map, graph, workloads, events, diagnoses (narrowed to namespaces: only those namespaces, no via-server/agent identity) | Logs, YAML, scale/restart/delete-pod/exec (subject to org Kube toggles), Explain (in the object's namespace; the web shows it per object) | Rollback, cordon, cluster settings/credentials, impersonation toggle |
+| Cluster (+ns) | Map, graph, workloads, events, diagnoses (narrowed to namespaces: only those namespaces, no via-server/agent identity, nor a routed cluster's last error) | Logs, YAML, scale/restart/delete-pod/exec (subject to org Kube toggles), Explain (in the object's namespace; the web shows it per object) | Rollback, cordon, cluster settings/credentials, impersonation toggle |
 | FTP/SFTP connection | See it | Browse, upload, download, rename, delete files, test | Edit, host key, delete connection |
 | Storage connection | See it, list buckets/objects | Upload, download, delete objects | Edit, delete connection |
 | Cloud account | See it, last sync, instances | Trigger sync | Edit credentials, delete |

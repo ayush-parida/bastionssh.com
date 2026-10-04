@@ -14,7 +14,7 @@ import type {
 } from '@smt/shared';
 import { rank, requireAuth, requireRole } from '../../auth/middleware.js';
 import { authorize } from '../../auth/access/authorize.js';
-import { clusterNamespaces, filterAccessibleClusters } from '../../auth/cluster-access.js';
+import { clusterNamespaces, filterAccessibleClusters, grantedNamespaces } from '../../auth/cluster-access.js';
 import { audit } from '../../audit/index.js';
 import { getDb } from '../../db/index.js';
 import { agents, kubeClusters, servers } from '../../db/schema.js';
@@ -249,13 +249,13 @@ export function toCluster(row: ClusterRow, names: { server: string | null; agent
   };
 }
 
-/** Record how a cluster answered (its health dot). Never touches `updatedAt`, which keys the caches. */
 /**
  * A cluster as the caller may see it. Members whose access is narrowed to
  * some namespaces (custom roles) see those namespaces only — within the
  * allowlist, never the rest of it — and nothing of how the cluster is
- * reached: the server or agent in between is not theirs to know. Admins and
- * anyone whose access covers the whole cluster see it all.
+ * reached: the server or agent in between is not theirs to know, so neither
+ * is the last error of a routed cluster (an SSH failure names the server).
+ * Admins and anyone whose access covers the whole cluster see it all.
  */
 function clusterFor(req: FastifyRequest, row: ClusterRow): KubeCluster {
   const narrowed = clusterNamespaces(req, row.id);
@@ -266,6 +266,7 @@ function clusterFor(req: FastifyRequest, row: ClusterRow): KubeCluster {
     ...cluster,
     viaServerId: null,
     viaAgentId: null,
+    lastError: row.lastError && row.connectVia !== 'direct' ? 'The cluster could not be reached' : row.lastError,
     namespacesAllowlist: namespaces,
     defaultNamespace: namespaces.includes(row.defaultNamespace)
       ? row.defaultNamespace
@@ -273,6 +274,7 @@ function clusterFor(req: FastifyRequest, row: ClusterRow): KubeCluster {
   };
 }
 
+/** Record how a cluster answered (its health dot). Never touches `updatedAt`, which keys the caches. */
 export function recordClusterStatus(clusterId: string, ok: boolean, error: string | null, serverVersion?: string | null): void {
   getDb()
     .update(kubeClusters)
@@ -432,12 +434,18 @@ export async function kubeRoutes(app: FastifyInstance) {
     const { id } = clusterParams.parse(req.params);
     try {
       const row = kubeCluster(req, id);
+      // Narrowed members: each namespace they may see. Members who see the
+      // whole cluster but were raised in some namespaces: those (within the
+      // allowlist), where they may do more than on the cluster as a whole
       const narrowed = clusterNamespaces(req, row.id);
+      const allowlist = parseAllowlist(row.namespacesAllowlist);
+      const raised = narrowed ? null : grantedNamespaces(req, row.id).filter((ns) => !allowlist || allowlist.includes(ns));
+      const listed = narrowed ?? (raised?.length ? raised : null);
       return {
         cluster: clusterFor(req, row),
         permissions: kubePermissionsFor(req, row.id),
-        ...(narrowed && {
-          namespacePermissions: Object.fromEntries(narrowed.map((ns) => [ns, kubePermissionsFor(req, row.id, ns)])),
+        ...(listed && {
+          namespacePermissions: Object.fromEntries(listed.map((ns) => [ns, kubePermissionsFor(req, row.id, ns)])),
         }),
       };
     } catch (err) {

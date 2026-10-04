@@ -2,10 +2,10 @@ import { and, eq, gt, isNull, or, type SQL } from 'drizzle-orm';
 import type { ClusterGrant } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { memberClusterAccess } from '../db/schema.js';
-import { authorize, levelFor } from './access/authorize.js';
+import { authorize, contributionsFor, levelFor } from './access/authorize.js';
 import type { ResourceAction } from './access/levels.js';
 import { accessibleIds, filterAccessible } from './access/filter.js';
-import type { AccessSubject } from './access/resolve.js';
+import { resolveAccess, type AccessSubject } from './access/resolve.js';
 
 /**
  * Per-cluster access — the Kubernetes counterpart of auth/server-access.ts,
@@ -44,6 +44,17 @@ export function canAccessCluster(who: AccessSubject, clusterId: string): boolean
 export function clusterNamespaces(who: AccessSubject, clusterId: string): string[] | null | undefined {
   const found = levelFor(who, 'cluster', clusterId);
   return found ? found.namespaces : undefined;
+}
+
+/**
+ * The namespaces that grants narrowed to some namespaces name on this
+ * cluster, whatever else reaches it. For a member who sees the whole cluster
+ * (say a viewer by base role) and was raised in a namespace by a custom role,
+ * these are where they may do more than on the cluster as a whole.
+ */
+export function grantedNamespaces(who: AccessSubject, clusterId: string): string[] {
+  const access = resolveAccess(who);
+  return [...new Set(contributionsFor(access, 'cluster', clusterId).flatMap((c) => c.namespaces ?? []))].sort();
 }
 
 /**

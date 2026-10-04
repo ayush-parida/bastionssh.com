@@ -901,10 +901,14 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   'body')` reads the Kubernetes matrix at the caller's level in the request's namespace, and
   `KubeContext.allowlist` is the cluster allowlist narrowed to the caller's granted
   namespaces (`permissionsIn(ns)` for per-namespace checks; `GET /clusters/:id` returns
-  `namespacePermissions`). For a member narrowed to some namespaces, the cluster itself
+  `namespacePermissions` for each namespace a narrowed member sees, and for a member who
+  sees the whole cluster but holds namespace-narrowed grants, for those namespaces
+  (`grantedNamespaces`), so the web can offer e.g. Explain where a role raised them). For a
+  member narrowed to some namespaces, the cluster itself
   (`GET /clusters`, `GET /clusters/:id`) shows only their namespaces as `namespacesAllowlist`
-  (the allowlist intersected with their grants), a `defaultNamespace` among them, and no
-  via-server or agent id or name; admins and anyone reaching the whole cluster see it all.
+  (the allowlist intersected with their grants), a `defaultNamespace` among them, no
+  via-server or agent id or name, and for a routed cluster a generic `lastError` (an SSH
+  failure names the server); admins and anyone reaching the whole cluster see it all.
   Container and pod shells are closed by level too; revocation weighs
   pod shells in their own namespace, so narrowing a grant's namespaces closes the shells it no
   longer covers. Creating servers stays admin-only; a server manager below admin cannot choose

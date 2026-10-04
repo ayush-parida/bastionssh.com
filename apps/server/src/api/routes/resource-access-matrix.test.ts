@@ -314,7 +314,14 @@ describe('server and cluster access matrix', () => {
       const before = db.select().from(kubeClusters).where(where).get()!;
       // Reached through db-1, with an allowlist wider than the member's namespace
       db.update(kubeClusters)
-        .set({ connectVia: 'server', viaServerId: otherServerId, namespacesAllowlist: JSON.stringify(['ops', 'shop', 'kube-system']), defaultNamespace: 'ops' })
+        .set({
+          connectVia: 'server',
+          viaServerId: otherServerId,
+          namespacesAllowlist: JSON.stringify(['ops', 'shop', 'kube-system']),
+          defaultNamespace: 'ops',
+          // How an SSH failure on the routing server reads
+          lastError: 'SSH connection to db-1 timed out',
+        })
         .where(where)
         .run();
       try {
@@ -329,6 +336,7 @@ describe('server and cluster access matrix', () => {
             viaAgentName: null,
             namespacesAllowlist: ['shop'],
             defaultNamespace: 'shop',
+            lastError: 'The cluster could not be reached',
           });
           const text = JSON.stringify(view);
           expect(text).not.toContain(otherServerId);
@@ -344,6 +352,7 @@ describe('server and cluster access matrix', () => {
             viaServerName: 'db-1',
             namespacesAllowlist: ['ops', 'shop', 'kube-system'],
             defaultNamespace: 'ops',
+            lastError: 'SSH connection to db-1 timed out',
           });
         }
       } finally {
@@ -353,10 +362,30 @@ describe('server and cluster access matrix', () => {
             viaServerId: before.viaServerId,
             namespacesAllowlist: before.namespacesAllowlist,
             defaultNamespace: before.defaultNamespace,
+            lastError: before.lastError,
           })
           .where(where)
           .run();
       }
+    });
+
+    it('tells a whole-cluster viewer raised in one namespace what they may do there (the Explain button reads it)', async () => {
+      // Scope `all` viewer: the whole cluster at view, operate in `shop` from a role
+      const raised = seedUser(orgId, 'viewer');
+      const shopRole = role('Shop on-call', [raised]);
+      grant({ role: shopRole }, { resourceType: 'cluster', level: 'operate', resourceId: clusterId, namespaces: ['shop'] });
+      const view = (await call(raised, 'GET', c())).json();
+      expect(view.permissions).toMatchObject({ view: true, yaml: false });
+      expect(view.namespacePermissions).toEqual({ shop: expect.objectContaining({ yaml: true, logs: true }) });
+      // Not narrowed: the cluster record is whole, as for any viewer
+      expect(view.cluster.namespacesAllowlist).toBeNull();
+      // The server agrees: Explain is allowed in `shop` (no provider here: 400), refused in `ops`
+      const explain = (namespace: string) =>
+        call(raised, 'POST', c('/explain'), { resource: 'deployments', namespace, name: namespace === 'shop' ? 'web' : 'tool' });
+      expect((await explain('shop')).statusCode).not.toBe(403);
+      expect((await explain('ops')).statusCode).toBe(403);
+      // A plain viewer gets no per-namespace answer
+      expect((await call(cases.baseViewer!.who, 'GET', c())).json().namespacePermissions).toBeUndefined();
     });
 
     it('lists only the granted namespaces and their workloads', async () => {

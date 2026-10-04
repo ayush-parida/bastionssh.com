@@ -225,7 +225,8 @@ export interface KubeClusterStatusView {
   /**
    * When the caller's access is narrowed to some namespaces (custom roles),
    * what they may do in each of them — possibly more than on the whole
-   * cluster. Absent when their access covers every namespace.
+   * cluster. A caller who sees the whole cluster but was raised in some
+   * namespaces gets those. Absent when no grant names a namespace.
    */
   namespacePermissions?: Record<string, KubePermissions>;
 }
