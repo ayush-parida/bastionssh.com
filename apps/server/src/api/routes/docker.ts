@@ -241,9 +241,9 @@ export async function dockerRoutes(app: FastifyInstance) {
   // org's Docker settings belong to Containers (unified roles spec §3.1)
   const serversModule = requireModule('servers');
   const containersModule = requireModule('containers');
-  app.addHook('preHandler', (req, reply) =>
-    (req.routeOptions.url?.includes('/servers/:id') ? serversModule : containersModule)(req, reply),
-  );
+  app.addHook('preHandler', function dockerModuleGuard(req, reply) {
+    return (req.routeOptions.url?.includes('/servers/:id') ? serversModule : containersModule)(req, reply);
+  });
 
   // ── Org settings ──────────────────────────────────────────────
 

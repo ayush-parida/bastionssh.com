@@ -869,9 +869,12 @@ for a resource module, the member sees an item in it or holds it at `manage`), `
 `isOrgOwner` / `requireOwner` (owner-only actions), and the delegation guard `canGrant` /
 `canAssignRole` (only what the actor holds, per module and per selector: id ⊆ tag ⊆ all,
 namespaces ⊆ theirs; the Owner role only by owners). `GET /api/me/modules` and `GET
-/api/me/access` serve the web. `requireRole` and `req.role` remain, deprecated, as what the
-caller's org-module levels amount to (`legacyRoleFor`: admin when they hold every org module
-Admin holds by default, and so on), until every route gates on modules. Access requests
+/api/me/access` serve the web. `requireRole` and `req.role` are gone: every route gates on
+modules and resources (`api/routes/route-sweep.test.ts` proves it), and what a member's roles
+amount to as a base role (`legacyRoleFor`: admin when they hold every org module Admin holds by
+default, and so on) only fills the compatible `role` fields old API callers read (`compatRole`
+for `/auth/me`). A read-only API token holds at most `view`, and only on the modules the
+built-in Viewer has by default (`readOnlyModuleLevel`) — as it acted as a viewer before. Access requests
 still see custom roles only (`customRoleFilter`); built-in names are reserved.
 
 **Resource and feature modules on module gates.** Every route of Servers (terminal sessions,
@@ -1226,9 +1229,10 @@ silently, so the UI can tell "not checked" apart from "not watched".
 
 ### Authorization (RBAC)
 
-Enforced by `requireRole(minimum)` in `/server/auth/middleware.ts`, applied per route.
-Roles are totally ordered — `viewer < operator < admin < owner` — and each implies
-every role before it. An unrecognized role string degrades to `viewer`, never upward.
+Enforced per route by module gates (`requireModule(module, level)`, `requireOwner()` in
+`/server/auth/access/modules.ts`) and resource checks — see 4.17. The
+table is what the built-in roles hold by default, which is what the base roles
+(`viewer < operator < admin < owner`) allowed before unified roles.
 
 | Area                        | Read     | Write / run |
 | --------------------------- | -------- | ----------- |

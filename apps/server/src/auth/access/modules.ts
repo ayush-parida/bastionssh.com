@@ -18,7 +18,7 @@ import { cronJobs, roleMembers, roles, savedCommands, servers } from '../../db/s
 import { contributionsFor } from './authorize.js';
 import { accessibleFilter, accessibleIds, accessibleIdsFor, reachesAny, RESOURCE_TABLES } from './filter.js';
 import { clampModuleLevel, meetsLevel, meetsModuleLevel, moduleDefinition, parseModulePermissions, TYPE_MODULES } from './levels.js';
-import { activeAt, resolveAccess, type AccessSubject, type Contribution, type ResolvedAccess } from './resolve.js';
+import { activeAt, readOnlyModuleLevel, resolveAccess, type AccessSubject, type Contribution, type ResolvedAccess } from './resolve.js';
 import { principalGrants } from './grants.js';
 
 /**
@@ -268,14 +268,14 @@ function holdsGrant(access: ResolvedAccess, grant: WantedGrant, until: string | 
   return coversNamespaces(held, grant.level, grant.namespaces);
 }
 
-/** The actor's level on `module` from the roles they hold until `until`, capped at `view` for read-only tokens. */
+/** The actor's level on `module` from the roles they hold until `until`, as a read-only token holds it for one. */
 function moduleLevelUntil(access: ResolvedAccess, module: ModuleKey, until: string | null): ModuleLevel {
   let level: ModuleLevel = 'none';
   for (const role of access.roleModules) {
     const held = role.modules[module];
     if (held && lasts(role.expiresAt, until) && meetsModuleLevel(held, level)) level = held;
   }
-  return access.readOnly && level !== 'none' ? 'view' : level;
+  return access.readOnly ? readOnlyModuleLevel(module, level) : level;
 }
 
 function describeGrant(grant: WantedGrant): string {

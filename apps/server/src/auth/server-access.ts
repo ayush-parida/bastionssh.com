@@ -43,9 +43,9 @@ export function activeGrantFilter(now: string = new Date().toISOString()): SQL {
 export type ServerScope = { all: true } | { all: false; serverIds: string[] };
 
 /**
- * What the subject may see. Reads the membership rather than trusting a passed
- * role, so a read-only token (which narrows `req.role`) does not turn an admin
- * into a restricted member, and a stale role cannot widen access.
+ * What the subject may see, from the roles and grants they hold now (a
+ * read-only token sees what its owner sees), so a stale role cannot widen
+ * access.
  */
 export function serverScope(who: AccessSubject): ServerScope {
   const ids = accessibleIds(who, 'server');

@@ -156,7 +156,10 @@ describe('module permissions', () => {
       // A read-only token never acts as an owner, and reads only
       const ro = { orgId, user: { id: owner.userId, email: '', displayName: '' }, apiTokenReadOnly: true };
       expect(isOwner(ro)).toBe(false);
-      expect(moduleLevel(ro, 'settings')).toBe('view');
+      expect(moduleLevel(ro, 'servers')).toBe('view');
+      // …and only what a viewer reads: before unified roles a read-only token acted as a viewer
+      expect(moduleLevel(ro, 'settings')).toBe('none');
+      expect(moduleLevel(ro, 'audit')).toBe('none');
     });
   });
 
@@ -304,8 +307,8 @@ describe('module permissions', () => {
 
       expect(await status('/audit/export', admin.headers)).toBe(200);
       expect(await status('/servers/new', admin.headers)).toBe(200);
-      // A read-only token reads only
-      expect(await status('/audit/export', readOnlyHeaders(admin.userId))).toBe(403);
+      // A read-only token reads only what a viewer reads: the audit log is not there for it
+      expect(await status('/audit/export', readOnlyHeaders(admin.userId))).toBe(404);
     });
 
     it('keeps owner-only actions to owners', async () => {
@@ -419,8 +422,10 @@ describe('module permissions', () => {
 
     it('caps a read-only actor at view and refuses members who are not active', () => {
       const ro = { orgId, user: { id: admin.userId, email: '', displayName: '' }, apiTokenReadOnly: true };
-      expect(canGrant(ro, { modules: { audit: 'view' }, grants: [{ resourceType: 'server', selector: 'all', level: 'view' }] }).ok).toBe(true);
-      expect(canGrant(ro, { modules: { audit: 'operate' } }).ok).toBe(false);
+      expect(canGrant(ro, { modules: { ssh_keys: 'view' }, grants: [{ resourceType: 'server', selector: 'all', level: 'view' }] }).ok).toBe(true);
+      expect(canGrant(ro, { modules: { ssh_keys: 'manage' } }).ok).toBe(false);
+      // Org modules a viewer lacks are off for a read-only token
+      expect(canGrant(ro, { modules: { audit: 'view' } }).ok).toBe(false);
       expect(canGrant(ro, { grants: [{ resourceType: 'server', selector: 'all', level: 'operate' }] }).ok).toBe(false);
       expect(canGrant({ orgId, userId: 'nobody' }, {})).toEqual({ ok: false, missing: ['an active membership'] });
     });

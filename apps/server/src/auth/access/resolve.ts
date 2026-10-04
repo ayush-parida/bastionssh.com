@@ -2,6 +2,7 @@ import type { FastifyRequest } from 'fastify';
 import { and, eq, gt, inArray, isNull, or, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
 import {
+  BUILT_IN_ROLE_DEFAULTS,
   BUILT_IN_ROLES,
   RESOURCE_TYPES,
   type AccessLevel,
@@ -163,10 +164,22 @@ function isBuiltIn(value: string | null): value is BuiltInRole {
   return value !== null && (BUILT_IN_ROLES as readonly string[]).includes(value);
 }
 
-/** Module levels capped at `view`, for read-only tokens. */
+/**
+ * A module level for a read-only token: at most `view`, and only on the
+ * modules the built-in Viewer has by default. Before unified roles such a
+ * token acted as a viewer for every org feature whoever owned it (resources:
+ * theirs, at `view`), so an admin's read-only token never read the audit
+ * log, roles or agents; this keeps that (spec §2.7 caps tokens, it does not
+ * widen them).
+ */
+export function readOnlyModuleLevel(module: ModuleKey, level: ModuleLevel): ModuleLevel {
+  return level === 'none' || !BUILT_IN_ROLE_DEFAULTS.viewer.modules[module] ? 'none' : 'view';
+}
+
+/** Module levels as a read-only token holds them (`readOnlyModuleLevel`). */
 function capped(modules: Record<ModuleKey, ModuleLevel>): Record<ModuleKey, ModuleLevel> {
   return Object.fromEntries(
-    Object.entries(modules).map(([key, level]) => [key, level === 'none' ? 'none' : 'view']),
+    Object.entries(modules).map(([key, level]) => [key, readOnlyModuleLevel(key as ModuleKey, level)]),
   ) as Record<ModuleKey, ModuleLevel>;
 }
 

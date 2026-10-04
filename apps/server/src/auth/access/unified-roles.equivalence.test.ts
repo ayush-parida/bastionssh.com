@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type preHandlerHookHandler } from 'fastify';
 import { and, eq, gt, inArray, isNull, or } from 'drizzle-orm';
 import {
   ACCESS_LEVELS,
@@ -10,19 +10,21 @@ import {
   RESOURCE_TYPES,
   type AccessLevel,
   type AccessReason,
+  type ModuleKey,
+  type ModuleLevel,
   type ResourceType,
   type Role,
 } from '@smt/shared';
 import { getDb, getRawDb } from '../../db/index.js';
 import { apiTokens, memberships, resourceGrants, roleMembers, roles } from '../../db/schema.js';
 import { generateApiToken } from '../token.js';
-import { rank, requireAuth, requireRole, ROLES } from '../middleware.js';
+import { rank, requireAuth } from '../middleware.js';
 import { baseRoleAllows, mayCreate } from '../command-access.js';
 import { ACTION_LEVELS, baseLevel, isAccessLevel, isResourceType, meetsLevel, requiredLevel, type ResourceAction } from './levels.js';
 import { authorize, levelForAccess } from './authorize.js';
 import { accessibleIds, accessibleIdsFor, reachesAny, reachesAnyFor } from './filter.js';
 import { emptyTypes, resolveAccess, type AccessSubject, type Contribution, type ResolvedAccess } from './resolve.js';
-import { isOrgOwner, isOwner } from './modules.js';
+import { isOrgOwner, isOwner, requireModule, requireOwner } from './modules.js';
 
 /**
  * Migration 0025 (unified roles spec §6.5): every member's effective access is
@@ -38,8 +40,9 @@ import { isOrgOwner, isOwner } from './modules.js';
  * the live engine once it has. For every member they must agree on every
  * resource action (and level and namespaces) of every resource, on every
  * accessible set, on "reaches any", and on everything the base role decided:
- * every `requireRole` gate through the real `requireAuth`, owner checks, and
- * the operator rights on saved commands and cron jobs.
+ * every gate that replaced a `requireRole` (the module gates and owner
+ * checks, through the real `requireAuth`), owner checks, and the operator
+ * rights on saved commands and cron jobs.
  */
 
 const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../db/migrations');
@@ -438,9 +441,9 @@ function before(member: Member): Answers {
     const access = legacyLoad(ORG, member.userId, readOnly);
     const prefix = readOnly ? 'ro ' : 'rw ';
     resourceAnswers(access, answers, prefix);
-    // requireRole read req.role: the membership's role, viewer for read-only tokens
+    // The compatible role (/auth/me): the membership's role, viewer for read-only tokens
     const reqRole: Role = readOnly ? 'viewer' : access.role;
-    answers.set(`${prefix}req.role`, access.active ? reqRole : null);
+    answers.set(`${prefix}role`, access.active ? reqRole : null);
     answers.set(`${prefix}orgAdmin`, access.active && access.orgAdmin);
     const operatorBase = access.active && access.scope === 'all' && !readOnly && rank(access.role) >= rank('operator');
     for (const type of ['saved_command', 'cron_job'] as const) {
@@ -484,7 +487,7 @@ function after(member: Member): Answers {
       }
     }
     const reqRole: Role = readOnly ? 'viewer' : access.role;
-    answers.set(`${prefix}req.role`, access.active ? reqRole : null);
+    answers.set(`${prefix}role`, access.active ? reqRole : null);
     answers.set(`${prefix}orgAdmin`, access.active && access.orgAdmin);
     for (const type of ['saved_command', 'cron_job'] as const) {
       answers.set(`${prefix}baseRoleAllows ${type}`, baseRoleAllows(who, type));
@@ -496,35 +499,74 @@ function after(member: Member): Answers {
   return answers;
 }
 
-/** A route per minimum role, behind the real requireAuth + requireRole. */
+/**
+ * Every gate that replaced a `requireRole(minimum)` in the route sweep, with
+ * that minimum: the module level (and owner check) each former admin, owner
+ * or operator route now asks for. Allowed through the new gate exactly when
+ * the old one let the member's base role through.
+ */
+const FORMER_GATES: { name: string; minimum: Role; gate: preHandlerHookHandler[] }[] = [
+  ...(
+    [
+      ['audit', 'view'],
+      ['audit', 'operate'],
+      ['audit', 'manage'],
+      ['agents', 'view'],
+      ['agents', 'manage'],
+      ['ai', 'manage'],
+      ['ssh_keys', 'manage'],
+      ['monitoring', 'manage'],
+      ['servers', 'manage'],
+      ['containers', 'manage'],
+      ['kubernetes', 'manage'],
+      ['ftp', 'manage'],
+      ['storage', 'manage'],
+      ['cloud', 'manage'],
+      ['team_members', 'operate'],
+      ['team_roles', 'view'],
+      ['team_roles', 'manage'],
+    ] as [ModuleKey, Exclude<ModuleLevel, 'none'>][]
+  ).map(([module, level]) => ({ name: `${module}-${level}`, minimum: 'admin' as Role, gate: [requireModule(module, level)] })),
+  ...(
+    [
+      ['audit', 'manage'],
+      ['recordings', 'manage'],
+      ['settings', 'manage'],
+      ['team_sign_in', 'manage'],
+    ] as [ModuleKey, Exclude<ModuleLevel, 'none'>][]
+  ).map(([module, level]) => ({ name: `owner-${module}-${level}`, minimum: 'owner' as Role, gate: [requireModule(module, level), requireOwner()] })),
+  { name: 'diagnostics-operate', minimum: 'operator', gate: [requireModule('diagnostics', 'operate')] },
+];
+
+/** A route per former gate, behind the real requireAuth. */
 function gateApp(): FastifyInstance {
   const app = Fastify();
   app.addHook('preHandler', requireAuth);
-  for (const minimum of ROLES) {
-    app.get(`/gate/${minimum}`, { preHandler: requireRole(minimum) }, async (req) => ({ role: req.role }));
-  }
+  for (const { name, gate } of FORMER_GATES) app.get(`/gate/${name}`, { preHandler: gate }, async () => ({ ok: true }));
   return app;
 }
 
-async function gates(app: FastifyInstance, member: Member): Promise<Record<string, number>> {
-  const statuses: Record<string, number> = {};
+/** Whether each former gate lets the member's tokens through now (404 and 403 both refuse). */
+async function gates(app: FastifyInstance, member: Member): Promise<Record<string, boolean | number>> {
+  const statuses: Record<string, boolean | number> = {};
   for (const [kind, token] of Object.entries(member.tokens)) {
-    for (const minimum of ROLES) {
-      const res = await app.inject({ method: 'GET', url: `/gate/${minimum}`, headers: { authorization: `Bearer ${token}` } });
-      statuses[`${kind} ${minimum}`] = res.statusCode;
+    for (const { name } of FORMER_GATES) {
+      const res = await app.inject({ method: 'GET', url: `/gate/${name}`, headers: { authorization: `Bearer ${token}` } });
+      // A suspended member is refused by requireAuth itself, as before
+      statuses[`${kind} ${name}`] = res.statusCode === 401 || res.statusCode === 403 && member.status !== 'active' ? res.statusCode : res.statusCode === 200;
     }
   }
   return statuses;
 }
 
 /** What requireAuth + requireRole answered before: 403 when suspended, else by the membership's role (read-only tokens: viewer). */
-function gatesBefore(member: Member): Record<string, number> {
-  const statuses: Record<string, number> = {};
+function gatesBefore(member: Member): Record<string, boolean | number> {
+  const statuses: Record<string, boolean | number> = {};
   const role = (ROLE_NAMES as readonly string[]).includes(member.role) ? member.role : 'viewer';
   for (const kind of ['rw', 'ro']) {
-    for (const minimum of ROLES) {
+    for (const { name, minimum } of FORMER_GATES) {
       const effective = kind === 'ro' ? 'viewer' : role;
-      statuses[`${kind} ${minimum}`] = member.status !== 'active' ? 403 : rank(effective) >= rank(minimum) ? 200 : 403;
+      statuses[`${kind} ${name}`] = member.status !== 'active' ? 403 : rank(effective) >= rank(minimum);
     }
   }
   return statuses;
@@ -561,7 +603,7 @@ describe('migration 0025 keeps every member’s effective access', () => {
     expect(compared).toBeGreaterThan(50_000);
   });
 
-  it('answers every former requireRole gate as before, through requireAuth', async () => {
+  it('answers every gate that replaced a requireRole as before, through requireAuth', async () => {
     const app = gateApp();
     await app.ready();
     for (const member of members) {

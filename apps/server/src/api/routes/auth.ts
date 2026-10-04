@@ -17,7 +17,7 @@ import {
   publicSessionId,
   setActiveOrg,
 } from '../../auth/session.js';
-import { requireAuth, resolveMembership, ROLES, SUSPENDED_MESSAGE, type Role } from '../../auth/middleware.js';
+import { compatRole, requireAuth, resolveMembership, ROLES, SUSPENDED_MESSAGE, type Role } from '../../auth/middleware.js';
 import {
   anyActiveOrgRequiresPasskey,
   authenticationOptions,
@@ -519,7 +519,7 @@ export async function authRoutes(app: FastifyInstance) {
     return {
       ...req.user,
       orgId: req.orgId,
-      role: req.role,
+      role: compatRole(req),
       passkeyVerified: req.passkeyVerified,
       requirePasskey: orgRequiresPasskey(req.orgId),
       passkeyCount: passkeyCount(req.user.id),
@@ -543,7 +543,7 @@ export async function authRoutes(app: FastifyInstance) {
       .where(eq(users.id, req.user.id))
       .run();
 
-    return { ...req.user, displayName: body.displayName, orgId: req.orgId, role: req.role };
+    return { ...req.user, displayName: body.displayName, orgId: req.orgId, role: compatRole(req) };
   });
 
   app.post('/change-password', { preHandler: requireAuth }, async (req, reply) => {

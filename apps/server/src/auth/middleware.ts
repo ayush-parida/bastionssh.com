@@ -30,11 +30,6 @@ declare module 'fastify' {
   interface FastifyRequest {
     user: { id: string; email: string; displayName: string };
     orgId: string;
-    /**
-     * @deprecated The base role the caller's module levels amount to (see
-     * `requireRole`); use `moduleLevel` / `requireModule` and resource checks.
-     */
-    role: Role;
     /** True when the caller authenticated with an API token rather than a session. */
     viaApiToken: boolean;
     /** An API token without the `write` scope: every resource level is capped at `view` (auth/access/). */
@@ -110,28 +105,13 @@ export function rank(role: string): number {
 }
 
 /**
- * @deprecated Gate on a module (`requireModule`) or a resource
- * (`requireResource`) instead; this stays until every route has moved.
- *
- * Gate a route on a minimum base role. Base roles no longer exist (unified
- * roles spec §2.1): `req.role` is what the caller's module levels amount to
- * (`legacyRoleFor` in auth/access/levels.ts — admin when they hold every
- * org module Admin holds by default, operator likewise, owner when they hold
- * the Owner role), capped for read-only tokens. With the built-in roles at
- * their defaults that is exactly the base role they had. Must run after
- * `requireAuth`.
- *
- *   app.post('/', { preHandler: requireRole('admin') }, handler)
+ * The base role the caller's roles amount to (`legacyRoleFor`; owner with
+ * the Owner role), viewer for a read-only token: the compatible `role` field
+ * of `/auth/me` for old API callers. Nothing is decided by it — routes gate
+ * on modules (`requireModule`) and resources.
  */
-export function requireRole(minimum: Role) {
-  return async function roleGuard(req: FastifyRequest, reply: FastifyReply) {
-    if (!req.role) return reply.status(401).send({ error: 'Unauthorized' });
-    if (rank(req.role) < rank(minimum)) {
-      return reply
-        .status(403)
-        .send({ error: `Requires ${minimum} role or higher (you are ${req.role})` });
-    }
-  };
+export function compatRole(req: FastifyRequest): Role {
+  return req.apiTokenReadOnly ? effectiveRole(resolveAccess(req).role, ['read']) : resolveAccess(req).role;
 }
 
 type TokenAuth =
@@ -292,11 +272,6 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   req.orgId = membership.orgId;
   req.viaApiToken = scopes !== null;
   req.apiTokenReadOnly = !!scopes && !scopes.includes('write');
-  // What the caller's roles amount to as a base role, for gates not yet on
-  // modules (memberships.role is no longer read). A token can only narrow
-  // what its owner may do, never widen it.
-  const memberRole = resolveAccess(req).role;
-  req.role = scopes ? effectiveRole(memberRole, scopes) : memberRole;
   req.sessionId = session?.id ?? null;
   req.passkeyVerified = session?.passkeyVerified ?? false;
   req.ssoOrgId = ssoOrgId;

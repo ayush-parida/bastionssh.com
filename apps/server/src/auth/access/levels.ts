@@ -262,9 +262,9 @@ export const TYPE_MODULES: Record<ResourceType, ModuleKey> = {
 };
 
 /**
- * The base role a set of module levels amounts to, for the routes that still
- * gate on base roles (`requireRole`, `req.role`) until they move to module
- * checks: the highest of Admin, Operator and Viewer whose default org-module
+ * The base role a set of module levels amounts to, for the compatible `role`
+ * fields old API callers read (`compatRole`, member lists, invites) — no
+ * route gates on it: the highest of Admin, Operator and Viewer whose default org-module
  * levels the member holds every one of (resource modules do not count —
  * items come from grants). Owners are decided by holding the Owner role, not
  * here. With every built-in at its defaults this is exactly the member's base
