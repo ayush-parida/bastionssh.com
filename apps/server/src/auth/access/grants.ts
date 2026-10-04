@@ -14,6 +14,13 @@ import { activeAt } from './resolve.js';
  * half its old resources and half its new ones.
  */
 
+/**
+ * Id prefix of a personal grant at "the base role's level" made by approving
+ * an access request (narrowed to namespaces). The `legacy-` start is what
+ * migration 0023's `memberships_legacy_grant_level` trigger matches.
+ */
+export const LEGACY_BASE_PREFIX = 'legacy-base:';
+
 /** Longest a grant may run from now; anything longer should be permanent. Matches MAX_GRANT_MINUTES. */
 const MAX_GRANT_MS = 365 * 24 * 60 * 60_000;
 
@@ -232,7 +239,10 @@ export function replaceGrants(
  * at least `level` for at least as long (an approval never shortens access).
  * For a cluster, `namespaces` narrows the grant to those namespaces (null =
  * every one); a grant already covering all of them counts as covering it.
- * Returns true when a grant was added.
+ * With `followsBaseRole`, the grant stands for "the base role, here" and gets
+ * a `legacy-` id, so migration 0023's role trigger moves its level with the
+ * member's base role (a demotion lowers it), like the whole-cluster grants
+ * the pre-roles tables mirror. Returns true when a grant was added.
  */
 export function addPersonalGrant(
   orgId: string,
@@ -242,6 +252,7 @@ export function addPersonalGrant(
   level: AccessLevel,
   grant: { expiresAt: string; grantedBy: string; reason: string | null },
   namespaces: string[] | null = null,
+  { followsBaseRole = false }: { followsBaseRole?: boolean } = {},
 ): boolean {
   const db = getDb();
   const narrowTo = type === 'cluster' && namespaces ? [...new Set(namespaces)].sort() : null;
@@ -272,7 +283,7 @@ export function addPersonalGrant(
   if (covered) return false;
   db.insert(resourceGrants)
     .values({
-      id: nanoid(),
+      id: followsBaseRole ? `${LEGACY_BASE_PREFIX}${nanoid()}` : nanoid(),
       orgId,
       principalType: 'user',
       principalId: userId,

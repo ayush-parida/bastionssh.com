@@ -15,6 +15,11 @@ export interface AIProviderConfig {
   /** apiKey is never returned to the client */
 }
 
+/** `GET /api/ai/access`: whether the caller may use the assistant (chat and command approvals). */
+export interface AIAccess {
+  chat: boolean;
+}
+
 export interface CreateAIProviderRequest {
   name: string;
   provider: AIProviderType;

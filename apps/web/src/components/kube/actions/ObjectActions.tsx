@@ -33,7 +33,7 @@ export default function ObjectActions({
   /** The object no longer exists (a deleted pod). */
   onGone?: () => void;
 }) {
-  const permissions = useKubePermissions(clusterId);
+  const permissions = useKubePermissions(clusterId, objectRef.namespace);
   const actionable = ACTIONABLE.has(objectRef.resource);
   const preview = useActionPreview(clusterId, objectRef, actionable && !!permissions);
   const p = preview.data;

@@ -835,11 +835,14 @@ export async function accessRequestRoutes(app: FastifyInstance) {
             : extendGrants(req.orgId, request.userId, ids, grant);
       } else {
         // Narrowed to namespaces, a base-level cluster request becomes a personal
-        // grant at the requester's base-role level as it is now
+        // grant at the requester's base-role level, which keeps following that
+        // role (a demotion before it expires lowers it) like a whole-cluster one
         const level = target.level ?? baseLevel(stillActive.role);
         grantedLevel = level;
         extended = ids.filter((id) =>
-          addPersonalGrant(req.orgId, request.userId, target.type as ResourceType, id, level, grant, namespaces),
+          addPersonalGrant(req.orgId, request.userId, target.type as ResourceType, id, level, grant, namespaces, {
+            followsBaseRole: target.level === null,
+          }),
         );
       }
       return true;

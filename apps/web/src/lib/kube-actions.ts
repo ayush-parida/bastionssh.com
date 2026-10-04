@@ -16,7 +16,7 @@ import type {
 } from '@smt/shared';
 import { kubeObjectPath } from '@smt/shared';
 import { api } from '@/lib/api.js';
-import { kubePath, useKubeCluster } from '@/lib/kube.js';
+import { kubePath, permissionsIn, useKubeCluster } from '@/lib/kube.js';
 
 /** Calls behind the guided actions (K3) and the preview their panels open with. */
 
@@ -49,9 +49,13 @@ export function useActionPreview(clusterId: string, ref: Pick<KubeObjectRef, 're
   });
 }
 
-/** What the caller may do on the cluster (the same matrix the server enforces). */
-export function useKubePermissions(clusterId: string) {
-  return useKubeCluster(clusterId).data?.permissions ?? null;
+/**
+ * What the caller may do on the cluster (the same matrix the server
+ * enforces) — in `namespace` when given, where a custom role may let them do
+ * more than on the cluster as a whole.
+ */
+export function useKubePermissions(clusterId: string, namespace?: string | null) {
+  return permissionsIn(useKubeCluster(clusterId).data, namespace) ?? null;
 }
 
 /**

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
+import { useAssistantAccess } from '@/hooks/useAssistantAccess.js';
 import { readSSE } from '@/lib/sse.js';
 import type { AIProviderConfig, AIAgentEvent } from '@smt/shared';
 import { Send, Bot, User, Terminal, ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
@@ -36,6 +37,7 @@ export default function AIChatPage() {
   const [providerId, setProviderId] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const canUseAssistant = useAssistantAccess();
 
   const { data: providers } = useQuery<AIProviderConfig[]>({
     queryKey: ['ai-providers'],
@@ -178,6 +180,15 @@ export default function AIChatPage() {
       if (abortRef.current === ctrl) abortRef.current = null;
       setStreaming(false);
     }
+  }
+
+  if (!canUseAssistant) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground" data-testid="ai-unavailable">
+        <Bot size={28} className="text-muted-foreground/60" />
+        <p>The AI assistant needs the operator role, or operate access to at least one server or cluster.</p>
+      </div>
+    );
   }
 
   return (

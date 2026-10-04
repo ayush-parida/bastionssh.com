@@ -32,6 +32,7 @@ import {
   ShipWheel,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme.js';
+import { useAssistantAccess } from '@/hooks/useAssistantAccess.js';
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -60,6 +61,7 @@ export default function Layout() {
   const { user, orgId, clearUser, setUser } = useAuthStore();
   const { theme, toggle } = useTheme();
   const queryClient = useQueryClient();
+  const canUseAssistant = useAssistantAccess();
 
   // Query keys are not scoped by user or org, so whatever ends the session —
   // sign-out or a 401 expiring it — must drop the cache before anyone else signs in.
@@ -127,7 +129,7 @@ export default function Layout() {
         )}
 
         <nav className="flex-1 overflow-y-auto p-2">
-          {navItems.map(({ to, label, icon: Icon }) => {
+          {navItems.filter(({ to }) => to !== '/ai' || canUseAssistant).map(({ to, label, icon: Icon }) => {
             const active = to === '/' ? pathname === '/' : pathname.startsWith(to);
             return (
               <Link

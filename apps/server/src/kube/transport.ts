@@ -8,7 +8,7 @@ import { openAgentTunnel } from '../agents/hub.js';
 import { blockedReason, type AllowNets } from '../net/ssrf.js';
 import { asSocket } from '../docker/transport.js';
 import { apiEndpoint, serverNameFor, type KubeCredential } from './kubeconfig.js';
-import { KubeError, fromTransportError } from './errors.js';
+import { KubeError, fromTransportError, markRouteError } from './errors.js';
 import { acquireServerSsh } from './ssh-pool.js';
 
 /**
@@ -144,22 +144,29 @@ export async function openRaw(route: ApiRoute, deps: TransportDeps = defaultTran
       if (!route.viaServerId) {
         throw new KubeError('This cluster is reached through a server that no longer exists; pick another route', 400);
       }
-      const lease = await acquireServerSsh(route.orgId, route.viaServerId, route.actorUserId);
+      // SSH, credential, jump host and host key failures name the server
+      const lease = await acquireServerSsh(route.orgId, route.viaServerId, route.actorUserId).catch((err: unknown) => {
+        throw markRouteError(err);
+      });
       try {
         const channel = await forwardOut(lease.client, host, port);
         return { stream: channel, release: lease.release };
       } catch (err) {
         lease.release();
-        throw err;
+        throw markRouteError(err);
       }
     }
     case 'agent': {
       if (!route.viaAgentId) {
         throw new KubeError('This cluster is reached through an agent that no longer exists; pick another route', 400);
       }
-      const socket = openAgentTunnel({ orgId: route.orgId, agentId: route.viaAgentId }, port);
-      await whenConnected(socket as unknown as Duplex & { connecting: boolean }, 'Opening the agent tunnel');
-      return { stream: socket, release: () => {} };
+      try {
+        const socket = openAgentTunnel({ orgId: route.orgId, agentId: route.viaAgentId }, port);
+        await whenConnected(socket as unknown as Duplex & { connecting: boolean }, 'Opening the agent tunnel');
+        return { stream: socket, release: () => {} };
+      } catch (err) {
+        throw markRouteError(err);
+      }
     }
     default:
       throw new KubeError('Unknown connection route', 400);

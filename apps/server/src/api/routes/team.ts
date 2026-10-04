@@ -373,18 +373,38 @@ async function changeScope(req: FastifyRequest, reply: FastifyReply, userId: str
   const from: MemberScope = member.scope === 'roles' ? 'roles' : 'all';
   if (from !== scope) {
     const before = snapshotAccess(req.orgId, [userId]);
-    // server_access is the pre-roles mirror of the scope, kept for one release
-    getDb()
-      .update(memberships)
-      .set({ scope, serverAccess: scope === 'roles' ? 'restricted' : 'all' })
-      .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
-      .run();
+    // Lifting the restriction ends the legacy "all" grants that kept the
+    // types it never narrowed open (migration 0023, the old access alias):
+    // the base role covers them now, and narrowing again here starts from
+    // the member's roles and personal grants alone, default-deny.
+    const legacyAllBefore = scope === 'all' ? legacyAllGrants(req.orgId, userId) : [];
+    const db = getDb();
+    db.transaction(() => {
+      // server_access is the pre-roles mirror of the scope, kept for one release
+      db.update(memberships)
+        .set({ scope, serverAccess: scope === 'roles' ? 'restricted' : 'all' })
+        .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
+        .run();
+      if (legacyAllBefore.length) {
+        db.delete(resourceGrants)
+          .where(
+            and(
+              eq(resourceGrants.orgId, req.orgId),
+              inArray(
+                resourceGrants.id,
+                LEGACY_ALL_TYPES.map((type) => legacyAllId(type, req.orgId, userId)),
+              ),
+            ),
+          )
+          .run();
+      }
+    });
     const live = revokeAfterChange(req.orgId, [userId], before).get(userId);
     await audit(req, 'member.scope_change', 'member', userId, userEmail(userId), {
       from,
       to: scope,
-      before: { scope: from },
-      after: { scope },
+      before: { scope: from, ...(legacyAllBefore.length && { legacyAll: legacyAllBefore }) },
+      after: { scope, ...(legacyAllBefore.length && { legacyAll: legacyAllGrants(req.orgId, userId) }) },
       ...(live && { live }),
     });
   }
@@ -793,7 +813,7 @@ export async function teamRoutes(app: FastifyInstance) {
     });
 
     // Personal grants by id written by the newer grants endpoint (any level)
-    // stay as they are for servers and clusters still listed, with a new
+    // or by approved access requests stay as they are for servers and clusters still listed, with a new
     // expiry if one was picked, and go for those left out. Grants by tag or
     // "all" are not this endpoint's to change.
     const personalById = (type: 'server' | 'cluster') =>
@@ -803,7 +823,9 @@ export async function teamRoutes(app: FastifyInstance) {
         eq(resourceGrants.principalId, userId),
         eq(resourceGrants.resourceType, type),
         eq(resourceGrants.selector, 'id'),
-        sql`substr(${resourceGrants.id}, 1, 7) <> 'legacy-'`,
+        // The pre-roles tables' mirrors, rewritten through those tables below
+        sql`substr(${resourceGrants.id}, 1, 14) <> 'legacy-server:'`,
+        sql`substr(${resourceGrants.id}, 1, 15) <> 'legacy-cluster:'`,
       );
     const newerServerIds = new Set(
       db.select({ id: resourceGrants.resourceId }).from(resourceGrants).where(personalById('server')).all().map((g) => g.id!),

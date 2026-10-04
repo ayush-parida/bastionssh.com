@@ -20,7 +20,7 @@ import { classifyCommand } from '../../ai/command-safety.js';
 import { resolveApproval, waitForApproval } from '../../ai/approvals.js';
 import { registerAgentStream } from '../../ai/streams.js';
 import { audit } from '../../audit/index.js';
-import type { AIAgentEvent } from '@smt/shared';
+import type { AIAccess, AIAgentEvent } from '@smt/shared';
 
 /** A cluster's name for the audit log (the caller's access is checked first). */
 function kubeClusterName(orgId: string, clusterId: string): string | undefined {
@@ -40,10 +40,14 @@ function kubeClusterName(orgId: string, clusterId: string): string | undefined {
  * operate on the server and approval for changes; Docker and Kubernetes
  * reads follow their matrices), and the prompt lists only what they can see.
  */
+function canUseAssistant(req: FastifyRequest): boolean {
+  if (rank(req.role) >= rank('operator')) return true;
+  return reachesAny(req, 'server', 'operate') || reachesAny(req, 'cluster', 'operate');
+}
+
 async function requireAssistant(req: FastifyRequest, reply: FastifyReply) {
   if (!req.role) return reply.status(401).send({ error: 'Unauthorized' });
-  if (rank(req.role) >= rank('operator')) return;
-  if (reachesAny(req, 'server', 'operate') || reachesAny(req, 'cluster', 'operate')) return;
+  if (canUseAssistant(req)) return;
   return reply.status(403).send({
     error: 'The AI assistant needs the operator role, or operate access to at least one server or cluster',
   });
@@ -178,6 +182,10 @@ export async function aiRoutes(app: FastifyInstance) {
     db.delete(aiProviderConfigs).where(eq(aiProviderConfigs.id, id)).run();
     return reply.status(204).send();
   });
+
+  // Whether to offer the assistant at all (the nav link, the terminal's
+  // sidebar); the same rule the chat and approvals enforce
+  app.get('/access', async (req): Promise<AIAccess> => ({ chat: canUseAssistant(req) }));
 
   // ── App context snapshot ──────────────────────────────────────
   app.get('/context', async (req) => {

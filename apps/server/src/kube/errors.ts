@@ -20,6 +20,30 @@ export class KubeError extends Error {
   }
 }
 
+/**
+ * Errors raised while reaching a cluster through a managed server or an
+ * agent. Their messages may name that server or agent ("SSH connection to
+ * db-1 timed out"), which a member whose access is narrowed to some
+ * namespaces must not learn (service.ts redacts them for such callers).
+ */
+const routeErrors = new WeakSet<object>();
+
+/** Mark `err` as raised on the way to the API server through a server or agent; returns it. */
+export function markRouteError<T>(err: T): T {
+  if (err && typeof err === 'object') routeErrors.add(err);
+  return err;
+}
+
+/** True when `err`, or an error it was wrapped from, was raised on a server or agent route. */
+export function isRouteError(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; current && typeof current === 'object' && depth < 5; depth++) {
+    if (routeErrors.has(current)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 /** The `Status` object the API server answers errors with. */
 interface KubeStatus {
   kind?: unknown;

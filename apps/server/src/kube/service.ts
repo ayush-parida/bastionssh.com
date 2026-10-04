@@ -7,7 +7,7 @@ import { kubeClusters } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import type { CacheSource } from './cache.js';
 import { KubeClient, type KubeIdentity } from './client.js';
-import { KubeError } from './errors.js';
+import { KubeError, isRouteError } from './errors.js';
 import { apiEndpoint, type KubeCredential } from './kubeconfig.js';
 import { kubePermissionsFor } from './permissions.js';
 import { kubeSettings } from './settings.js';
@@ -184,27 +184,63 @@ export async function cacheSourceFor(row: ClusterRow, req: Caller): Promise<Cach
   };
 }
 
+/** What a member narrowed to some namespaces is told when a routed cluster cannot be reached. */
+export const UNREACHABLE_ROUTED = 'The cluster could not be reached';
+
+/** A {@link KubeError} standing in for a route error a caller may not see; `original` is for admin records only. */
+export class RedactedKubeError extends KubeError {
+  constructor(
+    readonly original: unknown,
+    statusCode: number,
+  ) {
+    super(UNREACHABLE_ROUTED, statusCode);
+  }
+}
+
+/**
+ * `err` as `req`'s caller may see it. A member whose access to the cluster is
+ * narrowed to some namespaces learns nothing of how it is reached (custom
+ * roles spec §5), so a failure on the server or agent route — whose message
+ * names that server or agent — becomes a plain "could not be reached", with
+ * the same status. Everyone else gets the error as it is.
+ */
+export function routeSafeError(req: Pick<FastifyRequest, 'orgId' | 'user'>, cluster: Pick<ClusterRow, 'id' | 'connectVia'>, err: unknown): unknown {
+  if (cluster.connectVia === 'direct' || !isRouteError(err) || !clusterNamespaces(req, cluster.id)) return err;
+  const status = (err as { statusCode?: unknown }).statusCode;
+  return new RedactedKubeError(err, typeof status === 'number' && status >= 400 ? status : 502);
+}
+
+/** The error a route failed with before {@link routeSafeError} redacted it, for the cluster's own records. */
+export function unredacted(err: unknown): unknown {
+  return err instanceof RedactedKubeError ? err.original : err;
+}
+
 /**
  * Run `fn` with a client for `clusterId` (see the module comment). The
- * client is closed when `fn` settles.
+ * client is closed when `fn` settles. Failures come out as the caller may
+ * see them ({@link routeSafeError}).
  */
 export async function withKubeClient<T>(req: Caller, clusterId: string, fn: (ctx: KubeContext) => Promise<T>): Promise<T> {
   const cluster = kubeCluster(req, clusterId);
   const allowlist = callerNamespaces(req, cluster);
   const allowed = allowlist ? new Set(allowlist) : null;
-  const client = await clusterClient(cluster, req);
   try {
-    return await fn({
-      cluster,
-      client,
-      source: await cacheSourceFor(cluster, req),
-      permissions: kubePermissionsFor(req, cluster.id),
-      permissionsIn: (namespace) => kubePermissionsFor(req, cluster.id, namespace ?? undefined),
-      settings: kubeSettings(req.orgId),
-      allowlist,
-      namespaceAllowed: (namespace) => !allowed || !namespace || allowed.has(namespace),
-    });
-  } finally {
-    client.close();
+    const client = await clusterClient(cluster, req);
+    try {
+      return await fn({
+        cluster,
+        client,
+        source: await cacheSourceFor(cluster, req),
+        permissions: kubePermissionsFor(req, cluster.id),
+        permissionsIn: (namespace) => kubePermissionsFor(req, cluster.id, namespace ?? undefined),
+        settings: kubeSettings(req.orgId),
+        allowlist,
+        namespaceAllowed: (namespace) => !allowed || !namespace || allowed.has(namespace),
+      });
+    } finally {
+      client.close();
+    }
+  } catch (err) {
+    throw routeSafeError(req, cluster, err);
   }
 }

@@ -7,7 +7,17 @@ import { Link2, Loader2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
-import { HEALTH_DOT, healthLabel, kubeKeys, kubePath, useKubeChanges, useKubeCluster, type KubeObjectLinkState, type KubeTab } from '@/lib/kube.js';
+import {
+  HEALTH_DOT,
+  healthLabel,
+  kubeKeys,
+  kubePath,
+  permissionsIn,
+  useKubeChanges,
+  useKubeCluster,
+  type KubeObjectLinkState,
+  type KubeTab,
+} from '@/lib/kube.js';
 import ObjectInsight from './ObjectInsight.js';
 import ObjectActions from './actions/ObjectActions.js';
 import PodOverview from './pod/PodOverview.js';
@@ -63,7 +73,8 @@ export default function ObjectPanel({
   const [tab, setTab] = useState<Tab>('overview');
   /** Which container's logs the Logs tab opens on (a lane's "Logs" picks it); `n` reopens the same one. */
   const [logTarget, setLogTarget] = useState<{ container?: string; previous: boolean; n: number }>({ previous: false, n: 0 });
-  const permissions = useKubeCluster(clusterId).data?.permissions;
+  // In the object's namespace: a custom role may allow more there than on the whole cluster
+  const permissions = permissionsIn(useKubeCluster(clusterId).data, objectRef.namespace);
   const isPod = objectRef.resource === 'pods' && !!objectRef.namespace;
   const path = kubeObjectPath(objectRef);
   const detail = useQuery<KubeObjectDetail>({

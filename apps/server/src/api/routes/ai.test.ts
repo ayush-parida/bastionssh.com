@@ -422,6 +422,7 @@ describe('AI chat for members raised by custom roles', () => {
       })
       .run();
     const raised = member([{ type: 'cluster', id: clusterId, level: 'operate', namespaces: ['shop'] }]);
+    expect((await app.inject({ method: 'GET', url: '/api/ai/access', headers: raised.headers })).json()).toEqual({ chat: true });
     agent.script = [];
     const res = await chat(raised.headers);
     expect(res.statusCode).toBe(200);
@@ -434,6 +435,9 @@ describe('AI chat for members raised by custom roles', () => {
     const plainViewer = seedUser(orgId, 'viewer');
     agent.script = [];
     for (const who of [viewing, dangling, plainViewer]) {
+      // The web hides the assistant from them
+      const access = await app.inject({ method: 'GET', url: '/api/ai/access', headers: who.headers });
+      expect(access.json()).toEqual({ chat: false });
       const res = await chat(who.headers);
       expect(res.statusCode).toBe(403);
       expect(res.json().error).toMatch(/operate access/);

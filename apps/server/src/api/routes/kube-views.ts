@@ -27,7 +27,7 @@ import { podHealth, workloadHealth } from '../../kube/health.js';
 import { nodeUsage } from '../../kube/metrics.js';
 import { requireKube } from '../../kube/permissions.js';
 import { redactObject } from '../../kube/redact.js';
-import { withKubeClient, type KubeContext } from '../../kube/service.js';
+import { unredacted, withKubeClient, type KubeContext } from '../../kube/service.js';
 import { MAX_STREAMS_PER_USER, activeStreamCount } from '../sse.js';
 import { openKubeSse, TOO_MANY_KUBE_STREAMS, type KubeSse } from '../../kube/sse.js';
 import { namespaceName, objectRef, objectName, resourceName } from '../../kube/validation.js';
@@ -234,7 +234,9 @@ export async function kubeViewRoutes(app: FastifyInstance) {
       });
     } catch (err) {
       // Unreachable or refused: the cluster list's health dot says so too
-      if (err instanceof KubeError && err.statusCode >= 500) recordClusterStatus(id, false, err.message);
+      // (with the real reason, though the caller may have been told less)
+      const cause = unredacted(err);
+      if (cause instanceof KubeError && cause.statusCode >= 500) recordClusterStatus(id, false, cause.message);
       return sendKubeError(reply, err);
     }
   });

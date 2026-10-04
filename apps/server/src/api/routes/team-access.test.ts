@@ -360,6 +360,18 @@ describe('custom roles and resource access', () => {
       const jo = await roleScoped('operator');
       expect(legacyAll(jo.userId)).toEqual([]);
       expect(reaches(jo.userId)).toEqual([]);
+
+      // Lifted through the newer scope switch they go too (nothing changes while
+      // the base role covers everything), so narrowing again there denies by default
+      expect((await as(admin).patch(`/api/team/members/${ivan.userId}`, { scope: 'all' })).statusCode).toBe(200);
+      expect(legacyAll(ivan.userId)).toEqual([]);
+      expect(reaches(ivan.userId)).toEqual([...LEGACY]);
+      expect(audits('member.scope_change', ivan.userId).at(-1)!.meta).toMatchObject({
+        before: { scope: 'roles', legacyAll: LEGACY.map((resourceType) => ({ resourceType, level: 'view' })) },
+        after: { scope: 'all', legacyAll: [] },
+      });
+      expect((await as(admin).patch(`/api/team/members/${ivan.userId}`, { scope: 'roles' })).statusCode).toBe(200);
+      expect(reaches(ivan.userId)).toEqual([]);
     });
 
     it('replaces personal grants at any level, audited, and serves them through the old access endpoint too', async () => {
@@ -559,6 +571,28 @@ describe('custom roles and resource access', () => {
         expect(operateIn(max, 'shop')).toBe('operate');
         expect(operateIn(max, 'ops')).toBeNull();
         expect(operateIn(max)).toBe('view');
+
+        // It stands for the base role there, so it follows the role down (and back up) before it expires
+        const demoted = await as(admin).patch(`/api/team/members/${max.userId}`, { role: 'viewer' });
+        expect(demoted.statusCode, demoted.body).toBe(200);
+        expect(operateIn(max, 'shop')).toBe('view');
+        expect((await as(admin).patch(`/api/team/members/${max.userId}`, { role: 'operator' })).statusCode).toBe(200);
+        expect(operateIn(max, 'shop')).toBe('operate');
+
+        // The old per-member endpoint still removes it with the cluster
+        const cleared = await as(admin).put(`/api/team/members/${max.userId}/access`, { serverAccess: 'restricted', serverIds: [], clusterIds: [] });
+        expect(cleared.statusCode, cleared.body).toBe(200);
+        expect(operateIn(max, 'shop')).toBeNull();
+      });
+
+      it('keeps the level of a narrowed request that named one when the requester’s base role changes', async () => {
+        const ren = await shopViewer('operator');
+        const created = await ask(ren, { resourceType: 'cluster', resourceIds: [shop], level: 'operate', namespaces: ['shop'] });
+        expect((await as(admin).post(`/api/access-requests/${created.json().id}/approve`)).statusCode).toBe(200);
+        expect((await as(admin).patch(`/api/team/members/${ren.userId}`, { role: 'viewer' })).statusCode).toBe(200);
+        // Asked and approved at operate: an explicit level, not the base role's
+        expect(operateIn(ren, 'shop')).toBe('operate');
+        expect(personalClusterGrants(ren)[0]!.id.startsWith('legacy-')).toBe(false);
       });
 
       it('refuses namespaces anywhere but on cluster requests', async () => {

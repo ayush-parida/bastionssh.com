@@ -223,7 +223,7 @@ test.describe('Kubernetes integrations', () => {
     await expect(panel).toBeVisible();
   });
 
-  test('shows Explain in the namespaces a member operates in, and nowhere else', async ({ page }) => {
+  test('shows Explain, Logs and YAML in the namespaces a member operates in, and nowhere else', async ({ page }) => {
     // A viewer whose role lets them operate in `shop` only: the cluster as a whole is view
     await stubKube(page, { permissions: viewerPermissions, namespacePermissions: { shop: permissions } });
     await signInWithPassword(page, viewer.email, viewer.password);
@@ -232,9 +232,13 @@ test.describe('Kubernetes integrations', () => {
     const panel = page.getByTestId('kube-object-panel');
     await expect(panel).toContainText('worker-1');
     await expect(panel.getByTestId('kube-explain')).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'Logs', exact: true }).first()).toBeVisible();
+    await expect(panel.getByRole('button', { name: 'YAML', exact: true })).toBeVisible();
 
     await page.goto(`/kubernetes/${PROD}/objects/pods/ops/tool-1`);
     await expect(panel).toContainText('tool-1');
     await expect(page.getByTestId('kube-explain')).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Logs', exact: true })).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'YAML', exact: true })).toHaveCount(0);
   });
 });

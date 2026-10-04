@@ -355,6 +355,20 @@ describe('server and cluster access matrix', () => {
             lastError: 'SSH connection to db-1 timed out',
           });
         }
+
+        // Nor does a live failure on the route (db-1 has no SSH credential) reach them as it is
+        resetKubeCache();
+        const live = await call(narrowed, 'GET', c('/overview'));
+        expect(live.statusCode).toBeGreaterThanOrEqual(400);
+        expect(live.json()).toEqual({ error: 'The cluster could not be reached' });
+        expect(live.body).not.toContain('db-1');
+        const stream = await call(narrowed, 'GET', c('/stream?view=overview'));
+        expect(stream.body).not.toContain('db-1');
+        expect(stream.body).toContain('The cluster could not be reached');
+        for (const who of [admin, cases.roleManage!.who]) {
+          resetKubeCache();
+          expect((await call(who, 'GET', c('/overview'))).json()).toEqual({ error: 'No authentication method configured for this server' });
+        }
       } finally {
         db.update(kubeClusters)
           .set({

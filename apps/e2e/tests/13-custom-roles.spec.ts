@@ -96,8 +96,9 @@ test('a role with a tag selector and a cluster namespace gives a member exactly 
   await expect(memberPage.getByText(web1.name, { exact: true })).toBeVisible();
   await expect(memberPage.getByText(web2.name, { exact: true })).toBeVisible();
   await expect(memberPage.getByText(db1.name, { exact: true })).toHaveCount(0);
-  // A viewer raised to operate by the role may open a terminal there
+  // A viewer raised to operate by the role may open a terminal there, and use the assistant
   await expect(memberPage.getByRole('button', { name: 'Connect' })).toHaveCount(2);
+  await expect(memberPage.getByRole('link', { name: 'AI Assistant' })).toBeVisible();
 
   const clusters = (await (await memberPage.request.get('/api/kube/clusters')).json()) as { id: string }[];
   expect(clusters.map((c) => c.id)).toEqual([cluster.id]);
@@ -120,6 +121,19 @@ test('a role with a tag selector and a cluster namespace gives a member exactly 
   await page.getByLabel('Resource', { exact: true }).selectOption({ label: db1.name });
   await expect(result).toContainText('No access');
   await expect(result).toContainText('No role or personal grant covers it');
+});
+
+test('a member who can operate nothing is not offered the AI assistant', async ({ browser }) => {
+  const member = await createMember('viewer', 'no-ai');
+  const context = await browser.newContext({ extraHTTPHeaders: { 'X-Forwarded-For': fakeClientIp() } });
+  const page = await context.newPage();
+  await signInWithPassword(page, member.email, member.password);
+  await expect(page.getByRole('link', { name: 'Dashboard', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'AI Assistant' })).toHaveCount(0);
+  // Straight to the page: it says why instead of offering a chat the server would refuse
+  await page.goto('/ai');
+  await expect(page.getByTestId('ai-unavailable')).toBeVisible();
+  await context.close();
 });
 
 test('a member asks for namespaces of a cluster; the approver narrows them and only those are granted', async ({ page, browser }) => {

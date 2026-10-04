@@ -45,7 +45,7 @@ import { servers } from '../db/schema.js';
 import { vault } from '../vault/index.js';
 import { seedOrg, seedServer, seedUser } from '../api/routes/test-utils.js';
 import { clientFor, type ClientParams } from './service.js';
-import { KubeError } from './errors.js';
+import { KubeError, isRouteError } from './errors.js';
 import { evictKubeServer } from './ssh-pool.js';
 import { FAKE_TOKEN, pod, startFakeApi, type FakeApi } from './fake-api.test-helper.js';
 import { CA_CERT, CLIENT_CERT, CLIENT_KEY, OTHER_CA } from './test-certs.test-helper.js';
@@ -153,6 +153,12 @@ describe('kube transport and client', () => {
     fake.refuse = true;
     const err = await failure(direct({ apiUrl: 'https://kube.test:6443', connectVia: 'server', viaServerId: serverId }).version());
     expect(err.message).toMatch(/could not open a connection to kube\.test:6443/);
+    // Raised on the server route: redacted for members narrowed to some namespaces (service.ts)
+    expect(isRouteError(err)).toBe(true);
+    // The certificate check happens end to end, past the route
+    fake.refuse = false;
+    const wrongName = await failure(direct({ apiUrl: 'https://other.test:6443', connectVia: 'server', viaServerId: serverId }).version());
+    expect(isRouteError(wrongName)).toBe(false);
   });
 
   it('lists every page and watches from the list’s version', async () => {

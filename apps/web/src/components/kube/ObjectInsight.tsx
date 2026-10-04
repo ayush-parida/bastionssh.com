@@ -44,7 +44,7 @@ export default function ObjectInsight({
     retry: false,
     refetchInterval: 20_000,
   });
-  const permissions = useKubePermissions(clusterId);
+  const permissions = useKubePermissions(clusterId, objectRef.namespace);
   // The same query (and cache entry) the actions section below reads.
   const preview = useActionPreview(clusterId, objectRef, objectRef.resource === 'deployments' && !!permissions);
   const d = insight.data;

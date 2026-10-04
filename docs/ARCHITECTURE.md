@@ -901,8 +901,10 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   connections, cloud accounts, saved commands and cron jobs at their base level (`legacy-all:`
   ids, following role changes); admins remove them like any other grant. The old `PUT
   /team/members/:userId/access` alias does the same when it restricts a member (moves them
-  to scope `roles`) and removes those grants when it lifts the restriction; switching scope
-  through `PATCH /team/members/:userId` stays default-deny.
+  to scope `roles`) and removes those grants when it lifts the restriction. Switching scope
+  through `PATCH /team/members/:userId` stays default-deny: a move to `all` removes those
+  grants too (in the same transaction, audited as `legacyAll` before/after; nothing changes
+  while the base role covers everything), and a move to `roles` adds none.
 - The access-grant expiry sweep also removes expired role memberships and grants and closes
   what they gave.
 - **Servers, clusters and their dependents** gate on the level, not the base role
@@ -922,7 +924,12 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   (`GET /clusters`, `GET /clusters/:id`) shows only their namespaces as `namespacesAllowlist`
   (the allowlist intersected with their grants), a `defaultNamespace` among them, no
   via-server or agent id or name, and for a routed cluster a generic `lastError` (an SSH
-  failure names the server); admins and anyone reaching the whole cluster see it all.
+  failure names the server); admins and anyone reaching the whole cluster see it all. Live
+  failures are redacted the same way: `openRaw` (`kube/transport.ts`) marks errors raised on
+  the server or agent route (`markRouteError`), and `withKubeClient` turns them into "The
+  cluster could not be reached" (same status) for such a member (`routeSafeError` in
+  `kube/service.ts`) — every route, stream, fleet card and AI tool goes through it. The
+  overview still records the real reason as the cluster's `lastError`.
   Container and pod shells are closed by level too; revocation weighs
   pod shells in their own namespace, so narrowing a grant's namespaces closes the shells it no
   longer covers. Creating servers stays admin-only; a server manager below admin cannot choose
@@ -954,21 +961,26 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   role's level), and the approver may pass `namespaces` too — any for a whole-cluster request,
   a subset of those asked for otherwise, never more. Approval then adds personal grants
   narrowed to those namespaces (a base-level request narrowed this way is granted at the
-  requester's base-role level at approval), keeps what was granted as `approvedNamespaces`,
+  requester's base-role level, with a `legacy-base:` id so 0023's trigger keeps it following
+  the base role until it expires, like the whole-cluster grants), keeps what was granted as `approvedNamespaces`,
   and audits the namespaces asked for and granted as before/after.
 - AI chat (`POST /api/ai/chat`, `/api/ai/approvals/:id`) is open to operators and up, and to
   anyone a role or personal grant lets operate at least one existing server or cluster (a
   namespace of one counts; `reachesAny` in `filter.ts`). It widens nothing: `run_command`
   needs operate on its target server (approval still required for changes), the Docker and
   Kubernetes tools read their matrices at the caller's level there, and the system prompt
-  and `GET /api/ai/context` list only what the caller can see.
+  and `GET /api/ai/context` list only what the caller can see. `GET /api/ai/access` answers
+  `{ chat }` by the same rule, so the web hides the AI Assistant link (and the chat page says
+  why) from members who cannot use it.
 - Web: Team & Access has Members (member detail: scope, roles, personal grants, effective
   access with "via" badges), Roles (editor with per-type pickers, tag selectors with a live
   count, namespace chips, a plain-language preview) and Access checker tabs; server, cluster,
   connection, cloud, command and cron pages have a "who has access" button for admins
   (`components/access/`); `hooks/useAccessLevels.ts` hides actions the level does not allow
   (per item on the server, cluster, FTP, storage, cloud, command and cron pages, and the
-  diagnose button; Explain reads the cluster view's per-namespace permissions); adding a server, cluster, connection or account stays with admins.
+  diagnose button; the Kubernetes object panel — Explain, the Logs and YAML tabs, shells and
+  logs in the pod overview, the guided actions — reads the permissions in the object's
+  namespace, `permissionsIn` over the cluster view's `namespacePermissions`); adding a server, cluster, connection or account stays with admins.
 
 ---
 
