@@ -1,11 +1,15 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { requireAuth, requireRole } from '../../auth/middleware.js';
+import { requireAuth } from '../../auth/middleware.js';
+import { accessibleServerFilter, canAccessServer } from '../../auth/server-access.js';
+import { authorize, accessibleIds, type ResourceAction } from '../../auth/access/index.js';
 import {
-  accessibleSavedCommandFilter,
-  accessibleServerFilter,
-  canAccessServer,
-} from '../../auth/server-access.js';
+  baseRoleAllows,
+  denyAccess,
+  mayCreate,
+  refuseServers,
+  savedCommandFilter,
+} from '../../auth/command-access.js';
 import { getDb } from '../../db/index.js';
 import { savedCommands, commandRuns, servers, cronJobs } from '../../db/schema.js';
 import { eq, and, desc, inArray } from 'drizzle-orm';
@@ -69,27 +73,48 @@ async function runInlineFanout(jobs: Parameters<typeof executeSavedCommand>[0][]
 }
 
 /**
- * Load a command the caller may see: in their org and either unbound or bound
- * to a server they can access. Anything else is reported as not found.
+ * Load a command the caller may see (see `savedCommandFilter`): in their org,
+ * reached as a saved command, and either unbound or bound to a server they
+ * can access. Anything else is reported as not found.
  */
 function visibleCommand(req: FastifyRequest, id: string) {
   return getDb()
     .select()
     .from(savedCommands)
-    .where(
-      and(
-        eq(savedCommands.id, id),
-        eq(savedCommands.orgId, req.orgId),
-        accessibleSavedCommandFilter(req),
-      ),
-    )
+    .where(and(eq(savedCommands.id, id), eq(savedCommands.orgId, req.orgId), savedCommandFilter(req)))
     .get();
+}
+
+/**
+ * Load a command and check the caller's level on it for `action`. Sends 404
+ * (not visible) or 403 (visible, level too low) and returns undefined when
+ * refused. `baseRole`: what a scope-`all` member needed for this before
+ * custom roles (operators edited commands), kept for them.
+ */
+function commandFor(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  id: string,
+  action: ResourceAction<'saved_command'>,
+  baseRole?: 'operator',
+) {
+  const command = visibleCommand(req, id);
+  if (!command) {
+    reply.status(404).send({ error: 'Not found' });
+    return undefined;
+  }
+  const result = authorize(req, 'saved_command', id, action);
+  if (!result.ok && !(baseRole && baseRoleAllows(req, baseRole))) {
+    denyAccess(reply, result, 'Saved command');
+    return undefined;
+  }
+  return command;
 }
 
 /**
  * Changing or deleting a command changes what every cron job using it runs —
  * as that job's creator, on that job's server. So the caller must be able to
- * access every such server too, or they could plant commands on servers they
+ * operate every such server too, or they could plant commands on servers they
  * were never granted. Sends a 403 and returns false when blocked.
  */
 function mayRewriteCommand(req: FastifyRequest, reply: FastifyReply, commandId: string): boolean {
@@ -98,7 +123,7 @@ function mayRewriteCommand(req: FastifyRequest, reply: FastifyReply, commandId: 
     .from(cronJobs)
     .where(and(eq(cronJobs.savedCommandId, commandId), eq(cronJobs.orgId, req.orgId)))
     .all();
-  if (jobs.some((job) => !canAccessServer(req, job.serverId))) {
+  if (refuseServers(req, jobs.map((job) => job.serverId))) {
     reply.status(403).send({
       error:
         'This command is used by a cron job on a server you do not have access to, so you cannot change or delete it',
@@ -116,15 +141,18 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     return db
       .select()
       .from(savedCommands)
-      .where(and(eq(savedCommands.orgId, req.orgId), accessibleSavedCommandFilter(req)))
+      .where(and(eq(savedCommands.orgId, req.orgId), savedCommandFilter(req)))
       .all();
   });
 
-  app.post('/', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/', async (req, reply) => {
     const body = createCommandSchema.parse(req.body);
     const db = getDb();
     const id = nanoid();
 
+    if (!mayCreate(req, 'saved_command')) {
+      return reply.status(403).send({ error: 'Creating saved commands needs manage access to all saved commands' });
+    }
     if (body.serverId && !canAccessServer(req, body.serverId)) {
       return reply.status(404).send({ error: 'Server not found' });
     }
@@ -144,14 +172,14 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .send(db.select().from(savedCommands).where(eq(savedCommands.id, id)).get());
   });
 
-  app.patch('/:id', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.patch('/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = updateCommandSchema.parse(req.body);
     const db = getDb();
 
     // Bound to a server the caller cannot access: as if it did not exist
-    const command = visibleCommand(req, id);
-    if (!command) return reply.status(404).send({ error: 'Not found' });
+    const command = commandFor(req, reply, id, 'edit', 'operator');
+    if (!command) return reply;
     if (!mayRewriteCommand(req, reply, id)) return reply;
 
     if (body.serverId && !canAccessServer(req, body.serverId)) {
@@ -174,13 +202,13 @@ export async function savedCommandRoutes(app: FastifyInstance) {
     return db.select().from(savedCommands).where(eq(savedCommands.id, id)).get();
   });
 
-  app.post('/:id/run', { preHandler: requireRole('operator') }, async (req, reply) => {
+  app.post('/:id/run', async (req, reply) => {
     const { id } = req.params as { id: string };
     const { variables, serverId, serverIds, tag } = runCommandSchema.parse(req.body ?? {});
     const db = getDb();
 
-    const command = visibleCommand(req, id);
-    if (!command) return reply.status(404).send({ error: 'Not found' });
+    const command = commandFor(req, reply, id, 'run');
+    if (!command) return reply;
 
     // A restricted member's fan-out (by tag or id) only ever reaches their servers
     const orgServers = db
@@ -214,6 +242,19 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       }
       // Deduplicate so the same server is not hit twice in one fan-out
       targets = [...new Set(ids)].map((serverId) => byId.get(serverId)!);
+    }
+
+    // Running needs operate on every target, a tag's fan-out included (spec §2.7):
+    // one the caller may only view refuses the whole run rather than skipping it
+    const operable = accessibleIds(req, 'server', 'operate');
+    if (!operable.all) {
+      const allowed = new Set(operable.ids);
+      const viewOnly = targets.filter((t) => !allowed.has(t.id));
+      if (viewOnly.length) {
+        return reply.status(403).send({
+          error: `Running a command needs operate access to the server (you can only view ${viewOnly.map((t) => t.name).join(', ')})`,
+        });
+      }
     }
 
     // Recording ids are chosen now so the audit entry can link to each run's recording
@@ -294,6 +335,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
         and(
           inArray(commandRuns.id, wanted),
           eq(savedCommands.orgId, req.orgId),
+          savedCommandFilter(req),
           accessibleServerFilter(req, commandRuns.serverId),
         ),
       )
@@ -315,6 +357,7 @@ export async function savedCommandRoutes(app: FastifyInstance) {
         and(
           eq(commandRuns.id, runId),
           eq(savedCommands.orgId, req.orgId),
+          savedCommandFilter(req),
           accessibleServerFilter(req, commandRuns.serverId),
         ),
       )
@@ -340,12 +383,13 @@ export async function savedCommandRoutes(app: FastifyInstance) {
       .all();
   });
 
-  app.delete('/:id', { preHandler: requireRole('admin') }, async (req, reply) => {
+  app.delete('/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     const db = getDb();
 
-    const command = visibleCommand(req, id);
-    if (!command) return reply.status(404).send({ error: 'Not found' });
+    // Before roles only admins deleted commands, which is what `manage` means here
+    const command = commandFor(req, reply, id, 'delete');
+    if (!command) return reply;
     if (!mayRewriteCommand(req, reply, id)) return reply;
 
     // cron_jobs references this row without ON DELETE, so the delete would fail

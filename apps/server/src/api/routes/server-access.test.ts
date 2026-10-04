@@ -3,7 +3,7 @@ import { nanoid } from 'nanoid';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { commandRuns, cronJobs, savedCommands, serverAlerts } from '../../db/schema.js';
+import { commandRuns, cronJobs, resourceGrants, savedCommands, serverAlerts } from '../../db/schema.js';
 import { canAccessServer } from '../../auth/server-access.js';
 import { seedOrg, seedServer, seedUser } from './test-utils.js';
 
@@ -70,6 +70,21 @@ describe('per-server access', () => {
       payload: { serverAccess: 'restricted', serverIds: [serverA] },
     });
     expect(res.statusCode).toBe(200);
+    // Role-scoped members reach no saved command or cron job by default (custom
+    // roles spec §8.1); with all of both granted, the servers still narrow them
+    for (const resourceType of ['saved_command', 'cron_job'] as const) {
+      db.insert(resourceGrants)
+        .values({
+          id: nanoid(),
+          orgId,
+          principalType: 'user',
+          principalId: restricted.userId,
+          resourceType,
+          selector: 'all',
+          level: 'manage',
+        })
+        .run();
+    }
   });
 
   afterAll(async () => {

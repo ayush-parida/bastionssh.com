@@ -854,6 +854,16 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   narrowed to namespaces gives its level in those namespaces only; on the cluster as a whole
   (no namespace asked) it gives `view` at most. A cluster manager below admin may re-route the
   cluster only through a server they can operate, never through an agent.
+- Saved commands and cron jobs (`auth/command-access.ts`): seeing one needs `view` on it, and
+  a command bound to a server, or a job, is also hidden with its server. Running a command
+  needs `operate` on it and on every target server (a tag fan-out is refused if any tagged
+  server it sees is view-only); rewriting one needs `operate` on the servers of the cron jobs
+  that run it. A job: `view` for its history, `operate` to run it now (`POST
+  /api/cron-jobs/:id/run`) or switch it on/off, `manage` to edit or delete it; creating,
+  moving or changing what it runs needs `operate` on its server (and on its saved command).
+  Creating either needs `manage` on all of the type. Jobs run as their creator, who must
+  still operate the job, its server and its saved command at run time. Scope-`all` operators
+  keep their pre-roles rights (edit commands, edit/delete jobs, create both).
 - Until the team and access-request routes write `resource_grants` themselves, triggers from
   migration 0023 mirror `member_server_access` / `member_cluster_access` into personal grants
   (at the member's base-role level, following role changes) and `server_access` into `scope`.

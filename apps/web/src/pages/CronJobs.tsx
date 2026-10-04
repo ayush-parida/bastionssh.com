@@ -2,7 +2,7 @@ import { Fragment, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api.js';
 import type { CronJob, CronRun, Server, SavedCommand, CreateCronJobRequest } from '@smt/shared';
-import { Plus, Clock, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, Clock, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronRight, Play } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface FormState {
@@ -42,6 +42,17 @@ export default function CronJobsPage() {
   const toggleMutation = useMutation({
     mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api.patch(`/cron-jobs/${id}`, { enabled }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['cron-jobs'] }); },
+    onError: (err: Error) => toast.error(err.message),
+  });
+
+  const runNowMutation = useMutation({
+    mutationFn: (id: string) => api.post(`/cron-jobs/${id}/run`, {}),
+    onSuccess: (_data, id) => {
+      toast.success('Run started — see the run history');
+      setExpanded(id);
+      // The run is recorded a moment later; refresh the history once it has started
+      setTimeout(() => qc.invalidateQueries({ queryKey: ['cron-runs', id] }), 1500);
+    },
     onError: (err: Error) => toast.error(err.message),
   });
 
@@ -158,7 +169,10 @@ export default function CronJobsPage() {
                     </button>
                   </td>
                   <td className="px-4 py-3">
-                    <button onClick={() => { if (confirm('Delete?')) deleteMutation.mutate(j.id); }} className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => runNowMutation.mutate(j.id)} disabled={runNowMutation.isPending} title="Run now" className="text-muted-foreground hover:text-foreground disabled:opacity-50"><Play size={14} /></button>
+                      <button onClick={() => { if (confirm('Delete?')) deleteMutation.mutate(j.id); }} title="Delete" className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button>
+                    </div>
                   </td>
                 </tr>
                 {expanded === j.id && (

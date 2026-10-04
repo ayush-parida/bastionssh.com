@@ -10,6 +10,7 @@ import {
   canAccessServer,
 } from '../auth/server-access.js';
 import { rank } from '../auth/middleware.js';
+import { cronJobFilter } from '../auth/command-access.js';
 import { hostKeyStatus } from '../ssh/host-keys.js';
 import { permissionsFor } from '../docker/permissions.js';
 import { aiContainerLogs, aiInspect, aiListContainers } from '../docker/ai-tools.js';
@@ -589,7 +590,7 @@ export function buildSystemPrompt(opts: {
   const allCrons = db
     .select()
     .from(cronJobs)
-    .where(and(eq(cronJobs.orgId, opts.orgId), accessibleServerFilter(who, cronJobs.serverId)))
+    .where(and(eq(cronJobs.orgId, opts.orgId), cronJobFilter(who)))
     .all();
 
   const serverList =

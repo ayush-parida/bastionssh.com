@@ -1,6 +1,6 @@
 import { gt, isNull, or, type SQL } from 'drizzle-orm';
 import type { SQLiteColumn } from 'drizzle-orm/sqlite-core';
-import { memberServerAccess, savedCommands } from '../db/schema.js';
+import { memberServerAccess } from '../db/schema.js';
 import { levelFor } from './access/authorize.js';
 import {
   accessibleFilter,
@@ -8,6 +8,7 @@ import {
   filterAccessible as filterAccessibleRows,
 } from './access/filter.js';
 import type { AccessSubject } from './access/resolve.js';
+import { savedCommandFilter } from './command-access.js';
 
 export type { AccessSubject } from './access/resolve.js';
 
@@ -67,13 +68,13 @@ export function accessibleServerFilter(who: AccessSubject, column: SQLiteColumn)
 }
 
 /**
- * Saved commands the subject may see: those not bound to a server, plus those
- * bound to a server they can access. A command's text is operational detail of
- * the server it belongs to, so a restricted member must not read it for others.
+ * Saved commands the subject may see: those they reach as saved commands,
+ * and of those only the ones not bound to a server or bound to a server they
+ * can access. A command's text is operational detail of the server it belongs
+ * to, so a restricted member must not read it for others.
  */
 export function accessibleSavedCommandFilter(who: AccessSubject): SQL | undefined {
-  const filter = accessibleServerFilter(who, savedCommands.serverId);
-  return filter ? or(isNull(savedCommands.serverId), filter) : undefined;
+  return savedCommandFilter(who);
 }
 
 /** In-memory counterpart of `accessibleServerFilter` for rows already loaded. */

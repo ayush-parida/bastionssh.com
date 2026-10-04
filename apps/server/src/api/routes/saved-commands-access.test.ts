@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { buildApp } from '../app.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
-import { cronJobs, savedCommands } from '../../db/schema.js';
+import { cronJobs, resourceGrants, savedCommands } from '../../db/schema.js';
 import { ToolExecutor, buildSystemPrompt } from '../../ai/tools.js';
 import { seedOrg, seedServer, seedUser } from './test-utils.js';
 
@@ -94,6 +94,23 @@ describe('saved commands and per-server access', () => {
       payload: { serverAccess: 'restricted', serverIds: [serverA] },
     });
     expect(res.statusCode).toBe(200);
+    // A restricted (role-scoped) member reaches no saved command or cron job
+    // by default (custom roles spec §8.1); these grants give them all of both,
+    // so what is tested here is how the servers narrow that.
+    for (const resourceType of ['saved_command', 'cron_job'] as const) {
+      getDb()
+        .insert(resourceGrants)
+        .values({
+          id: nanoid(),
+          orgId,
+          principalType: 'user',
+          principalId: restricted.userId,
+          resourceType,
+          selector: 'all',
+          level: 'manage',
+        })
+        .run();
+    }
   });
 
   afterAll(async () => {
@@ -182,10 +199,11 @@ describe('saved commands and per-server access', () => {
       expect((await as(admin).delete(`/api/commands/${boundB}`)).statusCode).toBe(204);
     });
 
-    it('keeps DELETE admin-only', async () => {
-      // Admins see every server, so the access check on DELETE is defence in
-      // depth; a restricted operator stops at the role gate.
-      expect((await as(restricted).delete(`/api/commands/${unbound}`)).statusCode).toBe(403);
+    it('lets DELETE through manage on the command, still bounded by the servers', async () => {
+      // Manage (here from a grant) is what deleting needs; a command a cron job
+      // on an ungranted server runs is still out of reach
+      expect((await as(restricted).delete(`/api/commands/${usedOnB}`)).statusCode).toBe(403);
+      expect((await as(restricted).delete(`/api/commands/${unbound}`)).statusCode).toBe(204);
     });
   });
 });
