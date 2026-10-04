@@ -32,6 +32,7 @@ export {
   hasModule,
   isOrgOwner,
   isOwner,
+  isReservedRoleName,
   moduleLevel,
   requireModule,
   requireOwner,

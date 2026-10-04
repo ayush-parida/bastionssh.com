@@ -136,6 +136,19 @@ describe('custom roles and resource access', () => {
       expect(audits('role.delete', role.id)[0]!.meta).toMatchObject({ before: { name: 'Operations' } });
     });
 
+    it('never hands out, edits or imitates a built-in role, whatever the case of its name', async () => {
+      const ownerRole = `builtin:${orgId}:owner`;
+      expect((await as(admin).get(`/api/team/roles/${ownerRole}`)).statusCode).toBe(404);
+      expect((await as(admin).post(`/api/team/roles/${ownerRole}/members`, { userId: admin.userId })).statusCode).toBe(404);
+      expect((await as(admin).put(`/api/team/roles/${ownerRole}/grants`, { grants: [] })).statusCode).toBe(404);
+      expect((await as(admin).delete(`/api/team/roles/builtin:${orgId}:viewer`)).statusCode).toBe(404);
+      for (const name of ['Owner', 'owner', ' ADMIN ', 'no access', 'Viewer (modules only)']) {
+        expect((await as(admin).post('/api/team/roles', { name })).statusCode).toBe(409);
+      }
+      const role = await createRole('Lookalike', []);
+      expect((await as(admin).patch(`/api/team/roles/${role.id}`, { name: 'operator' })).statusCode).toBe(409);
+    });
+
     it('rejects grants on resources outside the org, tags on anything but servers, and namespaces on anything but clusters', async () => {
       const otherOrg = seedOrg('org-roles-other');
       const foreign = seedServer(otherOrg, admin.userId, 'elsewhere');

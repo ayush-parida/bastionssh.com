@@ -63,7 +63,14 @@ function role(modules: ModulePermissions | null, userIds: string[] = [], expires
 
 function grant(
   principal: { role: string } | { user: string },
-  g: { resourceType: (typeof RESOURCE_TYPES)[number]; level: 'view' | 'operate' | 'manage'; resourceId?: string; tag?: string; namespaces?: string[] },
+  g: {
+    resourceType: (typeof RESOURCE_TYPES)[number];
+    level: 'view' | 'operate' | 'manage';
+    resourceId?: string;
+    tag?: string;
+    namespaces?: string[];
+    expiresAt?: string;
+  },
 ) {
   getDb()
     .insert(resourceGrants)
@@ -78,6 +85,7 @@ function grant(
       tag: g.tag ?? null,
       namespaces: g.namespaces ? JSON.stringify(g.namespaces) : null,
       level: g.level,
+      expiresAt: g.expiresAt ?? null,
     })
     .run();
 }
@@ -240,6 +248,24 @@ describe('module permissions', () => {
       expect(visibleModules(who(creator.userId))).toEqual([{ module: 'ftp', level: 'manage' }]);
     });
 
+    it('counts saved commands and cron jobs as listed, with their servers, never the org total', () => {
+      const shown = seedServer(orgId, admin.userId, 'count-shown');
+      const hidden = seedServer(orgId, admin.userId, 'count-hidden');
+      const r = role({ servers: 'view', saved_commands: 'view', cron_jobs: 'view' });
+      grant({ role: r }, { resourceType: 'server', resourceId: shown, level: 'view' });
+      grant({ role: r }, { resourceType: 'saved_command', level: 'view' });
+      grant({ role: r }, { resourceType: 'cron_job', level: 'view' });
+      const member = memberWith(r);
+      const before = accessSummary(who(member.userId)).resources;
+      for (const serverId of [shown, hidden, null]) {
+        getDb().insert(savedCommands).values({ id: nanoid(), orgId, name: 'n', command: 'uptime', serverId, createdBy: admin.userId }).run();
+      }
+      const after = accessSummary(who(member.userId)).resources;
+      // The one on their server and the one on none; not the one on a server they cannot see
+      expect(after.saved_command).toEqual({ all: true, count: before.saved_command.count + 2 });
+      expect(after.saved_command.count).toBeLessThan(accessSummary(who(admin.userId)).resources.saved_command.count);
+    });
+
     it('shows every module to admins, in catalogue order', () => {
       expect(visibleModules(who(admin.userId)).map((m) => m.module)).toEqual(MODULES.map((m) => m.key));
     });
@@ -397,6 +423,44 @@ describe('module permissions', () => {
       expect(canGrant(ro, { modules: { audit: 'operate' } }).ok).toBe(false);
       expect(canGrant(ro, { grants: [{ resourceType: 'server', selector: 'all', level: 'operate' }] }).ok).toBe(false);
       expect(canGrant({ orgId, userId: 'nobody' }, {})).toEqual({ ok: false, missing: ['an active membership'] });
+    });
+
+    it('never lets a role or grant held for a while be given for longer, to anyone or to oneself', () => {
+      const soon = new Date(Date.now() + 3_600_000).toISOString();
+      const later = new Date(Date.now() + 7_200_000).toISOString();
+      const lead = role({ team_roles: 'manage', servers: 'view' });
+      grant({ role: lead }, { resourceType: 'server', tag: 'web', level: 'manage' });
+      const temp = seedUser(orgId, 'viewer');
+      getDb().delete(roleMembers).where(eq(roleMembers.userId, temp.userId)).run();
+      getDb().insert(roleMembers).values({ roleId: lead, userId: temp.userId, orgId, expiresAt: soon }).run();
+      const actor = who(temp.userId);
+      const tagWeb = { resourceType: 'server' as const, selector: 'tag' as const, tag: 'web', level: 'manage' as const };
+
+      // Permanent (or longer than they hold it): refused, and says what is missing
+      expect(canGrant(actor, { modules: { team_roles: 'manage' } })).toEqual({ ok: false, missing: ['Roles & access: manage'] });
+      expect(canGrant(actor, { grants: [tagWeb] }).ok).toBe(false);
+      expect(canGrant(actor, { grants: [tagWeb] }, { expiresAt: later }).ok).toBe(false);
+      expect(canAssignRole(actor, lead).ok).toBe(false);
+      expect(canAssignRole(actor, lead, { expiresAt: later }).ok).toBe(false);
+      // Until they lose it themselves, or sooner: fine
+      expect(canGrant(actor, { modules: { team_roles: 'manage' }, grants: [tagWeb] }, { expiresAt: soon }).ok).toBe(true);
+      expect(canAssignRole(actor, lead, { expiresAt: soon }).ok).toBe(true);
+
+      // A personal grant held for a while counts the same way
+      const permanent = memberWith(role({ servers: 'view' }));
+      grant({ user: permanent.userId }, { resourceType: 'server', resourceId: tagged.db, level: 'operate', expiresAt: soon });
+      const db = { resourceType: 'server' as const, selector: 'id' as const, resourceId: tagged.db, level: 'operate' as const };
+      expect(canGrant(who(permanent.userId), { grants: [db] }).ok).toBe(false);
+      expect(canGrant(who(permanent.userId), { grants: [db] }, { expiresAt: soon }).ok).toBe(true);
+
+      // An owner whose Owner role ends is no owner for longer than that
+      const tempOwner = memberWith();
+      getDb().insert(roleMembers).values({ roleId: builtin('owner'), userId: tempOwner.userId, orgId, expiresAt: soon }).run();
+      expect(canGrant(who(tempOwner.userId), { modules: { settings: 'manage' } }).ok).toBe(false);
+      expect(canGrant(who(tempOwner.userId), { modules: { settings: 'manage' } }, { expiresAt: soon }).ok).toBe(true);
+      expect(canAssignRole(who(tempOwner.userId), builtin('owner')).ok).toBe(false);
+      expect(canAssignRole(who(tempOwner.userId), builtin('owner'), { expiresAt: soon }).ok).toBe(true);
+      expect(canAssignRole(who(owner.userId), builtin('owner'), { expiresAt: later }).ok).toBe(true);
     });
 
     it('lets an operator assign Viewer but not Operator-plus-more or Admin', () => {

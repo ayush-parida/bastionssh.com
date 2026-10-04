@@ -97,6 +97,7 @@ function legacyLoad(orgId: string, userId: string, readOnly: boolean, now = new 
     readOnly,
     roles: [],
     modules: {} as ResolvedAccess['modules'],
+    roleModules: [],
     types: emptyTypes(),
     memo: new Map(),
   };

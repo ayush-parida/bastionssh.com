@@ -105,41 +105,35 @@ const MODULE_TYPES: Partial<Record<ModuleKey, ResourceType>> = Object.fromEntrie
 );
 
 /**
- * True when the subject sees at least one item of `type` — one cheap EXISTS.
- * Saved commands and cron jobs also follow their servers (auth/command-access.ts).
+ * WHERE fragment for the saved commands or cron jobs the subject sees: those
+ * reached by a grant, and only with their server (auth/command-access.ts).
  */
-function seesAnyItem(access: ResolvedAccess, type: ResourceType): boolean {
+function followingServers(access: ResolvedAccess, type: 'saved_command' | 'cron_job'): SQL | undefined {
   const who = { orgId: access.orgId, userId: access.userId };
   if (type === 'saved_command') {
     const server = accessibleFilter(who, 'server', savedCommands.serverId);
-    return !!getDb()
-      .select({ id: savedCommands.id })
-      .from(savedCommands)
-      .where(
-        and(
-          eq(savedCommands.orgId, access.orgId),
-          accessibleFilter(who, 'saved_command', savedCommands.id),
-          server ? or(isNull(savedCommands.serverId), server) : undefined,
-        ),
-      )
-      .limit(1)
-      .get();
+    return and(
+      eq(savedCommands.orgId, access.orgId),
+      accessibleFilter(who, 'saved_command', savedCommands.id),
+      server ? or(isNull(savedCommands.serverId), server) : undefined,
+    );
+  }
+  return and(
+    eq(cronJobs.orgId, access.orgId),
+    accessibleFilter(who, 'cron_job', cronJobs.id),
+    accessibleFilter(who, 'server', cronJobs.serverId),
+  );
+}
+
+/** True when the subject sees at least one item of `type` — one cheap EXISTS. */
+function seesAnyItem(access: ResolvedAccess, type: ResourceType): boolean {
+  if (type === 'saved_command') {
+    return !!getDb().select({ id: savedCommands.id }).from(savedCommands).where(followingServers(access, type)).limit(1).get();
   }
   if (type === 'cron_job') {
-    return !!getDb()
-      .select({ id: cronJobs.id })
-      .from(cronJobs)
-      .where(
-        and(
-          eq(cronJobs.orgId, access.orgId),
-          accessibleFilter(who, 'cron_job', cronJobs.id),
-          accessibleFilter(who, 'server', cronJobs.serverId),
-        ),
-      )
-      .limit(1)
-      .get();
+    return !!getDb().select({ id: cronJobs.id }).from(cronJobs).where(followingServers(access, type)).limit(1).get();
   }
-  return reachesAny(who, type, 'view');
+  return reachesAny({ orgId: access.orgId, userId: access.userId }, type, 'view');
 }
 
 /**
@@ -175,7 +169,8 @@ export function accessSummary(who: AccessSubject): MeAccess {
   const resources = Object.fromEntries(
     RESOURCE_TYPES.map((type) => {
       const ids = accessibleIds(who, type);
-      return [type, ids.all ? { all: true, count: countOf(access.orgId, type) } : { all: false, count: ids.ids.length }];
+      const follows = type === 'saved_command' || type === 'cron_job';
+      return [type, { all: ids.all, count: ids.all || follows ? countOf(access, type) : ids.ids.length }];
     }),
   ) as MeAccess['resources'];
   return {
@@ -189,10 +184,21 @@ export function accessSummary(who: AccessSubject): MeAccess {
   };
 }
 
-/** How many resources of `type` the org has (for a member who reaches all of them). */
-function countOf(orgId: string, type: ResourceType): number {
+/**
+ * How many resources of `type` the subject sees: the org's count for a member
+ * who reaches all of them. Saved commands and cron jobs follow their servers,
+ * so those are always counted as they are listed — never including items on
+ * servers the member cannot see.
+ */
+function countOf(access: ResolvedAccess, type: ResourceType): number {
+  if (type === 'saved_command') {
+    return getDb().select({ n: count() }).from(savedCommands).where(followingServers(access, type)).get()?.n ?? 0;
+  }
+  if (type === 'cron_job') {
+    return getDb().select({ n: count() }).from(cronJobs).where(followingServers(access, type)).get()?.n ?? 0;
+  }
   const { table, orgId: orgColumn } = RESOURCE_TABLES[type];
-  return getDb().select({ n: count() }).from(table).where(eq(orgColumn, orgId)).get()?.n ?? 0;
+  return getDb().select({ n: count() }).from(table).where(eq(orgColumn, access.orgId)).get()?.n ?? 0;
 }
 
 // ── Delegation guard (spec §4.2) ──────────────────────────────────────────────
@@ -231,13 +237,19 @@ function tagsOf(orgId: string, serverId: string): string[] {
   }
 }
 
+/** True when something ending at `end` (null = never) lasts until `until` (null = for good). */
+function lasts(end: string | null | undefined, until: string | null): boolean {
+  return end == null || (until !== null && end >= until);
+}
+
 /**
- * Does the actor hold `grant` themselves? A specific item is covered by
- * anything reaching it (the item, a tag it carries now, or "all"); a tag
- * only by that tag or "all"; "all" only by "all" — specific id ⊆ tag ⊆ all.
- * Clusters: every namespace asked for must be covered (null = all of them).
+ * Does the actor hold `grant` themselves, until `until`? A specific item is
+ * covered by anything reaching it (the item, a tag it carries now, or "all");
+ * a tag only by that tag or "all"; "all" only by "all" — specific id ⊆ tag ⊆
+ * all. Clusters: every namespace asked for must be covered (null = all of
+ * them). Only what the actor holds for at least as long counts.
  */
-function holdsGrant(access: ResolvedAccess, grant: WantedGrant): boolean {
+function holdsGrant(access: ResolvedAccess, grant: WantedGrant, until: string | null): boolean {
   const typeAccess = access.types[grant.resourceType];
   let found: Contribution[];
   if (grant.selector === 'all') found = typeAccess.every;
@@ -246,9 +258,20 @@ function holdsGrant(access: ResolvedAccess, grant: WantedGrant): boolean {
     const tags = grant.resourceType === 'server' ? tagsOf(access.orgId, grant.resourceId) : [];
     found = contributionsFor(access, grant.resourceType, grant.resourceId, tags);
   } else found = [];
+  const lasting = found.filter((c) => lasts(c.reason.expiresAt, until));
   // A read-only token holds nothing above `view`
-  const held = access.readOnly ? found.map((c) => ({ ...c, level: 'view' as const })) : found;
+  const held = access.readOnly ? lasting.map((c) => ({ ...c, level: 'view' as const })) : lasting;
   return coversNamespaces(held, grant.level, grant.namespaces);
+}
+
+/** The actor's level on `module` from the roles they hold until `until`, capped at `view` for read-only tokens. */
+function moduleLevelUntil(access: ResolvedAccess, module: ModuleKey, until: string | null): ModuleLevel {
+  let level: ModuleLevel = 'none';
+  for (const role of access.roleModules) {
+    const held = role.modules[module];
+    if (held && lasts(role.expiresAt, until) && meetsModuleLevel(held, level)) level = held;
+  }
+  return access.readOnly && level !== 'none' ? 'view' : level;
 }
 
 function describeGrant(grant: WantedGrant): string {
@@ -261,21 +284,29 @@ function describeGrant(grant: WantedGrant): string {
  * The delegation guard core (spec §4.2): may the actor give `wanted` — when
  * assigning or editing a role, granting, approving a request, inviting with
  * roles? Only what they hold themselves, at the same or a higher level, per
- * module and per resource selector. Owners may give anything (the Owner role
- * itself is owner-only: `canAssignRole`). Says what is missing when refused.
+ * module and per resource selector, and for at least as long: `expiresAt` is
+ * when what is given ends (null or absent = permanent), so a role or grant
+ * the actor holds for a while never lets them give it — to anyone, themselves
+ * included — for longer. Owners may give anything (the Owner role itself is
+ * owner-only: `canAssignRole`). Says what is missing when refused.
  */
-export function canGrant(actor: AccessSubject, wanted: PermissionSet): DelegationResult {
+export function canGrant(
+  actor: AccessSubject,
+  wanted: PermissionSet,
+  opts: { expiresAt?: string | null } = {},
+): DelegationResult {
   const access = resolveAccess(actor);
+  const until = opts.expiresAt ?? null;
   if (!access.active) return { ok: false, missing: ['an active membership'] };
-  if (access.owner && !access.readOnly) return { ok: true, missing: [] };
+  if (access.owner && !access.readOnly && lasts(access.roleModules[0]?.expiresAt, until)) return { ok: true, missing: [] };
   const missing: string[] = [];
   for (const [key, level] of Object.entries(wanted.modules ?? {}) as [ModuleKey, ModuleLevel][]) {
     if (level === 'none') continue;
     const asked = clampModuleLevel(key, level);
-    if (!meetsModuleLevel(access.modules[key], asked)) missing.push(`${moduleDefinition(key).label}: ${asked}`);
+    if (!meetsModuleLevel(moduleLevelUntil(access, key, until), asked)) missing.push(`${moduleDefinition(key).label}: ${asked}`);
   }
   for (const grant of wanted.grants ?? []) {
-    if (!holdsGrant(access, grant)) missing.push(describeGrant(grant));
+    if (!holdsGrant(access, grant, until)) missing.push(describeGrant(grant));
   }
   return { ok: missing.length === 0, missing };
 }
@@ -314,11 +345,12 @@ export function rolePermissions(orgId: string, roleId: string): PermissionSet | 
 }
 
 /**
- * May the actor give `roleId` to someone (or take it away, which needs the
- * same)? The Owner role only by owners (spec §4.3); any other role only when
- * the actor holds everything it gives (`canGrant`).
+ * May the actor give `roleId` to someone until `expiresAt` (null or absent =
+ * permanent), or take it away, which needs the same? The Owner role only by
+ * owners (spec §4.3); any other role only when the actor holds everything it
+ * gives for at least as long (`canGrant`).
  */
-export function canAssignRole(actor: AccessSubject, roleId: string): DelegationResult {
+export function canAssignRole(actor: AccessSubject, roleId: string, opts: { expiresAt?: string | null } = {}): DelegationResult {
   const access = resolveAccess(actor);
   const role = getDb()
     .select({ system: roles.system, name: roles.name })
@@ -326,8 +358,11 @@ export function canAssignRole(actor: AccessSubject, roleId: string): DelegationR
     .where(and(eq(roles.id, roleId), eq(roles.orgId, access.orgId)))
     .get();
   if (!role) return { ok: false, missing: ['the role'] };
-  if (role.system === 'owner') return isOwner(actor) ? { ok: true, missing: [] } : { ok: false, missing: ['the Owner role'] };
-  return canGrant(actor, rolePermissions(access.orgId, roleId)!);
+  if (role.system === 'owner') {
+    const lasting = isOwner(actor) && lasts(access.roleModules[0]?.expiresAt, opts.expiresAt ?? null);
+    return lasting ? { ok: true, missing: [] } : { ok: false, missing: ['the Owner role'] };
+  }
+  return canGrant(actor, rolePermissions(access.orgId, roleId)!, opts);
 }
 
 // ── Built-in and generated roles in the pre-0025 role routes ─────────────────
@@ -340,6 +375,13 @@ export const RESERVED_ROLE_NAMES: ReadonlySet<string> = new Set([
   ...Object.values(BUILT_IN_ROLE_DEFAULTS).map((d) => d.name),
   ...Object.values(MODULES_ONLY_DEFAULTS).map((d) => d.name),
 ]);
+
+const RESERVED_LOWER = new Set([...RESERVED_ROLE_NAMES].map((n) => n.toLowerCase()));
+
+/** True when `name` is one of those in any case ("owner", "ADMIN"), so no custom role passes for a built-in. */
+export function isReservedRoleName(name: string): boolean {
+  return RESERVED_LOWER.has(name.trim().toLowerCase());
+}
 
 /**
  * WHERE fragment for custom roles only: not built-in, not generated by

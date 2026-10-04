@@ -110,6 +110,12 @@ export interface ResolvedAccess {
   roles: HeldRoleInfo[];
   /** The union of the roles' module levels, capped at `view` for read-only tokens. */
   modules: Record<ModuleKey, ModuleLevel>;
+  /**
+   * Each held role's module levels and when the membership ends (null =
+   * permanent), not capped: what the delegation guard weighs, so a role held
+   * for a while never lets anyone give it, or what it holds, for longer.
+   */
+  roleModules: { expiresAt: string | null; modules: Partial<Record<ModuleKey, ModuleLevel>> }[];
   types: Record<ResourceType, TypeAccess>;
   /** Per-type id lists worked out from `types` (filter.ts), kept with the rest of the request's answer. */
   memo: Map<string, unknown>;
@@ -176,6 +182,7 @@ function load(subject: Subject, now: string): ResolvedAccess {
     readOnly,
     roles: [],
     modules: noModules(),
+    roleModules: [],
     types: emptyTypes(),
     memo: new Map(),
   };
@@ -217,13 +224,17 @@ function load(subject: Subject, now: string): ResolvedAccess {
   }));
 
   // The Owner role is locked: every module, every resource, whatever else is held
-  if (held.some((r) => r.system === 'owner')) {
+  const ownerRole = held.find((r) => r.system === 'owner');
+  if (ownerRole) {
     access.owner = true;
     access.role = 'owner';
     access.orgAdmin = true;
     access.modules = readOnly ? capped(allModules()) : allModules();
+    access.roleModules = [{ expiresAt: ownerRole.expiresAt, modules: allModules() }];
     for (const type of RESOURCE_TYPES) {
-      access.types[type].every.push({ level: 'manage', reason: { kind: 'base', name: 'owner', level: 'manage' }, namespaces: null });
+      const reason: AccessReason = { kind: 'base', name: 'owner', level: 'manage' };
+      if (ownerRole.expiresAt) reason.expiresAt = ownerRole.expiresAt;
+      access.types[type].every.push({ level: 'manage', reason, namespaces: null });
     }
     return access;
   }
@@ -274,6 +285,7 @@ function load(subject: Subject, now: string): ResolvedAccess {
       modules[key] = maxModuleLevel(modules[key], level);
     }
   }
+  access.roleModules = [...heldById.values()].map((r) => ({ expiresAt: r.expiresAt, modules: r.modules }));
   access.role = legacyRoleFor(modules);
   access.orgAdmin = access.role === 'admin';
   access.modules = readOnly ? capped(modules) : modules;
