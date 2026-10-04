@@ -1,8 +1,17 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { and, count, desc, eq, inArray, isNull, max, ne, sql, type SQL } from 'drizzle-orm';
+import { and, count, countDistinct, desc, eq, inArray, isNull, max, ne, notInArray, sql, type SQL } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import type { MemberServerAccess, OrgMember, OrgSecuritySettings, PasswordResetLink } from '@smt/shared';
+import {
+  RESOURCE_TYPES,
+  type HeldRole,
+  type MemberScope,
+  type MemberServerAccess,
+  type OrgMember,
+  type OrgSecuritySettings,
+  type PasswordResetLink,
+  type RoleGrant,
+} from '@smt/shared';
 import { rank, requireAuth, requireRole, ROLES, type Role } from '../../auth/middleware.js';
 import { getDb } from '../../db/index.js';
 import {
@@ -14,6 +23,9 @@ import {
   organizations,
   passkeys,
   passwordResets,
+  resourceGrants,
+  roleMembers,
+  roles,
   servers,
   sessions,
   users,
@@ -61,9 +73,9 @@ import {
   type SignInDevice,
 } from '../../auth/login-security.js';
 import { config } from '../../config/index.js';
-import { activeGrantFilter } from '../../auth/server-access.js';
-import { activeGrants, cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
-import { activeClusterGrants } from '../../auth/cluster-access.js';
+import { cancelPendingAccessRequests, MAX_GRANT_MINUTES, minutesFromNow } from '../../auth/access-grants.js';
+import { activeAt } from '../../auth/access/resolve.js';
+import { effectiveAccessList, principalGrants, revokeAfterChange, snapshotAccess } from '../../auth/access/index.js';
 
 const roleSchema = z.enum(ROLES);
 
@@ -73,7 +85,10 @@ const createInviteSchema = z.object({
   role: roleSchema.default('viewer'),
 });
 
-const changeRoleSchema = z.object({ role: roleSchema });
+/** A role, a scope (custom roles spec §6), or both. */
+const changeRoleSchema = z
+  .object({ role: roleSchema.optional(), scope: z.enum(['all', 'roles']).optional() })
+  .refine((b) => b.role !== undefined || b.scope !== undefined, { message: 'Nothing to change' });
 
 const acceptInviteSchema = z.object({
   /** Proves the redeemer is the person the invite was sent to, not just a link holder. */
@@ -268,6 +283,85 @@ function userEmail(userId: string) {
   return getDb().select({ email: users.email }).from(users).where(eq(users.id, userId)).get()?.email;
 }
 
+/** Custom roles each of `userIds` holds now, by user. */
+function heldRoles(orgId: string, userIds: string[]): Map<string, HeldRole[]> {
+  const byUser = new Map<string, HeldRole[]>();
+  if (!userIds.length) return byUser;
+  const rows = getDb()
+    .select({
+      userId: roleMembers.userId,
+      roleId: roleMembers.roleId,
+      name: roles.name,
+      color: roles.color,
+      expiresAt: roleMembers.expiresAt,
+    })
+    .from(roleMembers)
+    .innerJoin(roles, eq(roles.id, roleMembers.roleId))
+    .where(
+      and(
+        eq(roleMembers.orgId, orgId),
+        inArray(roleMembers.userId, userIds),
+        activeAt(roleMembers.expiresAt, new Date().toISOString()),
+      ),
+    )
+    .orderBy(roles.name)
+    .all();
+  for (const { userId, ...role } of rows) byUser.set(userId, [...(byUser.get(userId) ?? []), role]);
+  return byUser;
+}
+
+/**
+ * A member's personal grants by id on one type (servers or clusters), as the
+ * pre-roles access endpoints report them: one entry per resource, the
+ * longest-lasting when there are several.
+ */
+function personalIdGrants(grants: RoleGrant[], type: 'server' | 'cluster') {
+  const best = new Map<string, RoleGrant>();
+  for (const g of grants) {
+    if (g.resourceType !== type || g.selector !== 'id' || !g.resourceId) continue;
+    const prior = best.get(g.resourceId);
+    if (!prior || (prior.expiresAt !== null && (g.expiresAt === null || g.expiresAt > prior.expiresAt))) {
+      best.set(g.resourceId, g);
+    }
+  }
+  return [...best.values()].map((g) => ({
+    id: g.resourceId!,
+    expiresAt: g.expiresAt,
+    grantedBy: g.grantedBy,
+    reason: g.reason,
+  }));
+}
+
+/**
+ * Switch a member between every resource at their base role (`all`) and only
+ * what their roles and personal grants cover (`roles`). Narrowing closes what
+ * they lose at once. Sends the error and returns the reply when refused.
+ */
+async function changeScope(req: FastifyRequest, reply: FastifyReply, userId: string, scope: MemberScope) {
+  const member = targetMember(req, reply, userId, 'change access for', 'atOrBelow');
+  if (!member) return reply;
+  if (scope === 'roles' && rank(member.role) >= rank('admin')) {
+    return reply.status(400).send({ error: 'Owners and admins always have access to everything' });
+  }
+  const from: MemberScope = member.scope === 'roles' ? 'roles' : 'all';
+  if (from !== scope) {
+    const before = snapshotAccess(req.orgId, [userId]);
+    // server_access is the pre-roles mirror of the scope, kept for one release
+    getDb()
+      .update(memberships)
+      .set({ scope, serverAccess: scope === 'roles' ? 'restricted' : 'all' })
+      .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
+      .run();
+    const live = revokeAfterChange(req.orgId, [userId], before).get(userId);
+    await audit(req, 'member.scope_change', 'member', userId, userEmail(userId), {
+      from,
+      to: scope,
+      ...(live && { live }),
+    });
+  }
+  return { userId, scope };
+}
+
 /** Authenticated team management: who is in the org, and who has been asked. */
 export async function teamRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
@@ -284,6 +378,7 @@ export async function teamRoutes(app: FastifyInstance) {
         status: memberships.status,
         suspendedAt: memberships.suspendedAt,
         serverAccess: memberships.serverAccess,
+        scope: memberships.scope,
       })
       .from(memberships)
       .innerJoin(users, eq(memberships.userId, users.id))
@@ -291,19 +386,23 @@ export async function teamRoutes(app: FastifyInstance) {
       .all();
 
     const userIds = rows.map((r) => r.userId);
+    // Servers granted to the member by id (personal grants, the old per-member list included)
     const grants = new Map(
       userIds.length
         ? db
-            .select({ userId: memberServerAccess.userId, n: count() })
-            .from(memberServerAccess)
+            .select({ userId: resourceGrants.principalId, n: countDistinct(resourceGrants.resourceId) })
+            .from(resourceGrants)
             .where(
               and(
-                eq(memberServerAccess.orgId, req.orgId),
-                inArray(memberServerAccess.userId, userIds),
-                activeGrantFilter(),
+                eq(resourceGrants.orgId, req.orgId),
+                eq(resourceGrants.principalType, 'user'),
+                inArray(resourceGrants.principalId, userIds),
+                eq(resourceGrants.resourceType, 'server'),
+                eq(resourceGrants.selector, 'id'),
+                activeAt(resourceGrants.expiresAt, new Date().toISOString()),
               ),
             )
-            .groupBy(memberServerAccess.userId)
+            .groupBy(resourceGrants.principalId)
             .all()
             .map((g) => [g.userId, g.n])
         : [],
@@ -333,14 +432,18 @@ export async function teamRoutes(app: FastifyInstance) {
         : [],
     );
 
+    // Custom roles held, like passkeys an admin's concern
+    const held = seesPasskeys ? heldRoles(req.orgId, userIds) : new Map<string, HeldRole[]>();
+
     return rows.map((r) => ({
       ...r,
       role: r.role as Role,
       status: r.status === 'suspended' ? 'suspended' : 'active',
       serverAccess: r.serverAccess === 'restricted' ? 'restricted' : 'all',
+      scope: r.scope === 'roles' && rank(r.role) < rank('admin') ? 'roles' : 'all',
       serverCount: grants.get(r.userId) ?? 0,
       lastActiveAt: lastSeen.get(r.userId) ?? null,
-      ...(seesPasskeys && { passkeyCount: passkeyCounts.get(r.userId) ?? 0 }),
+      ...(seesPasskeys && { passkeyCount: passkeyCounts.get(r.userId) ?? 0, roles: held.get(r.userId) ?? [] }),
     }));
   });
 
@@ -407,7 +510,8 @@ export async function teamRoutes(app: FastifyInstance) {
 
   app.patch('/members/:userId', { preHandler: requireRole('admin') }, async (req, reply) => {
     const { userId } = req.params as { userId: string };
-    const { role } = changeRoleSchema.parse(req.body);
+    const { role, scope } = changeRoleSchema.parse(req.body);
+    if (role === undefined) return changeScope(req, reply, userId, scope!);
     const db = getDb();
 
     if (userId === req.user.id) {
@@ -424,7 +528,12 @@ export async function teamRoutes(app: FastifyInstance) {
     if (wouldOrphanOrg(activeOrgMembers(req.orgId), userId, role)) {
       return reply.status(400).send({ error: 'The organization must keep at least one owner' });
     }
+    if (scope === 'roles' && rank(role) >= rank('admin')) {
+      return reply.status(400).send({ error: 'Owners and admins always have access to everything' });
+    }
 
+    // The base role is the level on every resource under scope `all`
+    const accessBefore = snapshotAccess(req.orgId, [userId]);
     db.update(memberships)
       .set({ role })
       .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
@@ -439,13 +548,19 @@ export async function teamRoutes(app: FastifyInstance) {
       abortKubeStreams(userId, { orgId: req.orgId });
       closeDisallowedPodShells(req.orgId, userId);
     }
+    const live = revokeAfterChange(req.orgId, [userId], accessBefore).get(userId);
 
     const target = db.select().from(users).where(eq(users.id, userId)).get();
     await audit(req, 'member.role_change', 'member', userId, target?.email, {
       from: member.role,
       to: role,
+      ...(live && { live }),
     });
-    return { userId, role };
+    if (scope !== undefined) {
+      const changed = await changeScope(req, reply, userId, scope);
+      if (reply.sent) return changed;
+    }
+    return { userId, role, ...(scope !== undefined && { scope }) };
   });
 
   app.delete('/members/:userId', { preHandler: requireRole('admin') }, async (req, reply) => {
@@ -545,14 +660,25 @@ export async function teamRoutes(app: FastifyInstance) {
     if (!member) return reply.status(404).send({ error: 'Not a member of this organization' });
 
     // Expired grants are gone as far as anyone is concerned, even before the sweep deletes them
-    const grants = activeGrants(req.orgId, userId);
-    const clusterGrants = activeClusterGrants(req.orgId, userId);
+    const personalGrants = principalGrants(req.orgId, 'user', userId);
+    const grants = personalIdGrants(personalGrants, 'server').map(({ id, ...g }) => ({ serverId: id, ...g }));
+    const clusterGrants = personalIdGrants(personalGrants, 'cluster').map(({ id, ...g }) => ({ clusterId: id, ...g }));
+    const scope: MemberScope = member.scope === 'roles' && rank(member.role) < rank('admin') ? 'roles' : 'all';
+    const who = { orgId: req.orgId, userId };
     return {
-      serverAccess: member.serverAccess === 'restricted' ? 'restricted' : 'all',
+      // The pre-roles shape, kept as a compatible alias for one release
+      serverAccess: scope === 'roles' ? 'restricted' : 'all',
       serverIds: grants.map((g) => g.serverId),
       grants,
       clusterIds: clusterGrants.map((g) => g.clusterId),
       clusterGrants,
+      role: member.role as Role,
+      scope,
+      roles: heldRoles(req.orgId, [userId]).get(userId) ?? [],
+      personalGrants,
+      effective: Object.fromEntries(
+        RESOURCE_TYPES.map((type) => [type, effectiveAccessList(who, type)]),
+      ) as MemberServerAccess['effective'],
     } satisfies MemberServerAccess;
   });
 
@@ -635,33 +761,74 @@ export async function teamRoutes(app: FastifyInstance) {
       };
     });
 
+    // Personal grants by id written by the newer grants endpoint (any level)
+    // stay as they are for servers and clusters still listed, with a new
+    // expiry if one was picked, and go for those left out. Grants by tag or
+    // "all" are not this endpoint's to change.
+    const personalById = (type: 'server' | 'cluster') =>
+      and(
+        eq(resourceGrants.orgId, req.orgId),
+        eq(resourceGrants.principalType, 'user'),
+        eq(resourceGrants.principalId, userId),
+        eq(resourceGrants.resourceType, type),
+        eq(resourceGrants.selector, 'id'),
+        sql`substr(${resourceGrants.id}, 1, 7) <> 'legacy-'`,
+      );
+    const newerServerIds = new Set(
+      db.select({ id: resourceGrants.resourceId }).from(resourceGrants).where(personalById('server')).all().map((g) => g.id!),
+    );
+    const newerClusterIds = new Set(
+      db.select({ id: resourceGrants.resourceId }).from(resourceGrants).where(personalById('cluster')).all().map((g) => g.id!),
+    );
+    const legacyRows = rows.filter((r) => existing.has(r.serverId) || !newerServerIds.has(r.serverId));
+    const legacyClusterRows = clusterRows.filter((r) => existingClusters.has(r.clusterId) || !newerClusterIds.has(r.clusterId));
+
+    const accessBefore = snapshotAccess(req.orgId, [userId]);
     db.transaction(() => {
       db.update(memberships)
         .set({ serverAccess: body.serverAccess })
         .where(and(eq(memberships.userId, userId), eq(memberships.orgId, req.orgId)))
         .run();
       db.delete(memberServerAccess).where(memberGrants).run();
-      for (const row of rows) {
+      for (const row of legacyRows) {
         db.insert(memberServerAccess).values({ orgId: req.orgId, userId, ...row }).run();
+      }
+      db.delete(resourceGrants)
+        .where(and(personalById('server'), serverIds.length ? notInArray(resourceGrants.resourceId, serverIds) : undefined))
+        .run();
+      for (const [serverId, minutes] of Object.entries(body.expiresInMinutes)) {
+        if (!newerServerIds.has(serverId) || !serverIds.includes(serverId)) continue;
+        db.update(resourceGrants)
+          .set({ expiresAt: minutes == null ? null : minutesFromNow(minutes, now) })
+          .where(and(personalById('server'), eq(resourceGrants.resourceId, serverId)))
+          .run();
       }
       if (clusterIds) {
         db.delete(memberClusterAccess).where(memberClusterGrants).run();
-        for (const row of clusterRows) {
+        for (const row of legacyClusterRows) {
           db.insert(memberClusterAccess).values({ orgId: req.orgId, userId, ...row }).run();
+        }
+        db.delete(resourceGrants)
+          .where(and(personalById('cluster'), clusterIds.length ? notInArray(resourceGrants.resourceId, clusterIds) : undefined))
+          .run();
+        for (const [clusterId, minutes] of Object.entries(body.clusterExpiresInMinutes)) {
+          if (!newerClusterIds.has(clusterId) || !clusterIds.includes(clusterId)) continue;
+          db.update(resourceGrants)
+            .set({ expiresAt: minutes == null ? null : minutesFromNow(minutes, now) })
+            .where(and(personalById('cluster'), eq(resourceGrants.resourceId, clusterId)))
+            .run();
         }
       }
     });
 
-    const nowIso = new Date(now).toISOString();
-    const grants = rows.filter((r) => r.expiresAt === null || r.expiresAt > nowIso);
+    const personal = principalGrants(req.orgId, 'user', userId);
+    const grants = personalIdGrants(personal, 'server').map(({ id, ...g }) => ({ serverId: id, ...g }));
     const grantedIds = grants.map((g) => g.serverId);
-    const clusterGrants = activeClusterGrants(req.orgId, userId);
+    const clusterGrants = personalIdGrants(personal, 'cluster').map(({ id, ...g }) => ({ clusterId: id, ...g }));
     const grantedClusterIds = clusterGrants.map((g) => g.clusterId);
-    // Narrowed: anything already open on a server or cluster no longer granted closes now
-    const live =
-      body.serverAccess === 'restricted'
-        ? revokeLiveAccess(userId, { orgId: req.orgId, keepServerIds: grantedIds, keepClusterIds: grantedClusterIds })
-        : undefined;
+    // Narrowed: anything already open on what the member no longer reaches
+    // (through this list, their roles or other grants) closes now
+    const live = revokeAfterChange(req.orgId, [userId], accessBefore).get(userId);
 
     await audit(req, 'member.access_change', 'member', userId, userEmail(userId), {
       from: member.serverAccess,
@@ -674,7 +841,7 @@ export async function teamRoutes(app: FastifyInstance) {
     return {
       serverAccess: body.serverAccess,
       serverIds: grantedIds,
-      grants: grants.map(({ serverId, expiresAt, grantedBy, reason }) => ({ serverId, expiresAt, grantedBy, reason })),
+      grants,
       clusterIds: grantedClusterIds,
       clusterGrants,
     } satisfies MemberServerAccess;

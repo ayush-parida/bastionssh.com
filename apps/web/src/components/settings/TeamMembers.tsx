@@ -7,13 +7,9 @@ import { useAuthStore, useHasRole } from '@/store/auth.js';
 import type {
   OrgMember,
   Invite,
-  KubeCluster,
   CreatedInvite,
-  MemberServerAccess,
   PasswordResetLink,
   Role,
-  Server,
-  UpdateMemberServerAccess,
 } from '@smt/shared';
 import {
   Plus,
@@ -32,8 +28,8 @@ import {
   Fingerprint,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { ExpiryBadge } from '@/components/access/ExpiryBadge.js';
-import { DURATION_OPTIONS } from '@/lib/access.js';
+import MemberAccessDialog from '@/components/access/MemberAccessDialog.js';
+import { RoleDot } from '@/components/access/AccessBadges.js';
 
 const ROLE_OPTIONS: { value: Role; label: string; hint: string }[] = [
   { value: 'viewer', label: 'Viewer', hint: 'Read-only access' },
@@ -111,246 +107,13 @@ function StatusPill({ status }: { status: OrgMember['status'] }) {
 }
 
 function accessSummary(m: OrgMember): string {
-  if (rank(m.role) >= rank('admin') || m.serverAccess === 'all') return 'All servers';
-  if (m.serverCount === 0) return 'No servers';
-  return `${m.serverCount} server${m.serverCount === 1 ? '' : 's'}`;
-}
-
-/** How long a grant lasts, as picked in the dialog: as it is now, forever, or minutes from now. */
-type GrantChoice = 'keep' | 'permanent' | number;
-
-/**
- * Checkboxes for what a restricted member is granted, each with how long it
- * lasts. Servers and Kubernetes clusters use the same rows.
- */
-function GrantList({
-  items,
-  empty,
-  selected,
-  expiry,
-  choiceFor,
-  onToggle,
-  onChoose,
-}: {
-  items: { id: string; name: string; detail: string }[];
-  empty: string;
-  selected: Set<string>;
-  expiry: Map<string, string | null>;
-  choiceFor: (id: string) => GrantChoice;
-  onToggle: (id: string) => void;
-  onChoose: (id: string, choice: GrantChoice) => void;
-}) {
-  return (
-    <div className="rounded-md border border-border divide-y divide-border">
-      {!items.length ? (
-        <p className="px-3 py-4 text-sm text-muted-foreground">{empty}</p>
-      ) : (
-        items.map((item) => {
-          const checked = selected.has(item.id);
-          const expiresAt = expiry.get(item.id);
-          const choice = choiceFor(item.id);
-          return (
-            <div key={item.id} className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted/50">
-              <label className="flex flex-1 min-w-0 items-center gap-2">
-                <input type="checkbox" checked={checked} onChange={() => onToggle(item.id)} />
-                <span className="truncate">{item.name}</span>
-                <span className="text-xs text-muted-foreground font-mono truncate">{item.detail}</span>
-              </label>
-              {checked && expiresAt && choice === 'keep' && <ExpiryBadge expiresAt={expiresAt} />}
-              {checked && (
-                <select
-                  value={String(choice)}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    onChoose(item.id, v === 'keep' || v === 'permanent' ? v : Number(v));
-                  }}
-                  title="How long this access lasts"
-                  className="rounded-md border border-input bg-background px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-primary"
-                >
-                  {expiresAt && <option value="keep">Keep expiry</option>}
-                  <option value="permanent">Permanent</option>
-                  {DURATION_OPTIONS.map((o) => (
-                    <option key={o.minutes} value={o.minutes}>For {o.label}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-          );
-        })
-      )}
-    </div>
-  );
-}
-
-/** Only what changed: a grant left out keeps the expiry it has. */
-function expiryChanges(ids: string[], choiceFor: (id: string) => GrantChoice, current: Map<string, string | null>) {
-  const out: Record<string, number | null> = {};
-  for (const id of ids) {
-    const choice = choiceFor(id);
-    if (typeof choice === 'number') out[id] = choice;
-    else if (choice === 'permanent' && current.get(id)) out[id] = null;
-  }
-  return out;
-}
-
-/** Pick which servers and Kubernetes clusters a restricted member may use, and for how long. */
-function ServerAccessDialog({ member, onClose }: { member: OrgMember; onClose: () => void }) {
-  const qc = useQueryClient();
-  const [mode, setMode] = useState<MemberServerAccess['serverAccess'] | null>(null);
-  const [selected, setSelected] = useState<Set<string> | null>(null);
-  const [durations, setDurations] = useState<Record<string, GrantChoice>>({});
-  const [selectedClusters, setSelectedClusters] = useState<Set<string> | null>(null);
-  const [clusterDurations, setClusterDurations] = useState<Record<string, GrantChoice>>({});
-
-  const { data: servers } = useQuery<Server[]>({ queryKey: ['servers'], queryFn: () => api.get('/servers') });
-  const { data: clusters } = useQuery<KubeCluster[]>({ queryKey: ['kube', 'clusters'], queryFn: () => api.get('/kube/clusters') });
-  const { data: access, isLoading } = useQuery<MemberServerAccess>({
-    queryKey: ['member-access', member.userId],
-    queryFn: () => api.get(`/team/members/${member.userId}/access`),
-  });
-
-  // Local edits win; until the first edit, show what the server has
-  const effectiveMode = mode ?? access?.serverAccess ?? 'all';
-  const effectiveSelected = selected ?? new Set(access?.serverIds ?? []);
-  const currentExpiry = new Map((access?.grants ?? []).map((g) => [g.serverId, g.expiresAt]));
-  const effectiveClusters = selectedClusters ?? new Set(access?.clusterIds ?? []);
-  const currentClusterExpiry = new Map((access?.clusterGrants ?? []).map((g) => [g.clusterId, g.expiresAt]));
-
-  /** A time-bound grant starts on "keep"; anything else on "permanent". */
-  function choiceFor(serverId: string): GrantChoice {
-    return durations[serverId] ?? (currentExpiry.get(serverId) ? 'keep' : 'permanent');
-  }
-  function clusterChoiceFor(clusterId: string): GrantChoice {
-    return clusterDurations[clusterId] ?? (currentClusterExpiry.get(clusterId) ? 'keep' : 'permanent');
-  }
-
-  const saveMutation = useMutation({
-    mutationFn: () => {
-      const serverIds = [...effectiveSelected];
-      const clusterIds = [...effectiveClusters];
-      return api.put<MemberServerAccess>(`/team/members/${member.userId}/access`, {
-        serverAccess: effectiveMode,
-        serverIds,
-        expiresInMinutes: expiryChanges(serverIds, choiceFor, currentExpiry),
-        // Cluster grants are only replaced once the list of clusters is known
-        ...(clusters && {
-          clusterIds,
-          clusterExpiresInMinutes: expiryChanges(clusterIds, clusterChoiceFor, currentClusterExpiry),
-        }),
-      } satisfies UpdateMemberServerAccess);
-    },
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['team-members'] });
-      qc.invalidateQueries({ queryKey: ['member-access', member.userId] });
-      toast.success('Access updated');
-      onClose();
-    },
-    onError: (err: Error) => toast.error(err.message),
-  });
-
-  function toggle(id: string) {
-    const next = new Set(effectiveSelected);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelected(next);
-  }
-  function toggleCluster(id: string) {
-    const next = new Set(effectiveClusters);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelectedClusters(next);
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
-      onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
-    >
-      <div className="flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-lg border border-border bg-card shadow-xl">
-        <div className="flex items-center gap-3 border-b border-border px-4 py-3">
-          <ServerCog size={16} className="text-primary shrink-0" />
-          <span className="flex-1 truncate text-sm font-semibold">Access — {member.displayName}</span>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-            <X size={14} />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {isLoading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
-          ) : (
-            <>
-              <label className="flex items-start gap-2 text-sm">
-                <input
-                  type="radio"
-                  className="mt-1"
-                  checked={effectiveMode === 'all'}
-                  onChange={() => setMode('all')}
-                />
-                <span>
-                  <span className="font-medium">All servers</span>
-                  <span className="block text-xs text-muted-foreground">Including servers added later.</span>
-                </span>
-              </label>
-              <label className="flex items-start gap-2 text-sm">
-                <input
-                  type="radio"
-                  className="mt-1"
-                  checked={effectiveMode === 'restricted'}
-                  onChange={() => setMode('restricted')}
-                />
-                <span>
-                  <span className="font-medium">Only selected servers</span>
-                  <span className="block text-xs text-muted-foreground">
-                    Other servers and Kubernetes clusters are hidden everywhere — lists, terminals, files, commands, cron,
-                    monitoring and cluster views.
-                  </span>
-                </span>
-              </label>
-              {effectiveMode === 'restricted' && (
-                <>
-                  <GrantList
-                    items={(servers ?? []).map((srv) => ({ id: srv.id, name: srv.name, detail: srv.host }))}
-                    empty="No servers yet."
-                    selected={effectiveSelected}
-                    expiry={currentExpiry}
-                    choiceFor={choiceFor}
-                    onToggle={toggle}
-                    onChoose={(id, choice) => setDurations({ ...durations, [id]: choice })}
-                  />
-                  {!!clusters?.length && (
-                    <div className="space-y-2">
-                      <p className="text-sm font-medium">Kubernetes clusters</p>
-                      <GrantList
-                        items={clusters.map((c) => ({ id: c.id, name: c.name, detail: c.apiUrl }))}
-                        empty=""
-                        selected={effectiveClusters}
-                        expiry={currentClusterExpiry}
-                        choiceFor={clusterChoiceFor}
-                        onToggle={toggleCluster}
-                        onChoose={(id, choice) => setClusterDurations({ ...clusterDurations, [id]: choice })}
-                      />
-                    </div>
-                  )}
-                </>
-              )}
-            </>
-          )}
-        </div>
-        <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
-          <button onClick={onClose} className="rounded-md border border-border px-4 py-2 text-sm hover:bg-muted">
-            Cancel
-          </button>
-          <button
-            onClick={() => saveMutation.mutate()}
-            disabled={saveMutation.isPending || isLoading}
-            className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-          >
-            {saveMutation.isPending ? 'Saving…' : 'Save'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+  if (rank(m.role) >= rank('admin')) return 'Everything';
+  const roles = m.roles?.length ?? 0;
+  const scoped = (m.scope ?? (m.serverAccess === 'restricted' ? 'roles' : 'all')) === 'roles';
+  const parts = [scoped ? 'Only from roles' : 'All resources'];
+  if (roles) parts.push(`${roles} role${roles === 1 ? '' : 's'}`);
+  if (m.serverCount) parts.push(`${m.serverCount} server grant${m.serverCount === 1 ? '' : 's'}`);
+  return parts.join(' · ');
 }
 
 export default function TeamMembers() {
@@ -564,7 +327,7 @@ export default function TeamMembers() {
                 <th className="px-4 py-2 font-medium">Member</th>
                 <th className="px-4 py-2 font-medium">Role</th>
                 <th className="px-4 py-2 font-medium">Status</th>
-                <th className="px-4 py-2 font-medium">Servers</th>
+                <th className="px-4 py-2 font-medium">Access</th>
                 {isAdmin && <th className="px-4 py-2 font-medium">Passkeys</th>}
                 <th className="px-4 py-2 font-medium">Last active</th>
                 {isAdmin && <th className="px-4 py-2" />}
@@ -613,7 +376,18 @@ export default function TeamMembers() {
                       )}
                     </td>
                     <td className="px-4 py-3"><StatusPill status={m.status} /></td>
-                    <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">{accessSummary(m)}</td>
+                    <td className="px-4 py-3 text-xs text-muted-foreground">
+                      <span className="whitespace-nowrap">{accessSummary(m)}</span>
+                      {!!m.roles?.length && (
+                        <span className="mt-1 flex flex-wrap gap-1">
+                          {m.roles.map((r) => (
+                            <span key={r.roleId} className="flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
+                              <RoleDot color={r.color} /> {r.name}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </td>
                     {isAdmin && (
                       <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
                         {m.passkeyCount || '—'}
@@ -648,9 +422,9 @@ export default function TeamMembers() {
                             )}
                             <button
                               onClick={() => setAccessFor(m)}
-                              disabled={privileged}
-                              className="text-muted-foreground hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
-                              title={privileged ? 'Owners and admins always have access to every server' : 'Manage server access'}
+                              className="text-muted-foreground hover:text-foreground"
+                              title={privileged ? 'Roles and effective access (owners and admins manage everything)' : 'Access: scope, roles, grants and effective access'}
+                              aria-label={`Access for ${m.email}`}
                             >
                               <ServerCog size={14} />
                             </button>
@@ -709,7 +483,7 @@ export default function TeamMembers() {
         )}
       </div>
 
-      {accessFor && <ServerAccessDialog member={accessFor} onClose={() => setAccessFor(null)} />}
+      {accessFor && <MemberAccessDialog member={accessFor} onClose={() => setAccessFor(null)} />}
 
       {isAdmin && invites && invites.length > 0 && (
         <div className="mt-4">

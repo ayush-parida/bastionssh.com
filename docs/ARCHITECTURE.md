@@ -859,6 +859,28 @@ Design: `docs/superpowers/specs/2026-10-04-custom-roles-design.md`.
   (at the member's base-role level, following role changes) and `server_access` into `scope`.
 - The access-grant expiry sweep also removes expired role memberships and grants and closes
   what they gave.
+- API (`api/routes/team-access.ts`, under `/api/team`): roles CRUD, `PUT /roles/:id/grants`
+  (the list is replaced atomically by `grants.ts`), `POST`/`DELETE /roles/:id/members` (optional
+  expiry), `PUT /members/:userId/grants` (personal grants), the access checker
+  (`GET /access/explain`), who-has-access (`GET /access/resource`), picker data
+  (`GET /access/resources`) — all admin — and `GET /access/mine?type=` for anyone (their level
+  per resource, from `effective.ts`, so the web hides buttons). `PATCH /members/:userId` takes
+  `scope`; `GET /members/:userId/access` adds scope, roles, personal grants and the effective
+  access per type to the old fields. Every change snapshots the affected members first and
+  calls `revokeAfterChange`, and is audited with before/after. The old
+  `PUT /members/:userId/access` stays as an alias: it writes the mirrored tables, keeps newer
+  personal grants (and their level) for servers and clusters it still lists, and drops them for
+  those it leaves out.
+- Access requests may ask for a role (`role_id`; approval adds a time-bound role membership)
+  or for resources of any type at a level (`server_ids` holds `{ ids, level }` under
+  `resource_type`; approval adds time-bound personal grants, never shortening what is held).
+  Members may ask for what they already see (a higher level, or longer), servers by name when
+  the org lists them, and any role by name (`GET /access-requests/requestable`).
+- Web: Team & Access has Members (member detail: scope, roles, personal grants, effective
+  access with "via" badges), Roles (editor with per-type pickers, tag selectors with a live
+  count, namespace chips, a plain-language preview) and Access checker tabs; server, cluster,
+  connection, cloud, command and cron pages have a "who has access" button for admins
+  (`components/access/`); `hooks/useAccessLevels.ts` hides actions the level does not allow.
 
 ---
 

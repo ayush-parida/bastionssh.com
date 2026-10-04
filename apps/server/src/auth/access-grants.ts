@@ -12,8 +12,8 @@ import {
 } from '../db/schema.js';
 import { auditSystem } from '../audit/index.js';
 import logger from '../logger.js';
-import { activeGrantFilter } from './server-access.js';
 import { revokeAfterChange } from './access/revoke.js';
+import { activeAt } from './access/resolve.js';
 
 /**
  * Time-bound server grants. `member_server_access.expires_at` null means
@@ -34,20 +34,40 @@ export function minutesFromNow(minutes: number, now = Date.now()): string {
   return new Date(now + minutes * 60_000).toISOString();
 }
 
-/** A member's grants in force now, with their details. */
+/**
+ * A member's personal server grants by id in force now, with their details:
+ * the pre-roles per-member rows (mirrored into resource_grants) and personal
+ * grants written since, one per server — the longest-lasting.
+ */
 export function activeGrants(orgId: string, userId: string): ServerGrant[] {
-  return getDb()
+  const rows = getDb()
     .select({
-      serverId: memberServerAccess.serverId,
-      expiresAt: memberServerAccess.expiresAt,
-      grantedBy: memberServerAccess.grantedBy,
-      reason: memberServerAccess.reason,
+      serverId: resourceGrants.resourceId,
+      expiresAt: resourceGrants.expiresAt,
+      grantedBy: resourceGrants.grantedBy,
+      reason: resourceGrants.reason,
     })
-    .from(memberServerAccess)
+    .from(resourceGrants)
     .where(
-      and(eq(memberServerAccess.orgId, orgId), eq(memberServerAccess.userId, userId), activeGrantFilter()),
+      and(
+        eq(resourceGrants.orgId, orgId),
+        eq(resourceGrants.principalType, 'user'),
+        eq(resourceGrants.principalId, userId),
+        eq(resourceGrants.resourceType, 'server'),
+        eq(resourceGrants.selector, 'id'),
+        activeAt(resourceGrants.expiresAt, new Date().toISOString()),
+      ),
     )
     .all();
+  const best = new Map<string, ServerGrant>();
+  for (const row of rows) {
+    if (!row.serverId) continue;
+    const prior = best.get(row.serverId);
+    if (!prior || (prior.expiresAt !== null && (row.expiresAt === null || row.expiresAt > prior.expiresAt))) {
+      best.set(row.serverId, { ...row, serverId: row.serverId });
+    }
+  }
+  return [...best.values()];
 }
 
 /**

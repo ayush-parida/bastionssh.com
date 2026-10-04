@@ -30,6 +30,7 @@ import { toast } from 'sonner';
 import { FtpHostKeySection } from '@/components/ftp/FtpHostKey.js';
 import { DiagnoseButton, DiagnosticsDialog, connectionFailedToast } from '@/components/diagnostics/Diagnostics.js';
 import { isConnectivityFailure, type DiagnoseTarget } from '@/lib/diagnostics.js';
+import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 
 interface ConnectionForm {
   name: string;
@@ -536,6 +537,7 @@ export default function FtpPage() {
                   target={{ kind: 'ftp_connection', id: c.id, name: c.name }}
                   onOpen={setDiagnosing}
                 />
+                <WhoHasAccessButton type="ftp_connection" id={c.id} name={c.name} />
                 {canManage && (
                   <>
                     <button

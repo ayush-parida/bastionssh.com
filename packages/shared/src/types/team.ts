@@ -1,4 +1,12 @@
 import type { Role } from './auth.js';
+import type {
+  AccessLevel,
+  EffectiveAccessEntry,
+  HeldRole,
+  MemberScope,
+  ResourceType,
+  RoleGrant,
+} from './roles.js';
 
 export type MembershipStatus = 'active' | 'suspended';
 
@@ -20,6 +28,10 @@ export interface OrgMember {
   lastActiveAt: string | null;
   /** Passkeys registered to the account (they are per account, not per org). Admins and owners only. */
   passkeyCount?: number;
+  /** `all`: the base role on every resource. `roles`: only what roles and personal grants cover. */
+  scope?: MemberScope;
+  /** Custom roles held now. Admins and owners only. */
+  roles?: HeldRole[];
 }
 
 /** Org-wide security policy, readable by every member; only owners change it. */
@@ -40,6 +52,16 @@ export interface MemberServerAccess {
   /** Kubernetes clusters granted to a restricted member (expired grants never appear). */
   clusterIds?: string[];
   clusterGrants?: ClusterGrant[];
+  /**
+   * `GET` only (custom roles spec §6): the base role, scope, roles held,
+   * personal grants, and every resource the member reaches with its level
+   * and why. The fields above stay as compatible aliases for one release.
+   */
+  role?: Role;
+  scope?: MemberScope;
+  roles?: HeldRole[];
+  personalGrants?: RoleGrant[];
+  effective?: Record<ResourceType, EffectiveAccessEntry[]>;
 }
 
 export interface ClusterGrant {
@@ -94,10 +116,27 @@ export interface AccessRequest {
   createdAt: string;
   /** Pending: when the request lapses undecided. Approved: when the granted access ends. */
   expiresAt: string;
+  /** What is asked for: `server` (the `servers` above), `role`, or another resource type. */
+  resourceType?: ResourceType | 'role';
+  /** The custom role asked for (`resourceType` = `role`); name null once deleted. */
+  role?: { id: string; name: string | null } | null;
+  /** Resources asked for, any type (servers are also listed in `servers`). */
+  resources?: { id: string; name: string | null }[];
+  /** The level asked for; null for older server requests (the base role's level). */
+  level?: AccessLevel | null;
 }
 
+/**
+ * Body of `POST /access-requests`: servers (`serverIds`, at the base role's
+ * level, as before), a custom role (`roleId`), or resources of one type at a
+ * level (`resourceType` + `resourceIds` + `level`).
+ */
 export interface CreateAccessRequest {
-  serverIds: string[];
+  serverIds?: string[];
+  roleId?: string;
+  resourceType?: ResourceType;
+  resourceIds?: string[];
+  level?: AccessLevel;
   reason: string;
   durationMinutes: number;
 }

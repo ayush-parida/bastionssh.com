@@ -5,10 +5,10 @@ import { Check, Clock, KeyRound, Settings2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { cn, relativeTime } from '@/lib/utils.js';
-import { DURATION_OPTIONS, formatMinutes } from '@/lib/access.js';
+import { DURATION_OPTIONS, formatMinutes, RESOURCE_TYPE_LABELS } from '@/lib/access.js';
 import { useAuthStore, useHasRole } from '@/store/auth.js';
 import { ExpiryBadge } from './ExpiryBadge.js';
-import { durationChoices, RequestAccessDialog, useRequestableServers } from './RequestAccessDialog.js';
+import { durationChoices, RequestAccessDialog, useRequestableAccess, useRequestableServers } from './RequestAccessDialog.js';
 
 const STATUS_STYLE: Record<AccessRequestStatus, string> = {
   pending: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
@@ -26,8 +26,14 @@ function StatusPill({ request }: { request: AccessRequest }) {
   );
 }
 
-function serverNames(request: AccessRequest): string {
-  return request.servers.map((s) => s.name ?? 'deleted server').join(', ');
+/** What a request asks for: servers, a role, or resources of one type at a level. */
+function requestedText(request: AccessRequest): string {
+  if (request.resourceType === 'role') return `Role: ${request.role?.name ?? 'deleted role'}`;
+  const type = request.resourceType ?? 'server';
+  const labels = RESOURCE_TYPE_LABELS[type];
+  const names = (request.resources ?? request.servers).map((s) => s.name ?? `deleted ${labels.one}`).join(', ');
+  const prefix = type === 'server' ? '' : `${labels.many[0]!.toUpperCase()}${labels.many.slice(1)}: `;
+  return `${prefix}${names}${request.level ? ` (${request.level})` : ''}`;
 }
 
 /** One request: who, what, why, and where it stands. */
@@ -42,7 +48,7 @@ function RequestRow({ request, actions }: { request: AccessRequest; actions?: Re
           {accessEnds && <ExpiryBadge expiresAt={accessEnds} />}
         </div>
         <p className="text-sm">
-          {serverNames(request)}
+          {requestedText(request)}
           <span className="text-muted-foreground">
             {' '}· {formatMinutes(request.approvedMinutes ?? request.durationMinutes)}
             {request.approvedMinutes != null && request.approvedMinutes < request.durationMinutes &&
@@ -74,6 +80,7 @@ function DecideActions({ request }: { request: AccessRequest }) {
       qc.invalidateQueries({ queryKey: ['access-requests'] });
       qc.invalidateQueries({ queryKey: ['team-members'] });
       qc.invalidateQueries({ queryKey: ['member-access', request.userId] });
+      qc.invalidateQueries({ queryKey: ['roles'] });
       toast.success(verb === 'approve' ? 'Access granted' : 'Request denied');
     },
     onError: (err: Error) => toast.error(err.message),
@@ -189,11 +196,14 @@ export default function AccessRequests() {
 
   const { data: requestable } = useRequestableServers();
   const restricted = requestable?.restricted ?? false;
+  // Anyone below admin may ask for a role, or for more on what they can see
+  const { data: access } = useRequestableAccess();
+  const canRequest = !isAdmin && (access?.canRequest ?? false);
 
   const { data: requests } = useQuery<AccessRequest[]>({
     queryKey: ['access-requests'],
     queryFn: () => api.get('/access-requests'),
-    enabled: isAdmin || restricted,
+    enabled: isAdmin || canRequest,
     // New requests and lapsing ones show up without a reload
     refetchInterval: 60_000,
   });
@@ -207,7 +217,7 @@ export default function AccessRequests() {
     onError: (err: Error) => toast.error(err.message),
   });
 
-  if (!isAdmin && !restricted) return null;
+  if (!isAdmin && !canRequest) return null;
 
   const all = requests ?? [];
   const pending = all.filter((r) => r.status === 'pending');
@@ -227,7 +237,7 @@ export default function AccessRequests() {
               <Settings2 size={14} /> Policy
             </button>
           )}
-          {restricted && (
+          {canRequest && (
             <button
               onClick={() => setRequesting(true)}
               className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
@@ -239,8 +249,10 @@ export default function AccessRequests() {
       </div>
       <p className="text-sm text-muted-foreground mb-4">
         {isAdmin
-          ? 'Members limited to some servers can ask for others for a while. Approved access ends on its own.'
-          : 'You can use only some servers. Ask for others for as long as you need them; access ends on its own.'}
+          ? 'Members can ask for a role, or for servers and other resources, for a while. Approved access ends on its own.'
+          : restricted
+            ? 'You can use only some resources. Ask for others, or a role, for as long as you need them; access ends on its own.'
+            : 'Ask for a role, or a higher level on something, for as long as you need it; access ends on its own.'}
       </p>
 
       {isAdmin && showPolicy && requestable && <RequestPolicy settings={requestable.settings} />}

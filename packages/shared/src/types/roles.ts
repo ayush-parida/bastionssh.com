@@ -114,3 +114,141 @@ export interface EffectiveAccess {
   /** Clusters only: namespaces the member may see; null = every namespace. */
   namespaces?: string[] | null;
 }
+
+// ── API shapes (custom roles spec §6) ────────────────────────────────────────
+
+/**
+ * One entry of `PUT /team/roles/:id/grants` or `PUT /team/members/:userId/grants`.
+ * The list replaces what is there; an entry already past its `expiresAt` is
+ * dropped, so a grant that lapsed while the editor was open stays lapsed.
+ */
+export interface GrantInput {
+  resourceType: ResourceType;
+  selector: GrantSelector;
+  resourceId?: string | null;
+  tag?: string | null;
+  /** Clusters only; null/absent = every namespace. */
+  namespaces?: string[] | null;
+  level: AccessLevel;
+  /** When it ends; null/absent = permanent. Wins over `expiresInMinutes`. */
+  expiresAt?: string | null;
+  /** Minutes from now, for a new time-bound entry. */
+  expiresInMinutes?: number | null;
+  reason?: string | null;
+}
+
+/** A role member as the role editor shows them. */
+export interface RoleMemberDetail extends RoleMember {
+  email: string;
+  displayName: string;
+  /** Their base role in the org. */
+  role: string;
+}
+
+/** `GET /team/roles/:id`. */
+export interface CustomRoleDetail extends CustomRole {
+  grants: RoleGrant[];
+  members: RoleMemberDetail[];
+}
+
+/** Body of `POST /team/roles` and `PATCH /team/roles/:id`. */
+export interface SaveCustomRole {
+  name?: string;
+  description?: string | null;
+  color?: string | null;
+  /** Create only: the role's resources. */
+  grants?: GrantInput[];
+}
+
+/** Any resource access can be granted on, as pickers and lists name it. */
+export interface ResourceSummary {
+  type: ResourceType;
+  id: string;
+  name: string;
+  /** Host, URL or similar. */
+  detail?: string | null;
+  /** Servers only. */
+  tags?: string[];
+}
+
+/** `GET /team/access/resources` (admins): every resource of every type, for pickers. */
+export type AccessResources = Record<ResourceType, ResourceSummary[]>;
+
+/** One resource in a member's effective access. */
+export interface EffectiveAccessEntry extends EffectiveAccess {
+  name: string;
+}
+
+/** A custom role a member holds. */
+export interface HeldRole {
+  roleId: string;
+  name: string;
+  color: string | null;
+  expiresAt: string | null;
+}
+
+/** `GET /team/access/explain`: the access checker's answer. */
+export interface AccessExplanation extends EffectiveAccess {
+  user: { id: string; email: string; displayName: string; role: string; scope: MemberScope };
+  resource: { name: string };
+}
+
+/** One member in `GET /team/access/resource` (who has access). */
+export interface ResourceAccessHolder {
+  userId: string;
+  email: string;
+  displayName: string;
+  role: string;
+  scope: MemberScope;
+  level: AccessLevel;
+  via: AccessReason[];
+  namespaces?: string[] | null;
+}
+
+export interface ResourceAccessList {
+  resourceType: ResourceType;
+  resourceId: string;
+  name: string;
+  holders: ResourceAccessHolder[];
+}
+
+/**
+ * `GET /team/access/mine?type=`: the caller's level on each resource of a
+ * type they can see, so the UI can hide what the level does not allow (the
+ * server enforces regardless). `namespaces` lists, for clusters narrowed to
+ * some namespaces, which ones.
+ */
+export interface MyAccessLevels {
+  resourceType: ResourceType;
+  /** Owners and admins: `manage` on everything. */
+  orgAdmin: boolean;
+  levels: Record<string, AccessLevel>;
+  namespaces?: Record<string, string[]>;
+}
+
+/** A custom role a member may ask for (names only). */
+export interface RequestableRole {
+  id: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  /** Present when the member holds it now; null expiry means permanent. */
+  held: { expiresAt: string | null } | null;
+}
+
+/** A resource a member may ask for, or ask more of. `level` is what they have now. */
+export interface RequestableResource {
+  type: ResourceType;
+  id: string;
+  name: string;
+  level: AccessLevel | null;
+}
+
+/** `GET /access-requests/requestable`: roles and resources the caller may ask for. */
+export interface RequestableAccess {
+  /** False for owners and admins, who have everything already. */
+  canRequest: boolean;
+  settings: { restrictedSeeServerNames: boolean; maxRequestMinutes: number };
+  roles: RequestableRole[];
+  resources: RequestableResource[];
+}

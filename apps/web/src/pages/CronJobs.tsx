@@ -4,6 +4,8 @@ import { api } from '@/lib/api.js';
 import type { CronJob, CronRun, Server, SavedCommand, CreateCronJobRequest } from '@smt/shared';
 import { Plus, Clock, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
+import { useAccessLevels } from '@/hooks/useAccessLevels.js';
+import { WhoHasAccessButton } from '@/components/access/WhoHasAccess.js';
 
 interface FormState {
   name: string;
@@ -18,6 +20,8 @@ const empty: FormState = { name: '', serverId: '', schedule: '0 * * * *', timezo
 
 export default function CronJobsPage() {
   const qc = useQueryClient();
+  // The level on each job (custom roles): hide what it does not allow
+  const access = useAccessLevels('cron_job');
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FormState>(empty);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -153,12 +157,22 @@ export default function CronJobsPage() {
                   <td className="px-4 py-3 text-muted-foreground">{servers?.find(s => s.id === j.serverId)?.name ?? j.serverId}</td>
                   <td className="px-4 py-3 text-muted-foreground text-xs">{j.nextRunAt ? new Date(j.nextRunAt).toLocaleString() : '—'}</td>
                   <td className="px-4 py-3">
-                    <button onClick={() => toggleMutation.mutate({ id: j.id, enabled: !j.enabled })} title={j.enabled ? 'Disable' : 'Enable'}>
+                    <button
+                      onClick={() => toggleMutation.mutate({ id: j.id, enabled: !j.enabled })}
+                      disabled={!access.can(j.id, 'operate')}
+                      title={j.enabled ? 'Disable' : 'Enable'}
+                      className="disabled:cursor-not-allowed disabled:opacity-50"
+                    >
                       {j.enabled ? <ToggleRight size={18} className="text-emerald-500" /> : <ToggleLeft size={18} className="text-muted-foreground" />}
                     </button>
                   </td>
                   <td className="px-4 py-3">
-                    <button onClick={() => { if (confirm('Delete?')) deleteMutation.mutate(j.id); }} className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button>
+                    <div className="flex items-center gap-1">
+                      <WhoHasAccessButton type="cron_job" id={j.id} name={j.name} className="px-2" />
+                      {access.can(j.id, 'manage') && (
+                        <button onClick={() => { if (confirm('Delete?')) deleteMutation.mutate(j.id); }} className="text-red-500 hover:text-red-600"><Trash2 size={14} /></button>
+                      )}
+                    </div>
                   </td>
                 </tr>
                 {expanded === j.id && (
