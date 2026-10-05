@@ -1535,3 +1535,87 @@ describe('migration 0025 (unified roles)', () => {
     expect(sqlite.prepare('SELECT count(*) AS n FROM __drizzle_migrations').get()).toEqual({ n: journal.entries.length });
   });
 });
+
+const DEPLOYMENTS_TAG = '0026_deployments_module';
+
+describe('migration 0026 (Deployments module)', () => {
+  const modulesOf = (db: Database.Database, id: string) =>
+    JSON.parse((db.prepare('SELECT module_permissions FROM roles WHERE id = ?').get(id) as { module_permissions: string | null }).module_permissions ?? 'null') as Record<
+      string,
+      string
+    > | null;
+
+  /** Every table, column, index and trigger: the migration may only change data. */
+  const schema = (db: Database.Database) =>
+    db
+      .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != '__drizzle_migrations' ORDER BY type, name")
+      .all();
+
+  function seedBefore() {
+    const db = freshDb();
+    apply(db, journal.entries.map((e) => e.tag).filter((t) => t < DEPLOYMENTS_TAG));
+    db.exec(`
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o1', 'Org', 'org', 'now', 'now');
+      INSERT INTO users (id, email, display_name, created_at, updated_at) VALUES ('u1', 'a@x', 'A', 'now', 'now'), ('u2', 'b@x', 'B', 'now', 'now');
+      INSERT INTO memberships (user_id, org_id, role, scope, joined_at) VALUES ('u1', 'o1', 'operator', 'roles', 'now');
+      INSERT INTO roles (id, org_id, name, created_by, created_at, updated_at, module_permissions)
+        VALUES ('c1', 'o1', 'Web team', 'u1', 'now', 'now', '{"servers":"operate"}'), ('c0', 'o1', 'Old custom', 'u1', 'now', 'now', NULL);
+      UPDATE roles SET module_permissions = '{"dashboard":"view","servers":"view"}' WHERE id = 'builtin:o1:viewer';
+    `);
+    return db;
+  }
+
+  it('is registered in the journal', () => {
+    expect(journal.entries.map((e) => e.tag)).toContain(DEPLOYMENTS_TAG);
+  });
+
+  it('gives the built-in roles Deployments at their level, edited or not, and nobody else', () => {
+    const db = seedBefore();
+    const before = Object.fromEntries(['c1', 'c0', 'modules-only:o1:operator', 'builtin:o1:none'].map((id) => [id, modulesOf(db, id)]));
+    expect(modulesOf(db, 'builtin:o1:admin')).not.toHaveProperty('deployments');
+
+    apply(db, [DEPLOYMENTS_TAG]);
+
+    expect(modulesOf(db, 'builtin:o1:owner')!.deployments).toBe('manage');
+    expect(modulesOf(db, 'builtin:o1:admin')!.deployments).toBe('manage');
+    expect(modulesOf(db, 'builtin:o1:operator')!.deployments).toBe('operate');
+    // An edited Viewer keeps its edits
+    expect(modulesOf(db, 'builtin:o1:viewer')).toEqual({ dashboard: 'view', servers: 'view', deployments: 'view' });
+    // Custom roles (old and new style), generated "(modules only)" roles and No access: unchanged
+    for (const [id, modules] of Object.entries(before)) expect(modulesOf(db, id), id).toEqual(modules);
+  });
+
+  it('records the new defaults for new orgs and "Reset to default", matching @smt/shared', async () => {
+    const { BUILT_IN_ROLE_DEFAULTS, MODULES_ONLY_DEFAULTS } = await import('@smt/shared');
+    expect(BUILT_IN_ROLE_DEFAULTS.admin.modules.deployments).toBe('manage');
+    expect(BUILT_IN_ROLE_DEFAULTS.operator.modules.deployments).toBe('operate');
+    expect(BUILT_IN_ROLE_DEFAULTS.viewer.modules.deployments).toBe('view');
+    expect(BUILT_IN_ROLE_DEFAULTS.none.modules).toEqual({});
+    expect(MODULES_ONLY_DEFAULTS.operator.modules).not.toHaveProperty('deployments');
+    expect(MODULES_ONLY_DEFAULTS.viewer.modules).not.toHaveProperty('deployments');
+
+    const db = seedBefore();
+    apply(db, [DEPLOYMENTS_TAG]);
+    db.exec("INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('o2', 'New', 'new', 'now', 'now')");
+    expect(modulesOf(db, 'builtin:o2:admin')).toEqual(BUILT_IN_ROLE_DEFAULTS.admin.modules);
+    expect(modulesOf(db, 'builtin:o2:operator')).toEqual(BUILT_IN_ROLE_DEFAULTS.operator.modules);
+    expect(modulesOf(db, 'builtin:o2:viewer')).toEqual(BUILT_IN_ROLE_DEFAULTS.viewer.modules);
+  });
+
+  it('adds no table, column, index or trigger (deployment data lives on the servers)', () => {
+    const db = seedBefore();
+    const before = schema(db);
+    apply(db, [DEPLOYMENTS_TAG]);
+    expect(schema(db)).toEqual(before);
+    expect((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE '%deploy%' OR name LIKE '%release%')").all() as unknown[]).length).toBe(0);
+  });
+
+  it('is safe to apply twice', () => {
+    const db = seedBefore();
+    apply(db, [DEPLOYMENTS_TAG]);
+    db.exec("UPDATE roles SET module_permissions = json_set(module_permissions, '$.deployments', 'none') WHERE id = 'builtin:o1:operator'");
+    apply(db, [DEPLOYMENTS_TAG]);
+    // An admin's later choice is not overwritten
+    expect(modulesOf(db, 'builtin:o1:operator')!.deployments).toBe('none');
+  });
+});

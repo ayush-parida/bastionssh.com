@@ -310,6 +310,7 @@ export const MODULE_LEVELS: readonly ModuleLevel[] = ['none', 'view', 'operate',
 export type ModuleKey =
   | 'servers'
   | 'containers'
+  | 'deployments'
   | 'kubernetes'
   | 'ftp'
   | 'storage'
@@ -365,6 +366,18 @@ export const MODULES: readonly ModuleDefinition[] = [
     resourceType: 'server',
     levels: RESOURCE_LEVELS,
     hints: { view: 'Containers on their servers', operate: 'Containers on their servers', manage: 'Docker settings' },
+  },
+  {
+    key: 'deployments',
+    label: 'Deployments',
+    kind: 'resource',
+    resourceType: 'server',
+    levels: RESOURCE_LEVELS,
+    hints: {
+      view: 'Apps, releases and status on their servers',
+      operate: 'Deploy, roll back, restart and stop',
+      manage: 'Set up servers, edit app config and secrets, delete apps',
+    },
   },
   {
     key: 'kubernetes',
@@ -524,6 +537,7 @@ const VIEWER_MODULES: ModulePermissions = {
   dashboard: 'view',
   servers: 'view',
   containers: 'view',
+  deployments: 'view',
   kubernetes: 'view',
   ftp: 'view',
   storage: 'view',
@@ -542,6 +556,7 @@ const OPERATOR_MODULES: ModulePermissions = {
   ...VIEWER_MODULES,
   servers: 'operate',
   containers: 'operate',
+  deployments: 'operate',
   kubernetes: 'operate',
   ftp: 'operate',
   storage: 'operate',
@@ -602,22 +617,29 @@ export const BUILT_IN_ROLE_DEFAULTS: Record<BuiltInRole, BuiltInRoleDefaults> = 
   },
 };
 
+/** `modules` without `key` — for roles that predate a module and so do not hold it. */
+function without(modules: ModulePermissions, key: ModuleKey): ModulePermissions {
+  const { [key]: _dropped, ...rest } = modules;
+  return rest;
+}
+
 /**
  * The roles migration 0025 generated for role-scoped members ("only resources
  * from roles"): the base role's modules without its "All …" grants. Operators
  * there could not create saved commands or cron jobs, so those stay `operate`.
- * Ordinary editable roles once created.
+ * Ordinary editable roles once created — so, like custom roles, they do not
+ * get modules added later (Deployments, migration 0026).
  */
 export const MODULES_ONLY_DEFAULTS: Record<'operator' | 'viewer', { name: string; description: string; modules: ModulePermissions }> = {
   operator: {
     name: 'Operator (modules only)',
     description: 'Operator features; resources only from other roles and grants',
-    modules: { ...OPERATOR_MODULES, saved_commands: 'operate', cron_jobs: 'operate' },
+    modules: { ...without(OPERATOR_MODULES, 'deployments'), saved_commands: 'operate', cron_jobs: 'operate' },
   },
   viewer: {
     name: 'Viewer (modules only)',
     description: 'Viewer features; resources only from other roles and grants',
-    modules: VIEWER_MODULES,
+    modules: without(VIEWER_MODULES, 'deployments'),
   },
 };
 

@@ -219,6 +219,7 @@ describe('resource and feature modules', () => {
       { prefix: '/api/monitoring', id: () => ids.server },
       { prefix: '/api/notifications', id: () => 'x' },
       { prefix: '/api/docker', id: () => ids.server },
+      { prefix: '/api/deploy', id: () => ids.server },
       { prefix: '/api/kube', id: () => ids.cluster },
       { prefix: '/api/ftp', id: () => ids.ftp },
       { prefix: '/api/storage', id: () => ids.storage },
@@ -296,7 +297,7 @@ describe('resource and feature modules', () => {
   type Expect = Partial<Record<ModuleLevel, number>>;
   interface MatrixRoute {
     name: string;
-    method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     url: () => string;
     body?: () => object;
     expect: Expect;
@@ -334,6 +335,17 @@ describe('resource and feature modules', () => {
         { name: 'fleet', method: 'GET', url: () => '/api/docker/containers', expect: { none: 404, view: 200, operate: 200, manage: 200 } },
         { name: 'settings', method: 'GET', url: () => '/api/docker/settings', expect: { none: 404, view: 200, operate: 200, manage: 200 } },
         { name: 'change settings', method: 'PATCH', url: () => '/api/docker/settings', body: () => ({ bogus: true }), expect: { none: 404, view: 403, operate: 403, manage: 400 } },
+      ],
+    },
+    {
+      module: 'deployments',
+      with: { servers: 'view' },
+      grants: { server: 'manage' },
+      // An invalid app name is refused by the handler (400), so these stop past the gates without reaching the server
+      routes: [
+        { name: 'app', method: 'GET', url: () => `/api/deploy/servers/${ids.server}/apps/Bad_Name`, expect: { none: 404, view: 400, operate: 400, manage: 400 } },
+        { name: 'restart', method: 'POST', url: () => `/api/deploy/servers/${ids.server}/apps/Bad_Name/restart`, expect: { none: 404, view: 403, operate: 400, manage: 400 } },
+        { name: 'write config', method: 'PUT', url: () => `/api/deploy/servers/${ids.server}/apps/Bad_Name/config`, body: () => ({}), expect: { none: 404, view: 403, operate: 403, manage: 400 } },
       ],
     },
     {

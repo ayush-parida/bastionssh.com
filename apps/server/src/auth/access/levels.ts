@@ -91,6 +91,11 @@ export const ACTION_LEVELS = {
     host_keys: 'manage',
     rotate_keys: 'manage',
     docker_manage: 'manage',
+    // Deployments (deployments spec §2.7): apps, releases and status; deploy,
+    // roll back, restart; set up, config and secrets, delete an app
+    deploy_view: 'view',
+    deploy_operate: 'operate',
+    deploy_manage: 'manage',
     delete: 'manage',
   },
   cluster: {

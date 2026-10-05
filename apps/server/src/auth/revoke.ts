@@ -2,13 +2,14 @@ import { SSHBroker } from '../ssh/broker.js';
 import { evictUser } from '../ssh/sftp.js';
 import { abortAgentStreams } from '../ai/streams.js';
 import { closeDockerForUser } from '../docker/index.js';
+import { abortDeployStreams } from '../deploy/sse.js';
 import { closeKubeForUser } from '../kube/index.js';
 import { evictFtpUser } from '../ftp/index.js';
 
 /**
  * Ending browser sessions does not end what those sessions already opened.
  * This closes a user's live terminals (and their WebSockets), pooled SFTP,
- * FTP and Docker connections, Docker and Kubernetes event streams and
+ * FTP and Docker connections, Docker, Kubernetes and deploy log streams and
  * in-flight AI agent streams, so a revocation takes effect immediately rather
  * than when those connections happen to close. Storage, cloud accounts,
  * saved commands and cron jobs hold nothing open per user, so they have no
@@ -48,7 +49,7 @@ export interface LiveAccessScope {
 export interface LiveAccessRevoked {
   terminals: number;
   sftp: number;
-  /** Docker connections and streams. */
+  /** Docker connections and streams, deploy log streams included (they share the connection). */
   docker: number;
   /** Kubernetes streams and per-user caches. */
   kube: number;
@@ -74,7 +75,7 @@ export function revokeLiveAccess(userId: string, scope: LiveAccessScope = {}): L
       keepClusterIds: shellClusterIds,
     }),
     sftp: evictUser(userId, { orgId: scope.orgId, keepServerIds: shellServerIds }),
-    docker: closeDockerForUser(userId, { orgId: scope.orgId, keepServerIds }),
+    docker: closeDockerForUser(userId, { orgId: scope.orgId, keepServerIds }) + abortDeployStreams(userId, { orgId: scope.orgId, keepServerIds }),
     kube: closeKubeForUser(userId, { orgId: scope.orgId, keepClusterIds }),
     agents: abortAgentStreams(userId, { orgId: scope.orgId }),
     ...(ftp && { ftp }),

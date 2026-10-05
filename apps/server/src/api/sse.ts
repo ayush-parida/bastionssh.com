@@ -2,14 +2,15 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 
 /**
  * Server-sent event streams for live views (Docker logs, stats and events;
- * the Kubernetes change feed), with the AI chat's conventions: heartbeat
- * comments so proxies keep the connection, the work aborted as soon as the
- * browser goes away, and at most {@link MAX_STREAMS_PER_USER} open per user
- * across every feature.
+ * the Kubernetes change feed; deploy logs), with the AI chat's conventions:
+ * heartbeat comments so proxies keep the connection, the work aborted as soon
+ * as the browser goes away, and at most {@link MAX_STREAMS_PER_USER} open per
+ * user across every feature.
  *
  * Streams are registered so revoking a user's access ends them from outside
  * the request (auth/revoke.ts), not only when their connection drops. Each
- * feature wraps this with its own event type (docker/sse.ts, kube/sse.ts).
+ * feature wraps this with its own event type (docker/sse.ts, kube/sse.ts,
+ * deploy/sse.ts).
  */
 
 export const MAX_STREAMS_PER_USER = 8;
@@ -19,7 +20,7 @@ const REVOKED = 'Access revoked';
 
 /** Which feature a stream belongs to, and the server or cluster it is about. */
 export interface StreamTarget {
-  feature: 'docker' | 'kube';
+  feature: 'docker' | 'kube' | 'deploy';
   resourceId: string;
   /** Streams from the AI provider (Kubernetes Explain): they end with the member's AI Assistant module. */
   ai?: boolean;

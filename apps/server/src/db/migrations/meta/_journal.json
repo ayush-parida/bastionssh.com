@@ -183,6 +183,13 @@
       "when": 1779200000000,
       "tag": "0025_unified_roles",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1779300000000,
+      "tag": "0026_deployments_module",
+      "breakpoints": true
     }
   ]
 }

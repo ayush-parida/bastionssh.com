@@ -587,6 +587,55 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
   Turning the setting off, Docker off or pausing monitoring closes them silently; a sample
   that fails leaves them as they are.
 
+### 4.15b Deployments (`packages/bastionctl`, `/server/deploy`, `api/routes/deploy.ts`)
+
+Design: `docs/superpowers/specs/2026-10-05-server-deployments-design.md`. Phase A is in place
+(bastionctl, install and integrity check, migration 0026, the server routes); the web tab,
+nginx mode, DNS/TLS checks and certificate alerts come in later phases.
+
+- **No deployment data in the database.** Apps, `bastion.yml`, `.env`, releases and the proxy
+  config are files on the server under the root directory — `/opt/bastion` when the SSH user
+  can write it (created with passwordless `sudo` at setup when allowed), else `$HOME/bastion`
+  — discovered on every request (`deploy/install.ts`), never stored. Only audit rows are written
+  (`deploy.*`, `.env` changes and reveals with variable names only). Migration 0026 only adds
+  the Deployments module to the built-in roles (Admin manage, Operator operate, Viewer view;
+  custom and "(modules only)" roles none) and changes no table or column.
+- **bastionctl** (`packages/bastionctl`): TypeScript bundled by esbuild into one
+  zero-dependency ES module (`yaml` inside) plus a POSIX wrapper that runs it in the pinned
+  `node:22-alpine` image (by digest, `src/images.json`) with the root and the Docker socket
+  mounted, as the SSH user (`--user`, the socket's group added). It talks to the Engine API
+  over the socket (`docker.ts`), validates `bastion.yml` strictly (`config.ts`: unknown keys,
+  domains, ports, paths that leave the upload or app folder, named volumes only, a domain
+  another app serves), extracts uploads itself with every entry checked (`tar.ts`: no absolute
+  paths or `..`, nothing written through a link, links followed on disk must stay inside, no
+  hard links or devices, size and entry caps), builds `bastion-<app>:<release>` (`build.ts`:
+  generated Next.js standalone or static Dockerfiles, or the project's), starts
+  `bastion-<app>-<release>` on the private `bastion-apps` network, health-checks it from the
+  proxy container, regenerates the Caddyfile from every app (`caddy.ts`), has Caddy validate
+  it, swaps and reloads (restoring the previous file on failure), moves `current`, removes the
+  old container after a drain delay and prunes beyond `keep_releases` (never current or
+  previous). Locks are `O_EXCL` files, stale after 30 minutes or when the holder's bastionctl
+  container is gone. `--json` prints one result line; progress goes to stderr.
+- **Install and integrity** (`deploy/bundle.ts`, `deploy/install.ts`): the server ships the
+  built files; setup uploads them over SFTP (0755) and every other request first hashes the
+  installed program and wrapper — a mismatch is refused with 409 `bastionctl_mismatch`
+  (Reinstall = setup), a missing one with `not_set_up`.
+- **Remote** (`deploy/remote.ts`): commands run on an exec channel of the caller's pooled
+  Docker SSH connection, files through the caller's pooled SFTP channel — both opened with
+  `sshConnectConfig` + `connectSsh` and evicted on revocation. Command lines are built from
+  argv with `shellCommand`; `deploy/runner.ts` also refuses any argument that is not a known
+  flag, a plain word or a path under the root. `.env` values go to `env set` on stdin.
+- **Routes** (`/api/deploy`): module gate plus server level per route (`deploy_view` /
+  `deploy_operate` / `deploy_manage`). Deploy is `multipart/form-data` (one `source` file,
+  streamed to `<root>/tmp`), then an SSE log (`log`, `result`, `exit`, `end`) on the shared
+  stream machinery (`deploy/sse.ts`, feature `deploy`, per-user cap); like compose actions a
+  deploy keeps running when the browser leaves and is audited as `detached`. Revocation, or
+  losing Servers or Deployments, ends deploy streams. `PUT …/config` validates with bastionctl
+  first (422 with every problem). Env reveal needs a browser session and a passkey step-up.
+- Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with
+  the remote layer faked (matrix, integrity, streams, audit, no rows but audit); an env-gated
+  integration test over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`).
+
 ### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
 
 Design: `docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md`. Phase K1 (connect
@@ -1378,6 +1427,7 @@ server-management-tool/
 │       └── tests/
 ├── packages/
 │   ├── shared/           # Types shared between web and server
+│   ├── bastionctl/       # Deployments CLI installed on servers (one bundled file)
 │   └── cron-parser/      # Vendored / wrapped cron utilities
 ├── deploy/
 │   ├── docker/           # Dockerfile, compose, healthchecks

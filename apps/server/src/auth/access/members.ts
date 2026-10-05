@@ -20,6 +20,7 @@ import { getDb } from '../../db/index.js';
 import { memberships, organizations, roleMembers, roles, servers } from '../../db/schema.js';
 import { abortAgentStreams } from '../../ai/streams.js';
 import { abortDockerStreams } from '../../docker/sse.js';
+import { abortDeployStreams } from '../../deploy/sse.js';
 import { closeDisallowedExecSessions } from '../../docker/exec.js';
 import { abortKubeStreams } from '../../kube/sse.js';
 import { closeDisallowedPodShells } from '../../kube/exec.js';
@@ -472,6 +473,7 @@ export function snapshotMembers(orgId: string, userIds: Iterable<string>): Membe
  * has open on resources they no longer reach (`revokeAfterChange`), and on
  * modules they lost or were lowered on — AI streams when the AI Assistant
  * goes, Docker streams and container shells with Containers or Servers,
+ * deploy log streams with Deployments or Servers,
  * Kubernetes streams and pod shells with Kubernetes (the pages reopen what
  * is still allowed). Returns what closed, per member.
  */
@@ -489,6 +491,7 @@ export function revokeAfterMemberChange(orgId: string, userIds: Iterable<string>
       extra.docker += abortDockerStreams(userId, { orgId });
       extra.terminals += closeDisallowedExecSessions(orgId, userId);
     }
+    if (lowered('deployments') || lowered('servers')) extra.docker += abortDeployStreams(userId, { orgId });
     if (lowered('kubernetes')) {
       extra.kube += abortKubeStreams(userId, { orgId });
       extra.terminals += closeDisallowedPodShells(orgId, userId);
