@@ -404,7 +404,7 @@ Each app is its own folder, container and image, all behind the one proxy, which
 
 A deploy or rollback moves traffic without touching the proxy's config. When the config does change (domains, TLS, another port, an app added or removed), the proxy starts a second Caddy with the new config, moves new connections over once it serves every certificate the old one did, and lets the old one finish the connections it has: no request is dropped (a browser's idle kept-alive connection may be closed after 10 seconds, which browsers retry on their own). The proxy speaks HTTP/1.1 and HTTP/2; HTTP/3 is not offered.
 
-Nothing an app's log prints of its `.env` values (6 characters or longer) reaches the deploy log, `build.log` or `release.json`: each is shown as `••••`.
+Nothing an app's log prints of its `.env` values (6 characters or longer) reaches the deploy log, `build.log` or `release.json`: each is shown as `••••`. Masking matches the values as written (and each line of a multi-line value, and its JSON-escaped form); a shorter value, or one the app prints transformed — base64- or URL-encoded, split across lines differently, hashed — is not recognized, so an app should not print its secrets at all.
 
 ### Domains and TLS
 

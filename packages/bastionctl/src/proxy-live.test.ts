@@ -66,20 +66,29 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     expect(reloaded.exitCode, reloaded.stderr).toBe(0);
   }
 
+  /** Sockets that have carried a whole response: a request on one of them is on a kept-alive connection. */
+  const served = new WeakSet<object>();
+
   function get(domain: string, agent: https.Agent | false): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
+      let socket: object | null = null;
       const req = https.request(
         { host: '127.0.0.1', port: HTTPS_PORT, path: '/', servername: domain, headers: { host: domain }, rejectUnauthorized: false, agent, timeout: 10_000 },
         (res) => {
           let body = '';
           res.setEncoding('utf8');
           res.on('data', (c: string) => (body += c));
-          res.on('end', () => resolve({ status: res.statusCode ?? 0, body: body.trim() }));
+          res.on('end', () => {
+            if (socket) served.add(socket);
+            resolve({ status: res.statusCode ?? 0, body: body.trim() });
+          });
         },
       );
+      // Node's req.reusedSocket misses a socket handed to a request that waited for one; this does not
+      req.on('socket', (s) => (socket = s));
       req.on('timeout', () => req.destroy(new Error('timed out')));
       req.on('error', (err: Error & { reused?: boolean }) => {
-        err.reused = req.reusedSocket;
+        err.reused = !!socket && served.has(socket);
         reject(err);
       });
       req.end();
@@ -153,20 +162,24 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
       while (running) {
         try {
           let res;
-          try {
-            res = await get('web.test', agent);
-          } catch (err) {
-            // As browsers, curl and Node's docs do: a request on a kept-alive connection the server closed is sent again
-            const e = err as NodeJS.ErrnoException & { reused?: boolean };
-            if (!e.reused || e.code !== 'ECONNRESET') throw err;
-            retried++;
-            res = await get('web.test', agent);
+          for (let attempt = 1; ; attempt++) {
+            try {
+              res = await get('web.test', agent);
+              break;
+            } catch (err) {
+              // As browsers, curl and Node's docs do: a request on a kept-alive connection the server
+              // closed is sent again (each pooled connection may be one; a fresh connection never is)
+              const e = err as NodeJS.ErrnoException & { reused?: boolean };
+              if (!e.reused || !['ECONNRESET', 'EPIPE'].includes(e.code ?? '') || attempt > 3) throw err;
+              retried++;
+            }
           }
           count++;
           if (res.status === 200) bodies.add(res.body);
           else failures.push(`HTTP ${res.status}: ${res.body.slice(0, 100)}`);
         } catch (err) {
-          failures.push((err as Error).message);
+          const e = err as NodeJS.ErrnoException & { reused?: boolean };
+          failures.push(`${e.message} (${e.code ?? 'no code'}, ${e.reused ? 'kept-alive' : 'new'} connection)`);
         }
       }
     };
@@ -187,6 +200,9 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     keepAlive.destroy();
 
     expect(failures, `${failures.length} of ${count} requests failed (${retried} retried)\n${log}`).toEqual([]);
+    // Only an idle kept-alive connection the old Caddy closes as its drain ends is retried: at most
+    // one per pooled socket (the agent keeps 2) per switch, never a request on a new connection
+    expect(retried, `${retried} retries over 4 switches`).toBeLessThanOrEqual(2 * 4);
     // Requests through every switch (how many depends on the machine)
     expect(count).toBeGreaterThan(50);
     expect([...bodies].sort()).toEqual(['up3000', 'up4000']);

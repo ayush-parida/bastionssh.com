@@ -637,7 +637,9 @@ Deployments section.
   `build.log`/`release.json` (an app's log or health check answer may print them) — also
   each line of a multi-line value (a build prints one line at a time) and its JSON-escaped
   form; `releases` masks a kept record's error again as it reads it, and a rollback's
-  Docker failure is a masked failed outcome like a deploy's.
+  Docker failure is a masked failed outcome like a deploy's. Not masked (by design): values
+  under 6 characters, and a value the app prints transformed (base64, URL-encoding, other
+  escaping than JSON's, split other than at its own line breaks).
   `list --json` adds per app `certificate` (the one expiring first: issuer, notAfter,
   daysLeft, lastError — Caddy's storage listed and read in one `find` and one `cat` run, or in
   nginx mode the helper's public copies under `/var/lib/bastion-nginx`, which the wrapper
