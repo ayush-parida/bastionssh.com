@@ -117,8 +117,11 @@ function storedZip(files: Record<string, string>): Buffer {
 
 const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
 
-/** Answer the tab's calls; everything but GETs is recorded in `sent`. `state.setUp` flips when Setup runs. */
-async function stubDeploy(page: Page, serverId: string, sent: Sent[], state = { setUp: true }) {
+/**
+ * Answer the tab's calls; everything but GETs is recorded in `sent`. `state.setUp` flips when Setup runs;
+ * `state.deployLevel` is site1's bastion.yml `permissions.deploy`.
+ */
+async function stubDeploy(page: Page, serverId: string, sent: Sent[], state: { setUp: boolean; deployLevel?: 'operate' | 'manage' } = { setUp: true }) {
   // The app's Runtime section asks Docker; nothing to show here
   await page.route(`**/api/docker/servers/${serverId}**`, (route) => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found"}' }));
   await page.route(`**/api/deploy/servers/${serverId}**`, async (route: Route) => {
@@ -161,7 +164,15 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state = { 
         instructions: [],
       });
     }
-    if (path === '/apps') return json(state.setUp ? [summary('site1'), summary('blog')] : []);
+    if (path === '/apps') {
+      // What a bastionctl that reports them adds: site1's certificate and its container's usage; blog reports neither
+      const site1 = {
+        ...summary('site1'),
+        certificate: { issuer: "Let's Encrypt R11", expiresAt: new Date(Date.now() + 9.5 * 86_400_000).toISOString(), error: null },
+        usage: { memoryBytes: 128 * 1024 ** 2, memoryLimitBytes: 512 * 1024 ** 2, cpuPercent: 2.5 },
+      };
+      return json(state.setUp ? [site1, summary('blog')] : []);
+    }
     if (path === '/apps/site1/domains') {
       return json({
         app: 'site1',
@@ -211,6 +222,7 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state = { 
           healthcheck: { path: '/', timeout: '30s' },
           keep_releases: 5,
           proxy: 'caddy',
+          ...(state.deployLevel && { permissions: { deploy: state.deployLevel } }),
         },
         previousRelease: OLD,
         lock: null,
@@ -305,6 +317,13 @@ test.describe('Deployments', () => {
     await expect(apps.getByRole('row', { name: /site1/ })).toContainText('healthy');
     await expect(apps.getByRole('row', { name: /site1/ })).toContainText(RELEASE);
     await expect(apps.getByRole('row', { name: /blog/ })).toBeVisible();
+    // Certificate days left as a badge (amber under 14 days) and memory/CPU, where the server reports them
+    await expect(apps.getByRole('columnheader', { name: 'Certificate' })).toBeVisible();
+    await expect(apps.getByRole('columnheader', { name: 'Memory / CPU' })).toBeVisible();
+    const site1Cert = apps.getByRole('row', { name: /site1/ }).getByText('9 days');
+    await expect(site1Cert).toHaveClass(/amber/);
+    await expect(site1Cert).toHaveAttribute('title', /Expires .*issued by Let's Encrypt R11/);
+    await expect(apps.getByRole('row', { name: /site1/ })).toContainText('2.5%');
     await expect(page.getByText('/opt/bastion', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reinstall' })).toBeVisible();
     await expect(apps.getByRole('button', { name: 'New app' })).toBeVisible();
@@ -330,6 +349,8 @@ test.describe('Deployments', () => {
 
       await page.getByRole('button', { name: 'Deploy', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: 'Deploy site1' });
+      // Said before anything is sent: the code runs with the app's secrets
+      await expect(dialog.getByRole('note')).toContainText("Deploying runs this code on the server with site1's secrets");
       await dialog.getByLabel('Project folder').setInputFiles(project);
       await expect(dialog).toContainText('my-site/');
       await dialog.getByRole('button', { name: 'Deploy' }).click();
@@ -505,6 +526,27 @@ test.describe('Deployments', () => {
     await expect(ports).toContainText('Port 443: filtered');
     await expect(ports).toContainText('Allow inbound TCP 443');
     await snap(page, 'domains');
+    expect(sent).toEqual([]);
+  });
+
+  test('an operator cannot deploy or roll back an app whose bastion.yml asks for manage, and is told why', async ({ page }) => {
+    const operator = await createMember('operator', 'deploy-operator');
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent, { setUp: true, deployLevel: 'manage' });
+    await signInWithPassword(page, operator.email, operator.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+
+    await expect(page.getByRole('button', { name: 'Deploy', exact: true })).toBeDisabled();
+    await expect(page.getByRole('note')).toContainText('needs manage access to deployments on this server');
+    await expect(page.getByRole('note')).toContainText('permissions.deploy: manage');
+    await expect(page.getByText('Manage access (permissions.deploy)')).toBeVisible();
+    // Restart and Stop are not deploys
+    await expect(page.getByRole('button', { name: 'Restart', exact: true })).toBeEnabled();
+    await page.getByRole('tab', { name: 'Releases' }).click();
+    await expect(page.getByRole('row', { name: `Release ${OLD}` })).toBeVisible();
+    await expect(page.getByRole('button', { name: `Roll back to ${OLD}` })).toHaveCount(0);
+    await snap(page, 'deploy-needs-manage');
     expect(sent).toEqual([]);
   });
 

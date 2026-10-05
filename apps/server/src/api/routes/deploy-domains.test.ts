@@ -168,7 +168,8 @@ function defaultBastionctl(args: string[]): Scripted {
     case 'setup':
       return { stdout: { root: '/opt/bastion', proxy: rest[1], network: 'bastion-apps', proxyContainer: null, version: '9.9.9' } };
     case 'status':
-      return { stdout: { name: rest[0], config: { ...CONFIG, proxy: fake.files.get('/opt/bastion/proxy/mode')?.toString().trim() ?? 'caddy' }, configError: null } };
+      // bastionctl reads the mode itself: a broken SFTP channel (below) does not reach it
+      return { stdout: { name: rest[0], config: { ...CONFIG, proxy: (Map.prototype.get.call(fake.files, '/opt/bastion/proxy/mode') as Buffer | undefined)?.toString().trim() ?? 'caddy' }, configError: null } };
     case 'certs':
       return {
         stdout: [

@@ -208,6 +208,7 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
           }}
           className="m-4 max-h-80 min-h-[8rem] overflow-auto rounded-md border border-border bg-zinc-950 p-2 font-mono text-xs leading-5 text-zinc-100"
         >
+          {/* As the server sent it: masking .env values in the app's own output (a failed health check's log) is bastionctl's job, before it leaves the server */}
           {state.lines.map((l, i) => (
             <div key={i} className={cn('whitespace-pre-wrap break-all', /error|failed/i.test(l.text) && 'text-red-300')}>
               {l.text}

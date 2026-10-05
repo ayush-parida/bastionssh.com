@@ -1,4 +1,4 @@
-import type { DeployAppSummary, DeployContainer } from '@smt/shared';
+import { DEPLOY_CERT_EXPIRING_DAYS, type DeployAppSummary, type DeployContainer } from '@smt/shared';
 import { Lock, Plus, Rocket, TriangleAlert } from 'lucide-react';
 import { HEALTH_STYLE, STATE_STYLE } from '@/lib/docker.js';
 import type { DeployAppRow } from '@/lib/deploy.js';
@@ -21,22 +21,33 @@ export function HealthBadge({ app }: { app: Pick<DeployAppSummary, 'container' |
   );
 }
 
-/** Days until a certificate expires, as the list shows it. */
-function certText(row: DeployAppRow): { text: string; warn: boolean } {
-  const cert = row.certificate;
-  if (!cert) return { text: '—', warn: false };
-  if (cert.error) return { text: 'Error', warn: true };
-  if (!cert.expiresAt) return { text: 'Pending', warn: false };
-  const days = Math.floor((new Date(cert.expiresAt).getTime() - Date.now()) / 86_400_000);
-  return { text: days < 0 ? 'Expired' : `${days} d`, warn: days < 14 };
+const CERT_TONE = {
+  ok: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+  warn: 'bg-amber-500/10 text-amber-600',
+  bad: 'bg-red-500/10 text-red-600',
+  muted: 'bg-muted text-muted-foreground',
+} as const;
+
+/** The certificate as a badge: days left (amber under 14, red once expired or failing), with expiry and issuer on hover. */
+export function certBadge(cert: DeployAppRow['certificate'], now = Date.now()): { text: string; tone: keyof typeof CERT_TONE; title: string } | null {
+  if (!cert) return null;
+  const expires = cert.expiresAt ? new Date(cert.expiresAt) : null;
+  const days = expires && !Number.isNaN(expires.getTime()) ? Math.floor((expires.getTime() - now) / 86_400_000) : null;
+  const facts = [expires ? `Expires ${expires.toLocaleDateString(undefined, { dateStyle: 'medium' })}` : null, cert.issuer ? `issued by ${cert.issuer}` : null].filter(Boolean).join(', ');
+  const title = [facts, cert.error].filter(Boolean).join(' — ') || 'No certificate yet';
+  if (days !== null && days < 0) return { text: 'Expired', tone: 'bad', title };
+  if (cert.error) return { text: days !== null ? `${days} d · error` : 'Error', tone: 'bad', title };
+  if (days === null) return { text: 'Pending', tone: 'muted', title };
+  return { text: days === 1 ? '1 day' : `${days} days`, tone: days < DEPLOY_CERT_EXPIRING_DAYS ? 'warn' : 'ok', title };
 }
 
 /**
  * The server's apps (spec §7): domains, health, current release, certificate
  * and memory/CPU. Read from the server on every load; a row opens the app.
- * The certificate and memory/CPU columns show only when the server reports
- * them for some app (bastionctl's list leaves them out today; an app's
- * Domains tab and its Overview have both) rather than as a column of dashes.
+ * The certificate (a days-left badge) and memory/CPU columns show when the
+ * server reports them for any app, and are left out only when no app does
+ * (an older bastionctl) rather than shown as a column of dashes; an app's
+ * Domains tab and its Overview have the details either way.
  */
 export default function AppList({
   apps,
@@ -81,7 +92,7 @@ export default function AppList({
             </thead>
             <tbody>
               {apps.map((app) => {
-                const cert = certText(app);
+                const cert = certBadge(app.certificate);
                 return (
                   <tr
                     key={app.name}
@@ -118,7 +129,17 @@ export default function AppList({
                       <HealthBadge app={app} />
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs">{app.currentRelease ?? '—'}</td>
-                    {showCert && <td className={cn('px-4 py-2.5 text-xs', cert.warn && 'text-amber-600')}>{cert.text}</td>}
+                    {showCert && (
+                      <td className="px-4 py-2.5">
+                        {cert ? (
+                          <span title={cert.title} className={cn('whitespace-nowrap rounded px-1.5 py-0.5 text-xs', CERT_TONE[cert.tone])}>
+                            {cert.text}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    )}
                     {showUsage && (
                       <td className="px-4 py-2.5 text-xs">
                         {app.usage

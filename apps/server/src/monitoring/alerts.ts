@@ -147,7 +147,8 @@ export interface ReconcileOptions {
  * condition that stays true for an hour does not re-notify every sweep.
  *
  * Host alerts only: container alerts are keyed per container and reconciled
- * on their own (monitoring/containers.ts).
+ * on their own (monitoring/containers.ts), as are deployed apps' certificate
+ * alerts (deploy/cert-alerts.ts).
  */
 export function reconcileAlerts(
   orgId: string,
@@ -163,7 +164,8 @@ export function reconcileAlerts(
     .from(serverAlerts)
     .where(and(eq(serverAlerts.serverId, serverId), isNull(serverAlerts.resolvedAt)))
     .all()
-    .filter((a) => !isContainerAlert(a.type));
+    // Container and certificate alerts are keyed per container or app domain and reconciled on their own
+    .filter((a) => !isContainerAlert(a.type) && a.type !== 'deploy_certificate');
 
   const openByType = new Map(open.map((a) => [a.type as AlertType, a]));
   const opened: AlertCondition[] = [];

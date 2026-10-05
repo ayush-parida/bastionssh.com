@@ -1,6 +1,7 @@
 import { buildApp } from './api/app.js';
 import { startWorker } from './worker/index.js';
 import { startHealthMonitor } from './monitoring/scheduler.js';
+import { startCertificateChecks } from './deploy/cert-check.js';
 import { startCloudSync } from './cloud/scheduler.js';
 import { startBackupScheduler } from './backup/scheduler.js';
 import { holdServerLock } from './backup/lock.js';
@@ -50,6 +51,8 @@ async function main() {
 
   // Health checks, cloud inventory sync and database backups run on plain intervals in-process — no Redis required.
   startHealthMonitor();
+  // Deployed apps' certificates, every 6 h, on servers found to have deployments then
+  startCertificateChecks();
   startCloudSync();
   startBackupScheduler();
   // Time-bound server grants: removes expired ones and closes what is still open on them

@@ -36,6 +36,9 @@ const fake = vi.hoisted(() => ({
   bastionctl: null as null | ((args: string[], run: FakeRun) => Scripted | Promise<Scripted>),
   /** Bytes seen by upload(), per path. */
   uploads: new Map<string, number>(),
+  /** Uploads wait for this before reading their source. */
+  uploadHold: null as Promise<void> | null,
+  uploadsStarted: 0,
 }));
 
 /** Split a command line made of single-quoted words (shellCommand's output) back into argv; anything else throws. */
@@ -114,6 +117,8 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
         fake.modes.set(path, mode);
       },
       async upload(path, source) {
+        fake.uploadsStarted++;
+        await fake.uploadHold;
         const chunks: Buffer[] = [];
         for await (const c of source as AsyncIterable<Buffer>) chunks.push(c);
         fake.files.set(path, Buffer.concat(chunks));
@@ -144,6 +149,7 @@ import { auditLog, passkeys, resourceGrants, roleMembers, roles, sessions } from
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { setBastionctlBundleForTests, type BastionctlBundle } from '../../deploy/bundle.js';
 import { activeDeployStreamCount } from '../../deploy/sse.js';
+import { MAX_STREAMS_PER_USER } from '../sse.js';
 import { shellCommand } from '../../docker/shell.js';
 import { seedOrg, seedServer, seedSession, seedUser } from './test-utils.js';
 
@@ -213,8 +219,10 @@ describe('deployment routes', () => {
   let serverA: string;
   let otherOrgServer: string;
 
+  // A fresh address per call keeps the whole file under the API's rate limit (fetch calls share 127.0.0.1)
+  let calls = 0;
   const call = (who: Pick<Who, 'headers'>, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, payload?: object) =>
-    app.inject({ method, url, headers: who.headers, ...(payload && { payload }) });
+    app.inject({ method, url, headers: who.headers, remoteAddress: `10.78.${(++calls >> 8) & 255}.${calls & 255}`, ...(payload && { payload }) });
   const api = (path = '', server = serverA) => `/api/deploy/servers/${server}${path}`;
 
   function audits(action: string) {
@@ -315,6 +323,8 @@ describe('deployment routes', () => {
     fake.runs.length = 0;
     fake.commands.length = 0;
     fake.uploads.clear();
+    fake.uploadHold = null;
+    fake.uploadsStarted = 0;
     fake.bastionctl = defaultBastionctl;
     installed();
   });
@@ -434,6 +444,8 @@ describe('deployment routes', () => {
       await call(admin, 'DELETE', api('/apps/site1?purge=true'));
       for (const command of fake.commands) expect(shellCommand(parseQuoted(command))).toBe(command);
       expect(fake.runs.map((r) => r.argv)).toEqual([
+        // Who may roll back: bastion.yml's permissions.deploy, read now
+        ['status', 'site1'],
         ['rollback', 'site1', '20261005-120000-abcdef12'],
         ['delete', 'site1', '--purge'],
       ]);
@@ -532,7 +544,8 @@ describe('deployment routes', () => {
         { type: 'exit', exitCode: 0, signal: null, durationMs: expect.any(Number), timedOut: false },
         { type: 'end' },
       ]);
-      const [deploy] = fake.runs;
+      const [status, deploy] = fake.runs;
+      expect(status!.argv).toEqual(['status', 'site1']);
       expect(deploy!.argv.slice(0, 3)).toEqual(['deploy', 'site1', '--source']);
       expect(deploy!.argv[3]).toMatch(/^\/opt\/bastion\/tmp\/upload-[0-9a-f]{24}\.tar\.gz$/);
       expect(seenUpload).toEqual(payload);
@@ -573,7 +586,9 @@ describe('deployment routes', () => {
       const notSetUp = await postForm(operator, api('/apps/site1/deploy'), tarGz());
       expect(notSetUp.res.status).toBe(409);
       expect(((await notSetUp.res.json()) as { code: string }).code).toBe('not_set_up');
-      expect(fake.runs).toEqual([]);
+      // Only the permission check's status read ran
+      expect(fake.runs.map((r) => r.argv[0])).toEqual(['status', 'status']);
+      expect(fake.uploads.size).toBe(0);
     });
 
     it('keeps the deploy running when the browser leaves, and audits it as detached', async () => {
@@ -628,6 +643,92 @@ describe('deployment routes', () => {
       expect(events.map((e) => e.type)).toEqual(['log', 'error', 'exit', 'end']);
       expect(events[1]).toMatchObject({ error: expect.stringMatching(/without a result/) });
       expect(audits('deploy.rollback').some((r) => r.meta.result === 'failed' && r.meta.exitCode === null)).toBe(true);
+    });
+  });
+
+  describe("bastion.yml's permissions.deploy", () => {
+    const withLevel = (deploy: unknown, extra: Record<string, unknown> = {}) => (args: string[]) =>
+      args[0] === 'status' ? { stdout: { name: args[1], config: { name: args[1], permissions: { deploy } }, configError: null, ...extra } } : defaultBastionctl(args);
+
+    it('makes deploy and rollback need manage when it says so, before any upload', async () => {
+      fake.bastionctl = withLevel('manage');
+      const { res } = await postForm(operator, api('/apps/site1/deploy'), tarGz());
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ code: 'deploy_needs_manage', error: expect.stringMatching(/permissions\.deploy/) });
+      expect(fake.uploadsStarted).toBe(0);
+      const rollback = await call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release });
+      expect(rollback.statusCode).toBe(403);
+      expect(fake.runs.map((r) => r.argv[0])).toEqual(['status', 'status']);
+      // Restart is not a deploy: operate still does
+      expect((await call(operator, 'POST', api('/apps/site1/restart'))).statusCode).toBe(200);
+
+      // Manage in the module but operate on the server is not enough either
+      const halfway = memberWith({ servers: 'operate', deployments: 'manage' }, 'operate');
+      expect((await call(halfway, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release })).statusCode).toBe(403);
+
+      const ok = await postForm(admin, api('/apps/site1/deploy'), tarGz());
+      expect(ok.res.status).toBe(200);
+      expect((await allEvents(ok.res)).find((e) => e.type === 'result')).toMatchObject({ outcome: { result: 'success' } });
+    });
+
+    it('lets operators deploy when it says operate or is missing; a value it does not know, or an unreadable config, needs manage', async () => {
+      for (const level of ['operate', undefined]) {
+        fake.bastionctl = level ? withLevel(level) : defaultBastionctl;
+        const res = await call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release });
+        expect(res.statusCode, String(level)).toBe(200);
+      }
+      fake.bastionctl = withLevel('admins-only');
+      expect((await call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release })).statusCode).toBe(403);
+      fake.bastionctl = (args) => (args[0] === 'status' ? { stdout: { name: 'site1', config: null, configError: 'bad YAML' } } : defaultBastionctl(args));
+      expect((await call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release })).statusCode).toBe(403);
+      // Reported at the top level of status too
+      fake.bastionctl = (args) => (args[0] === 'status' ? { stdout: { name: 'site1', permissions: { deploy: 'manage' } } } : defaultBastionctl(args));
+      expect((await call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release })).statusCode).toBe(403);
+    });
+  });
+
+  describe('stream cap', () => {
+    it('counts uploads from the start of the request: past the cap, more are refused with 429', async () => {
+      const hold = deferred();
+      fake.uploadHold = hold.promise;
+      // All still uploading: no log stream open yet
+      const pending = Array.from({ length: MAX_STREAMS_PER_USER }, () => postForm(admin, api('/apps/site1/deploy'), tarGz()));
+      await until(() => fake.uploadsStarted === MAX_STREAMS_PER_USER);
+      expect(activeDeployStreamCount(admin.userId)).toBe(MAX_STREAMS_PER_USER);
+
+      const extra = await postForm(admin, api('/apps/site1/deploy'), tarGz());
+      expect(extra.res.status).toBe(429);
+      expect(((await extra.res.json()) as { error: string }).error).toMatch(/Too many open streams/);
+      expect((await call(admin, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release })).statusCode).toBe(429);
+      expect(fake.uploadsStarted).toBe(MAX_STREAMS_PER_USER);
+      // Another member has their own places
+      expect((await call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release })).statusCode).toBe(200);
+
+      hold.resolve();
+      for (const { res } of await Promise.all(pending)) {
+        expect(res.status).toBe(200);
+        expect((await allEvents(res)).at(-1)).toEqual({ type: 'end' });
+      }
+      await until(() => activeDeployStreamCount(admin.userId) === 0);
+    });
+
+    it('gives the place back when a request ends before streaming, and stops an upload when access is revoked', async () => {
+      fake.bastionctl = (args) => (args[0] === 'status' ? { stdout: { error: 'No app named site1 on this server', code: 1 }, exitCode: 1 } : defaultBastionctl(args));
+      expect(activeDeployStreamCount(operator.userId)).toBe(0);
+      for (let i = 0; i < MAX_STREAMS_PER_USER + 2; i++) expect((await postForm(operator, api('/apps/site1/deploy'), tarGz())).res.status).toBe(404);
+      expect(activeDeployStreamCount(operator.userId)).toBe(0);
+
+      fake.bastionctl = defaultBastionctl;
+      const hold = deferred();
+      fake.uploadHold = hold.promise;
+      const pending = postForm(operator, api('/apps/site1/deploy'), tarGz());
+      await until(() => fake.uploadsStarted === 1);
+      revokeLiveAccess(operator.userId, { orgId });
+      hold.resolve();
+      const { res } = await pending;
+      expect(res.status).toBe(403);
+      expect(fake.runs.map((r) => r.argv[0])).not.toContain('deploy');
+      expect(activeDeployStreamCount(operator.userId)).toBe(0);
     });
   });
 
