@@ -23,6 +23,8 @@ import FilesPage from '@/pages/Files.js';
 import MonitoringPage from '@/pages/Monitoring.js';
 import ServerHealthPage from '@/pages/ServerHealth.js';
 import ServerDockerPage from '@/pages/ServerDocker.js';
+import ServerDeploymentsPage from '@/pages/ServerDeployments.js';
+import DeploymentsPage from '@/pages/Deployments.js';
 import ContainersPage from '@/pages/Containers.js';
 import StoragePage from '@/pages/Storage.js';
 import StorageBucketsPage from '@/pages/StorageBuckets.js';
@@ -86,6 +88,9 @@ export default function App() {
           <Route path="servers/:id/files" element={<ModuleGate modules={['servers']}><FilesPage /></ModuleGate>} />
           <Route path="servers/:id/health" element={<ModuleGate modules={['servers']}><ServerHealthPage /></ModuleGate>} />
           <Route path="servers/:id/docker" element={<ModuleGate modules={['servers']}><ServerDockerPage /></ModuleGate>} />
+          <Route path="servers/:id/deployments" element={<ModuleGate modules={['deployments']}><ServerDeploymentsPage /></ModuleGate>} />
+          <Route path="servers/:id/deployments/:app" element={<ModuleGate modules={['deployments']}><ServerDeploymentsPage /></ModuleGate>} />
+          <Route path="deployments" element={<ModuleGate modules={['deployments']}><DeploymentsPage /></ModuleGate>} />
           <Route path="containers" element={<ModuleGate modules={['containers']}><ContainersPage /></ModuleGate>} />
           <Route path="kubernetes" element={<ModuleGate modules={['kubernetes']}><KubernetesPage /></ModuleGate>} />
           <Route path="kubernetes/overview" element={<ModuleGate modules={['kubernetes']}><KubeOverviewPage /></ModuleGate>} />

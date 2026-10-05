@@ -15,7 +15,7 @@ import {
   type ServerStatus,
   type SSHKey,
 } from '@smt/shared';
-import { Activity, Cloud, Container, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
+import { Activity, Cloud, Container, KeyRound, Plus, Terminal, Trash2, Pencil, FolderOpen, RadioTower, Rocket, RotateCw, Server as ServerIcon, Waypoints, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { StatusDot } from '@/components/monitoring/StatusBadge.js';
 import { formatUptime, statusMeta } from '@/lib/monitoring.js';
@@ -114,6 +114,7 @@ export default function ServersPage() {
   const [diagnosing, setDiagnosing] = useState<DiagnoseTarget | null>(null);
   const [requesting, setRequesting] = useState(false);
   const isAdmin = useModule('servers', 'manage');
+  const deployments = useModule('deployments');
   // The level on each server (custom roles): hide what it does not allow
   const access = useAccessLevels('server');
   // Servers ticked for a bulk key rotation, and the batch last started
@@ -656,6 +657,11 @@ export default function ServersPage() {
                 {s.docker.mode === 'auto' && (s.docker.detectedAt || isAdmin) && (
                   <button onClick={() => navigate(`/servers/${s.id}/docker`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
                     <Container size={12} /> Docker
+                  </button>
+                )}
+                {deployments && (
+                  <button onClick={() => navigate(`/servers/${s.id}/deployments`)} className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-muted">
+                    <Rocket size={12} /> Deployments
                   </button>
                 )}
                 <DiagnoseButton target={{ kind: 'server', id: s.id, name: s.name }} onOpen={setDiagnosing} />

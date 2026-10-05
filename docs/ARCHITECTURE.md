@@ -638,9 +638,22 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   first line only: the app log after it may hold its secrets). Revocation, or
   losing Servers or Deployments, ends deploy streams. `PUT …/config` validates with bastionctl
   first (422 with every problem). Env reveal needs a browser session and a passkey step-up.
+- **Web** (`pages/ServerDeployments.tsx`, `components/deploy/`, `lib/deploy.ts`,
+  `lib/archive.ts`): the server's Deployments tab at `/servers/:id/deployments[/:app]`, and
+  `/deployments` in navigation (servers to pick from; shown with the module). Buttons follow
+  the lower of the Deployments module level and the server level. Setup and Reinstall, the app
+  list, and per app Deploy, Releases with Rollback, Restart/Stop, `bastion.yml` (a form that
+  edits the YAML text in place with `yaml`'s Document API, so comments survive, and the raw
+  YAML; a 422's problems show by key path), `.env` (names only; values write-only; reveal with
+  `withStepUp`), Domains (a DNS check through DNS Lookup) and Delete. A folder or `.zip` is
+  packed into a `.tar.gz` in the browser without `node_modules`, `.next` and `.git` (a single
+  top-level folder dropped); the upload goes by XMLHttpRequest for progress, and its SSE
+  answer is read from the growing response. Live memory/CPU and logs of an app's container
+  come from the Docker module when the member may inspect containers there.
 - Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with
   the remote layer faked (matrix, integrity, streams, audit, no rows but audit); an env-gated
-  integration test over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`).
+  integration test over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`);
+  Playwright `15-deployments.spec.ts` drives the tab against a stubbed `/api/deploy`.
 
 ### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
 
