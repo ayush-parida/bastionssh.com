@@ -459,6 +459,18 @@ test.describe('Deployments', () => {
     await page.getByRole('button', { name: 'Validate and save' }).click();
     await expect(page.getByText('bastion.yml saved')).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
+
+    // Who may deploy: manage writes permissions.deploy, operate (the default) drops the key
+    await page.getByRole('tab', { name: 'Form' }).click();
+    const who = page.getByLabel('Who may deploy');
+    await expect(who).toHaveValue('operate');
+    await who.selectOption('manage');
+    await page.getByRole('button', { name: 'Validate and save' }).click();
+    await expect.poll(() => (sent.filter((s) => s.method === 'PUT').at(-1)!.body as { text: string }).text).toContain('permissions:\n  deploy: manage');
+    await who.selectOption('operate');
+    await page.getByRole('button', { name: 'Validate and save' }).click();
+    await expect.poll(() => sent.filter((s) => s.method === 'PUT').length).toBe(5);
+    expect((sent.filter((s) => s.method === 'PUT').at(-1)!.body as { text: string }).text).not.toContain('permissions');
   });
 
   test('.env: names listed, values write-only, reveal on request', async ({ page }) => {

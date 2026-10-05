@@ -201,7 +201,7 @@ export default function ConfigEditor({
   const tlsMode = isObject(tls) ? 'files' : typeof tls === 'string' && tls.startsWith('dns:') ? 'dns' : typeof tls === 'string' ? tls : 'auto';
   const buildType = str(['build', 'type']) || 'nextjs';
   // Issues the form has no field for (syntax, unknown keys) are listed above it
-  const shown = ['name', 'domains', 'redirect_www', 'tls', 'build.type', 'build.node', 'build.dir', 'build.output', 'run.port', 'run.env_file', 'run.volumes', 'run.memory', 'run.cpus', 'healthcheck.path', 'healthcheck.timeout', 'keep_releases', 'proxy'];
+  const shown = ['name', 'domains', 'redirect_www', 'tls', 'build.type', 'build.node', 'build.dir', 'build.output', 'run.port', 'run.env_file', 'run.volumes', 'run.memory', 'run.cpus', 'healthcheck.path', 'healthcheck.timeout', 'keep_releases', 'proxy', 'permissions'];
   const unplaced = (issues ?? []).filter((i) => mode === 'yaml' || !shown.some((p) => i.path === p || i.path.startsWith(`${p}.`)));
 
   return (
@@ -378,6 +378,17 @@ export default function ConfigEditor({
             <select className={input} disabled={readOnly} value={str(['proxy']) || 'caddy'} onChange={(e) => update(['proxy'], e.target.value)}>
               <option value="caddy">caddy</option>
               <option value="nginx">nginx</option>
+            </select>
+          </Field>
+          <Field label="Who may deploy" issues={at('permissions')} hint="Deploy and roll back; a deploy runs the app's code with its secrets">
+            <select
+              className={input}
+              disabled={readOnly}
+              value={str(['permissions', 'deploy']) || 'operate'}
+              onChange={(e) => update(['permissions'], e.target.value === 'manage' ? { deploy: 'manage' } : undefined)}
+            >
+              <option value="operate">operate (default)</option>
+              <option value="manage">manage</option>
             </select>
           </Field>
         </div>
