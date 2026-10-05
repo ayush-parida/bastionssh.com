@@ -168,6 +168,14 @@ EOF
   say "}"
 }
 
+# The first of the app's domains nginx -t reported claimed twice
+conflicting() {
+  for d in $site_domains; do
+    case $1 in *"conflicting server name \"$d\""*) say "$d"; return 0 ;; esac
+  done
+  return 1
+}
+
 restore() {
   if [ "$had" = yes ]; then mv -f "$prev" "$conf"; else rm -f "$conf"; fi
 }
@@ -191,6 +199,13 @@ install_conf() {
     restore
     die "nginx -t refused the server block of $app; the previous one is back: $(last_lines "$out")"
   fi
+  # nginx only warns about a name two server blocks claim, and serves the one
+  # it read first: a domain of a site the host already serves (conf.d comes
+  # before sites-enabled) would be taken over, and certbot asked for it
+  if taken=$(conflicting "$out"); then
+    restore
+    die "$taken is already served by another nginx server block on this host; the previous server block of $app is back"
+  fi
   if ! out=$(nginx -s reload 2>&1); then
     restore
     nginx -s reload >/dev/null 2>&1 || true
@@ -205,16 +220,30 @@ fingerprint() {
   if [ -f "$1" ]; then cksum <"$1"; else say none; fi
 }
 
-# One run at a time: nginx -t and reload see one change at a time
+# One run at a time: nginx -t and reload see one change at a time. The lock
+# names its holder: a run killed outright (the SSH session gone) leaves it
+# behind, and the next run takes it over instead of waiting for an admin.
 lock() {
   mkdir -p "$STATE_DIR"
   tries=0
   until mkdir "$STATE_DIR/lock" 2>/dev/null; do
+    holder=$(cat "$STATE_DIR/lock/pid" 2>/dev/null || true)
+    case $holder in
+      '' | *[!0-9]*) ;;
+      *) if ! kill -0 "$holder" 2>/dev/null; then
+        log "taking over the lock of run $holder, which is gone"
+        rm -rf "$STATE_DIR/lock"
+        continue
+      fi ;;
+    esac
     tries=$((tries + 1))
     [ "$tries" -lt 120 ] || die "another bastion-nginx run holds $STATE_DIR/lock (remove it if none is running)"
     sleep 1
   done
-  trap 'rmdir "$STATE_DIR/lock" 2>/dev/null || true' EXIT
+  printf '%s\n' "$$" >"$STATE_DIR/lock/pid"
+  trap 'rm -rf "$STATE_DIR/lock"' EXIT
+  # Signals (the SSH session closing, a broken pipe) end the run through exit, which releases the lock
+  trap 'exit 1' HUP INT TERM PIPE
 }
 
 apply() {

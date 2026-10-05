@@ -100,6 +100,18 @@ export async function readProxyMode(remote: Remote, root: string): Promise<Deplo
   return mode === 'caddy' || mode === 'nginx' ? mode : null;
 }
 
+/**
+ * The mode a server already uses: its mode file, else Caddy when it was set
+ * up before modes existed (a Caddyfile but no mode file) — its bastion-caddy
+ * owns 80/443, which detection would otherwise take for the host's nginx and
+ * move every app behind it. Null for a server never set up.
+ */
+export async function existingProxyMode(remote: Remote, root: string): Promise<DeployProxyMode | null> {
+  const mode = await readProxyMode(remote, root);
+  if (mode) return mode;
+  return (await remote.hashFile(`${root}/proxy/Caddyfile`)) !== null ? 'caddy' : null;
+}
+
 /** Put the shipped helper next to bastionctl, for the administrator to install root-owned. */
 export async function uploadHelper(remote: Remote, root: string, bundle: BastionctlBundle): Promise<void> {
   if (!bundle.nginxHelper) throw new DeployError('This BastionSSH was built without the nginx helper (build packages/bastionctl)', 503, 'bastionctl_missing_bundle');
@@ -108,7 +120,7 @@ export async function uploadHelper(remote: Remote, root: string, bundle: Bastion
 
 export async function proxyState(remote: Remote, root: string | null, bundle: BastionctlBundle): Promise<DeployProxyState> {
   const nginx = await detectNginx(remote, bundle);
-  const mode = root ? await readProxyMode(remote, root) : null;
+  const mode = root ? await existingProxyMode(remote, root) : null;
   const wantsNginx = mode === 'nginx' || (mode === null && nginx.detected);
   return {
     mode,

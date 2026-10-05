@@ -661,7 +661,7 @@ Deployments section.
   certonly --webroot --cert-name bastion-<app>[-staging] --keep-until-expiring --expand
   --deploy-hook 'nginx -s reload'` (renewal is certbot's timer). A certbot failure leaves the
   HTTP block serving and is kept in `/var/lib/bastion-nginx/<cert>.error` for `status`. One run
-  at a time (a `mkdir` lock). BastionSSH hashes the installed helper before each run (409
+  at a time (a `mkdir` lock holding its pid: a run killed outright is taken over, signals release it); a domain `nginx -t` warns another server block already claims ("conflicting server name") restores the previous file, since nginx would serve whichever it read first. BastionSSH hashes the installed helper before each run (409
   `nginx_helper_missing` / `nginx_helper_mismatch`), runs `apply` after a successful deploy
   (its lines join the deploy log before `result`) or config change once the site file exists,
   and `remove` after a delete; failures are reported in the response and audited as

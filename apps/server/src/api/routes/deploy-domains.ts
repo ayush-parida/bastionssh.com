@@ -53,15 +53,16 @@ export async function syncProxy(
   action: 'apply' | 'remove',
   onLine?: (line: string) => void,
 ): Promise<DeployNginxApplyResult | null> {
-  if ((await readProxyMode(ctx.remote, ctx.root)) !== 'nginx') return null;
-  if (action === 'apply' && (await ctx.remote.readFile(`${ctx.root}/proxy/nginx/${app}.site`, 16 * 1024)) === null) return null;
   let result: DeployNginxApplyResult;
   try {
+    if ((await readProxyMode(ctx.remote, ctx.root)) !== 'nginx') return null;
+    if (action === 'apply' && (await ctx.remote.readFile(`${ctx.root}/proxy/nginx/${app}.site`, 16 * 1024)) === null) return null;
     result = await runHelper(ctx.remote, ctx.root, app, action, requireBundle(), onLine);
   } catch (err) {
-    if (!(err instanceof DeployError)) throw err;
-    result = { app, result: 'failed', certificate: 'skipped', error: err.message, log: [] };
-    onLine?.(`nginx: ${err.message}`);
+    // Any failure (SFTP or SSH included): the deploy, config change or delete already happened
+    const message = (err as Error).message || 'The nginx helper could not be run';
+    result = { app, result: 'failed', certificate: 'skipped', error: message.slice(0, 500), log: [] };
+    onLine?.(`nginx: ${message}`);
   }
   await audit(req, 'deploy.proxy_sync', 'server', ctx.server.id, ctx.server.name, {
     app,

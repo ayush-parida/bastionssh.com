@@ -32,7 +32,7 @@ import type { RunResult } from '../../deploy/remote.js';
 import { actorLabel, bastionctlCommand, DEPLOY_TIMEOUT_MS, parseResult, SETUP_TIMEOUT_MS } from '../../deploy/runner.js';
 import { contextFor, sendDeployError, withDeploy, withRemote, type DeployContext } from '../../deploy/service.js';
 import { openDeploySse, TOO_MANY_STREAMS, type DeploySse } from '../../deploy/sse.js';
-import { detectNginx, readProxyMode, uploadHelper } from '../../deploy/nginx.js';
+import { detectNginx, existingProxyMode, uploadHelper } from '../../deploy/nginx.js';
 import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
 
 /**
@@ -129,7 +129,11 @@ async function streamCommand(
   let error: string | null = null;
   if (parsed && 'release' in parsed) {
     outcome = parsed;
-    if (outcome.result === 'success' && after) await after((text) => sse.send({ type: 'log', lines: [{ stream: 'stderr', text }] }));
+    if (outcome.result === 'success' && after) {
+      const log = (text: string) => sse.send({ type: 'log', lines: [{ stream: 'stderr', text }] });
+      // The release is live: whatever follows must not hide its result (or skip the finish audit)
+      await after(log).catch((err: Error) => log(`warning: ${err.message}`));
+    }
     sse.send({ type: 'result', outcome });
   } else {
     error = parsed?.error ?? (result.timedOut ? 'The command did not finish in time' : 'The command ended without a result (connection lost?)');
@@ -196,7 +200,7 @@ export async function deployRoutes(app: FastifyInstance) {
           }
           await installBastionctl(remote, prepared.root, bundle);
           const ctx = contextFor(req, remote, prepared.root);
-          const proxy = requested ?? (await readProxyMode(remote, prepared.root)) ?? ((await detectNginx(remote, bundle)).detected ? 'nginx' : 'caddy');
+          const proxy = requested ?? (await existingProxyMode(remote, prepared.root)) ?? ((await detectNginx(remote, bundle)).detected ? 'nginx' : 'caddy');
           if (proxy === 'nginx') await uploadHelper(remote, prepared.root, bundle);
           const { value } = await ctx.run<DeploySetupResult>(['setup', '--proxy', proxy], { timeoutMs: SETUP_TIMEOUT_MS });
           await auditDeploy(req, 'deploy.setup', ctx, { ...base, docker: prepared.socket, proxy, result: 'success' });

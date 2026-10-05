@@ -395,7 +395,7 @@ echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/bastion-nginx' | sudo tee /etc
 sudo chmod 0440 /etc/sudoers.d/bastion-nginx
 ```
 
-The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails. It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu). From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`.
+The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails, or when `nginx -t` reports one of the app's domains as already claimed by another server block on the host (a site you serve yourself is never taken over). It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu). From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`.
 
 ### Several sites on one server
 

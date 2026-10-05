@@ -67,7 +67,7 @@ beforeEach(() => {
 echo "nginx $*" >> ${ctl}/log
 case "$1" in
   -t) if [ -f ${ctl}/fail-test ]; then echo "nginx: [emerg] unexpected end of file" >&2; exit 1; fi
-      cat ${conf}/*.conf > ${ctl}/tested 2>/dev/null; echo "nginx: configuration file test is successful" >&2 ;;
+      cat ${conf}/*.conf > ${ctl}/tested 2>/dev/null; cat ${ctl}/warn >&2 2>/dev/null; echo "nginx: configuration file test is successful" >&2 ;;
   -s) if [ -f ${ctl}/fail-reload ]; then echo "nginx: [error] reload failed" >&2; exit 1; fi ;;
   -T) echo "include ${conf}/*.conf;" ;;
 esac
@@ -178,6 +178,42 @@ describe('bastion-nginx apply', () => {
     expect(r.values.error).toMatch(/^reloading nginx failed/);
     expect(fs.readdirSync(conf)).toEqual(['default.conf']);
   });
+
+  it('refuses a domain another server block on the host already serves', () => {
+    helper('apply', root, 'site1');
+    const before = confFile();
+    fs.rmSync(path.join(ctl, 'log'));
+    // The admin's own site on the host serves shop.example.com: nginx -t passes with a warning
+    site('app=site1\ntls=auto\nupstream=18480\ndomain=site1.com\ndomain=shop.example.com\n');
+    write(path.join(ctl, 'warn'), 'nginx: [warn] conflicting server name "shop.example.com" on 0.0.0.0:80, ignored\n');
+    const r = helper('apply', root, 'site1');
+    expect(r.status).toBe(1);
+    expect(r.values.error).toBe('shop.example.com is already served by another nginx server block on this host; the previous server block of site1 is back');
+    expect(confFile()).toBe(before);
+    // Neither reloaded nor sent to certbot
+    expect(calls()).toEqual(['nginx -t']);
+    // A conflict on a name that is not the app's own is not its business
+    write(path.join(ctl, 'warn'), 'nginx: [warn] conflicting server name "www.shop.example.com" on 0.0.0.0:80, ignored\n');
+    expect(helper('apply', root, 'site1').values.result).toBe('applied');
+  });
+
+  it('takes over the lock of a run that was killed, and waits for one that is alive', () => {
+    fs.mkdirSync(path.join(state, 'lock'), { recursive: true });
+    // A pid that cannot be running
+    fs.writeFileSync(path.join(state, 'lock', 'pid'), '999999999\n');
+    const r = helper('apply', root, 'site1');
+    expect(r.values.result).toBe('applied');
+    expect(r.stderr).toContain('taking over the lock of run 999999999');
+    expect(fs.existsSync(path.join(state, 'lock'))).toBe(false);
+    // A live holder (this test's own process) is not taken over
+    fs.mkdirSync(path.join(state, 'lock'));
+    fs.writeFileSync(path.join(state, 'lock', 'pid'), `${process.pid}\n`);
+    const started = Date.now();
+    const waited = spawnSync(SHELL, ['-c', `(sleep 2; rm -rf ${state}/lock) & ${SHELL} ${script} apply ${root} site1; wait`], { encoding: 'utf8' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1500);
+    expect(waited.stdout).toContain('result=unchanged');
+    expect(waited.stderr).not.toContain('taking over');
+  }, 15_000);
 
   it('keeps serving HTTP when certbot fails, and remembers the error for status', () => {
     write(path.join(ctl, 'fail-certbot'), '');
