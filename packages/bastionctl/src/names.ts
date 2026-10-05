@@ -107,6 +107,10 @@ export class Layout {
   get buildLock() {
     return path.join(this.root, 'build.lock');
   }
+  /** Held while setup runs: two setups at once would both create the networks and the proxy container. */
+  get setupLock() {
+    return path.join(this.root, 'setup.lock');
+  }
   /** Held while the proxy config is rebuilt and switched: every app's switch in turn. */
   get proxyLock() {
     return path.join(this.root, 'proxy.lock');

@@ -76,6 +76,8 @@ import { BASTIONCTL_VERSION } from './version.js';
 const TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 /** How long a deploy waits for another app's image build (BastionSSH gives a deploy 30 minutes). */
 const BUILD_LOCK_WAIT_MS = 20 * 60_000;
+/** How long a setup waits for another one (BastionSSH gives setup 10 minutes; pulling the proxy image is most of it). */
+const SETUP_LOCK_WAIT_MS = 8 * 60_000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -301,6 +303,17 @@ export function version(): DeployVersion {
  * Caddy); changing it recreates the proxy container with the other ports.
  */
 export async function setup(ctx: Ctx, opts: { proxy?: DeployProxyMode } = {}): Promise<DeploySetupResult> {
+  // One setup at a time: a second waits, then finds everything in place
+  fs.mkdirSync(ctx.layout.root, { recursive: true, mode: 0o755 });
+  const release = await waitForLock(ctx.layout.setupLock, { holder: ctx.actor, docker: ctx.docker, now: ctx.now, what: 'setup of this server', waitMs: SETUP_LOCK_WAIT_MS, intervalMs: 500 });
+  try {
+    return await setupLocked(ctx, opts);
+  } finally {
+    release();
+  }
+}
+
+async function setupLocked(ctx: Ctx, opts: { proxy?: DeployProxyMode }): Promise<DeploySetupResult> {
   const { layout, docker } = ctx;
   for (const dir of [layout.bin, layout.apps, layout.tmp, layout.proxy, path.join(layout.proxy, 'data'), path.join(layout.proxy, 'config')]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o755 });

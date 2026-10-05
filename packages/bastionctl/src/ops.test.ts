@@ -106,6 +106,25 @@ describe('setup', () => {
     expect(fake.pulls).toHaveLength(1);
   });
 
+  it('runs two setups at once in turn, both successfully', async () => {
+    fake.networks.clear();
+    fake.internalNetworks.clear();
+    fake.containers.delete(PROXY_CONTAINER);
+    const results = await Promise.all([ops.setup(ctx()), ops.setup(ctx())]);
+    for (const r of results) expect(r).toMatchObject({ proxy: 'caddy', proxyContainer: { state: 'running' } });
+    expect(fake.networks.has('bastion-apps')).toBe(true);
+    expect(fs.existsSync(layout.setupLock)).toBe(false);
+  });
+
+  it('takes a network created by someone else meanwhile as there', async () => {
+    const docker = new DockerApi(fake.socket);
+    fake.networks.delete('bastion-test-race');
+    // Both inspect before either creates: the second create answers 409
+    const created = await Promise.all([docker.ensureNetwork('bastion-test-race', {}), docker.ensureNetwork('bastion-test-race', {})]);
+    expect(created.sort()).toEqual([false, true]);
+    fake.networks.delete('bastion-test-race');
+  });
+
   it('puts a live container from before bastion-live under its alias', async () => {
     await app();
     const id = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;

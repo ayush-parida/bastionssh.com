@@ -291,7 +291,13 @@ export class DockerApi {
   async ensureNetwork(name: string, labels: Record<string, string>, opts: { internal?: boolean } = {}): Promise<boolean> {
     const existing = await this.inspect(`/networks/${encodeURIComponent(name)}`);
     if (existing) return false;
-    await this.json('POST', '/networks/create', { body: { Name: name, Driver: 'bridge', CheckDuplicate: true, Internal: !!opts.internal, Labels: labels } });
+    try {
+      await this.json('POST', '/networks/create', { body: { Name: name, Driver: 'bridge', CheckDuplicate: true, Internal: !!opts.internal, Labels: labels } });
+    } catch (err) {
+      // Created by someone else since the inspect (another setup, by hand): it exists, which is all we need
+      if (err instanceof DockerApiError && err.status === 409) return false;
+      throw err;
+    }
     return true;
   }
 

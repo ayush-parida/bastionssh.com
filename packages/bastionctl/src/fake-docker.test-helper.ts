@@ -253,6 +253,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
       }
       if (p === '/networks/create' && req.method === 'POST') {
         const spec = JSON.parse(body.toString()) as { Name: string; Internal?: boolean };
+        if (fake.networks.has(spec.Name)) return json(409, { message: `network with name ${spec.Name} already exists` });
         fake.networks.add(spec.Name);
         if (spec.Internal) fake.internalNetworks.add(spec.Name);
         return json(201, { Id: hexId() });
