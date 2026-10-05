@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DeployAppConfig } from '@smt/shared';
+import { checkDeploySource, type DeployAppConfig, type DeploySourceView } from '@smt/shared';
 import { BUN_IMAGE, CADDY_IMAGE, IMAGES, NODE_BUILD_VERSIONS, nodeBuildImage } from './images.js';
 import { BastionError, isInside } from './names.js';
 
@@ -201,6 +201,62 @@ function nodeNote(dir: string, configured: string | null): string {
   return version === major ? `Node.js ${major}: ${ref}` : `Node.js ${version} asked for; building with the pinned Node.js ${major} image: ${ref}`;
 }
 
+/**
+ * The extracted upload as the shared source check sees it ({@link checkDeploySource}).
+ * Never through a link: a link to a folder is not a folder of the upload.
+ */
+export function sourceView(root: string): DeploySourceView {
+  const resolve = (p: string) => {
+    const full = path.resolve(root, p);
+    return isInside(root, full) ? full : null;
+  };
+  const stat = (p: string) => {
+    const full = resolve(p);
+    try {
+      return full ? fs.lstatSync(full) : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    isFile: (p) => !!stat(p)?.isFile(),
+    isDir: (p) => !!stat(p)?.isDirectory(),
+    list: (dir) => {
+      const full = resolve(dir);
+      try {
+        return full
+          ? fs
+              .readdirSync(full, { withFileTypes: true })
+              .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
+              .sort()
+          : [];
+      } catch {
+        return [];
+      }
+    },
+    readText: (p) => {
+      const s = stat(p);
+      // package.json: a file, and not one so large reading it is the problem
+      if (!s?.isFile() || s.size > 1024 * 1024) return null;
+      try {
+        return fs.readFileSync(resolve(p)!, 'utf8');
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/**
+ * Refuse an upload that cannot build as configured, with what to do instead
+ * (a static site's `.next` folder, a package.json without a build script, a
+ * missing output folder…). The browser runs the same check before uploading.
+ */
+export function checkSource(extracted: string, config: Pick<DeployAppConfig, 'build'>): void {
+  const problem = checkDeploySource(sourceView(extracted), config.build);
+  if (problem) throw new BastionError(`${problem.message} (Docs: ${problem.docs})`);
+}
+
 /** Work out how to build the extracted upload at `extracted`. */
 export function planBuild(extracted: string, config: Pick<DeployAppConfig, 'build' | 'run'>): BuildPlan {
   const context = path.resolve(extracted, config.build.dir);
@@ -213,6 +269,7 @@ export function planBuild(extracted: string, config: Pick<DeployAppConfig, 'buil
   if (!isInside(extracted, context) || !stat?.isDirectory()) {
     throw new BastionError(`build.dir ${config.build.dir} is not a folder in the upload`);
   }
+  checkSource(extracted, config);
   switch (config.build.type) {
     case 'dockerfile':
       if (!exists(context, 'Dockerfile')) throw new BastionError(`build.type is dockerfile but there is no Dockerfile in ${config.build.dir}`);

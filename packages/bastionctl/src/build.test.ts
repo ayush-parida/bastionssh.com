@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { DeployAppConfig } from '@smt/shared';
-import { detectPackageManager, GENERATED_DOCKERFILE, nodeVersion, planBuild } from './build.js';
+import { detectPackageManager, GENERATED_DOCKERFILE, nodeVersion, planBuild, sourceView } from './build.js';
 import { BUN_IMAGE, CADDY_IMAGE, IMAGES, nodeBuildImage } from './images.js';
 
 let dir: string;
@@ -123,7 +123,7 @@ describe('dockerfile and static builds', () => {
     expect(plan.generated).toBe(`FROM ${CADDY_IMAGE}\nCOPY ["out","/srv/"]\nEXPOSE 80\nCMD ["caddy", "file-server", "--root", "/srv", "--listen", ":80"]\n`);
     expect(() => planBuild(dir, config({ type: 'static', output: 'dist' }))).toThrow(/not a folder/);
 
-    write('package.json', '{}');
+    write('package.json', '{"scripts":{"build":"vite build"}}');
     write('pnpm-lock.yaml');
     plan = planBuild(dir, config({ type: 'static', output: 'dist' }));
     expect(plan.generated).toContain(`FROM ${nodeBuildImage('20')} AS build`);
@@ -134,6 +134,69 @@ describe('dockerfile and static builds', () => {
     plan = planBuild(dir, config({ type: 'static', output: 'dist' }));
     expect(plan.generated).toContain(`AS build\nWORKDIR /app\nCOPY --from=${BUN_IMAGE} /usr/local/bin/bun /usr/local/bin/bun\n`);
     expect(plan.generated).toMatch(/\/usr\/local\/bin\/bun\nCOPY \["package.json", "bun.lock", ".\/"\]\nRUN bun install --frozen-lockfile\nCOPY . .\nRUN bun run build\n/);
+  });
+
+  it('refuses a static upload that cannot build, with what to upload instead', () => {
+    const staticConfig = (output = 'out') => config({ type: 'static', output });
+    // Next's .next folder picked instead of out/
+    write('BUILD_ID', 'abc');
+    write('server/app/index.html');
+    write('static/chunks/main.js');
+    expect(() => planBuild(dir, staticConfig('.'))).toThrow(/This is Next's \.next build folder, not a static export\. Set output: 'export'.*upload the out folder \(it contains index\.html\)/);
+    fs.rmSync(path.join(dir, 'BUILD_ID'));
+    // server/ next to static/ is enough to tell
+    expect(() => planBuild(dir, staticConfig('.'))).toThrow(/\.next build folder/);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir);
+
+    // The whole project with its built .next/ and out/: package.json without a build script is not run
+    write('package.json', '{"name":"site","scripts":{"start":"next start"}}');
+    write('out/index.html');
+    expect(() => planBuild(dir, staticConfig())).toThrow(/package\.json has no build script.*Missing script: build.*upload only its output folder/);
+    write('package.json', '{not json');
+    expect(() => planBuild(dir, staticConfig())).toThrow(/package\.json is not valid JSON/);
+    fs.rmSync(path.join(dir, 'package.json'));
+
+    // output: out, but the out folder's contents were uploaded: what is at the root is named
+    fs.rmSync(path.join(dir, 'out'), { recursive: true });
+    write('index.html');
+    write('_next/static/x.js');
+    expect(() => planBuild(dir, staticConfig())).toThrow(/build\.output out is not a folder in the upload\. At the top of the upload: _next\/, index\.html\. .*set build\.output to \./);
+    expect(planBuild(dir, staticConfig('.')).generated).toContain('COPY [".","/srv/"]');
+
+    // distDir: 'out' without output: 'export' makes out/ a Next build folder
+    write('out/BUILD_ID');
+    write('out/required-server-files.json');
+    expect(() => planBuild(dir, staticConfig())).toThrow(/out is a Next\.js build folder.*distDir: 'out'/);
+    // Every refusal points at the docs
+    expect(() => planBuild(dir, staticConfig())).toThrow(/Docs: \/docs\/deployments\/troubleshooting#uploaded-a-nextjs-build-folder/);
+  });
+
+  it('refuses a Next.js upload without package.json, or a build folder, before building', () => {
+    write('BUILD_ID');
+    write('server/pages/index.js');
+    write('static/css/a.css');
+    expect(() => planBuild(dir, config())).toThrow(/This is Next's \.next build folder, not your project's source.*build\.type: dockerfile/);
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(dir);
+    write('app/page.tsx');
+    expect(() => planBuild(dir, config())).toThrow(/build\.type is nextjs but there is no package\.json in the upload\. .*Found: app\//);
+    write('web/package.json', '{}');
+    expect(() => planBuild(dir, config({ dir: 'web' }))).toThrow(/output: 'standalone'/);
+  });
+
+  it('looks at the upload without following links', () => {
+    write('real/BUILD_ID');
+    fs.symlinkSync(path.join(dir, 'real/BUILD_ID'), path.join(dir, 'BUILD_ID'));
+    fs.mkdirSync(path.join(dir, 'out'));
+    write('out/index.html');
+    const view = sourceView(dir);
+    expect(view.isFile('BUILD_ID')).toBe(false);
+    expect(view.isFile('real/BUILD_ID')).toBe(true);
+    expect(view.isDir('out')).toBe(true);
+    expect(view.list('')).toEqual(['BUILD_ID', 'out/', 'real/']);
+    expect(view.isFile('../etc/passwd')).toBe(false);
+    expect(planBuild(dir, config({ type: 'static', output: 'out' })).generated).toContain('COPY ["out","/srv/"]');
   });
 
   it('never reads a config file through a link', () => {

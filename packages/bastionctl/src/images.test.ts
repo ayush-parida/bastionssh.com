@@ -54,7 +54,7 @@ describe('pinned images', () => {
       fs.mkdirSync(path.join(dir, 'out'));
       write('out/index.html', 'hi');
       const texts = [planBuild(dir, config({ type: 'static', output: 'out' })).generated!];
-      write('package.json', '{}');
+      write('package.json', '{"scripts":{"build":"next build"}}');
       write('next.config.js', "module.exports = { output: 'standalone' };");
       for (const lockfile of ['pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'package-lock.json']) {
         write(lockfile);

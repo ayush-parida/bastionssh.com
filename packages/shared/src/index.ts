@@ -24,6 +24,7 @@ export * from './types/recording.js';
 export * from './types/docker.js';
 export * from './types/deploy.js';
 export * from './types/deploy-permissions.js';
+export * from './types/deploy-source.js';
 export * from './types/kube.js';
 export * from './types/kube-pods.js';
 export * from './types/pagination.js';
