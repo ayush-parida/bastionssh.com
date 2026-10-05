@@ -11,6 +11,12 @@ export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/;
 export const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export const NETWORK = 'bastion-apps';
+/**
+ * Internal network the proxy reaches live releases on, by an alias per app
+ * and port (see {@link liveAlias}). A release joins it only after its health
+ * check, so a deploy moves traffic without reloading the proxy.
+ */
+export const LIVE_NETWORK = 'bastion-live';
 export const PROXY_CONTAINER = 'bastion-caddy';
 export const LABEL_APP = 'bastion.app';
 export const LABEL_RELEASE = 'bastion.release';
@@ -62,6 +68,14 @@ export function newReleaseId(now: Date, checksum: string): string {
 
 export const imageName = (app: string, release: string) => `bastion-${app}:${release}`;
 export const containerName = (app: string, release: string) => `bastion-${app}-${release}`;
+/**
+ * The name the proxy sends an app's traffic to on {@link LIVE_NETWORK}: every
+ * live container of the app answers to it. The port is part of it, so a
+ * release listening on another port never shares it with the one serving. It
+ * cannot equal a container name (those end in a release id) or another app's
+ * alias (the app name is followed by `-live-` and digits only).
+ */
+export const liveAlias = (app: string, port: number) => `bastion-${app}-live-${port}`;
 /**
  * Named Docker volume for `volumes: ["<name>:/path"]`. The `.` cannot occur
  * in an app or volume name, so no two apps share one: with `-`, app `a`'s

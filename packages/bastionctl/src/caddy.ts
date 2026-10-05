@@ -2,10 +2,11 @@ import type { DeployAppConfig } from '@smt/shared';
 
 /**
  * The Caddyfile (deployments spec §5 step 6, §6), generated from every app on
- * the server: one site block per app serving its domains through its current
- * container, plus redirect blocks for `redirect_www`. Never hand-edited — it
- * is rewritten on every deploy, rollback, config change and `proxy apply`.
- * Every value placed in it was validated first (domains, app names, release
+ * the server: one site block per app serving its domains through the app's
+ * live alias, plus redirect blocks for `redirect_www`. Never hand-edited — it
+ * is regenerated on every deploy, rollback, config change and `proxy apply`;
+ * a deploy reloads Caddy only when the text changed (`proxy apply` always
+ * does). Every value placed in it was validated first (domains, app names, release
  * ids, ports, provider names), so nothing user-written can open a new
  * directive.
  */
@@ -13,6 +14,8 @@ import type { DeployAppConfig } from '@smt/shared';
 /** Where the proxy container sees `<root>/proxy`. */
 export const PROXY_MOUNT = '/bastion-proxy';
 const STAGING_CA = 'https://acme-staging-v02.api.letsencrypt.org/directory';
+/** How long Caddy keeps trying an app's upstream for one request (GETs, and any request that never reached it). */
+const RETRY_DURATION = '5s';
 
 export interface ProxySite {
   app: string;
@@ -20,7 +23,7 @@ export interface ProxySite {
   domains: string[];
   redirect_www: DeployAppConfig['redirect_www'];
   tls: DeployAppConfig['tls'];
-  /** `bastion-<app>-<release>:<port>` on the bastion-apps network. */
+  /** `bastion-<app>-live-<port>:<port>`: the app's live alias on the bastion-live network. */
   upstream: string;
 }
 
@@ -70,9 +73,19 @@ export function generateCaddyfile(sites: readonly ProxySite[]): string {
   for (const site of [...sites].sort((a, b) => a.app.localeCompare(b.app))) {
     const { served, redirects } = splitRedirects(site.domains, site.redirect_www);
     const tls = tlsLines(site);
-    out.push('', `# app ${site.app}, release ${site.release}`);
+    // No release in here: a deploy that only moves the live alias leaves this file as it is
+    out.push('', `# app ${site.app}`);
     if (served.length > 0) {
-      out.push(`${served.join(', ')} {`, ...tls, '\tencode zstd gzip', `\treverse_proxy ${site.upstream}`, '}');
+      out.push(
+        `${served.join(', ')} {`,
+        ...tls,
+        '\tencode zstd gzip',
+        // While a deploy stops the previous container, a request it dropped is tried again on the new one
+        `\treverse_proxy ${site.upstream} {`,
+        `\t\tlb_try_duration ${RETRY_DURATION}`,
+        '\t}',
+        '}',
+      );
     }
     for (const [from, to] of redirects) {
       out.push('', `${from} {`, ...tls, `\tredir https://${to}{uri} permanent`, '}');

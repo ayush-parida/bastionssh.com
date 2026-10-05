@@ -86,6 +86,7 @@ describe('setup', () => {
     for (const dir of ['bin', 'apps', 'tmp', 'proxy/data', 'proxy/config']) expect(fs.statSync(path.join(root, dir)).isDirectory(), dir).toBe(true);
     expect(fs.statSync(layout.tmp).mode & 0o777).toBe(0o700);
     expect(fake.networks.has('bastion-apps')).toBe(true);
+    expect([...fake.internalNetworks]).toEqual(['bastion-live']);
     expect(fake.pulls).toEqual([CADDY_IMAGE]);
     const proxy = fake.containers.get(PROXY_CONTAINER)!;
     expect(proxy.Image).toBe(CADDY_IMAGE);
@@ -95,6 +96,7 @@ describe('setup', () => {
       NetworkMode: 'bastion-apps',
       RestartPolicy: { Name: 'unless-stopped' },
     });
+    expect(proxy.Networks).toEqual({ 'bastion-live': { Aliases: [] } });
     expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('admin localhost:2019');
 
     const id = proxy.Id;
@@ -102,6 +104,16 @@ describe('setup', () => {
     expect(again).toMatchObject({ root, proxy: 'caddy', network: 'bastion-apps', proxyContainer: { state: 'running' } });
     expect(fake.containers.get(PROXY_CONTAINER)!.Id).toBe(id);
     expect(fake.pulls).toHaveLength(1);
+  });
+
+  it('puts a live container from before bastion-live under its alias', async () => {
+    await app();
+    const id = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    const c = fake.containers.get(`bastion-site1-${id}`)!;
+    c.Networks = {};
+    await ops.setup(ctx());
+    expect(c.Networks).toEqual({ 'bastion-live': { Aliases: ['bastion-site1-live-3000'] } });
+    expect(logs).toContain('Put site1 on bastion-live');
   });
 });
 
@@ -133,12 +145,15 @@ describe('deploy', () => {
       Mounts: [{ Type: 'volume', Source: 'bastion-site1.data', Target: '/data', ReadOnly: false }],
     });
     expect(c.HostConfig).not.toHaveProperty('PortBindings');
+    // In the proxy's rotation under the app's live alias, joined after the health check
+    expect(c.Networks).toEqual({ 'bastion-live': { Aliases: ['bastion-site1-live-3000'] } });
+    expect(fake.requests.indexOf('POST /networks/bastion-live/connect')).toBeGreaterThan(fake.requests.indexOf('POST /exec/' + ''));
 
     // Health check from the proxy, then validate before reload
     expect(fake.execs[0]).toEqual({ container: PROXY_CONTAINER, cmd: ['wget', '-q', '-O', '/dev/null', '-T', '5', `http://bastion-site1-${id}:3000/health`] });
     expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
     const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
-    expect(caddyfile).toContain(`site1.com {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-${id}:3000\n}`);
+    expect(caddyfile).toContain('site1.com {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-live-3000:3000 {\n\t\tlb_try_duration 5s\n\t}\n}');
     expect(caddyfile).toContain('www.site1.com {\n\tredir https://site1.com{uri} permanent\n}');
     expect(fs.existsSync(`${layout.caddyfile}.next`)).toBe(false);
 
@@ -156,7 +171,11 @@ describe('deploy', () => {
   it('replaces the old container only after the new one serves, and prunes beyond keep_releases', async () => {
     await app();
     const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
     const second = (await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'))).release;
+    // Same domains and port: traffic moved over the live alias, Caddy was not reloaded
+    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
+    expect(logs).toContain('Proxy config unchanged; traffic moves over the live network');
     expect(fake.containers.has(`bastion-site1-${first}`)).toBe(false);
     expect(fake.containers.get(`bastion-site1-${second}`)!.State.Running).toBe(true);
     expect([currentRelease(layout, 'site1'), previousRelease(layout, 'site1')]).toEqual([second, first]);
@@ -166,6 +185,20 @@ describe('deploy', () => {
     expect(releaseIds(layout, 'site1')).toEqual([second, third]);
     expect(fake.images.has(`bastion-site1:${first}`)).toBe(false);
     expect(fake.images.has(`bastion-site1:${second}`)).toBe(true);
+  });
+
+  it('removes labelled images no kept release names, and nothing of other apps', async () => {
+    await app();
+    const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    // A release folder deleted by hand, and another app's image
+    const stray = '20260101-000000-deadbeef';
+    fake.images.set(`bastion-site1:${stray}`, { Id: 'sha256:stray', Labels: { 'bastion.app': 'site1', 'bastion.release': stray } });
+    fake.images.set(`bastion-site2:${stray}`, { Id: 'sha256:other', Labels: { 'bastion.app': 'site2', 'bastion.release': stray } });
+    const second = (await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'))).release;
+    expect(fake.images.has(`bastion-site1:${stray}`)).toBe(false);
+    expect(fake.images.has(`bastion-site2:${stray}`)).toBe(true);
+    expect([first, second].map((id) => fake.images.has(`bastion-site1:${id}`))).toEqual([true, true]);
+    expect(logs).toContain('Removed 1 image of releases no longer kept');
   });
 
   it('leaves the old release serving when the new one fails its health check', async () => {
@@ -200,6 +233,9 @@ describe('deploy', () => {
   it('restores the previous proxy config when Caddy refuses to reload', async () => {
     await app();
     const good = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    // Another port: the next release needs a new upstream, so a reload
+    fs.writeFileSync(path.join(layout.tmp, 'port.yml'), SITE1.replace('port: 3000', 'port: 4000'));
+    await ops.init(ctx(), 'site1', { config: 'tmp/port.yml', force: true });
     const before = fs.readFileSync(layout.caddyfile, 'utf8');
     let reloads = 0;
     fake.exec = ({ cmd }) => (cmd[1] === 'reload' && ++reloads === 1 ? { exitCode: 1, stderr: 'Error: loading new config: bad things' } : { exitCode: 0 });
@@ -261,15 +297,14 @@ describe('deploy', () => {
     const [a, b] = await Promise.all([ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1')), ops.deploy(ctx(), 'blog', upload('b.tgz', 'v1'))]);
     expect([a.result, b.result]).toEqual(['success', 'success']);
     const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
-    expect(caddyfile).toContain(`reverse_proxy bastion-site1-${a.release}:3000`);
-    expect(caddyfile).toContain(`reverse_proxy bastion-blog-${b.release}:3000`);
+    expect(caddyfile).toContain('reverse_proxy bastion-site1-live-3000:3000 {');
+    expect(caddyfile).toContain('reverse_proxy bastion-blog-live-3000:3000 {');
     expect([currentRelease(layout, 'site1'), currentRelease(layout, 'blog')]).toEqual([a.release, b.release]);
 
     const [a2, b2] = await Promise.all([ops.deploy(ctx(), 'site1', upload('c.tgz', 'v2')), ops.deploy(ctx(), 'blog', upload('d.tgz', 'v2'))]);
     expect([a2.result, b2.result]).toEqual(['success', 'success']);
-    const after = fs.readFileSync(layout.caddyfile, 'utf8');
-    expect(after).toContain(`reverse_proxy bastion-site1-${a2.release}:3000`);
-    expect(after).toContain(`reverse_proxy bastion-blog-${b2.release}:3000`);
+    // Same ports: the config stands and only the live containers changed
+    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toBe(caddyfile);
     expect(fake.containers.get(`bastion-site1-${a2.release}`)!.State.Running).toBe(true);
     expect(fake.containers.get(`bastion-blog-${b2.release}`)!.State.Running).toBe(true);
     expect(fs.existsSync(layout.proxyLock)).toBe(false);
@@ -282,23 +317,24 @@ describe('deploy', () => {
     const a = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
     const b = (await ops.deploy(ctx(), 'blog', upload('b.tgz', 'v1'))).release;
     // Two switches at once, as two deploys' activations would run them
-    const next = (name: string, from: string) => {
+    // On new ports, so each switch changes the config
+    const next = (name: string, from: string, port: number) => {
       const id = `${from.slice(0, -8)}ffffffff`;
       const old = readRelease(layout, name, from)!;
       fs.mkdirSync(layout.release(name, id));
-      writeRelease(layout, { ...old, id, container: `bastion-${name}-${id}` });
+      writeRelease(layout, { ...old, id, container: `bastion-${name}-${id}`, port });
       return id;
     };
-    const a2 = next('site1', a);
-    const b2 = next('blog', b);
+    const a2 = next('site1', a, 3001);
+    const b2 = next('blog', b, 3002);
     const config = (name: string) => loadConfig(layout, name);
     await Promise.all([
-      applyProxy(ctx(), new Map([['site1', siteFor(config('site1'), a2, `bastion-site1-${a2}`, 3000)]]), () => setCurrent(layout, 'site1', a2)),
-      applyProxy(ctx(), new Map([['blog', siteFor(config('blog'), b2, `bastion-blog-${b2}`, 3000)]]), () => setCurrent(layout, 'blog', b2)),
+      applyProxy(ctx(), new Map([['site1', siteFor(config('site1'), a2, 3001)]]), () => setCurrent(layout, 'site1', a2)),
+      applyProxy(ctx(), new Map([['blog', siteFor(config('blog'), b2, 3002)]]), () => setCurrent(layout, 'blog', b2)),
     ]);
     const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
-    expect(caddyfile).toContain(`reverse_proxy bastion-site1-${a2}:3000`);
-    expect(caddyfile).toContain(`reverse_proxy bastion-blog-${b2}:3000`);
+    expect(caddyfile).toContain('reverse_proxy bastion-site1-live-3001:3001 {');
+    expect(caddyfile).toContain('reverse_proxy bastion-blog-live-3002:3002 {');
     expect(fs.existsSync(layout.proxyLock)).toBe(false);
   });
 
@@ -332,7 +368,7 @@ describe('rollback, restart, stop and delete', () => {
     expect(fake.builds).toHaveLength(builds);
     expect(fake.containers.get(`bastion-site1-${first}`)!.State.Running).toBe(true);
     expect(fake.containers.has(`bastion-site1-${second}`)).toBe(false);
-    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain(`reverse_proxy bastion-site1-${first}:3000`);
+    expect(fake.containers.get(`bastion-site1-${first}`)!.Networks).toEqual({ 'bastion-live': { Aliases: ['bastion-site1-live-3000'] } });
     expect([currentRelease(layout, 'site1'), previousRelease(layout, 'site1')]).toEqual([first, second]);
 
     await expect(ops.rollback(ctx(), 'site1', first)).rejects.toThrow(/already the current release/);

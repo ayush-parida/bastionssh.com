@@ -29,6 +29,8 @@ describe('Next.js builds', () => {
     ['pnpm-lock.yaml', 'pnpm', 'corepack enable && pnpm install --frozen-lockfile', 'pnpm run build'],
     ['yarn.lock', 'yarn', 'corepack enable && yarn install --frozen-lockfile', 'yarn build'],
     ['package-lock.json', 'npm', 'npm ci', 'npm run build'],
+    ['bun.lock', 'bun', 'bun install --frozen-lockfile', 'bun run build'],
+    ['bun.lockb', 'bun', 'bun install --frozen-lockfile', 'bun run build'],
   ])('with %s installs with %s', (lockfile, manager, install, build) => {
     write('package.json', '{"name":"x"}');
     write(lockfile);
@@ -43,6 +45,9 @@ describe('Next.js builds', () => {
     expect(plan.generated).toContain('FROM node:20-alpine AS run');
     expect(plan.generated).toContain('PORT=3000 HOSTNAME=0.0.0.0');
     expect(plan.generated).toContain('CMD ["node", "server.js"]');
+    // Bun is brought into the install and build stages only; the server runs on Node
+    const bunLines = plan.generated!.split('\n').filter((l) => l.includes('oven/bun'));
+    expect(bunLines).toEqual(manager === 'bun' ? Array(2).fill('COPY --from=oven/bun:1-alpine /usr/local/bin/bun /usr/local/bin/bun') : []);
   });
 
   it('uses yarn berry, npm install without a lockfile, and the configured port', () => {
@@ -95,6 +100,11 @@ describe('dockerfile and static builds', () => {
     write('pnpm-lock.yaml');
     plan = planBuild(dir, config({ type: 'static', output: 'dist' }));
     expect(plan.generated).toMatch(/FROM node:20-alpine AS build[\s\S]*pnpm run build[\s\S]*FROM caddy@sha256:[0-9a-f]{64}\nCOPY --from=build \["\/app\/dist","\/srv\/"\]/);
+
+    fs.rmSync(path.join(dir, 'pnpm-lock.yaml'));
+    write('bun.lock');
+    plan = planBuild(dir, config({ type: 'static', output: 'dist' }));
+    expect(plan.generated).toMatch(/AS build\nWORKDIR \/app\nCOPY --from=oven\/bun:1-alpine \/usr\/local\/bin\/bun \/usr\/local\/bin\/bun\nCOPY \["package.json", "bun.lock", ".\/"\]\nRUN bun install --frozen-lockfile\nCOPY . .\nRUN bun run build\n/);
   });
 
   it('never reads a config file through a link', () => {

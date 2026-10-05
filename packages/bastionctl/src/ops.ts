@@ -29,13 +29,27 @@ import {
   LABEL_APP,
   LABEL_MANAGED,
   LABEL_RELEASE,
+  LIVE_NETWORK,
+  liveAlias,
   newReleaseId,
   NETWORK,
   PROXY_CONTAINER,
   releaseId,
   volumeName,
 } from './names.js';
-import { applyProxy, CADDY_IMAGE, proxyContainer, proxyEnv, proxySpec, siteFor, switchProxy, withProxyLock, writeInitialCaddyfile } from './proxy.js';
+import {
+  applyProxy,
+  CADDY_IMAGE,
+  joinLive,
+  proxyContainer,
+  proxyEnv,
+  proxySpec,
+  requireProxy,
+  siteFor,
+  switchProxy,
+  withProxyLock,
+  writeInitialCaddyfile,
+} from './proxy.js';
 import {
   clearCurrent,
   currentRelease,
@@ -171,11 +185,21 @@ async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string,
 }
 
 /**
- * Start `record`'s image as the app's live container (spec §5 steps 4–7):
- * a new container next to the old one, health check, proxy switched to it,
- * `current` moved, then the app's other containers stopped and removed after
- * the drain delay. Any failure before the switch removes the new container
- * and leaves the old one serving.
+ * Start `record`'s image as the app's live container (spec §5 steps 4–7),
+ * with no request lost:
+ *
+ * 1. a new container next to the old one, on bastion-apps only — out of
+ *    the proxy's rotation — and its health check;
+ * 2. the new container joins bastion-live under the app's live alias, so it
+ *    serves next to the old one; the proxy config is regenerated and
+ *    reloaded only if it changed (first deploy, another port), and
+ *    `current` moves;
+ * 3. after the drain delay the app's other containers are stopped (each gets
+ *    SIGTERM and time to finish) and removed; a GET one of them drops is
+ *    retried by Caddy on the new one.
+ *
+ * Any failure before step 3 removes the new container (and with it its
+ * alias) and leaves the old one serving.
  */
 async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord): Promise<void> {
   const name = containerName(config.name, record.id);
@@ -186,8 +210,12 @@ async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord
   try {
     await ctx.docker.start(name);
     await waitHealthy(ctx, config, name, record.port);
+    await requireProxy(ctx);
     // `current` moves while the proxy lock is still held, so another app's switch builds on it
-    await applyProxy(ctx, new Map([[config.name, siteFor(config, record.id, name, record.port)]]), () => {
+    await withProxyLock(ctx, async () => {
+      await joinLive(ctx, name, liveAlias(config.name, record.port));
+      ctx.log(`${name} is live`);
+      await switchProxy(ctx, new Map([[config.name, siteFor(config, record.id, record.port)]]), { onlyIfChanged: true });
       // Release dirs may be gone for a CLI user who deleted them; the link still moves
       fs.mkdirSync(ctx.layout.release(config.name, record.id), { recursive: true });
       setCurrent(ctx.layout, config.name, record.id);
@@ -201,7 +229,7 @@ async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord
   const others = (await ctx.docker.listContainers([`${LABEL_APP}=${config.name}`])).filter((c) => !c.Names.includes(`/${name}`));
   if (others.length > 0) {
     if (ctx.drainMs > 0) {
-      ctx.log(`Draining the previous container for ${Math.round(ctx.drainMs / 1000)}s`);
+      ctx.log(`Both releases serve for ${Math.round(ctx.drainMs / 1000)}s, then the previous container stops`);
       await sleep(ctx.drainMs);
     }
     for (const c of others) {
@@ -212,9 +240,17 @@ async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord
   }
 }
 
-/** Remove releases (and their images) beyond keep_releases; never current or previous (spec §5 step 8). */
+/**
+ * Remove releases (and their images) beyond keep_releases; never current or
+ * previous (spec §5 step 8). Then the app's labelled images that no kept
+ * release names — left by a release folder deleted by hand, or a deploy cut
+ * off between build and record. The caller holds the app's deploy lock, so no
+ * build of this app is in flight.
+ */
 export async function prune(ctx: Ctx, app: string, keep: number): Promise<string[]> {
-  const removed = pruneCandidates(releaseIds(ctx.layout, app), keep, currentRelease(ctx.layout, app), previousRelease(ctx.layout, app));
+  const current = currentRelease(ctx.layout, app);
+  const previous = previousRelease(ctx.layout, app);
+  const removed = pruneCandidates(releaseIds(ctx.layout, app), keep, current, previous);
   for (const id of removed) {
     const record = readRelease(ctx.layout, app, id);
     if (record?.image) {
@@ -223,6 +259,24 @@ export async function prune(ctx: Ctx, app: string, keep: number): Promise<string
     fs.rmSync(ctx.layout.release(app, id), { recursive: true, force: true });
   }
   if (removed.length > 0) ctx.log(`Pruned ${removed.length} old release${removed.length === 1 ? '' : 's'}`);
+
+  const kept = new Set([...releaseIds(ctx.layout, app), current, previous]);
+  const repo = `bastion-${app}`;
+  let orphans = 0;
+  for (const image of await ctx.docker.listImages([`${LABEL_APP}=${app}`])) {
+    const release = image.Labels?.[LABEL_RELEASE];
+    if (release && kept.has(release)) continue;
+    // By tag (only ours, never a kept release's); an untagged image by id
+    const tags = (image.RepoTags ?? []).filter((t) => t !== '<none>:<none>');
+    const refs = tags.length > 0 ? tags.filter((t) => t.startsWith(`${repo}:`) && !kept.has(t.slice(repo.length + 1))) : [image.Id];
+    for (const ref of refs) {
+      await ctx.docker
+        .removeImage(ref)
+        .then(() => orphans++)
+        .catch((err: Error) => ctx.log(`warning: could not remove image ${ref}: ${err.message}`));
+    }
+  }
+  if (orphans > 0) ctx.log(`Removed ${orphans} image${orphans === 1 ? '' : 's'} of releases no longer kept`);
   return removed;
 }
 
@@ -242,6 +296,8 @@ export async function setup(ctx: Ctx): Promise<DeploySetupResult> {
   cleanTmp(ctx);
   await docker.ping();
   if (await docker.ensureNetwork(NETWORK, { [LABEL_MANAGED]: 'network' })) ctx.log(`Created network ${NETWORK}`);
+  // Internal: apps reach the outside over bastion-apps; this one only carries the proxy's traffic to them
+  if (await docker.ensureNetwork(LIVE_NETWORK, { [LABEL_MANAGED]: 'network' }, { internal: true })) ctx.log(`Created network ${LIVE_NETWORK}`);
   if (!(await docker.imageExists(CADDY_IMAGE))) {
     ctx.log(`Pulling ${images.caddy}`);
     await docker.pull(images.caddy, (line) => ctx.log(line));
@@ -258,6 +314,7 @@ export async function setup(ctx: Ctx): Promise<DeploySetupResult> {
     ctx.log(`Creating ${PROXY_CONTAINER}`);
     await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv)));
   }
+  await joinLive(ctx, PROXY_CONTAINER);
   if (!info?.State.Running) {
     try {
       await docker.start(PROXY_CONTAINER);
@@ -268,6 +325,13 @@ export async function setup(ctx: Ctx): Promise<DeploySetupResult> {
       }
       throw err;
     }
+  }
+  // Every app's current container answers to its live alias (containers from before bastion-live too)
+  for (const app of appNames(layout)) {
+    const id = currentRelease(layout, app);
+    const record = id ? readRelease(layout, app, id) : null;
+    if (!record?.port || !(await docker.inspectContainer(containerName(app, record.id)))) continue;
+    if (await joinLive(ctx, containerName(app, record.id), liveAlias(app, record.port))) ctx.log(`Put ${app} on ${LIVE_NETWORK}`);
   }
   // Bring the live config up to date with the apps on disk
   if (appNames(layout).some((a) => currentRelease(layout, a))) await applyProxy(ctx);

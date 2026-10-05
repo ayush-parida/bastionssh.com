@@ -288,11 +288,18 @@ export class DockerApi {
     if (pending) onLine(pending);
   }
 
-  async ensureNetwork(name: string, labels: Record<string, string>): Promise<boolean> {
+  async ensureNetwork(name: string, labels: Record<string, string>, opts: { internal?: boolean } = {}): Promise<boolean> {
     const existing = await this.inspect(`/networks/${encodeURIComponent(name)}`);
     if (existing) return false;
-    await this.json('POST', '/networks/create', { body: { Name: name, Driver: 'bridge', CheckDuplicate: true, Labels: labels } });
+    await this.json('POST', '/networks/create', { body: { Name: name, Driver: 'bridge', CheckDuplicate: true, Internal: !!opts.internal, Labels: labels } });
     return true;
+  }
+
+  /** Attach a container (running or not) to a network under `aliases`. */
+  async connectNetwork(network: string, container: string, aliases: string[] = []): Promise<void> {
+    await this.request('POST', `/networks/${encodeURIComponent(network)}/connect`, {
+      body: { Container: container, EndpointConfig: { Aliases: aliases } },
+    });
   }
 
   async removeVolume(name: string): Promise<void> {
@@ -374,4 +381,5 @@ export interface ContainerInspect {
   Config: { Image: string; Labels: Record<string, string> | null };
   State: { Status: string; Running: boolean; Restarting?: boolean; StartedAt?: string; ExitCode?: number; Health?: { Status: string } };
   RestartCount?: number;
+  NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null } | null> | null };
 }

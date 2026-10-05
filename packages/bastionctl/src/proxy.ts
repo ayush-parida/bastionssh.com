@@ -6,7 +6,7 @@ import { appNames, tryLoadConfig } from './config.js';
 import type { Ctx } from './context.js';
 import { certPaths, generateCaddyfile, PROXY_MOUNT, type ProxySite } from './caddy.js';
 import { waitForLock } from './lock.js';
-import { BastionError, containerName, isInside, LABEL_MANAGED, NETWORK, PROXY_CONTAINER } from './names.js';
+import { BastionError, containerName, isInside, LABEL_MANAGED, LIVE_NETWORK, liveAlias, NETWORK, PROXY_CONTAINER } from './names.js';
 import { currentRelease, readRelease } from './releases.js';
 
 /**
@@ -15,6 +15,15 @@ import { currentRelease, readRelease } from './releases.js';
  * `<root>/proxy` mounted at /bastion-proxy. Applying a new Caddyfile writes it
  * beside the old one, has Caddy validate it, swaps it in and reloads
  * gracefully; a failed reload puts the previous file back and reloads that.
+ *
+ * Caddy reaches each app by its live alias on `bastion-live` (names.ts
+ * liveAlias), not by container name. A deploy moves traffic by attaching the
+ * healthy new container under that alias and stopping the old one, with no
+ * reload at all: even a graceful reload drops the odd connection Caddy had
+ * just accepted (Go's server shutdown closes a connection whose request
+ * arrives after it began), and on a busy site that is a failed request on
+ * every deploy of any app. Only config changes (domains, TLS, port, apps
+ * added or removed) reload.
  */
 
 /** Pinned image reference for creating the container (`repo@sha256:…`). */
@@ -23,8 +32,8 @@ export const CADDY_IMAGE = images.caddy.replace(/:[^/@]*@/, '@');
 /** An app whose entry in the proxy changes: a new upstream, or null to drop it. */
 export type ProxyOverride = Map<string, ProxySite | null>;
 
-export function siteFor(config: DeployAppConfig, release: string, container: string, port: number): ProxySite {
-  return { app: config.name, release, domains: config.domains, redirect_www: config.redirect_www, tls: config.tls, upstream: `${container}:${port}` };
+export function siteFor(config: DeployAppConfig, release: string, port: number): ProxySite {
+  return { app: config.name, release, domains: config.domains, redirect_www: config.redirect_www, tls: config.tls, upstream: `${liveAlias(config.name, port)}:${port}` };
 }
 
 /** The sites of every app with a current release, apps in `overrides` replaced. Apps in nginx mode are not Caddy's. */
@@ -54,7 +63,7 @@ export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyO
       ctx.log(`warning: ${app} is left out of the proxy: release.json of ${current} names another container or port`);
       continue;
     }
-    sites.push(siteFor(config, current, record.container, record.port));
+    sites.push(siteFor(config, current, record.port));
   }
   return sites;
 }
@@ -93,7 +102,7 @@ export async function proxyContainer(ctx: Pick<Ctx, 'docker'>): Promise<DeployCo
   };
 }
 
-async function requireProxy(ctx: Pick<Ctx, 'docker'>) {
+export async function requireProxy(ctx: Pick<Ctx, 'docker'>) {
   const proxy = await proxyContainer(ctx);
   if (!proxy) throw new BastionError('The proxy is not set up on this server (run bastionctl setup)');
   if (proxy.state !== 'running') throw new BastionError(`The proxy container ${PROXY_CONTAINER} is ${proxy.state} (run bastionctl setup)`);
@@ -101,6 +110,14 @@ async function requireProxy(ctx: Pick<Ctx, 'docker'>) {
 
 async function caddy(ctx: Pick<Ctx, 'docker'>, args: string[]) {
   return ctx.docker.exec(PROXY_CONTAINER, ['caddy', ...args, '--adapter', 'caddyfile'], 60_000);
+}
+
+function readText(file: string): string | null {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
 }
 
 function lastLines(text: string, n = 6): string {
@@ -133,6 +150,11 @@ export async function applyProxy(
   });
 }
 
+export interface SwitchOptions {
+  /** Leave Caddy alone when the generated file is the one it runs (a deploy that only moved the live alias). */
+  onlyIfChanged?: boolean;
+}
+
 /** Run `fn` holding `proxy.lock` (see {@link applyProxy}); waits for another run's switch to finish. */
 export async function withProxyLock<T>(ctx: Pick<Ctx, 'layout' | 'docker' | 'actor' | 'now'>, fn: () => Promise<T>): Promise<T> {
   const release = await waitForLock(ctx.layout.proxyLock, {
@@ -150,11 +172,15 @@ export async function withProxyLock<T>(ctx: Pick<Ctx, 'layout' | 'docker' | 'act
 }
 
 /** The switch itself; the caller holds `proxy.lock` and checked the proxy runs. */
-export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride): Promise<void> {
+export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride, opts: SwitchOptions = {}): Promise<void> {
   const sites = collectSites(ctx, overrides);
   copyCertificates(ctx, sites);
   const text = generateCaddyfile(sites);
   const file = ctx.layout.caddyfile;
+  if (opts.onlyIfChanged && readText(file) === text) {
+    ctx.log('Proxy config unchanged; traffic moves over the live network');
+    return;
+  }
   const next = `${file}.next`;
   const prev = `${file}.prev`;
   fs.writeFileSync(next, text, { mode: 0o644 });
@@ -180,6 +206,18 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
     if (restored.exitCode !== 0) ctx.log(`warning: reloading the previous proxy config failed too: ${lastLines(restored.stderr)}`);
   }
   throw new BastionError(`Reloading the proxy failed; the previous config was restored:\n${reason}`);
+}
+
+/** Attach `container` to the live network under `alias` unless it already answers to it there. */
+export async function joinLive(ctx: Pick<Ctx, 'docker'>, container: string, alias?: string): Promise<boolean> {
+  const info = await ctx.docker.inspectContainer(container);
+  if (!info) throw new BastionError(`No container ${container}`);
+  const endpoint = info.NetworkSettings?.Networks?.[LIVE_NETWORK];
+  if (endpoint && (!alias || endpoint.Aliases?.includes(alias))) return false;
+  // Attached under other aliases (a container from before this release's port): not ours to fix here
+  if (endpoint) throw new BastionError(`${container} is on ${LIVE_NETWORK} without the alias ${alias}`);
+  await ctx.docker.connectNetwork(LIVE_NETWORK, container, alias ? [alias] : []);
+  return true;
 }
 
 /** Write the Caddyfile without a running proxy (first setup). */
