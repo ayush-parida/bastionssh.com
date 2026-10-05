@@ -30,6 +30,7 @@ import {
   RadioTower,
   Container,
   ShipWheel,
+  Rocket,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme.js';
 import { useAssistantAccess } from '@/hooks/useAssistantAccess.js';
@@ -46,6 +47,7 @@ const navItems: { to: string; label: string; icon: React.ElementType; modules: M
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, modules: ['dashboard'] },
   { to: '/servers', label: 'Servers', icon: Server, modules: ['servers'] },
   { to: '/containers', label: 'Containers', icon: Container, modules: ['containers'] },
+  { to: '/deployments', label: 'Deployments', icon: Rocket, modules: ['deployments'] },
   { to: '/kubernetes', label: 'Kubernetes', icon: ShipWheel, modules: ['kubernetes'] },
   { to: '/agents', label: 'Agents', icon: RadioTower, modules: ['agents'] },
   { to: '/storage', label: 'Object Storage', icon: HardDrive, modules: ['storage'] },

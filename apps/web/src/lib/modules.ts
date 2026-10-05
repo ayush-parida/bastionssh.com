@@ -10,6 +10,7 @@ export const MODULE_PATHS: Partial<Record<ModuleKey, string>> = {
   dashboard: '/',
   servers: '/servers',
   containers: '/containers',
+  deployments: '/deployments',
   kubernetes: '/kubernetes',
   agents: '/agents',
   storage: '/storage',

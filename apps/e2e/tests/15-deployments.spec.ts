@@ -1,0 +1,465 @@
+import { crc32, gunzipSync } from 'node:zlib';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Page, Route } from '@playwright/test';
+import { createMember, expect, ownerApi, signInWithPassword, test } from './fixtures.js';
+
+/**
+ * The Deployments tab against a stubbed `/api/deploy`: no SSH server or
+ * Docker is involved. Under test is the browser side — Setup, the app list,
+ * a deploy with its upload and streamed log (a folder is packed without
+ * node_modules, .next and .git), Rollback, bastion.yml validation errors
+ * shown next to their fields, the write-only .env editor, and which buttons
+ * each role gets. The server under test is real (the Deployments module
+ * shows only with a server in sight); nothing connects to it.
+ */
+
+const RELEASE = '20261005-120000-abcdef12';
+const OLD = '20261004-090000-12345678';
+
+interface Sent {
+  method: string;
+  path: string;
+  body: unknown;
+  raw: Buffer | null;
+}
+
+const CONFIG = ['# managed by the web e2e', 'name: site1', 'domains: [site1.example.com]', 'build:', '  type: nextjs', 'run:', '  port: 3000', ''].join('\n');
+
+function summary(name: string) {
+  return {
+    name,
+    domains: [`${name}.example.com`],
+    buildType: 'nextjs',
+    currentRelease: RELEASE,
+    container: { name: `bastion-${name}-${RELEASE}`, id: 'c'.repeat(64), state: 'running', status: 'Up 2 hours', health: 'healthy' },
+    configError: null,
+    locked: false,
+  };
+}
+
+function release(id: string, current: boolean) {
+  return {
+    id,
+    app: 'site1',
+    createdAt: '2026-10-05T12:00:00Z',
+    finishedAt: '2026-10-05T12:01:00Z',
+    actor: 'admin@e2e.example.com',
+    checksum: 'f'.repeat(64),
+    image: `bastion-site1:${id}`,
+    container: `bastion-site1-${id}`,
+    port: 3000,
+    buildType: 'nextjs',
+    result: 'success',
+    error: null,
+    previous: null,
+    current,
+    imagePresent: true,
+  };
+}
+
+/** The file names in an uploaded deploy source: a gzipped tar inside one multipart body, sorted. */
+function uploadedNames(raw: Buffer): string[] {
+  expect(raw.toString('latin1')).toContain('name="source"; filename="site1.tar.gz"');
+  const start = raw.indexOf(Buffer.from([0x1f, 0x8b]));
+  const end = raw.lastIndexOf(Buffer.from('\r\n--'));
+  const tar = gunzipSync(raw.subarray(start, end));
+  const names: string[] = [];
+  for (let at = 0; at + 512 <= tar.length; ) {
+    const name = tar.subarray(at, at + 100).toString('utf8').replace(/\0.*$/s, '');
+    if (!name) break;
+    const size = parseInt(tar.subarray(at + 124, at + 136).toString('ascii').replace(/\0.*$/s, '').trim(), 8);
+    names.push(name);
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  return names.sort();
+}
+
+/** A zip of `files` with stored (uncompressed) entries, as a test fixture. */
+function storedZip(files: Record<string, string>): Buffer {
+  const locals: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(files)) {
+    const nameBuf = Buffer.from(name);
+    const data = Buffer.from(text);
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(data.length, 20);
+    cd.writeUInt32LE(data.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt32LE(offset, 42);
+    locals.push(local, nameBuf, data);
+    central.push(cd, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+  const cdBuf = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(Object.keys(files).length, 8);
+  eocd.writeUInt16LE(Object.keys(files).length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cdBuf, eocd]);
+}
+
+const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
+
+/** Answer the tab's calls; everything but GETs is recorded in `sent`. `state.setUp` flips when Setup runs. */
+async function stubDeploy(page: Page, serverId: string, sent: Sent[], state = { setUp: true }) {
+  // The app's Runtime section asks Docker; nothing to show here
+  await page.route(`**/api/docker/servers/${serverId}**`, (route) => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found"}' }));
+  await page.route(`**/api/deploy/servers/${serverId}**`, async (route: Route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const path = url.pathname.replace(`/api/deploy/servers/${serverId}`, '') || '/';
+    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    const method = req.method();
+    if (method !== 'GET') {
+      const raw = req.postDataBuffer();
+      let body: unknown = null;
+      try {
+        body = req.postDataJSON();
+      } catch {
+        body = null;
+      }
+      sent.push({ method, path: `${path}${url.search}`, body, raw });
+    }
+
+    if (method === 'GET' && path === '/') {
+      return json({ root: state.setUp ? '/opt/bastion' : null, integrity: state.setUp ? 'ok' : 'missing', version: '0.1.0' });
+    }
+    if (path === '/setup') {
+      state.setUp = true;
+      return json({
+        root: '/opt/bastion',
+        proxy: 'caddy',
+        network: 'bastion-apps',
+        proxyContainer: { name: 'bastion-caddy', id: 'p'.repeat(64), state: 'running', status: 'Up 1 second', health: null },
+        version: '0.1.0',
+        sudo: true,
+        socket: 'writable',
+      });
+    }
+    if (path === '/apps') return json(state.setUp ? [summary('site1'), summary('blog')] : []);
+    if (path === '/apps/site1' && method === 'GET') {
+      return json({
+        ...summary('site1'),
+        config: {
+          name: 'site1',
+          domains: ['site1.example.com'],
+          redirect_www: 'none',
+          tls: 'auto',
+          build: { type: 'nextjs', node: null, dir: '.', output: null },
+          run: { port: 3000, env_file: '.env', volumes: [], memory: '512m', cpus: 1 },
+          healthcheck: { path: '/', timeout: '30s' },
+          keep_releases: 5,
+          proxy: 'caddy',
+        },
+        previousRelease: OLD,
+        lock: null,
+      });
+    }
+    if (path === '/apps/site1/releases') return json([release(RELEASE, true), release(OLD, false)]);
+    if (path === '/apps/site1/config' && method === 'GET') return json({ text: CONFIG });
+    if (path === '/apps/site1/config' && method === 'PUT') {
+      const { text } = req.postDataJSON() as { text: string };
+      if (/port: 70000/.test(text) || /^extra:/m.test(text)) {
+        return json(
+          {
+            error: 'The config is not valid',
+            code: 'invalid_config',
+            errors: [
+              ...(/port: 70000/.test(text) ? [{ path: 'run.port', message: 'A port from 1 to 65535' }] : []),
+              ...(/^extra:/m.test(text) ? [{ path: 'extra', message: 'Unknown key' }] : []),
+            ],
+          },
+          422,
+        );
+      }
+      return json({ app: 'site1', created: false });
+    }
+    if (path === '/apps/site1/deploy') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: sse([
+          { type: 'log', lines: [{ stream: 'stderr', text: 'Unpacking the upload' }, { stream: 'stderr', text: 'Building image bastion-site1' }] },
+          { type: 'log', lines: [{ stream: 'stderr', text: 'Health check passed' }] },
+          { type: 'result', outcome: { app: 'site1', release: '20261005-130000-99999999', previous: RELEASE, result: 'success', error: null } },
+          { type: 'exit', exitCode: 0, signal: null, durationMs: 4200, timedOut: false },
+          { type: 'end' },
+        ]),
+      });
+    }
+    if (path === '/apps/site1/rollback') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: sse([
+          { type: 'log', lines: [{ stream: 'stderr', text: `Starting bastion-site1-${OLD}` }, { stream: 'stderr', text: 'Proxy switched' }] },
+          { type: 'result', outcome: { app: 'site1', release: OLD, previous: RELEASE, result: 'success', error: null } },
+          { type: 'exit', exitCode: 0, signal: null, durationMs: 1500, timedOut: false },
+          { type: 'end' },
+        ]),
+      });
+    }
+    if (path === '/apps/site1/env' && method === 'GET') return json({ keys: ['DATABASE_URL', 'SECRET_KEY'] });
+    if (path === '/apps/site1/env/DATABASE_URL/reveal') return json({ key: 'DATABASE_URL', value: 'postgres://app:hunter2@db/app' });
+    if (/^\/apps\/site1\/env\/[A-Z_]+$/.test(path)) return json({ key: path.split('/').pop(), changed: true });
+    if (path === '/apps/site1/restart' || path === '/apps/site1/stop') return json({ app: 'site1', container: `bastion-site1-${RELEASE}` });
+    return json({ error: `not stubbed: ${method} ${path}` }, 404);
+  });
+}
+
+test.describe('Deployments', () => {
+  let serverId: string;
+  let admin: { email: string; password: string };
+
+  test.beforeAll(async () => {
+    const owner = await ownerApi();
+    const res = await owner.post('/api/servers', {
+      data: { name: `deploy-${Date.now().toString(36)}`, host: '192.0.2.40', username: 'deploy', authType: 'password', password: 'unused', tags: [] },
+    });
+    expect(res.status(), await res.text()).toBe(201);
+    serverId = ((await res.json()) as { id: string }).id;
+    await owner.dispose();
+    admin = await createMember('admin', 'deploy');
+  });
+
+  test('sets a server up from the tab, then lists its apps', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent, { setUp: false });
+    await signInWithPassword(page, admin.email, admin.password);
+
+    // Navigation: the module's page lists servers; each opens its tab
+    await page.getByRole('link', { name: 'Deployments' }).click();
+    await page.locator(`a[href="/servers/${serverId}/deployments"]`).click();
+
+    const setup = page.getByRole('region', { name: 'Setup' });
+    await expect(setup).toContainText('Set up deployments');
+    await expect(setup).toContainText('Docker Engine installed and running');
+    await expect(setup).toContainText('root-equivalent');
+    await setup.getByRole('button', { name: 'Set up deployments' }).click();
+    await expect(page.getByText('Deployments are set up')).toBeVisible();
+    expect(sent.map((s) => `${s.method} ${s.path}`)).toEqual(['POST /setup']);
+
+    const apps = page.getByRole('region', { name: 'Apps' });
+    await expect(apps.getByRole('row', { name: /site1/ })).toContainText('site1.example.com');
+    await expect(apps.getByRole('row', { name: /site1/ })).toContainText('healthy');
+    await expect(apps.getByRole('row', { name: /site1/ })).toContainText(RELEASE);
+    await expect(apps.getByRole('row', { name: /blog/ })).toBeVisible();
+    await expect(page.getByText('/opt/bastion', { exact: true })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reinstall' })).toBeVisible();
+    await expect(apps.getByRole('button', { name: 'New app' })).toBeVisible();
+  });
+
+  test('deploys a folder without node_modules, .next and .git, and shows the log as it streams', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+
+    const dir = mkdtempSync(join(tmpdir(), 'deploy-e2e-'));
+    try {
+      const project = join(dir, 'my-site');
+      for (const sub of ['src', 'node_modules/react', '.next/cache', '.git']) mkdirSync(join(project, sub), { recursive: true });
+      writeFileSync(join(project, 'package.json'), '{"name":"my-site"}');
+      writeFileSync(join(project, 'src/index.js'), 'export default 1;');
+      writeFileSync(join(project, 'node_modules/react/index.js'), 'module.exports = {};');
+      writeFileSync(join(project, '.next/cache/x'), 'cache');
+      writeFileSync(join(project, '.git/HEAD'), 'ref: refs/heads/main');
+
+      await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Deploy site1' });
+      await dialog.getByLabel('Project folder').setInputFiles(project);
+      await expect(dialog).toContainText('my-site/');
+      await dialog.getByRole('button', { name: 'Deploy' }).click();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const log = page.getByRole('region', { name: 'Deploy log' });
+    await expect(log).toContainText('Deployed release 20261005-130000-99999999');
+    await expect(log.getByTestId('deploy-log')).toContainText('Unpacking the upload');
+    await expect(log.getByTestId('deploy-log')).toContainText('Health check passed');
+    await expect(log).toContainText(`Previously serving ${RELEASE}`);
+
+    // One multipart upload: a gzipped tar of the project root, without the excluded folders
+    const upload = sent.find((s) => s.path === '/apps/site1/deploy');
+    expect(upload).toBeTruthy();
+    expect(uploadedNames(upload!.raw!)).toEqual(['package.json', 'src/index.js']);
+  });
+
+  test('deploys a Finder-made zip from its folder, without the __MACOSX metadata', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+
+    // What macOS "Compress" makes of a folder: the folder, and AppleDouble files beside it
+    const zip = storedZip({
+      'my-site/package.json': '{"name":"my-site"}',
+      'my-site/src/index.js': 'export default 1;',
+      '__MACOSX/my-site/._package.json': 'resource fork',
+    });
+    await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Deploy site1' });
+    await dialog.getByLabel('Archive file').setInputFiles({ name: 'my-site.zip', mimeType: 'application/zip', buffer: zip });
+    await dialog.getByRole('button', { name: 'Deploy' }).click();
+
+    await expect(page.getByRole('region', { name: 'Deploy log' })).toContainText('Deployed release');
+    const upload = sent.find((s) => s.path === '/apps/site1/deploy');
+    expect(upload).toBeTruthy();
+    // The project root is the upload's root, where build.dir `.` finds package.json
+    expect(uploadedNames(upload!.raw!)).toEqual(['package.json', 'src/index.js']);
+  });
+
+  test('rolls back to a kept release after a confirmation', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await page.getByRole('tab', { name: 'Releases' }).click();
+
+    await expect(page.getByRole('row', { name: `Release ${RELEASE}` })).toContainText('current');
+    await expect(page.getByRole('button', { name: `Roll back to ${RELEASE}` })).toHaveCount(0);
+    await page.getByRole('button', { name: `Roll back to ${OLD}` }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm).toContainText(OLD);
+    expect(sent).toEqual([]);
+    await confirm.getByRole('button', { name: 'Roll back' }).click();
+
+    const log = page.getByRole('region', { name: 'Rollback log' });
+    await expect(log).toContainText(`Rolled back to release ${OLD}`);
+    await expect(log.getByTestId('deploy-log')).toContainText('Proxy switched');
+    expect(sent.map((s) => [s.method, s.path, s.body])).toEqual([['POST', '/apps/site1/rollback', { release: OLD }]]);
+  });
+
+  test('shows the server’s validation errors next to their fields, and in the YAML view with their paths', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await page.getByRole('tab', { name: 'Config' }).click();
+
+    const port = page.getByLabel('Port');
+    await expect(port).toHaveValue('3000');
+    await port.fill('70000');
+    await page.getByRole('button', { name: 'Validate and save' }).click();
+
+    await expect(page.getByRole('alert')).toContainText('bastionctl refused this config (1 problem)');
+    await expect(page.getByText('A port from 1 to 65535')).toBeVisible();
+    // The form edits the YAML in place: the comment it does not show survives
+    const put = sent.find((s) => s.method === 'PUT')!;
+    expect((put.body as { text: string }).text).toContain('# managed by the web e2e');
+    expect((put.body as { text: string }).text).toContain('port: 70000');
+
+    // Raw YAML: an unknown key, listed with its path
+    await page.getByRole('tab', { name: 'YAML' }).click();
+    const yaml = page.getByLabel('bastion.yml');
+    await yaml.fill(`${CONFIG}extra: true\n`);
+    await page.getByRole('button', { name: 'Validate and save' }).click();
+    await expect(page.getByRole('alert')).toContainText('extra: Unknown key');
+
+    // Fixed: saved
+    await yaml.fill(CONFIG.replace('3000', '8080'));
+    await page.getByRole('button', { name: 'Validate and save' }).click();
+    await expect(page.getByText('bastion.yml saved')).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('.env: names listed, values write-only, reveal on request', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await page.getByRole('tab', { name: 'Environment' }).click();
+
+    const vars = page.getByRole('list', { name: 'Variables' });
+    await expect(vars.getByRole('listitem', { name: 'DATABASE_URL' })).toContainText('••••');
+    await expect(page.getByText('hunter2')).toHaveCount(0);
+
+    // Reveal: shown until hidden
+    await page.getByRole('button', { name: 'Reveal DATABASE_URL' }).click();
+    await expect(vars.getByRole('listitem', { name: 'DATABASE_URL' })).toContainText('postgres://app:hunter2@db/app');
+    await page.getByRole('button', { name: 'Hide DATABASE_URL' }).click();
+    await expect(page.getByText('hunter2')).toHaveCount(0);
+
+    // Change a value: the field starts empty, never prefilled
+    await page.getByRole('button', { name: 'Change SECRET_KEY' }).click();
+    const value = page.getByLabel('New value for SECRET_KEY');
+    await expect(value).toHaveValue('');
+    await expect(value).toHaveAttribute('type', 'password');
+    await value.fill('s3cret');
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByText('SECRET_KEY saved')).toBeVisible();
+
+    // A value typed and cancelled is gone when the form opens again
+    await page.getByRole('button', { name: 'Add variable' }).click();
+    const form = page.getByRole('form', { name: 'Add variable' });
+    await form.getByLabel('Variable value').fill('abandoned-secret');
+    await form.getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('button', { name: 'Add variable' }).click();
+    await expect(form.getByLabel('Variable value')).toHaveValue('');
+
+    // Add one; a bad name is refused before anything is sent
+    await form.getByLabel('Variable name').fill('1BAD');
+    await expect(form.getByRole('button', { name: 'Add' })).toBeDisabled();
+    await form.getByLabel('Variable name').fill('API_TOKEN');
+    await form.getByLabel('Variable value').fill('tok-123');
+    await form.getByRole('button', { name: 'Add' }).click();
+    await expect(page.getByText('API_TOKEN saved')).toBeVisible();
+
+    // Remove, after a confirmation
+    await page.getByRole('button', { name: 'Remove SECRET_KEY' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Remove' }).click();
+    await expect(page.getByText('SECRET_KEY removed')).toBeVisible();
+
+    expect(sent.map((s) => [s.method, s.path, s.body])).toEqual([
+      ['POST', '/apps/site1/env/DATABASE_URL/reveal', null],
+      ['PUT', '/apps/site1/env/SECRET_KEY', { value: 's3cret' }],
+      ['PUT', '/apps/site1/env/API_TOKEN', { value: 'tok-123' }],
+      ['DELETE', '/apps/site1/env/SECRET_KEY', null],
+    ]);
+  });
+
+  test('a viewer sees apps and releases, but no actions, config editing or .env', async ({ page }) => {
+    const viewer = await createMember('viewer', 'deploy-viewer');
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, viewer.email, viewer.password);
+    await page.goto(`/servers/${serverId}/deployments`);
+    await expect(page.getByRole('region', { name: 'Apps' }).getByRole('row', { name: /site1/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Reinstall' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'New app' })).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'site1' }).click();
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+    for (const name of ['Deploy', 'Restart', 'Stop', 'Delete site1']) {
+      await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+    }
+    await expect(page.getByRole('tab', { name: 'Environment' })).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Releases' }).click();
+    await expect(page.getByRole('row', { name: `Release ${OLD}` })).toBeVisible();
+    await expect(page.getByRole('button', { name: `Roll back to ${OLD}` })).toHaveCount(0);
+    await page.getByRole('tab', { name: 'Config' }).click();
+    await expect(page.getByLabel('Port')).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Validate and save' })).toHaveCount(0);
+    expect(sent).toEqual([]);
+  });
+});
