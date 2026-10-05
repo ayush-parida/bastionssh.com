@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DeployAppStatus, DeployNginxApplyResult, DeployProxyMode, DockerServerStatus } from '@smt/shared';
-import { ArrowLeft, Lock, Power, RefreshCw, RotateCw, Trash2, TriangleAlert, Upload } from 'lucide-react';
+import { deployPermissionLevel, type DeployAppStatus, type DeployNginxApplyResult, type DeployProxyMode, type DockerServerStatus } from '@smt/shared';
+import { ArrowLeft, Lock, Power, RefreshCw, RotateCw, ShieldAlert, Trash2, TriangleAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { appPath, deployKeys, nginxSyncMessage, when } from '@/lib/deploy.js';
@@ -121,6 +121,9 @@ export default function AppDetail({
     );
   }
   const s = status.data;
+  // bastion.yml's permissions.deploy: deploy and rollback may need manage rather than operate (the server enforces it)
+  const deployLevel = deployPermissionLevel(s);
+  const canDeploy = levels.operate && (deployLevel === 'operate' || levels.manage);
   const tabs: { id: Tab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
     { id: 'releases', label: 'Releases' },
@@ -157,8 +160,8 @@ export default function AppDetail({
             <>
               <button
                 onClick={() => setDialog('deploy')}
-                disabled={run.busy || !!s.configError}
-                title={s.configError ? 'Fix bastion.yml first' : undefined}
+                disabled={run.busy || !!s.configError || !canDeploy}
+                title={s.configError ? 'Fix bastion.yml first' : !canDeploy ? 'Deploying this app needs manage access (bastion.yml permissions.deploy)' : undefined}
                 className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
               >
                 <Upload size={14} /> Deploy
@@ -193,6 +196,16 @@ export default function AppDetail({
       </div>
 
       <DeployRunPanel state={run.state} onDismiss={run.dismiss} />
+
+      {levels.operate && !canDeploy && (
+        <p role="note" className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
+          <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+          <span>
+            Deploying and rolling back <span className="font-mono">{app}</span> needs manage access to deployments on this server: its bastion.yml sets{' '}
+            <span className="font-mono">permissions.deploy: manage</span>. You can still restart and stop it.
+          </span>
+        </p>
+      )}
 
       {s.configError && (
         <p className="mb-4 flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-600">
@@ -236,6 +249,7 @@ export default function AppDetail({
               )}
             </Fact>
             <Fact label="Domains">{s.domains.join(', ') || '—'}</Fact>
+            <Fact label="Who may deploy">{deployLevel === 'manage' ? 'Manage access (permissions.deploy)' : 'Operate access'}</Fact>
             <Fact label="Limits">
               {s.config ? `${s.config.run.memory ?? 'no memory limit'} · ${s.config.run.cpus != null ? `${s.config.run.cpus} CPU` : 'no CPU limit'}` : '—'}
             </Fact>
@@ -244,7 +258,7 @@ export default function AppDetail({
         </div>
       )}
       {tab === 'releases' && (
-        <ReleasesPanel serverId={serverId} app={app} canOperate={levels.operate} busy={run.busy} onRollback={(release) => void run.rollback(release)} />
+        <ReleasesPanel serverId={serverId} app={app} canOperate={canDeploy} busy={run.busy} onRollback={(release) => void run.rollback(release)} />
       )}
       {tab === 'config' && <ConfigEditor serverId={serverId} app={app} canManage={levels.manage} />}
       {tab === 'env' && levels.manage && <EnvEditor serverId={serverId} app={app} />}

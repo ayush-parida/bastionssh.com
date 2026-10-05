@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { FileArchive, FolderUp, Upload, X } from 'lucide-react';
+import { FileArchive, FolderUp, ShieldAlert, Upload, X } from 'lucide-react';
 import { EXCLUDED_DIRS, isTarball, packFolder, packZip } from '@/lib/archive.js';
 import { formatBytes } from '@/lib/utils.js';
 
@@ -83,6 +83,13 @@ export default function DeploySourceDialog({
           <p className="text-muted-foreground">
             Upload the project source. The server builds it with the settings in <span className="font-mono">bastion.yml</span>, starts the new
             release next to the current one, and switches traffic once it is healthy.
+          </p>
+          <p role="note" className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+            <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+            <span>
+              Deploying runs this code on the server with <span className="font-mono">{app}</span>&apos;s secrets: the new release starts with every
+              value in the app&apos;s .env and its volumes. Deploy only code you trust.
+            </span>
           </p>
           <div className="grid grid-cols-2 gap-3">
             <label className="flex cursor-pointer flex-col items-center gap-2 rounded-md border border-dashed border-border p-4 text-center hover:bg-muted/50">

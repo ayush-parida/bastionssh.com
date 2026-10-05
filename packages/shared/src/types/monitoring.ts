@@ -25,7 +25,7 @@ export type AlertType =
   | 'kube_workload_unavailable'
   | 'kube_pod_crashloop'
   | 'kube_pod_pending'
-  /** A deployed app's certificate is not being renewed (deployments spec §6); derived on read, never stored. */
+  /** A deployed app's certificate is expiring, not being renewed or expired (deployments spec §6); one alert per app and domain. */
   | 'deploy_certificate';
 
 export type AlertSeverity = 'warning' | 'critical';

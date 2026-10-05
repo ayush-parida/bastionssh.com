@@ -3,11 +3,13 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import posix from 'node:path/posix';
 import type { FastifyRequest } from 'fastify';
-import type { Client, ClientChannel, SFTPWrapper } from 'ssh2';
+import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2';
 import { LineSplitter } from '../docker/demux.js';
 import { acquire as acquireSsh, poolKey as sshPoolKey, type DockerLease } from '../docker/pool.js';
 import type { servers } from '../db/schema.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
+import { HostKeyMismatchError, sshConnectConfig } from '../ssh/host-keys.js';
+import { connectSsh } from '../ssh/jump.js';
 import * as sftp from '../ssh/sftp.js';
 import { DeployError } from './errors.js';
 
@@ -157,6 +159,18 @@ async function lstatFile(conn: SFTPWrapper, path: string): Promise<boolean> {
   }
 }
 
+async function hashRemoteFile(c: SFTPWrapper, path: string): Promise<string | null> {
+  if (!(await lstatFile(c, path))) return null;
+  const hash = createHash('sha256');
+  for await (const chunk of sftp.createReadStream(c, path) as AsyncIterable<Buffer>) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+async function readRemoteFile(c: SFTPWrapper, path: string, maxBytes: number): Promise<Buffer | null> {
+  if (!(await lstatFile(c, path))) return null;
+  return sftp.readFile(c, path, maxBytes);
+}
+
 /**
  * Open the caller's pooled SSH and SFTP connections to `server` (credentials
  * decrypted once). The caller must `release()`.
@@ -176,18 +190,8 @@ export async function openRemote(req: Pick<FastifyRequest, 'orgId' | 'user'>, se
   return {
     server,
     run: (command, opts) => runOnClient(ssh.client, command, opts),
-    async hashFile(path) {
-      const c = await conn();
-      if (!(await lstatFile(c, path))) return null;
-      const hash = createHash('sha256');
-      for await (const chunk of sftp.createReadStream(c, path) as AsyncIterable<Buffer>) hash.update(chunk);
-      return hash.digest('hex');
-    },
-    async readFile(path, maxBytes) {
-      const c = await conn();
-      if (!(await lstatFile(c, path))) return null;
-      return sftp.readFile(c, path, maxBytes);
-    },
+    hashFile: async (path) => hashRemoteFile(await conn(), path),
+    readFile: async (path, maxBytes) => readRemoteFile(await conn(), path, maxBytes),
     async writeFile(path, data, mode) {
       const c = await conn();
       const tmp = posix.join(posix.dirname(path), `.${posix.basename(path)}.${randomBytes(6).toString('hex')}`);
@@ -230,6 +234,75 @@ export async function openRemote(req: Pick<FastifyRequest, 'orgId' | 'user'>, se
       released = true;
       ssh.release();
       (files as sftp.SftpLease | null)?.release();
+    },
+  };
+}
+
+const SYSTEM_CONNECT_TIMEOUT_MS = 20_000;
+
+/**
+ * A short-lived, unpooled connection for background checks nobody is asking
+ * for (deploy/cert-check.ts), with the server's own credentials like the
+ * health probe — through `sshConnectConfig` + `connectSsh`, so pinned host
+ * keys, jump hosts and agents apply. It reads only: commands and files;
+ * writing, uploading and removing refuse. `release()` closes it.
+ */
+export async function openSystemRemote(server: ServerRow): Promise<Remote> {
+  const { auth } = await resolveServerAuth(server.orgId, server.id);
+  const target = { id: server.id, host: server.host, port: server.port, username: server.username };
+  const client = new Client();
+  await new Promise<void>((resolve, reject) => {
+    const { config, guard } = sshConnectConfig(target, auth, 'health_check', { readyTimeout: SYSTEM_CONNECT_TIMEOUT_MS });
+    let settled = false;
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!err) return resolve();
+      try {
+        client.end();
+      } catch {
+        // already torn down
+      }
+      reject(err);
+    };
+    const timer = setTimeout(() => settle(new DeployError('SSH connection timed out', 504)), SYSTEM_CONNECT_TIMEOUT_MS + 1_000);
+    client
+      .on('ready', () => settle())
+      .on('error', (err: Error) => {
+        const cause = guard.error(err);
+        settle(cause instanceof HostKeyMismatchError ? cause : new DeployError(`SSH connection failed: ${cause.message}`, 502));
+      })
+      .on('close', () => settle(new DeployError('SSH connection closed before it was ready', 502)));
+    // A jump hop is only logged: no member asked for this connection
+    try {
+      connectSsh(client, target, config, 'health_check');
+    } catch (err) {
+      settle(err as Error);
+    }
+  });
+  let files: Promise<SFTPWrapper> | null = null;
+  const conn = () => (files ??= new Promise<SFTPWrapper>((resolve, reject) => client.sftp((err, s) => (err ? reject(err) : resolve(s)))));
+  const readOnly = async (): Promise<never> => {
+    throw new DeployError('This connection only reads from the server', 500);
+  };
+  let released = false;
+  return {
+    server,
+    run: (command, opts) => runOnClient(client, command, opts),
+    hashFile: async (path) => hashRemoteFile(await conn(), path),
+    readFile: async (path, maxBytes) => readRemoteFile(await conn(), path, maxBytes),
+    writeFile: readOnly,
+    upload: readOnly,
+    remove: readOnly,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        client.end();
+      } catch {
+        // already torn down
+      }
     },
   };
 }

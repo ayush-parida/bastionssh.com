@@ -16,15 +16,16 @@ import {
   type DeployServerState,
   type DeploySetupResult,
   type DeployValidation,
+  deployPermissionLevel,
 } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
-import { requireModule } from '../../auth/access/modules.js';
-import { requireServer } from '../../auth/server-access.js';
+import { hasModule, requireModule } from '../../auth/access/modules.js';
+import { canOnServer, requireServer } from '../../auth/server-access.js';
 import { passkeyCount, requireBrowserSession, STEP_UP_MESSAGE } from '../../auth/passkey.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { boolQuery } from '../query.js';
-import { MAX_STREAMS_PER_USER, activeStreamCount } from '../sse.js';
+import { reserveStream, type StreamReservation } from '../sse.js';
 import { bastionctlInfo } from '../../deploy/bundle.js';
 import { DeployError } from '../../deploy/errors.js';
 import { discoverRoot, installBastionctl, integrity, prepareRoot, requireBundle } from '../../deploy/install.js';
@@ -83,6 +84,23 @@ const tmpName = (root: string, prefix: string, ext: string) => `${root}/tmp/${pr
 export function auditError(message: string | null | undefined): string | null {
   if (!message) return null;
   return message.split('\n')[0]!.slice(0, 300);
+}
+
+/**
+ * Deploy and rollback need the level the app's bastion.yml sets with
+ * `permissions.deploy` (operate unless it says manage), read from the app's
+ * status now — in the Deployments module and on the server alike, as the
+ * route gates weigh both. A deploy runs the app's code with its secrets.
+ */
+async function requireDeployLevel(req: FastifyRequest, ctx: DeployContext, app: string): Promise<void> {
+  const { value: status } = await ctx.run<DeployAppStatus>(['status', app]);
+  if (deployPermissionLevel(status) === 'operate') return;
+  if (hasModule(req, 'deployments', 'manage') && canOnServer(req, ctx.server.id, 'deploy_manage')) return;
+  throw new DeployError(
+    `Deploying and rolling back ${app} needs manage access to deployments on this server: its bastion.yml sets permissions.deploy to manage`,
+    403,
+    'deploy_needs_manage',
+  );
 }
 
 function auditDeploy(req: FastifyRequest, action: AuditAction, ctx: Pick<DeployContext, 'server'>, metadata: Record<string, unknown>) {
@@ -296,10 +314,15 @@ export async function deployRoutes(app: FastifyInstance) {
   app.post('/servers/:id/apps/:app/deploy', { preHandler: gate('operate') }, async (req, reply) => {
     const { id, app: name } = appParams.parse(req.params);
     if (!req.isMultipart()) return reply.status(400).send({ error: 'Send the source as multipart/form-data, in a file field named "source"' });
-    return sseRoute(req, reply, id, async (ctx, open) => {
+    return sseRoute(req, reply, id, async (ctx, open, slot) => {
+      await requireDeployLevel(req, ctx, name);
       const part = await req.file();
       if (!part || part.fieldname !== 'source') throw new DeployError('Send the source in a file field named "source"', 400);
       const upload = tmpName(ctx.root, 'upload', '.tar.gz');
+      // Access revoked while the upload runs: stop taking it
+      const revoked = () => part.file.destroy(new DeployError('Your access has changed. The upload was stopped.', 403));
+      if (slot.signal.aborted) revoked();
+      else slot.signal.addEventListener('abort', revoked, { once: true });
       try {
         const bytes = await ctx.remote.upload(upload, part.file, config.sftpMaxUploadBytes);
         if (part.file.truncated) throw new DeployError('The upload is too large', 413);
@@ -331,6 +354,7 @@ export async function deployRoutes(app: FastifyInstance) {
     const { id, app: name } = appParams.parse(req.params);
     const { release } = rollbackBody.parse(req.body);
     return sseRoute(req, reply, id, async (ctx, open) => {
+      await requireDeployLevel(req, ctx, name);
       const sse = open();
       if (!sse) return;
       const { outcome, error, result } = await streamCommand(req, ctx, sse, ['rollback', name, release]);
@@ -451,25 +475,37 @@ export async function deployRoutes(app: FastifyInstance) {
 
 /**
  * A streaming route: `run` does what may still fail with a proper HTTP status
- * (discovery, integrity, the upload), then calls `open()` and streams. Errors
- * before `open()` are answered as JSON, after it as an `error` event.
+ * (discovery, integrity, permissions, the upload), then calls `open()` and
+ * streams. Errors before `open()` are answered as JSON, after it as an
+ * `error` event. The request holds one of the user's stream places from its
+ * start — an upload can run for minutes before the log opens, and parallel
+ * uploads must not all slip under the cap meanwhile — and hands it to the
+ * stream when it opens.
  */
 async function sseRoute(
   req: FastifyRequest,
   reply: FastifyReply,
   serverId: string,
-  run: (ctx: DeployContext, open: () => DeploySse | null) => Promise<void>,
+  run: (ctx: DeployContext, open: () => DeploySse | null, slot: StreamReservation) => Promise<void>,
 ) {
-  if (activeStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) return reply.status(429).send({ error: TOO_MANY_STREAMS });
+  const slot = reserveStream(req, { feature: 'deploy', resourceId: serverId });
+  if (!slot) return reply.status(429).send({ error: TOO_MANY_STREAMS });
   let sse: DeploySse | null = null;
-  const open = () => (sse = openDeploySse(req, reply, serverId));
+  const open = () => {
+    // Revoked before the log opened (during the upload or the checks before it): nothing runs
+    if (slot.signal.aborted) throw new DeployError('Your access has changed. Nothing was run.', 403);
+    // Synchronous: the place freed here is the one the stream takes
+    slot.release();
+    return (sse = openDeploySse(req, reply, serverId));
+  };
   try {
-    await withDeploy(req, serverId, (ctx) => run(ctx, open));
+    await withDeploy(req, serverId, (ctx) => run(ctx, open, slot));
   } catch (err) {
     const stream = sse as DeploySse | null;
     if (stream) stream.fail(err);
     else if (!reply.sent) return sendDeployError(reply, err);
   } finally {
+    slot.release();
     (sse as DeploySse | null)?.end();
   }
 }

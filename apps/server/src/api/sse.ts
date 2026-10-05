@@ -60,6 +60,34 @@ export function activeStreamCount(userId?: string, feature?: StreamTarget['featu
   return n;
 }
 
+/** A place under the per-user cap held before the stream opens (see {@link reserveStream}). */
+export interface StreamReservation {
+  /** Aborted when access is revoked (as a stream would be). */
+  signal: AbortSignal;
+  /** Give the place back (idempotent); done just before opening the stream, or when the request ends without one. */
+  release: () => void;
+}
+
+/**
+ * Hold one of the user's {@link MAX_STREAMS_PER_USER} places from the start
+ * of a request that streams only later — a deploy upload, which can take
+ * minutes before its log opens — so concurrent requests cannot all pass the
+ * cap while none has opened yet. Null when the user is at the cap. Revoking
+ * access aborts `signal`, like an open stream's.
+ */
+export function reserveStream(req: FastifyRequest, target: StreamTarget): StreamReservation | null {
+  if (activeStreamCount(req.user.id) >= MAX_STREAMS_PER_USER) return null;
+  const controller = new AbortController();
+  const entry: ActiveStream = { orgId: req.orgId, userId: req.user.id, ...target, controller };
+  streams.add(entry);
+  return {
+    signal: controller.signal,
+    release: () => {
+      streams.delete(entry);
+    },
+  };
+}
+
 /**
  * Start an event stream, or answer 429 with `tooMany` and return null when
  * the user already has {@link MAX_STREAMS_PER_USER} open. The route owns the

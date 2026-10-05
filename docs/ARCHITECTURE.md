@@ -599,7 +599,8 @@ Deployments section.
   config are files on the server under the root directory — `/opt/bastion` when the SSH user
   can write it (created with passwordless `sudo` at setup when allowed), else `$HOME/bastion`
   — discovered on every request (`deploy/install.ts`), never stored. Only audit rows are written
-  (`deploy.*`, `.env` changes and reveals with variable names only). Migration 0026 only adds
+  (`deploy.*`, `.env` changes and reveals with variable names only), plus certificate alerts as
+  monitoring data in `server_alerts` (below). Migration 0026 only adds
   the Deployments module to the built-in roles (Admin manage, Operator operate, Viewer view;
   custom and "(modules only)" roles none) and changes no table or column.
 - **bastionctl** (`packages/bastionctl`): TypeScript bundled by esbuild into one
@@ -689,11 +690,18 @@ Deployments section.
 - **Routes** (`/api/deploy`): module gate plus server level per route (`deploy_view` /
   `deploy_operate` / `deploy_manage`). Deploy is `multipart/form-data` (one `source` file,
   streamed to `<root>/tmp`), then an SSE log (`log`, `result`, `exit`, `end`) on the shared
-  stream machinery (`deploy/sse.ts`, feature `deploy`, per-user cap); like compose actions a
+  stream machinery (`deploy/sse.ts`, feature `deploy`, per-user cap — a deploy or rollback request
+  holds its place from its start (`reserveStream` in `api/sse.ts`), so uploads still in flight
+  count and one past the cap is refused with 429; revocation stops an upload); like compose actions a
   deploy keeps running when the browser leaves and is audited as `detached` (a failure's
   first line only: the app log after it may hold its secrets). Revocation, or
   losing Servers or Deployments, ends deploy streams. `PUT …/config` validates with bastionctl
   first (422 with every problem). Env reveal needs a browser session and a passkey step-up.
+  Deploy and rollback also need the level `bastion.yml`'s `permissions.deploy` sets, read from
+  `bastionctl status` before the upload is taken (`deployPermissionLevel` in `@smt/shared`: missing
+  means operate; `manage`, an unknown value or an unreadable config means manage, in the module and
+  on the server) — 403 `deploy_needs_manage`; the app page explains it and hides Deploy and
+  Rollback, and the deploy dialog warns that the code runs with the app's secrets.
 - **Web** (`pages/ServerDeployments.tsx`, `components/deploy/`, `lib/deploy.ts`,
   `lib/archive.ts`): the server's Deployments tab at `/servers/:id/deployments[/:app]`, and
   `/deployments` in navigation (servers to pick from; shown with the module). Buttons follow
@@ -760,9 +768,18 @@ Deployments section.
   expiring, failing, expired, missing) is derived on read by `deployCertState` in
   `@smt/shared`: failing once past the renewal point (a third of the lifetime left) plus two
   days, or with an error logged inside the renewal window. Failing and expired certificates
-  raise `deploy_certificate` alerts through `notifyAlertsChanged`, one per app and domain
-  (`container: <app>/<domain>`); `deploy/cert-alerts.ts` only remembers in memory what it
-  last announced, so a read sends opened/resolved on a change only — no `server_alerts` rows.
+  raise `deploy_certificate` alerts (`deploy/cert-alerts.ts`), as do certificates under 14 days
+  left that nobody renews (files) or that should have lasted months (never Caddy's hours-long
+  internal ones): one open `server_alerts` row per app and domain (message led by
+  `<app>/<domain>:`, `container` in notifications), channels told on open, on escalation to
+  critical and on resolve, a reopen within 24 h of resolving kept quiet; host alert
+  reconciliation leaves them alone. They are reconciled on each Domains read and by the
+  background check (`deploy/cert-check.ts`, started in `index.ts` with monitoring): every 6 h, a
+  few servers at a time over a short-lived SSH connection with the server's own credentials, it
+  discovers the root as a request does (nothing records which servers have deployments), skips a
+  bastionctl that is not ours, reads each deployed app's certificates, keeps alerts of an
+  unreachable server or unreadable app, resolves those of apps or deployments that are gone, and
+  quietly those of servers whose monitoring is off.
 - Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with
   the remote layer faked (matrix, integrity, streams, audit, no rows but audit); env-gated
   integration tests over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`;

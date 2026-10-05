@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { DEPLOY_NAME_PATTERN, type DeployAppStatus, type DeployCertFacts, type DeployDomainsReport, type DeployNginxApplyResult, type DeployProxyState } from '@smt/shared';
 import { audit } from '../../audit/index.js';
 import { requireBundle, discoverRoot } from '../../deploy/install.js';
-import { notifyCertificates } from '../../deploy/cert-alerts.js';
+import { reconcileAppCertificates } from '../../deploy/cert-alerts.js';
 import { domainsReport, type DomainDeps } from '../../deploy/domains.js';
 import { DeployError } from '../../deploy/errors.js';
 import { nginxCertificates, proxyState, readProxyMode, runHelper } from '../../deploy/nginx.js';
@@ -24,7 +24,8 @@ import { sendDeployError, withDeploy, withRemote, type DeployContext } from '../
  *   (after fixing DNS, to retry its certificate).
  *
  * Everything is read from the server and the network on each request; the
- * only rows written are audit entries.
+ * only rows written are audit entries and certificate alerts (monitoring
+ * data in `server_alerts`, deploy/cert-alerts.ts).
  */
 
 /** deploy.ts's module + server level check. */
@@ -109,7 +110,10 @@ export async function deployDomainRoutes(app: FastifyInstance, opts: { gate: Gat
               : (await ctx.run<DeployCertFacts[]>(['certs', name])).value,
           deps: domainDeps,
         });
-        notifyCertificates(req.orgId, ctx.server.id, name, report.domains.flatMap((d) => (d.certificate ? [d.certificate] : [])));
+        // Certificates read (not merely unreadable): bring the app's alerts in line
+        if (!report.certificatesError) {
+          reconcileAppCertificates(req.orgId, ctx.server.id, name, report.domains.flatMap((d) => (d.certificate ? [d.certificate] : [])), config.domains);
+        }
         return report;
       });
     } catch (err) {
