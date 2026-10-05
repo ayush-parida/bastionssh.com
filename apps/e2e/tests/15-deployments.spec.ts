@@ -216,6 +216,8 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state: { s
     if (path === '/apps/site1' && method === 'GET') {
       return json({
         ...summary('site1'),
+        // bastionctl reports the config's permissions at the top level too
+        permissions: { deploy: state.deployLevel ?? 'operate' },
         config: {
           name: 'site1',
           domains: ['site1.example.com'],
