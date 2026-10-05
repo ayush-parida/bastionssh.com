@@ -234,6 +234,46 @@ describe('background certificate check', () => {
     expect(sent.events.map((e) => e.kind)).toEqual(['opened', 'resolved']);
   });
 
+  it('keeps the alerts of an app whose bastion.yml does not read, or whose name it does not know', async () => {
+    const id = seedServer(orgId, admin, 'broken-config');
+    const fake = setUp();
+    fakes.set(id, fake);
+    await runCertificateCheck(deps);
+    expect(alertsOf(id)).toHaveLength(1);
+
+    const listed = fake.answers.list!([]) as Array<Record<string, unknown>>;
+    fake.answers.list = () => [{ ...listed[0], configError: 'bastion.yml: bad YAML', domains: [] }, { ...listed[1], name: 'Bad_Name', currentRelease: 'r1' }];
+    fake.runs.length = 0;
+    expect(await runCertificateCheck(deps)).toEqual([{ serverId: id, result: 'checked', apps: 0, skipped: 2 }]);
+    expect(fake.runs).toEqual([['list']]);
+    expect(alertsOf(id)).toHaveLength(1);
+    expect(sent.events.map((e) => e.kind)).toEqual(['opened']);
+  });
+
+  it('closes a connection that opens only after the server ran out of time, and reads nothing over it', async () => {
+    const id = seedServer(orgId, admin, 'slow');
+    const fake = setUp();
+    fakes.set(id, fake);
+    const saved = certCheckLimits.serverTimeoutMs;
+    certCheckLimits.serverTimeoutMs = 20;
+    try {
+      const slow: CertCheckDeps = {
+        ...deps,
+        async open(server) {
+          await new Promise((r) => setTimeout(r, 60));
+          return deps.open(server);
+        },
+      };
+      expect(await runCertificateCheck(slow)).toEqual([{ serverId: id, result: 'unreachable' }]);
+      await new Promise((r) => setTimeout(r, 120));
+      expect(open).toBe(0);
+      expect(released).toBe(1);
+      expect(fake.runs).toEqual([]);
+    } finally {
+      certCheckLimits.serverTimeoutMs = saved;
+    }
+  });
+
   it('resolves quietly when monitoring is off for a server, and asks nothing of it', async () => {
     const id = seedServer(orgId, admin, 'paused');
     fakes.set(id, setUp());

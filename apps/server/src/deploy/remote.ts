@@ -275,7 +275,11 @@ export async function openSystemRemote(server: ServerRow): Promise<Remote> {
       })
       .on('close', () => settle(new DeployError('SSH connection closed before it was ready', 502)));
     // A jump hop is only logged: no member asked for this connection
-    connectSsh(client, target, config, 'health_check');
+    try {
+      connectSsh(client, target, config, 'health_check');
+    } catch (err) {
+      settle(err as Error);
+    }
   });
   let files: Promise<SFTPWrapper> | null = null;
   const conn = () => (files ??= new Promise<SFTPWrapper>((resolve, reject) => client.sftp((err, s) => (err ? reject(err) : resolve(s)))));

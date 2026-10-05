@@ -492,6 +492,8 @@ async function sseRoute(
   if (!slot) return reply.status(429).send({ error: TOO_MANY_STREAMS });
   let sse: DeploySse | null = null;
   const open = () => {
+    // Revoked before the log opened (during the upload or the checks before it): nothing runs
+    if (slot.signal.aborted) throw new DeployError('Your access has changed. Nothing was run.', 403);
     // Synchronous: the place freed here is the one the stream takes
     slot.release();
     return (sse = openDeploySse(req, reply, serverId));

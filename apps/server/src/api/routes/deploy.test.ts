@@ -39,6 +39,8 @@ const fake = vi.hoisted(() => ({
   /** Uploads wait for this before reading their source. */
   uploadHold: null as Promise<void> | null,
   uploadsStarted: 0,
+  /** Called once an upload has read all of its source. */
+  afterUpload: null as null | (() => void),
 }));
 
 /** Split a command line made of single-quoted words (shellCommand's output) back into argv; anything else throws. */
@@ -122,6 +124,7 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
         const chunks: Buffer[] = [];
         for await (const c of source as AsyncIterable<Buffer>) chunks.push(c);
         fake.files.set(path, Buffer.concat(chunks));
+        fake.afterUpload?.();
         fake.uploads.set(path, Buffer.concat(chunks).length);
         return Buffer.concat(chunks).length;
       },
@@ -325,6 +328,7 @@ describe('deployment routes', () => {
     fake.uploads.clear();
     fake.uploadHold = null;
     fake.uploadsStarted = 0;
+    fake.afterUpload = null;
     fake.bastionctl = defaultBastionctl;
     installed();
   });
@@ -728,6 +732,34 @@ describe('deployment routes', () => {
       const { res } = await pending;
       expect(res.status).toBe(403);
       expect(fake.runs.map((r) => r.argv[0])).not.toContain('deploy');
+      expect(activeDeployStreamCount(operator.userId)).toBe(0);
+    });
+
+    it('runs nothing when access is revoked after the checks began but before the log opens', async () => {
+      const statusHold = deferred();
+      let statusStarted = false;
+      fake.bastionctl = async (args) => {
+        if (args[0] !== 'status') return defaultBastionctl(args);
+        statusStarted = true;
+        await statusHold.promise;
+        return defaultBastionctl(args);
+      };
+      const pending = call(operator, 'POST', api('/apps/site1/rollback'), { release: OUTCOME.release });
+      await until(() => statusStarted);
+      revokeLiveAccess(operator.userId, { orgId });
+      statusHold.resolve();
+      const res = await pending;
+      expect(res.statusCode).toBe(403);
+      expect(fake.runs.map((r) => r.argv[0])).toEqual(['status']);
+      expect(activeDeployStreamCount(operator.userId)).toBe(0);
+
+      // The same for an upload that had already been read in full
+      fake.bastionctl = defaultBastionctl;
+      fake.runs.length = 0;
+      fake.afterUpload = () => revokeLiveAccess(operator.userId, { orgId });
+      const { res: upload } = await postForm(operator, api('/apps/site1/deploy'), tarGz());
+      expect(upload.status).toBe(403);
+      expect(fake.runs.map((r) => r.argv[0])).toEqual(['status']);
       expect(activeDeployStreamCount(operator.userId)).toBe(0);
     });
   });

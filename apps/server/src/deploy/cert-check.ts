@@ -1,4 +1,4 @@
-import type { DeployAppStatus, DeployAppSummary, DeployCertFacts } from '@smt/shared';
+import { DEPLOY_NAME_PATTERN, type DeployAppStatus, type DeployAppSummary, type DeployCertFacts } from '@smt/shared';
 import { getDb } from '../db/index.js';
 import { servers } from '../db/schema.js';
 import { config } from '../config/index.js';
@@ -96,7 +96,12 @@ export async function checkCertificatesOn(
   let checked = 0;
   let skipped = 0;
   for (const app of apps) {
-    if (app.configError || !app.currentRelease || app.domains.length === 0) {
+    if (!DEPLOY_NAME_PATTERN.test(app.name) || app.configError) {
+      // Not a name we know, or a bastion.yml that does not read: its domains are unknown, so its alerts stay
+      skipped++;
+      continue;
+    }
+    if (!app.currentRelease || app.domains.length === 0) {
       // Nothing served (yet, or any more): nothing to renew
       reconcileAppCertificates(server.orgId, server.id, app.name, [], [], now);
       continue;
@@ -131,14 +136,24 @@ export async function checkCertificatesOn(
 
 async function checkServer(server: ServerRow, bundle: BastionctlBundle, deps: CertCheckDeps): Promise<CertCheckOutcome> {
   let remote: Remote | null = null;
+  let timedOut = false;
   try {
     return await withTimeout(
       (async () => {
-        remote = await deps.open(server);
-        return checkCertificatesOn(server, remote, bundle, deps.now());
+        const opened = await deps.open(server);
+        // Connected only after the time ran out: close it, and read nothing
+        if (timedOut) {
+          opened.release();
+          throw new Error('timed out while connecting');
+        }
+        remote = opened;
+        return checkCertificatesOn(server, opened, bundle, deps.now());
       })(),
       certCheckLimits.serverTimeoutMs,
-      () => (remote as Remote | null)?.release(),
+      () => {
+        timedOut = true;
+        (remote as Remote | null)?.release();
+      },
     );
   } catch (err) {
     logger.debug({ serverId: server.id, err: (err as Error).message }, 'Certificate check could not reach a server');
