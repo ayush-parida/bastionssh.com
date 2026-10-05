@@ -280,7 +280,7 @@ export default function AppDetail({
         >
           <p>
             {dialog === 'restart'
-              ? 'The container restarts with the current .env; the site is briefly unavailable.'
+              ? 'The container restarts with the environment it started with (deploy again to apply .env changes); the site is briefly unavailable.'
               : 'The site stops answering until the app is restarted or deployed again.'}
           </p>
         </ConfirmDialog>

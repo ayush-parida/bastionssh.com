@@ -31,6 +31,7 @@ import {
   Container,
   ShipWheel,
   Rocket,
+  BookOpen,
 } from 'lucide-react';
 import { useTheme } from '@/hooks/useTheme.js';
 import { useAssistantAccess } from '@/hooks/useAssistantAccess.js';
@@ -40,8 +41,8 @@ import { TEAM_MODULES } from '@/lib/modules.js';
 /**
  * The sidebar, one entry per module (unified roles spec §5): an entry shows
  * only when `GET /api/me/modules` lists its module — on for the member and,
- * for a resource module, with something in it. Settings has no module: every
- * member keeps their own account.
+ * for a resource module, with something in it. Docs and Settings have no
+ * module: every member reads the docs and keeps their own account.
  */
 const navItems: { to: string; label: string; icon: React.ElementType; modules: ModuleKey[] | null }[] = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, modules: ['dashboard'] },
@@ -62,6 +63,7 @@ const navItems: { to: string; label: string; icon: React.ElementType; modules: M
   { to: '/audit', label: 'Audit Log', icon: ScrollText, modules: ['audit'] },
   { to: '/recordings', label: 'Recordings', icon: Film, modules: ['recordings'] },
   { to: '/team', label: 'Team & Access', icon: Users, modules: TEAM_MODULES },
+  { to: '/docs', label: 'Docs', icon: BookOpen, modules: null },
   { to: '/settings', label: 'Settings', icon: Settings, modules: null },
 ];
 

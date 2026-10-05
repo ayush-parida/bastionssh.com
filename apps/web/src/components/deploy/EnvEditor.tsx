@@ -45,8 +45,9 @@ function ValueForm({ label, busy, onSubmit, onCancel }: { label: string; busy: b
  * The app's `.env` on the server (spec §7): variable names are listed, values
  * are write-only. Revealing one needs a passkey confirmation and is recorded
  * in the audit log (by name); it shows only until hidden or the app changes.
- * Containers read `.env` when they start, so a change applies on the next
- * deploy or restart.
+ * A container gets `.env` when it is created — by a deploy or a rollback; a
+ * restart keeps the environment it was created with — so a change applies
+ * on the next deploy.
  */
 export default function EnvEditor({ serverId, app }: { serverId: string; app: string }) {
   const qc = useQueryClient();
@@ -74,7 +75,7 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
     mutationFn: ({ key, value }: { key: string; value: string }) =>
       api.put<{ key: string; changed: boolean }>(appPath(serverId, app, `/env/${encodeURIComponent(key)}`), { value }),
     onSuccess: (res) => {
-      toast.success(res.changed ? `${res.key} saved — restart or deploy to apply` : `${res.key} unchanged`);
+      toast.success(res.changed ? `${res.key} saved — deploy again to apply` : `${res.key} unchanged`);
       setEditing(null);
       setAdding(false);
       setNewKey('');
@@ -106,7 +107,7 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
       <div className="flex items-center gap-2">
         <p className="flex-1 text-sm text-muted-foreground">
           Values are never shown here unless revealed; revealing one asks for your passkey and is recorded in the audit log. Changes apply when the app
-          restarts or is deployed.
+          is next deployed (a restart keeps the values it started with).
         </p>
         {!adding && (
           <button onClick={() => setAdding(true)} className="flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted">
@@ -238,13 +239,13 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
           confirmLabel="Remove"
           onConfirm={async () => {
             await api.delete(appPath(serverId, app, `/env/${encodeURIComponent(removing)}`));
-            toast.success(`${removing} removed — restart or deploy to apply`);
+            toast.success(`${removing} removed — deploy again to apply`);
             setRevealed(({ [removing]: _dropped, ...rest }) => rest);
             await qc.invalidateQueries({ queryKey: deployKeys.env(serverId, app) });
           }}
           onClose={() => setRemoving(null)}
         >
-          <p>The app keeps the old value until it restarts or is deployed again.</p>
+          <p>The app keeps the old value until it is deployed again (a restart keeps it).</p>
         </ConfirmDialog>
       )}
     </div>

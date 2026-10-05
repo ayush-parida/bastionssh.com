@@ -66,9 +66,16 @@ test('a member with only No access sees the empty home and their own account', a
   const page = await signedIn(browser, member);
   await expect(page.getByTestId('no-access-home')).toBeVisible();
   await expect(page.getByText("You don't have access to anything yet")).toBeVisible();
-  // Nothing in the sidebar but their own settings
-  await expect(sidebar(page).getByRole('link')).toHaveCount(1);
+  // Nothing in the sidebar but the docs and their own settings
+  await expect(sidebar(page).getByRole('link')).toHaveCount(2);
+  await expect(sidebar(page).getByRole('link', { name: 'Docs' })).toBeVisible();
   await expect(sidebar(page).getByRole('link', { name: 'Settings' })).toBeVisible();
+
+  // The docs are open to them: nothing in them is the organization's
+  await sidebar(page).getByRole('link', { name: 'Docs' }).click();
+  await expect(page.getByRole('heading', { name: 'Docs', level: 1 })).toBeVisible();
+  await page.goto('/docs/deployments/static-site');
+  await expect(page.getByRole('heading', { name: 'Deploy a static site', level: 1 })).toBeVisible();
 
   // A deep link into a module is not there for them
   await page.goto('/servers');

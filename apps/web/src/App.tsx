@@ -37,6 +37,7 @@ import AgentsPage from '@/pages/Agents.js';
 import KubernetesPage from '@/pages/Kubernetes.js';
 import KubeClusterPage from '@/pages/KubeCluster.js';
 import KubeOverviewPage from '@/pages/KubeOverview.js';
+import DocsPage from '@/pages/Docs.js';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
@@ -116,6 +117,9 @@ export default function App() {
           <Route path="recordings/:id" element={<ModuleGate modules={['recordings']}><RecordingPlayerPage /></ModuleGate>} />
           <Route path="team" element={<ModuleGate modules={TEAM_MODULES}><TeamPage /></ModuleGate>} />
           <Route path="settings" element={<SettingsPage />} />
+          {/* Not a module: the docs are the same for every member and show nothing of the org */}
+          <Route path="docs" element={<DocsPage />} />
+          <Route path="docs/:section/:slug" element={<DocsPage />} />
           <Route path="*" element={<ModuleNotFound />} />
         </Route>
       </Routes>
