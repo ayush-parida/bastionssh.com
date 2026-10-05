@@ -185,6 +185,7 @@ export type AuditAction =
   | 'deploy.env_set'
   | 'deploy.env_unset'
   | 'deploy.env_reveal'
+  | 'deploy.proxy_sync'
   | 'org.docker_settings'
   | 'ai.docker_read'
   | 'ai.kube_read'

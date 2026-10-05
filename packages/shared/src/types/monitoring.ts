@@ -24,7 +24,9 @@ export type AlertType =
   | 'kube_node_not_ready'
   | 'kube_workload_unavailable'
   | 'kube_pod_crashloop'
-  | 'kube_pod_pending';
+  | 'kube_pod_pending'
+  /** A deployed app's certificate is not being renewed (deployments spec §6); derived on read, never stored. */
+  | 'deploy_certificate';
 
 export type AlertSeverity = 'warning' | 'critical';
 

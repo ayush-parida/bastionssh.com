@@ -3,6 +3,7 @@ import path from 'node:path';
 import { parseDocument } from 'yaml';
 import type { DeployAppConfig, DeployBuildType, DeployValidation, DeployValidationIssue } from '@smt/shared';
 import { BastionError, Layout, NAME_PATTERN } from './names.js';
+import { NGINX_TLS, proxyMode } from './nginx.js';
 
 /**
  * `bastion.yml` (deployments spec §4), strictly validated: unknown keys are
@@ -287,6 +288,10 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
     if (data.proxy === 'caddy' || data.proxy === 'nginx') proxy = data.proxy;
     else issues.add('proxy', 'Must be caddy or nginx');
   }
+  // certbot's webroot challenge on the host: no wildcards, no DNS providers, no internal CA
+  if (proxy === 'nginx' && (typeof tls !== 'string' || !(NGINX_TLS as readonly string[]).includes(tls))) {
+    issues.add('tls', 'With proxy: nginx, tls must be auto or staging (certificates come from certbot on the host)');
+  }
 
   if (issues.list.length > 0) return { config: null, issues: issues.list };
   return {
@@ -362,11 +367,13 @@ export function domainConflicts(layout: Layout, app: string, domains: readonly s
   return issues;
 }
 
-/** Full validation of config text for `app` on this server: syntax, schema, then domains across apps. */
+/** Full validation of config text for `app` on this server: syntax, schema, the server's proxy mode, then domains across apps. */
 export function validateForServer(layout: Layout, app: string, text: string): DeployValidation & { config: DeployAppConfig | null } {
   const { config, issues } = checkConfigText(text, app);
   if (!config) return { ok: false, errors: issues, config: null };
+  const mode = proxyMode(layout);
   const conflicts = domainConflicts(layout, app, config.domains);
+  if (config.proxy !== mode) conflicts.unshift({ path: 'proxy', message: `This server's proxy is set up for ${mode}; use proxy: ${mode}` });
   return { ok: conflicts.length === 0, errors: conflicts, config: conflicts.length === 0 ? config : null };
 }
 
@@ -375,7 +382,7 @@ export function formatIssues(issues: readonly DeployValidationIssue[]): string {
 }
 
 /** The starting config `init` writes when none is given. */
-export function templateConfig(app: string): string {
+export function templateConfig(app: string, proxy: DeployAppConfig['proxy'] = 'caddy'): string {
   return [
     `name: ${app}`,
     `domains: [${app}.example.com]`,
@@ -389,7 +396,7 @@ export function templateConfig(app: string): string {
     '  env_file: .env',
     'healthcheck: { path: /, timeout: 30s }',
     'keep_releases: 5',
-    'proxy: caddy',
+    `proxy: ${proxy}`,
     '',
   ].join('\n');
 }

@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { DeployAppConfig, DeployContainer } from '@smt/shared';
+import type { DeployAppConfig, DeployContainer, DeployProxyMode } from '@smt/shared';
 import images from './images.json' with { type: 'json' };
 import { appNames, tryLoadConfig } from './config.js';
 import type { Ctx } from './context.js';
 import { certPaths, generateCaddyfile, PROXY_MOUNT, type ProxySite } from './caddy.js';
 import { waitForLock } from './lock.js';
 import { BastionError, containerName, isInside, LABEL_MANAGED, LIVE_NETWORK, liveAlias, NETWORK, PROXY_CONTAINER } from './names.js';
+import { NGINX_HELPER_PATH, NGINX_UPSTREAM_PORT, proxyMode, syncSiteFiles } from './nginx.js';
 import { currentRelease, readRelease } from './releases.js';
 
 /**
@@ -36,9 +37,10 @@ export function siteFor(config: DeployAppConfig, release: string, port: number):
   return { app: config.name, release, domains: config.domains, redirect_www: config.redirect_www, tls: config.tls, upstream: `${liveAlias(config.name, port)}:${port}` };
 }
 
-/** The sites of every app with a current release, apps in `overrides` replaced. Apps in nginx mode are not Caddy's. */
+/** The sites of every app with a current release, apps in `overrides` replaced. Apps asking for the other proxy mode are left out. */
 export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyOverride = new Map()): ProxySite[] {
   const sites: ProxySite[] = [];
+  const mode = proxyMode(ctx.layout);
   for (const app of new Set([...appNames(ctx.layout), ...overrides.keys()])) {
     if (overrides.has(app)) {
       const site = overrides.get(app);
@@ -52,7 +54,10 @@ export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyO
       ctx.log(`warning: ${app} is left out of the proxy: ${error}`);
       continue;
     }
-    if (config.proxy !== 'caddy') continue;
+    if (config.proxy !== mode) {
+      ctx.log(`warning: ${app} is left out of the proxy: it asks for proxy: ${config.proxy}, but this server is set up for ${mode}`);
+      continue;
+    }
     const record = readRelease(ctx.layout, app, current);
     if (!record || !record.container || !record.port) {
       ctx.log(`warning: ${app} is left out of the proxy: release ${current} has no release.json`);
@@ -192,8 +197,9 @@ export async function withProxyLock<T>(ctx: Pick<Ctx, 'layout' | 'docker' | 'act
 /** The switch itself; the caller holds `proxy.lock` and checked the proxy runs. */
 export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride, opts: SwitchOptions = {}): Promise<void> {
   const sites = collectSites(ctx, overrides);
+  const mode = proxyMode(ctx.layout);
   const certificatesChanged = copyCertificates(ctx, sites);
-  const text = generateCaddyfile(sites);
+  const text = generateCaddyfile(sites, mode);
   const file = ctx.layout.caddyfile;
   if (opts.onlyIfChanged && !certificatesChanged && readText(file) === text) {
     ctx.log('Proxy config unchanged; traffic moves over the live network');
@@ -216,6 +222,12 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
   const reloaded = await caddy(ctx, ['reload', '--config', `${PROXY_MOUNT}/Caddyfile`, ...(certificatesChanged ? ['--force'] : [])]);
   if (reloaded.exitCode === 0) {
     ctx.log(`Proxy reloaded (${sites.length} app${sites.length === 1 ? '' : 's'})`);
+    if (mode === 'nginx') {
+      // The host's nginx follows through the helper (BastionSSH runs it; see nginx.ts)
+      const { changed, removed } = syncSiteFiles(ctx.layout, sites);
+      for (const app of changed) ctx.log(`nginx: the server block of ${app} changed; run: sudo ${NGINX_HELPER_PATH} apply ${ctx.layout.root} ${app}`);
+      for (const app of removed) ctx.log(`nginx: ${app} is no longer served; run: sudo ${NGINX_HELPER_PATH} remove ${app}`);
+    }
     return;
   }
   const reason = lastLines(reloaded.stderr || reloaded.stdout);
@@ -242,7 +254,7 @@ export async function joinLive(ctx: Pick<Ctx, 'docker'>, container: string, alia
 /** Write the Caddyfile without a running proxy (first setup). */
 export function writeInitialCaddyfile(ctx: Pick<Ctx, 'layout' | 'log'>): void {
   if (fs.existsSync(ctx.layout.caddyfile)) return;
-  fs.writeFileSync(ctx.layout.caddyfile, generateCaddyfile(collectSites(ctx)), { mode: 0o644 });
+  fs.writeFileSync(ctx.layout.caddyfile, generateCaddyfile(collectSites(ctx), proxyMode(ctx.layout)), { mode: 0o644 });
 }
 
 /** Read `<root>/proxy/.env` (DNS provider tokens) for the proxy container's environment. */
@@ -255,22 +267,33 @@ export function proxyEnv(ctx: Pick<Ctx, 'layout'>, parse: (text: string) => Map<
   }
 }
 
-/** The proxy container's create spec (spec §2.5). */
-export function proxySpec(ctx: Pick<Ctx, 'layout'>, env: string[]): Record<string, unknown> {
+/** Label on the proxy container naming the mode it was created for; a change of mode recreates it. */
+export const LABEL_PROXY_MODE = 'bastion.proxy-mode';
+
+/**
+ * The proxy container's create spec (spec §2.5): ports 80 and 443 on every
+ * address, or in nginx mode plain HTTP on the loopback port the host's nginx
+ * forwards to.
+ */
+export function proxySpec(ctx: Pick<Ctx, 'layout'>, env: string[], mode: DeployProxyMode = 'caddy'): Record<string, unknown> {
   const proxy = ctx.layout.proxy;
+  const ports =
+    mode === 'nginx'
+      ? { '80/tcp': [{ HostIp: '127.0.0.1', HostPort: String(NGINX_UPSTREAM_PORT) }] }
+      : {
+          '80/tcp': [{ HostPort: '80' }],
+          '443/tcp': [{ HostPort: '443' }],
+          '443/udp': [{ HostPort: '443' }],
+        };
   return {
     Image: CADDY_IMAGE,
     Cmd: ['caddy', 'run', '--config', `${PROXY_MOUNT}/Caddyfile`, '--adapter', 'caddyfile'],
     Env: env,
-    Labels: { [LABEL_MANAGED]: 'proxy' },
-    ExposedPorts: { '80/tcp': {}, '443/tcp': {}, '443/udp': {} },
+    Labels: { [LABEL_MANAGED]: 'proxy', [LABEL_PROXY_MODE]: mode },
+    ExposedPorts: mode === 'nginx' ? { '80/tcp': {} } : { '80/tcp': {}, '443/tcp': {}, '443/udp': {} },
     HostConfig: {
       Binds: [`${proxy}:${PROXY_MOUNT}`, `${path.join(proxy, 'data')}:/data`, `${path.join(proxy, 'config')}:/config`],
-      PortBindings: {
-        '80/tcp': [{ HostPort: '80' }],
-        '443/tcp': [{ HostPort: '443' }],
-        '443/udp': [{ HostPort: '443' }],
-      },
+      PortBindings: ports,
       RestartPolicy: { Name: 'unless-stopped' },
       NetworkMode: NETWORK,
     },

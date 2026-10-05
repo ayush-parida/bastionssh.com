@@ -17,7 +17,7 @@ export const DEPLOY_TIMEOUT_MS = 30 * 60_000;
 export const SETUP_TIMEOUT_MS = 10 * 60_000;
 export const COMMAND_TIMEOUT_MS = 2 * 60_000;
 
-const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain']);
+const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy']);
 const WORD = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 function checkedArg(arg: string, root: string): string {
