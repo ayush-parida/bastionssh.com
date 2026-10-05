@@ -672,7 +672,8 @@ Deployments section.
   `auto_https off` and `trusted_proxies static <gateway>/32 127.0.0.1/32` — forwarded headers
   count only from where the host's nginx reaches it (the `bastion-apps` gateway the loopback
   port forwards from, read from the network at each switch), not from an app container on
-  the same network — so switches, health checks and rollbacks are unchanged; the host's nginx terminates TLS and forwards each app's domains
+  the same network; and nginx's server block sets `X-Forwarded-For $remote_addr` rather than
+  appending to what a client sent — so switches, health checks and rollbacks are unchanged; the host's nginx terminates TLS and forwards each app's domains
   to it. A config's `proxy:` must match the server's mode (validated), and nginx mode allows
   `tls: auto | staging` only. After each successful proxy switch bastionctl writes
   `proxy/nginx/<app>.site` (app, tls, upstream port, domains) for every served app and removes

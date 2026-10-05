@@ -298,10 +298,11 @@ describe.skipIf(!container)('nginx mode against a real nginx, certbot and an ACM
     expect(caddyfile).toContain(`\t\ttrusted_proxies static ${gateway}/32 127.0.0.1/32\n`);
     expect(caddyfile).not.toContain('private_ranges');
 
-    // Through nginx: what nginx forwards reaches the app, then the gateway nginx came from
+    // Through nginx: the address nginx saw (never what the client claimed), then the gateway nginx came from
     const viaNginx = await tlsGet('site1.test', '/cgi-bin/xff', { 'x-forwarded-for': '6.6.6.6' });
     expect(viaNginx.status).toBe(200);
-    expect(viaNginx.body).toMatch(new RegExp(`^6\\.6\\.6\\.6, [0-9a-f.:]+, ${gateway.replaceAll('.', '\\.')}$`));
+    expect(viaNginx.body).not.toContain('6.6.6.6');
+    expect(viaNginx.body).toMatch(new RegExp(`^[0-9a-f.:]+, ${gateway.replaceAll('.', '\\.')}$`));
 
     // A container on the same network talking to Caddy directly cannot claim a client address
     const forged = admin(

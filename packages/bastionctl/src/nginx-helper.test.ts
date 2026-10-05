@@ -144,6 +144,9 @@ describe('bastion-nginx apply', () => {
     expect(text).toContain(`ssl_certificate_key ${live}/bastion-site1/privkey.pem;`);
     expect(text).toContain('proxy_pass http://127.0.0.1:18480;');
     expect(text).toContain('proxy_set_header Host $host;');
+    // nginx is the edge: what a client claims in X-Forwarded-For is not passed on (Caddy trusts nginx)
+    expect(text).toContain('proxy_set_header X-Forwarded-For $remote_addr;');
+    expect(text).not.toContain('proxy_add_x_forwarded_for');
     expect(text).not.toContain('[::]');
     expect(fs.statSync(path.join(state, 'acme')).isDirectory()).toBe(true);
     // Nothing but bastion-site1.conf in conf.d changed

@@ -122,6 +122,10 @@ listen() {
   if [ -e "$IPV6_PROBE" ]; then say "	listen [::]:$1;"; fi
 }
 
+# nginx is the edge: X-Forwarded-For starts afresh with the address it saw
+# (\$proxy_add_x_forwarded_for would pass on whatever a client claimed, and
+# Caddy trusts what nginx sends). With real_ip configured for a CDN in front,
+# \$remote_addr is already the client's.
 proxy_location() {
   cat <<EOF
 	location / {
@@ -129,7 +133,7 @@ proxy_location() {
 		proxy_http_version 1.1;
 		proxy_set_header Host \$host;
 		proxy_set_header X-Real-IP \$remote_addr;
-		proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-For \$remote_addr;
 		proxy_set_header X-Forwarded-Proto \$scheme;
 		proxy_set_header Upgrade \$http_upgrade;
 		proxy_set_header Connection \$http_connection;
