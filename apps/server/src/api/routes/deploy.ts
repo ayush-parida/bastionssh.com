@@ -206,7 +206,7 @@ export async function deployRoutes(app: FastifyInstance) {
           await auditDeploy(req, 'deploy.setup', ctx, { ...base, docker: prepared.socket, proxy, result: 'success' });
           return { ...value, sudo: prepared.sudo, socket: prepared.socket };
         } catch (err) {
-          await audit(req, 'deploy.setup', 'server', remote.server.id, remote.server.name, { ...base, result: 'failed', error: (err as Error).message });
+          await audit(req, 'deploy.setup', 'server', remote.server.id, remote.server.name, { ...base, result: 'failed', error: auditError((err as Error).message) });
           throw err;
         }
       });

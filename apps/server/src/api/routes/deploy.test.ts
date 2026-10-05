@@ -409,6 +409,14 @@ describe('deployment routes', () => {
       expect(fake.files.get('/opt/bastion/bin/bastionctl.mjs')).toEqual(SCRIPT);
     });
 
+    it('audits a failed setup with the first line of its error only', async () => {
+      fake.bastionctl = (args) =>
+        args[0] === 'setup' ? { stdout: { error: 'Ports 80/443 are taken by something else\nSECRET_TOKEN=abc', code: 1 }, exitCode: 1 } : defaultBastionctl(args);
+      expect((await call(admin, 'POST', api('/setup'))).statusCode).toBe(409);
+      expect(audits('deploy.setup')[0]!.meta).toMatchObject({ result: 'failed', error: 'Ports 80/443 are taken by something else' });
+      expect(JSON.stringify(audits('deploy.setup'))).not.toContain('SECRET_TOKEN');
+    });
+
     it('answers 503 when this build has no bastionctl', async () => {
       setBastionctlBundleForTests(null);
       try {
