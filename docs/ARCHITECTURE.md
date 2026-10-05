@@ -649,7 +649,8 @@ Deployments section.
   default operate; BastionSSH enforces it).
 - **Pinned images** (`src/images.json`, `images.ts`): bastionctl's own Node.js, Caddy (proxy
   and static sites), Bun (copied into bun builds) and one Node.js build image per supported
-  major (18, 20, 22, 24; `build.node` must be one of them, `22.11` builds on 22), each
+  major (18, 20, 22, 24; `build.node` must be one of them, `22.11` builds on 22; an `engines`
+  floor like `>=16` builds on the oldest pinned major that meets it), each
   `repo:tag@sha256:…` and used by digest only. `images.test.ts` fails on any reference that is
   not, in images.json, in every generated Dockerfile or anywhere in the source.
   To move them: `pnpm --filter @smt/bastionctl run update-images` (resolves each tag's

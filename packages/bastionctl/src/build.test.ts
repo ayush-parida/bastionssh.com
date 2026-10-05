@@ -81,6 +81,22 @@ describe('Next.js builds', () => {
     expect(nodeVersion(dir, null)).toBe('20');
   });
 
+  it('meets an engines floor older than every pinned image with the oldest pinned one, never an exact version', () => {
+    const engines = (node: string) => {
+      write('package.json', JSON.stringify({ engines: { node } }));
+      return nodeVersion(dir, null);
+    };
+    expect(engines('>=16')).toBe('18');
+    expect(engines('>= 14.17.0')).toBe('18');
+    expect(engines('>18')).toBe('20');
+    expect(engines('>=20.9')).toBe('20');
+    // Not a floor: the version asked for, which the build then refuses with the versions it has
+    expect(engines('^16.0.0')).toBe('16');
+    expect(engines('16.x')).toBe('16');
+    write('next.config.js', "module.exports = { output: 'standalone' };");
+    expect(() => planBuild(dir, config({ type: 'nextjs' }))).toThrow(/Node.js 16 is not available for builds; use one of 18, 20, 22, 24/);
+  });
+
   it('builds on the pinned image of the major version, and refuses a version it has none for', () => {
     write('package.json', '{}');
     write('next.config.js', NEXT_CONFIG);

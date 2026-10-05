@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DeployAppConfig } from '@smt/shared';
-import { BUN_IMAGE, CADDY_IMAGE, IMAGES, nodeBuildImage } from './images.js';
+import { BUN_IMAGE, CADDY_IMAGE, IMAGES, NODE_BUILD_VERSIONS, nodeBuildImage } from './images.js';
 import { BastionError, isInside } from './names.js';
 
 /**
@@ -87,8 +87,10 @@ function runScript(manager: PackageManager, script: string): string {
   return `npm run ${script}`;
 }
 
-/** Lines a Node.js stage needs before it can run `manager` (corepack ships with Node for pnpm and yarn). */
-/** Bun is copied into the Node.js stages from its official image (pinned); Next itself still runs on Node. */
+/**
+ * Lines a Node.js stage needs before it can run `manager` (corepack ships with Node for pnpm and yarn).
+ * Bun is copied into the Node.js stages from its official image (pinned); Next itself still runs on Node.
+ */
 function toolLines(manager: PackageManager): string[] {
   return manager === 'bun' ? [`COPY --from=${BUN_IMAGE} /usr/local/bin/bun /usr/local/bin/bun`] : [];
 }
@@ -102,8 +104,13 @@ export function nodeVersion(dir: string, configured: string | null): string {
   }
   try {
     const engines = (JSON.parse(readText(dir, 'package.json') ?? '{}') as { engines?: { node?: unknown } }).engines?.node;
-    const m = typeof engines === 'string' ? /(\d{2})/.exec(engines) : null;
-    if (m) return m[1]!;
+    const m = typeof engines === 'string' ? /(>=?)?\s*v?(\d{2})(\.\d)?/.exec(engines) : null;
+    if (m) {
+      if (!m[1]) return m[2]!;
+      // A floor (`>=16`, `>18`): the oldest pinned image that meets it
+      const floor = Number(m[2]) + (m[1] === '>' && !m[3] ? 1 : 0);
+      return NODE_BUILD_VERSIONS.find((v) => Number(v) >= floor) ?? m[2]!;
+    }
   } catch {
     // unreadable package.json: the build reports it
   }
