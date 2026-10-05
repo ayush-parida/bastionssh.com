@@ -22,6 +22,8 @@ export interface FakeContainer {
   RestartCount: number;
   /** Networks joined after create (network connect), with their aliases. */
   Networks: Record<string, { Aliases: string[] }>;
+  /** Address on the network it was created on. */
+  IPAddress: string;
 }
 
 export interface ExecCall {
@@ -150,6 +152,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           State: { Status: 'created', Running: false, Restarting: false, ExitCode: 0, StartedAt: '' },
           RestartCount: 0,
           Networks: {},
+          IPAddress: `172.30.0.${fake.containers.size + 2}`,
         };
         fake.containers.set(name, c);
         return json(201, { Id: c.Id, Warnings: [] });
@@ -177,7 +180,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           State: c.State,
           RestartCount: c.RestartCount,
           HostConfig: c.HostConfig,
-          NetworkSettings: { Networks: { [String(c.HostConfig.NetworkMode ?? 'bridge')]: { Aliases: null }, ...c.Networks } },
+          NetworkSettings: { Networks: { [String(c.HostConfig.NetworkMode ?? 'bridge')]: { Aliases: null, IPAddress: c.IPAddress }, ...c.Networks } },
         });
       }
       if ((m = /^\/containers\/([^/]+)\/logs$/.exec(p))) {

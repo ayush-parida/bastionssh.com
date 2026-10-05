@@ -121,6 +121,7 @@ describe('deploy', () => {
   it('builds, starts, checks health, switches the proxy, then records and serves the release', async () => {
     await app();
     fs.writeFileSync(layout.env('site1'), 'API_KEY="s3cret"\n', { mode: 0o600 });
+    const mark = fake.requests.length;
     const outcome = await ops.deploy(ctx(), 'site1', upload('up.tgz', 'v1'));
     expect(outcome).toEqual({ app: 'site1', release: expect.stringMatching(/^20261005-1200\d\d-[0-9a-f]{8}$/), previous: null, result: 'success', error: null });
     const id = outcome.release;
@@ -147,10 +148,14 @@ describe('deploy', () => {
     expect(c.HostConfig).not.toHaveProperty('PortBindings');
     // In the proxy's rotation under the app's live alias, joined after the health check
     expect(c.Networks).toEqual({ 'bastion-live': { Aliases: ['bastion-site1-live-3000'] } });
-    expect(fake.requests.indexOf('POST /networks/bastion-live/connect')).toBeGreaterThan(fake.requests.indexOf('POST /exec/' + ''));
+    const requests = fake.requests.slice(mark);
+    const firstExec = requests.findIndex((r) => /^POST \/exec\/[^/]+\/start$/.test(r));
+    expect(firstExec).toBeGreaterThan(-1);
+    expect(requests.indexOf('POST /networks/bastion-live/connect')).toBeGreaterThan(firstExec);
 
-    // Health check from the proxy, then validate before reload
-    expect(fake.execs[0]).toEqual({ container: PROXY_CONTAINER, cmd: ['wget', '-q', '-O', '/dev/null', '-T', '5', `http://bastion-site1-${id}:3000/health`] });
+    // Health check from the proxy by the container's address on bastion-apps, then validate before reload
+    expect(fake.execs[0]).toEqual({ container: PROXY_CONTAINER, cmd: ['wget', '-q', '-O', '/dev/null', '-T', '5', `http://${c.IPAddress}:3000/health`] });
+    expect(logs).toContain(`Health check: http://bastion-site1-${id}:3000/health (up to 2s)`);
     expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
     const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
     expect(caddyfile).toContain('site1.com {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-live-3000:3000 {\n\t\tlb_try_duration 5s\n\t}\n}');
@@ -199,6 +204,38 @@ describe('deploy', () => {
     expect(fake.images.has(`bastion-site2:${stray}`)).toBe(true);
     expect([first, second].map((id) => fake.images.has(`bastion-site1:${id}`))).toEqual([true, true]);
     expect(logs).toContain('Removed 1 image of releases no longer kept');
+  });
+
+  it('reloads Caddy, forced, when a custom certificate changed though the config did not', async () => {
+    await app('site1', SITE1.replace('redirect_www: apex\n', 'redirect_www: apex\ntls: { cert: tls/cert.pem, key: tls/key.pem }\n'));
+    fs.mkdirSync(path.join(layout.app('site1'), 'tls'));
+    fs.writeFileSync(path.join(layout.app('site1'), 'tls/cert.pem'), 'CERT 1');
+    fs.writeFileSync(path.join(layout.app('site1'), 'tls/key.pem'), 'KEY 1');
+    await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'));
+    await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'));
+    // Same file, same certificate: no reload
+    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
+
+    // A renewed certificate under the same path is only read by a forced reload
+    fs.writeFileSync(path.join(layout.app('site1'), 'tls/cert.pem'), 'CERT 2');
+    await ops.deploy(ctx(), 'site1', upload('c.tgz', 'v3'));
+    const reloads = fake.execs.filter((e) => e.cmd[1] === 'reload').map((e) => e.cmd.slice(2));
+    // (the first deploy copied the certificate for the first time)
+    expect(reloads).toEqual(Array(2).fill(['--config', '/bastion-proxy/Caddyfile', '--force', '--adapter', 'caddyfile']));
+    expect(fs.readFileSync(path.join(layout.proxy, 'certs/site1/cert.pem'), 'utf8')).toBe('CERT 2');
+  });
+
+  it('health-checks by address, so an app name too long for a DNS label still deploys', async () => {
+    const name = 'a'.repeat(41);
+    await app(name, SITE1.replace('name: site1', `name: ${name}`).replace('[site1.com, www.site1.com]', '[long.example.com]'));
+    const outcome = await ops.deploy(ctx(), name, upload('a.tgz', 'v1'));
+    expect(outcome.result).toBe('success');
+    // The container name is 74 characters: no resolver looks it up as one label
+    expect(`bastion-${name}-${outcome.release}`.length).toBeGreaterThan(63);
+    const c = fake.containers.get(`bastion-${name}-${outcome.release}`)!;
+    expect(fake.execs[0]!.cmd.at(-1)).toBe(`http://${c.IPAddress}:3000/health`);
+    // The live alias the proxy resolves stays a valid label
+    expect(c.Networks['bastion-live']!.Aliases[0]!.length).toBeLessThanOrEqual(63);
   });
 
   it('leaves the old release serving when the new one fails its health check', async () => {

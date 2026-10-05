@@ -613,10 +613,11 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   generated Next.js standalone or static Dockerfiles — npm, pnpm, yarn or bun from the
   lockfile, Node from config, `.nvmrc` or `engines` — or the project's), starts
   `bastion-<app>-<release>` on the private `bastion-apps` network, health-checks it from the
-  proxy container, then attaches it to the internal `bastion-live` network under the app's
+  proxy container by its address there (a long app name makes the container name no valid DNS
+  label), then attaches it to the internal `bastion-live` network under the app's
   live alias `bastion-<app>-live-<port>`, which is what the Caddyfile (`caddy.ts`) proxies
   to. Caddy is reloaded only when the regenerated file differs (first deploy, another port,
-  domains or TLS): validated, swapped, reloaded, the previous file restored on failure —
+  domains or TLS) or a custom certificate changed (then forced, as Caddy skips an unchanged config): validated, swapped, reloaded, the previous file restored on failure —
   even a graceful reload drops the odd just-accepted connection, so a plain redeploy or
   rollback moves traffic over the alias alone and loses no request. It then moves
   `current`, stops and removes the old container after a drain delay (Caddy retries a GET

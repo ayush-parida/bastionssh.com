@@ -381,5 +381,5 @@ export interface ContainerInspect {
   Config: { Image: string; Labels: Record<string, string> | null };
   State: { Status: string; Running: boolean; Restarting?: boolean; StartedAt?: string; ExitCode?: number; Health?: { Status: string } };
   RestartCount?: number;
-  NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null } | null> | null };
+  NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null; IPAddress?: string } | null> | null };
 }

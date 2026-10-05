@@ -170,7 +170,13 @@ async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string,
       const logs = await ctx.docker.logsTail(container);
       throw new BastionError(`The new container stopped (exit ${info?.State.ExitCode ?? '?'})${logs ? `:\n${logs}` : ''}`);
     }
-    const probe = await ctx.docker.exec(PROXY_CONTAINER, ['wget', '-q', '-O', '/dev/null', '-T', '5', url], 15_000);
+    // By its address on bastion-apps, not its name: a name over 63 characters
+    // (an app name over 30) is no valid DNS label, and the proxy's resolver
+    // would never find it
+    const ip = info.NetworkSettings?.Networks?.[NETWORK]?.IPAddress;
+    if (!ip || !/^[0-9.]+$|^[0-9a-f:]+$/i.test(ip)) throw new BastionError(`The new container has no address on ${NETWORK}`);
+    const target = `http://${ip.includes(':') ? `[${ip}]` : ip}:${port}${config.healthcheck.path}`;
+    const probe = await ctx.docker.exec(PROXY_CONTAINER, ['wget', '-q', '-O', '/dev/null', '-T', '5', target], 15_000);
     if (probe.exitCode === 0) {
       ctx.log('Health check passed');
       return;

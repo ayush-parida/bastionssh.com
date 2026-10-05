@@ -68,8 +68,14 @@ export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyO
   return sites;
 }
 
-/** Copy `tls: { cert, key }` files from the app folder to `<root>/proxy/certs/<app>/` for Caddy. */
-function copyCertificates(ctx: Pick<Ctx, 'layout'>, sites: ProxySite[]) {
+/**
+ * Copy `tls: { cert, key }` files from the app folder to
+ * `<root>/proxy/certs/<app>/` for Caddy. True when any copy differs from the
+ * file Caddy loaded: the Caddyfile names the same paths, so only a forced
+ * reload makes Caddy read a renewed certificate.
+ */
+function copyCertificates(ctx: Pick<Ctx, 'layout'>, sites: ProxySite[]): boolean {
+  let changed = false;
   for (const site of sites) {
     if (typeof site.tls === 'string') continue;
     const appDir = ctx.layout.app(site.app);
@@ -84,9 +90,21 @@ function copyCertificates(ctx: Pick<Ctx, 'layout'>, sites: ProxySite[]) {
         // reported below
       }
       if (!isInside(appDir, from) || !stat?.isFile()) throw new BastionError(`tls.${kind} of ${site.app} (${site.tls[kind]}) is not a file in the app folder`);
-      fs.copyFileSync(from, path.join(ctx.layout.proxy, dest[kind]));
-      fs.chmodSync(path.join(ctx.layout.proxy, dest[kind]), 0o600);
+      const to = path.join(ctx.layout.proxy, dest[kind]);
+      const before = readBytes(to);
+      fs.copyFileSync(from, to);
+      fs.chmodSync(to, 0o600);
+      if (!before?.equals(fs.readFileSync(to))) changed = true;
     }
+  }
+  return changed;
+}
+
+function readBytes(file: string): Buffer | null {
+  try {
+    return fs.readFileSync(file);
+  } catch {
+    return null;
   }
 }
 
@@ -174,10 +192,10 @@ export async function withProxyLock<T>(ctx: Pick<Ctx, 'layout' | 'docker' | 'act
 /** The switch itself; the caller holds `proxy.lock` and checked the proxy runs. */
 export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride, opts: SwitchOptions = {}): Promise<void> {
   const sites = collectSites(ctx, overrides);
-  copyCertificates(ctx, sites);
+  const certificatesChanged = copyCertificates(ctx, sites);
   const text = generateCaddyfile(sites);
   const file = ctx.layout.caddyfile;
-  if (opts.onlyIfChanged && readText(file) === text) {
+  if (opts.onlyIfChanged && !certificatesChanged && readText(file) === text) {
     ctx.log('Proxy config unchanged; traffic moves over the live network');
     return;
   }
@@ -194,7 +212,8 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
   const hadPrevious = fs.existsSync(file);
   if (hadPrevious) fs.copyFileSync(file, prev);
   fs.renameSync(next, file);
-  const reloaded = await caddy(ctx, ['reload', '--config', `${PROXY_MOUNT}/Caddyfile`]);
+  // Caddy skips a reload whose config is unchanged, and would keep serving the old certificate
+  const reloaded = await caddy(ctx, ['reload', '--config', `${PROXY_MOUNT}/Caddyfile`, ...(certificatesChanged ? ['--force'] : [])]);
   if (reloaded.exitCode === 0) {
     ctx.log(`Proxy reloaded (${sites.length} app${sites.length === 1 ? '' : 's'})`);
     return;
