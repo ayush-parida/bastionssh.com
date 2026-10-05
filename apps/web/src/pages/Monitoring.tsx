@@ -35,6 +35,7 @@ const ALERT_LABEL: Record<ServerAlert['type'], string> = {
   kube_workload_unavailable: 'Workload unavailable',
   kube_pod_crashloop: 'Pods crash-looping',
   kube_pod_pending: 'Pods stuck pending',
+  deploy_certificate: 'Certificate not renewing',
 };
 
 function SummaryTile({

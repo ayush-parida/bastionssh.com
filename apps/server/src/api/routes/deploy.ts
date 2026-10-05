@@ -32,6 +32,8 @@ import type { RunResult } from '../../deploy/remote.js';
 import { actorLabel, bastionctlCommand, DEPLOY_TIMEOUT_MS, parseResult, SETUP_TIMEOUT_MS } from '../../deploy/runner.js';
 import { contextFor, sendDeployError, withDeploy, withRemote, type DeployContext } from '../../deploy/service.js';
 import { openDeploySse, TOO_MANY_STREAMS, type DeploySse } from '../../deploy/sse.js';
+import { detectNginx, readProxyMode, uploadHelper } from '../../deploy/nginx.js';
+import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
 
 /**
  * Server-side deployments (deployments spec §7), under
@@ -56,6 +58,7 @@ const rollbackBody = z.object({ release: z.string().regex(DEPLOY_NAME_PATTERN, '
 const configBody = z.object({ text: z.string().max(64 * 1024) }).strict();
 const envBody = z.object({ value: z.string().max(64 * 1024) }).strict();
 const deleteQuery = z.object({ purge: boolQuery });
+const setupBody = z.object({ proxy: z.enum(['caddy', 'nginx']).optional() }).strict();
 
 /** How often buffered log lines are sent. */
 const LOG_FLUSH_MS = 100;
@@ -97,6 +100,8 @@ async function streamCommand(
   ctx: DeployContext,
   sse: DeploySse,
   args: string[],
+  /** Runs after a successful outcome, before the stream ends; its lines join the log. */
+  after?: (log: (line: string) => void) => Promise<unknown>,
 ): Promise<{ outcome: DeployOutcome | null; error: string | null; result: RunResult }> {
   let pending: DeployLogLine[] = [];
   let timer: NodeJS.Timeout | null = null;
@@ -124,6 +129,7 @@ async function streamCommand(
   let error: string | null = null;
   if (parsed && 'release' in parsed) {
     outcome = parsed;
+    if (outcome.result === 'success' && after) await after((text) => sse.send({ type: 'log', lines: [{ stream: 'stderr', text }] }));
     sse.send({ type: 'result', outcome });
   } else {
     error = parsed?.error ?? (result.timedOut ? 'The command did not finish in time' : 'The command ended without a result (connection lost?)');
@@ -166,9 +172,13 @@ export async function deployRoutes(app: FastifyInstance) {
   /**
    * POST /servers/:id/setup — create the root directory, install (or
    * reinstall) bastionctl, then `bastionctl setup`: network, proxy, folders.
+   * `{ proxy }` picks the mode; by default a server keeps the mode it was set
+   * up with, and a first setup picks nginx when the host's nginx owns ports
+   * 80/443 (spec §6), uploading the helper an administrator then installs.
    */
   app.post('/servers/:id/setup', { preHandler: gate('manage') }, async (req, reply) => {
     const { id } = serverParams.parse(req.params);
+    const { proxy: requested } = setupBody.parse(req.body ?? {});
     try {
       const bundle = requireBundle();
       return await withRemote(req, id, async (remote) => {
@@ -186,8 +196,10 @@ export async function deployRoutes(app: FastifyInstance) {
           }
           await installBastionctl(remote, prepared.root, bundle);
           const ctx = contextFor(req, remote, prepared.root);
-          const { value } = await ctx.run<DeploySetupResult>(['setup'], { timeoutMs: SETUP_TIMEOUT_MS });
-          await auditDeploy(req, 'deploy.setup', ctx, { ...base, docker: prepared.socket, result: 'success' });
+          const proxy = requested ?? (await readProxyMode(remote, prepared.root)) ?? ((await detectNginx(remote, bundle)).detected ? 'nginx' : 'caddy');
+          if (proxy === 'nginx') await uploadHelper(remote, prepared.root, bundle);
+          const { value } = await ctx.run<DeploySetupResult>(['setup', '--proxy', proxy], { timeoutMs: SETUP_TIMEOUT_MS });
+          await auditDeploy(req, 'deploy.setup', ctx, { ...base, docker: prepared.socket, proxy, result: 'success' });
           return { ...value, sudo: prepared.sudo, socket: prepared.socket };
         } catch (err) {
           await audit(req, 'deploy.setup', 'server', remote.server.id, remote.server.name, { ...base, result: 'failed', error: (err as Error).message });
@@ -261,7 +273,8 @@ export async function deployRoutes(app: FastifyInstance) {
           }
           const { value } = await ctx.run<{ app: string; created: boolean }>(['init', name, '--config', file, '--force']);
           await auditDeploy(req, 'deploy.config_update', ctx, { app: name, created: value.created });
-          return value;
+          const proxy = await syncProxy(req, ctx, name, 'apply');
+          return proxy ? { ...value, proxy } : value;
         } finally {
           await ctx.remote.remove(file);
         }
@@ -289,7 +302,8 @@ export async function deployRoutes(app: FastifyInstance) {
         const sse = open();
         if (!sse) return;
         await auditDeploy(req, 'deploy.start', ctx, { app: name, bytes });
-        const { outcome, error, result } = await streamCommand(req, ctx, sse, ['deploy', name, '--source', upload]);
+        // nginx mode: the host's server block (and certificate) follow the first deploy and domain changes
+        const { outcome, error, result } = await streamCommand(req, ctx, sse, ['deploy', name, '--source', upload], (log) => syncProxy(req, ctx, name, 'apply', log));
         await auditDeploy(req, 'deploy.finish', ctx, {
           app: name,
           release: outcome?.release ?? null,
@@ -352,7 +366,8 @@ export async function deployRoutes(app: FastifyInstance) {
       return await withDeploy(req, id, async (ctx) => {
         const { value } = await ctx.run<{ app: string; purged: boolean }>(['delete', name, ...(purge ? ['--purge'] : [])]);
         await auditDeploy(req, 'deploy.delete', ctx, { app: name, purge });
-        return value;
+        const proxy = await syncProxy(req, ctx, name, 'remove');
+        return proxy ? { ...value, proxy } : value;
       });
     } catch (err) {
       return sendDeployError(reply, err);
@@ -425,6 +440,9 @@ export async function deployRoutes(app: FastifyInstance) {
       return sendDeployError(reply, err);
     }
   });
+
+  // Domains, TLS and the nginx helper (spec §6)
+  await app.register(deployDomainRoutes, { gate });
 }
 
 /**

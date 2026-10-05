@@ -18,6 +18,9 @@ export interface BastionctlBundle {
   wrapper: Buffer;
   scriptSha256: string;
   wrapperSha256: string;
+  /** The nginx-mode helper an administrator installs root-owned (spec §6); absent from older builds. */
+  nginxHelper?: Buffer;
+  nginxHelperSha256?: string;
 }
 
 let cached: BastionctlBundle | null | undefined;
@@ -32,8 +35,17 @@ export function bastionctlBundle(): BastionctlBundle | null {
     const dir = path.dirname(require.resolve('@smt/bastionctl/package.json'));
     const script = readFileSync(path.join(dir, 'dist', 'bastionctl.mjs'));
     const wrapper = readFileSync(path.join(dir, 'dist', 'bastionctl'));
+    const nginxHelper = readFileSync(path.join(dir, 'dist', 'bastion-nginx'));
     const { version } = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8')) as { version: string };
-    cached = { version, script, wrapper, scriptSha256: sha256(script), wrapperSha256: sha256(wrapper) };
+    cached = {
+      version,
+      script,
+      wrapper,
+      scriptSha256: sha256(script),
+      wrapperSha256: sha256(wrapper),
+      nginxHelper,
+      nginxHelperSha256: sha256(nginxHelper),
+    };
   } catch {
     cached = null;
   }

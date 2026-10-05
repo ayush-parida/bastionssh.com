@@ -329,6 +329,101 @@ The **Compose** tab lists Compose projects found from their containers' labels, 
 
 ---
 
+## 🚢 Deployments
+
+Deploy web apps — Next.js, anything with a Dockerfile, or a static site — to your own servers, without Git and without BastionSSH keeping any of it. The server is the source of truth: each app's config, secrets, releases and the proxy config are files there, and `bastionctl` on the server does the work, so a deploy runs the same from BastionSSH or from a shell (`ssh server /opt/bastion/bin/bastionctl deploy site1 --source site.tar.gz`). BastionSSH only uploads, streams the log, and records who did what in the audit log ([design](docs/superpowers/specs/2026-10-05-server-deployments-design.md)).
+
+**Set up** on a server's Deployments tab needs Docker on the server and an SSH user that may use it (docker group, or passwordless `sudo docker`). It installs `bastionctl` (one file, checked against the copy this BastionSSH ships before every use — a modified one is refused until you reinstall), creates the private `bastion-apps` network and the proxy. Deployments live in `/opt/bastion` when the SSH user can write it (created with passwordless `sudo` when allowed), otherwise in `~/bastion`:
+
+```
+/opt/bastion/
+  bin/bastionctl, bin/bastionctl.mjs, bin/bastion-nginx
+  proxy/Caddyfile                 # generated from every app; never edit
+  proxy/data/ proxy/config/       # Caddy's certificates and state
+  proxy/mode                      # caddy or nginx, chosen at setup
+  proxy/nginx/<app>.site          # nginx mode: what the host helper builds server blocks from
+  apps/<app>/
+    bastion.yml                   # the app's config
+    .env                          # secrets (0600), given to the container at start
+    releases/<id>/                # source, build.log, release.json
+    current -> releases/<id>
+```
+
+**Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>`, starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
+
+### `bastion.yml`
+
+```yaml
+name: site1                         # a-z, 0-9 and -, at most 41 characters; the app's folder name
+domains: [site1.com, www.site1.com] # at most 50; no two apps on a server may share one
+redirect_www: apex                  # apex: www → apex · www: apex → www · none
+tls: auto                           # see TLS below
+build:
+  type: nextjs                      # nextjs | dockerfile | static
+  node: "20"                        # nextjs and static: Node.js version (default: .nvmrc, engines, else 20)
+  dir: .                            # project folder inside the upload
+  output: out                       # static only: the folder to serve after the build
+run:
+  port: 3000                        # what the app listens on (static: always 80)
+  env_file: .env                    # in the app folder
+  volumes: ["uploads:/app/public/uploads"]   # named volumes only, never host paths
+  memory: 512m                      # optional limits
+  cpus: 1
+healthcheck: { path: /, timeout: 30s }
+keep_releases: 5                    # 2–50; the current and previous release are always kept
+proxy: caddy                        # caddy | nginx — must match how the server was set up
+```
+
+Unknown keys are refused, and the editor shows every problem at once. Next.js apps need `output: 'standalone'` in `next.config.js`; the build explains how if it is missing.
+
+### Caddy or nginx
+
+| | Caddy (default) | nginx mode |
+| --- | --- | --- |
+| For | servers with nothing on ports 80/443 | servers that already run nginx for other sites |
+| Ports 80/443 | the `bastion-caddy` container | your nginx; `bastion-caddy` listens on `127.0.0.1:18480` only |
+| Certificates | Caddy, automatically, renewed by Caddy | `certbot certonly --webroot`, renewed by certbot's timer, which reloads nginx |
+| What changes on the host | nothing outside the deployments folder | only `/etc/nginx/conf.d/bastion-<app>.conf`, one file per app |
+| TLS options | all below | `auto` and `staging` |
+
+Setup picks nginx mode by itself when an nginx on the host owns port 80 or 443 (and keeps whichever mode a server was set up with). In nginx mode every app still goes through `bastion-caddy`, so zero-downtime switches, health checks and rollbacks work the same; nginx terminates TLS and forwards each app's domains to it. Its server block only changes when an app's domains do, and it is written by `bastion-nginx`, a small script that is the only thing BastionSSH runs as root. Install it once, root-owned, and allow just that command — the Deployments tab shows these lines with your server's paths and user, and lists only what is still missing:
+
+```sh
+sudo apt-get install -y certbot      # if certbot is not installed
+sudo install -o root -g root -m 0755 /opt/bastion/bin/bastion-nginx /usr/local/sbin/bastion-nginx
+echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/bastion-nginx' | sudo tee /etc/sudoers.d/bastion-nginx
+sudo chmod 0440 /etc/sudoers.d/bastion-nginx
+```
+
+The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails. It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu). From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`.
+
+### Several sites on one server
+
+Each app is its own folder, container and image, all behind the one proxy, which routes by domain. A domain belongs to one app (a second app claiming it is refused), each app has its own `.env` and volumes (`bastion-<app>.<name>`), and a deploy or rollback of one app reloads the proxy without touching the others. Nothing but the proxy publishes a port.
+
+### Domains and TLS
+
+| `tls:` | Certificate | Needs |
+| --- | --- | --- |
+| `auto` | Let's Encrypt, obtained and renewed automatically | DNS pointing at the server, ports 80 and 443 open to the internet |
+| `staging` | Let's Encrypt's staging CA — not trusted by browsers; for testing without hitting rate limits | as `auto` |
+| `internal` | Caddy's own CA, for private names and intranets | nothing; browsers need Caddy's root installed to trust it |
+| `dns:<provider>` | via the DNS provider's API — the only way to get wildcards (`*.site1.com`) | the API token in `/opt/bastion/proxy/.env` as `<PROVIDER>_API_TOKEN` (never in BastionSSH), and a Caddy build with that provider's DNS module — the pinned standard image has none yet |
+| `{ cert: cert.pem, key: key.pem }` | your own files, in the app folder | renewing them yourself |
+
+**Domains** on an app checks each domain now: its A/AAAA records against the server's public address (with the exact record to create when they do not match — a domain is saved either way), whether ports 80 and 443 answer from BastionSSH for `auto`/`staging`, and each certificate's issuer, expiry and last issuance or renewal error, read from Caddy (or from certbot through the helper in nginx mode). A certificate that is past its renewal point, has a renewal error logged, or has expired raises a **Certificate not renewing** alert through your notification channels — once when it starts, and again when it recovers. The state is worked out from the server whenever certificate status is read (opening Domains, or the API); BastionSSH stores none of it and does not poll on its own.
+
+### Sizing
+
+- **Builds run on the server.** A Next.js build wants about 1–2 GB of memory on its own; on a 1 GB server add 2 GB of swap or builds may be killed. Static and Dockerfile builds depend on the project.
+- **Running apps**: Caddy uses a few tens of MB; a Next.js standalone server typically 100–300 MB, a static site served by Caddy a few MB. Set `run.memory` so one app cannot starve the others.
+- **Disk**: each kept release keeps its image (often 150–500 MB for Node apps; layers are shared between releases of an app). `keep_releases: 5` with a few apps fits comfortably in 20 GB; lower it on small disks.
+- As a rule of thumb: 1 vCPU / 1 GB for a few static or small Dockerfile sites, 2 vCPU / 2–4 GB to build and run several Next.js apps.
+
+Permissions follow the **Deployments** module and your access to the server: view sees apps, releases, status and domains; operate deploys, rolls back, restarts and stops; manage sets up, edits `bastion.yml` and `.env` (values are write-only; revealing one needs a passkey and is audited), and deletes apps.
+
+---
+
 ## ☸️ Kubernetes
 
 **Kubernetes** in the sidebar lists your clusters, each with a health dot from its last test or use. A cluster opens on its **map**: one card per node with its role, whether it is ready or cordoned, any memory/disk/PID pressure, CPU and memory bars (what pods asked for, and what they really use when the cluster has metrics-server), and the node's pods as small tiles — green running, amber pending or starting, red failing (CrashLoopBackOff, Error, OOMKilled…), grey completed, purple terminating. Hover a tile for the pod's name, namespace, restarts and reason; click it for the pod's panel. Pods no node can take wait in a separate **Waiting for a node** lane with the scheduler's reason ("0/3 nodes are available: Insufficient cpu"). Picking a namespace dims everything outside it, and the choice is remembered per cluster. **Workloads** lists Deployments, StatefulSets, DaemonSets, Jobs and CronJobs with a health dot and a one-line summary ("2 of 3 ready"). Every object has its own panel — health, key facts, labels and what it is connected to (its owner, the pods it runs or sends traffic to), each a link — at a stable URL you can share. Operators and up also get a read-only YAML view. Everything updates live while the page is open; nothing needs `kubectl`. (The [design](docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md) explains the choices behind all of it.)

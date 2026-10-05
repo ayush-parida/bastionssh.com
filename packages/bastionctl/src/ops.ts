@@ -7,6 +7,7 @@ import type {
   DeployAppSummary,
   DeployContainer,
   DeployOutcome,
+  DeployProxyMode,
   DeployRelease,
   DeploySetupResult,
   DeployValidation,
@@ -35,7 +36,8 @@ import {
   releaseId,
   volumeName,
 } from './names.js';
-import { applyProxy, CADDY_IMAGE, proxyContainer, proxyEnv, proxySpec, siteFor, switchProxy, withProxyLock, writeInitialCaddyfile } from './proxy.js';
+import { NGINX_UPSTREAM_PORT, proxyMode, readProxyMode, writeProxyMode } from './nginx.js';
+import { applyProxy, CADDY_IMAGE, LABEL_PROXY_MODE, proxyContainer, proxyEnv, proxySpec, siteFor, switchProxy, withProxyLock, writeInitialCaddyfile } from './proxy.js';
 import {
   clearCurrent,
   currentRelease,
@@ -232,12 +234,18 @@ export function version(): DeployVersion {
   return { version: BASTIONCTL_VERSION, node: process.version, images };
 }
 
-/** Directories, network and proxy container (spec §2.5, §5 `setup`). Safe to run again. */
-export async function setup(ctx: Ctx): Promise<DeploySetupResult> {
+/**
+ * Directories, network and proxy container (spec §2.5, §5 `setup`). Safe to
+ * run again. `proxy` picks the mode (default: the one set up before, else
+ * Caddy); changing it recreates the proxy container with the other ports.
+ */
+export async function setup(ctx: Ctx, opts: { proxy?: DeployProxyMode } = {}): Promise<DeploySetupResult> {
   const { layout, docker } = ctx;
   for (const dir of [layout.bin, layout.apps, layout.tmp, layout.proxy, path.join(layout.proxy, 'data'), path.join(layout.proxy, 'config')]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
   }
+  const mode = opts.proxy ?? readProxyMode(layout) ?? 'caddy';
+  writeProxyMode(layout, mode);
   fs.chmodSync(layout.tmp, 0o700);
   cleanTmp(ctx);
   await docker.ping();
@@ -254,9 +262,15 @@ export async function setup(ctx: Ctx): Promise<DeploySetupResult> {
     await docker.remove(PROXY_CONTAINER);
     info = null;
   }
+  // Created before modes existed (no label): a Caddy-mode container
+  if (info && (info.Config.Labels?.[LABEL_PROXY_MODE] ?? 'caddy') !== mode) {
+    ctx.log(`Replacing ${PROXY_CONTAINER} (proxy mode is now ${mode})`);
+    await docker.remove(PROXY_CONTAINER);
+    info = null;
+  }
   if (!info) {
-    ctx.log(`Creating ${PROXY_CONTAINER}`);
-    await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv)));
+    ctx.log(`Creating ${PROXY_CONTAINER}${mode === 'nginx' ? ` behind the host's nginx (127.0.0.1:${NGINX_UPSTREAM_PORT})` : ''}`);
+    await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv), mode));
   }
   if (!info?.State.Running) {
     try {
@@ -264,14 +278,18 @@ export async function setup(ctx: Ctx): Promise<DeploySetupResult> {
     } catch (err) {
       const message = (err as Error).message;
       if (/address already in use|port is already allocated/i.test(message)) {
-        throw new BastionError(`Ports 80/443 are taken by something else on this server (${message}). Stop it, or use proxy: nginx (coming later).`);
+        throw new BastionError(
+          mode === 'nginx'
+            ? `Port ${NGINX_UPSTREAM_PORT} on 127.0.0.1 is taken by something else on this server (${message}).`
+            : `Ports 80/443 are taken by something else on this server (${message}). Stop it, or set up in nginx mode (setup --proxy nginx) when it is the host's nginx.`,
+        );
       }
       throw err;
     }
   }
   // Bring the live config up to date with the apps on disk
   if (appNames(layout).some((a) => currentRelease(layout, a))) await applyProxy(ctx);
-  return { root: layout.root, proxy: 'caddy', network: NETWORK, proxyContainer: await proxyContainer(ctx), version: BASTIONCTL_VERSION };
+  return { root: layout.root, proxy: mode, network: NETWORK, proxyContainer: await proxyContainer(ctx), version: BASTIONCTL_VERSION };
 }
 
 /** `validate <app> [--file f]`: the config file (default: the app's own), with domains checked across apps. */
@@ -300,7 +318,7 @@ export async function init(ctx: Ctx, app: string, opts: { config?: string; force
   const configFile = ctx.layout.config(app);
   const existed = fs.existsSync(configFile);
   if (existed && !opts.force) throw new BastionError(`${app} already has a bastion.yml (use --force to replace it)`);
-  const text = opts.config ? fs.readFileSync(fileInRoot(ctx, opts.config), 'utf8') : templateConfig(app);
+  const text = opts.config ? fs.readFileSync(fileInRoot(ctx, opts.config), 'utf8') : templateConfig(app, proxyMode(ctx.layout));
   // Under the proxy lock: two configs written at once must not both pass the
   // check for domains another app uses, and the switch must see this one
   await withProxyLock(ctx, async () => {
@@ -387,7 +405,6 @@ export async function deploy(baseCtx: Ctx, app: string, source: string): Promise
   const config = loadConfig(baseCtx.layout, app);
   const conflicts = validateForServer(baseCtx.layout, app, fs.readFileSync(baseCtx.layout.config(app), 'utf8'));
   if (!conflicts.ok) throw new BastionError(`Invalid config: ${formatIssues(conflicts.errors)}`, 3);
-  if (config.proxy !== 'caddy') throw new BastionError('proxy: nginx is not available yet; use proxy: caddy');
   const sourceFile = fileInRoot(baseCtx, source);
   const proxy = await proxyContainer(baseCtx);
   if (proxy?.state !== 'running') throw new BastionError('The proxy is not running on this server (run bastionctl setup)');

@@ -70,6 +70,7 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../deploy/remote.js')>();
   const { createHash } = await import('node:crypto');
   const { DISCOVER_SCRIPT, PREPARE_SCRIPT } = await import('../../deploy/install.js');
+  const { DETECT_SCRIPT } = await import('../../deploy/nginx.js');
   const openRemote = async (_req: unknown, server: import('../../deploy/remote.js').ServerRow): Promise<import('../../deploy/remote.js').Remote> => {
     fake.opened++;
     let released = false;
@@ -87,6 +88,8 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
         if (argv[0] === 'sh' && argv[1] === '-c') {
           if (argv[2] === DISCOVER_SCRIPT) return done(`root=${fake.root ?? ''}\n`, []);
           if (argv[2] === PREPARE_SCRIPT) return done('root=/opt/bastion\nsudo=no\ndocker=yes\nsocket=writable\n', []);
+          // No nginx on this host: setup keeps Caddy (deploy-domains.test.ts covers nginx mode)
+          if (argv[2] === DETECT_SCRIPT) return done('installed=no\nrunning=no\nhttp=no\nhttps=no\ncertbot=no\ninclude=no\nsudo=no\n', []);
           throw new Error('unexpected script');
         }
         if (argv[0] !== 'env' || !argv[1]!.startsWith('BASTION_ACTOR=') || argv[2] !== `${fake.root}/bin/bastionctl` || argv.at(-1) !== '--json') {
@@ -398,7 +401,7 @@ describe('deployment routes', () => {
       expect(fake.files.get('/opt/bastion/bin/bastionctl.mjs')).toEqual(SCRIPT);
       expect(fake.files.get('/opt/bastion/bin/bastionctl')).toEqual(WRAPPER);
       expect(fake.modes.get('/opt/bastion/bin/bastionctl')).toBe(0o755);
-      expect(fake.runs.map((r) => r.argv)).toEqual([['setup']]);
+      expect(fake.runs.map((r) => r.argv)).toEqual([['setup', '--proxy', 'caddy']]);
       expect(audits('deploy.setup')[0]!.meta).toMatchObject({ root: '/opt/bastion', version: '9.9.9', result: 'success' });
       // A reinstall over a modified copy works the same
       fake.files.set('/opt/bastion/bin/bastionctl.mjs', Buffer.from('// tampered'));

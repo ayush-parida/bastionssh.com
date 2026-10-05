@@ -590,8 +590,9 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
 ### 4.15b Deployments (`packages/bastionctl`, `/server/deploy`, `api/routes/deploy.ts`)
 
 Design: `docs/superpowers/specs/2026-10-05-server-deployments-design.md`. Phase A is in place
-(bastionctl, install and integrity check, migration 0026, the server routes); the web tab,
-nginx mode, DNS/TLS checks and certificate alerts come in later phases.
+(bastionctl, install and integrity check, migration 0026, the server routes), and so is phase D
+(nginx mode, DNS/port pre-checks, certificate status and alerts); the user guide is the README's
+Deployments section.
 
 - **No deployment data in the database.** Apps, `bastion.yml`, `.env`, releases and the proxy
   config are files on the server under the root directory — `/opt/bastion` when the SSH user
@@ -638,9 +639,54 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   first line only: the app log after it may hold its secrets). Revocation, or
   losing Servers or Deployments, ends deploy streams. `PUT …/config` validates with bastionctl
   first (422 with every problem). Env reveal needs a browser session and a passkey step-up.
+- **Proxy modes** (`<root>/proxy/mode`, written by `bastionctl setup --proxy caddy|nginx`):
+  setup keeps a server's mode, and a first setup picks nginx when `deploy/nginx.ts`'s constant
+  probe finds a running host nginx listening on 80/443. In nginx mode `bastion-caddy` stays —
+  it publishes only `127.0.0.1:18480`, its Caddyfile is plain `http://` sites with
+  `auto_https off` and `trusted_proxies static private_ranges` — so switches, health checks
+  and rollbacks are unchanged; the host's nginx terminates TLS and forwards each app's domains
+  to it. A config's `proxy:` must match the server's mode (validated), and nginx mode allows
+  `tls: auto | staging` only. After each successful proxy switch bastionctl writes
+  `proxy/nginx/<app>.site` (app, tls, upstream port, domains) for every served app and removes
+  stale ones (`packages/bastionctl/src/nginx.ts`).
+- **The nginx helper** (`packages/bastionctl/bastion-nginx.sh`, shipped as
+  `dist/bastion-nginx` with its SHA-256): a POSIX script an administrator installs root-owned
+  at `/usr/local/sbin/bastion-nginx` with a sudoers rule for that path only — the one command
+  BastionSSH runs as root (`sudo -n`, argv quoted; `GET /proxy` lists the missing setup
+  steps). It re-validates every value of the site file (`LC_ALL=C`, no links, size and count
+  caps), generates `/etc/nginx/conf.d/bastion-<app>.conf` from those values only (port 80:
+  ACME webroot `/var/lib/bastion-nginx/acme` and, with a certificate, a redirect; 443: TLS and
+  `proxy_pass` to the loopback port), runs `nginx -t` and `nginx -s reload` and restores the
+  previous file on either failure, skips the reload when nothing changed, and runs `certbot
+  certonly --webroot --cert-name bastion-<app>[-staging] --keep-until-expiring --expand
+  --deploy-hook 'nginx -s reload'` (renewal is certbot's timer). A certbot failure leaves the
+  HTTP block serving and is kept in `/var/lib/bastion-nginx/<cert>.error` for `status`. One run
+  at a time (a `mkdir` lock). BastionSSH hashes the installed helper before each run (409
+  `nginx_helper_missing` / `nginx_helper_mismatch`), runs `apply` after a successful deploy
+  (its lines join the deploy log before `result`) or config change once the site file exists,
+  and `remove` after a delete; failures are reported in the response and audited as
+  `deploy.proxy_sync`, never undoing what came before. `POST …/apps/:app/proxy` (operate)
+  runs `apply` again, e.g. after fixing DNS.
+- **Domains and certificates** (`deploy/domains.ts`, `GET …/apps/:app/domains`, view): the
+  server's public address (its host when public, its name resolved, else the server asking an
+  egress echo service with the URLs as script arguments), each domain's A/AAAA through the DNS
+  module's resolver compared with it (wildcards through a name under them) with the exact
+  records to create, ports 80/443 through the diagnostics TCP probe for `tls: auto | staging`,
+  and certificate facts: `bastionctl certs <app>` reads Caddy's storage with `find`/`cat` in
+  the proxy container (its files are root 0600) and the latest `tls.*` error from Caddy's JSON
+  log; in nginx mode `bastion-nginx status` reads certbot's with openssl. The state (valid,
+  expiring, failing, expired, missing) is derived on read by `deployCertState` in
+  `@smt/shared`: failing once past the renewal point (a third of the lifetime left) plus two
+  days, or with an error logged inside the renewal window. Failing and expired certificates
+  raise `deploy_certificate` alerts through `notifyAlertsChanged`, one per app and domain
+  (`container: <app>/<domain>`); `deploy/cert-alerts.ts` only remembers in memory what it
+  last announced, so a read sends opened/resolved on a change only — no `server_alerts` rows.
 - Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with
   the remote layer faked (matrix, integrity, streams, audit, no rows but audit); an env-gated
-  integration test over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`).
+  integration test over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`). The
+  nginx helper runs for real under dash in `nginx-helper.test.ts` with its paths moved into a
+  temp tree and fake `nginx`/`certbot`; `deploy-domains.test.ts` covers mode detection at
+  setup, the helper after deploy/config/delete, the domains report in both modes and alerts.
 
 ### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
 

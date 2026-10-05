@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { certs } from './certs.js';
 import type { Ctx } from './context.js';
 import { DEFAULT_SOCKET, DockerApi } from './docker.js';
 import { MAX_VALUE_BYTES } from './env.js';
@@ -15,12 +16,13 @@ import * as ops from './ops.js';
 
 export const USAGE = `Usage: bastionctl <command> [options] [--json]
 
-  setup                                   Network, proxy container and folders (safe to repeat)
+  setup [--proxy caddy|nginx]             Network, proxy container and folders (safe to repeat)
   init <app> [--config <file>] [--force]  Create an app (template, or a bastion.yml file)
   validate <app> [--file <file>]          Check a config (default: the app's bastion.yml)
   list                                    Apps with their current release and container
   status <app>                            One app in detail
   releases <app>                          An app's releases, newest first
+  certs <app>                             Certificates of the app's domains (issuer, expiry, last error)
   deploy <app> --source <file>            Build and serve an upload (.tar or .tar.gz)
   rollback <app> <release>                Serve a kept release again (no rebuild)
   restart <app> | stop <app>              The app's live container
@@ -36,7 +38,7 @@ interface Parsed {
   flags: Map<string, string | true>;
 }
 
-const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root']);
+const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy']);
 const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help']);
 
 export function parseArgs(argv: string[]): Parsed {
@@ -146,9 +148,11 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       return { value: v, text: `bastionctl ${v.version} (node ${v.node})\n` };
     }
     case 'setup': {
-      expect(args, 0, 'setup');
-      const r = await ops.setup(ctx);
-      return { value: r, text: `Ready: ${r.root} (proxy ${r.proxyContainer?.state ?? 'missing'})\n` };
+      expect(args, 0, 'setup [--proxy caddy|nginx]');
+      const proxy = flag(parsed, 'proxy');
+      if (proxy !== undefined && proxy !== 'caddy' && proxy !== 'nginx') throw new BastionError('--proxy is caddy or nginx', 2);
+      const r = await ops.setup(ctx, { proxy });
+      return { value: r, text: `Ready: ${r.root} (${r.proxy} mode, proxy ${r.proxyContainer?.state ?? 'missing'})\n` };
     }
     case 'init': {
       expect(args, 1, 'init <app> [--config <file>] [--force]');
@@ -174,6 +178,11 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       expect(args, 1, 'releases <app>');
       const r = await ops.releases(ctx, appName(args[0]));
       return { value: r, text: lines(r.map((x) => `${x.current ? '*' : ' '} ${x.id}\t${x.result}\t${x.actor}`)) };
+    }
+    case 'certs': {
+      expect(args, 1, 'certs <app>');
+      const r = await certs(ctx, appName(args[0]));
+      return { value: r, text: lines(r.map((c) => `${c.domain}\t${c.issuer ?? 'no certificate'}\t${c.notAfter ?? '-'}${c.lastError ? `\t${c.lastError.message}` : ''}`)) };
     }
     case 'deploy': {
       expect(args, 1, 'deploy <app> --source <file>');

@@ -1,7 +1,8 @@
 // Bundle bastionctl into one dependency-free ES module (yaml included) and
 // write the POSIX wrapper next to it with the pinned Node.js image filled in.
-// dist/manifest.json carries both files' SHA-256: BastionSSH ships these
-// files and refuses to run a bastionctl on a server that does not match.
+// dist/manifest.json carries the files' SHA-256: BastionSSH ships these
+// files and refuses to run a bastionctl (or nginx helper) on a server that
+// does not match.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { build } from 'esbuild';
@@ -25,8 +26,20 @@ await build({
 const wrapper = readFileSync('wrapper.sh', 'utf8').replace('@NODE_IMAGE@', images.node);
 writeFileSync('dist/bastionctl', wrapper, { mode: 0o755 });
 
+// The nginx-mode helper an administrator installs root-owned (spec §6); shipped as is
+writeFileSync('dist/bastion-nginx', readFileSync('bastion-nginx.sh'), { mode: 0o755 });
+
 const sha256 = (file) => createHash('sha256').update(readFileSync(file)).digest('hex');
 writeFileSync(
   'dist/manifest.json',
-  JSON.stringify({ version, script: { file: 'bastionctl.mjs', sha256: sha256('dist/bastionctl.mjs') }, wrapper: { file: 'bastionctl', sha256: sha256('dist/bastionctl') } }, null, 2) + '\n',
+  JSON.stringify(
+    {
+      version,
+      script: { file: 'bastionctl.mjs', sha256: sha256('dist/bastionctl.mjs') },
+      wrapper: { file: 'bastionctl', sha256: sha256('dist/bastionctl') },
+      nginxHelper: { file: 'bastion-nginx', sha256: sha256('dist/bastion-nginx') },
+    },
+    null,
+    2,
+  ) + '\n',
 );
