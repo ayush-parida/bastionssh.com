@@ -35,7 +35,7 @@ If the connection cannot be made â€” a timeout, a refused port, a DNS failure â€
 | **Files** | Opens the server's SFTP file browser. See [SFTP file browser](/docs/files/sftp-file-browser). |
 | **AI** | Opens the AI assistant beside the terminal. It can see the last part of the terminal's output to help explain errors. See [AI assistant](/docs/ai/ai-assistant). |
 | **Diagnose** | Appears after a session drops, to check why. |
-| **Disconnect** | Closes the SSH session. |
+| **Disconnect** | Closes the SSH session. Once the session has ended, this becomes **Back to servers**. |
 
 The terminal resizes with the browser window; BastionSSH passes the new size to the server so full-screen programs such as `htop`, `vim` and `less` draw correctly.
 

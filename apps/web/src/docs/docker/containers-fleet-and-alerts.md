@@ -16,7 +16,7 @@ The table shows each container's **Name**, **Server**, **Image**, **State**, **S
 
 - **Filter by name, image or project** in the search box.
 - Filter by state (**Any state**, Running, Unhealthy, Restarting, Paused, Stopped), and pick one server from **All servers**.
-- Tick **Show stopped** to include containers that are not running.
+- Stopped containers are included by default; untick **Show stopped** to see only running ones.
 - Click a row to open that container on its server's Docker page, where you can read logs and run actions.
 
 The list refreshes every minute while the page is open.
@@ -33,7 +33,7 @@ Docker is found on a server the first time someone opens its Docker page. Server
 
 Container alerts are **off by default**, so a first rollout stays quiet. To turn them on:
 
-1. Go to **Settings → Docker** (owners and admins).
+1. Go to the **Docker** section of **Settings** (needs the **manage** level on the Containers module; admins and owners by default).
 2. Turn on **Alert on unhealthy, crash-looping and failed containers**.
 
 From then on, each regular health check also looks at the containers on servers where Docker was found, over the same SSH connection. Servers without Docker are never asked.

@@ -20,7 +20,7 @@ Every app still goes through `bastion-caddy`, so zero-downtime switches, health 
 
 ## Choosing nginx mode
 
-**Automatic** at setup picks nginx mode when an nginx on the host owns port 80 or 443. You can also choose it explicitly. A server keeps the mode it was set up with; apps' `bastion.yml` must say `proxy: nginx` (a new app's template already does).
+**Automatic** at a server's first setup picks nginx mode when an nginx on the host is running and owns port 80 or 443. You can also choose **nginx on the host** explicitly. A server keeps the mode it was set up with unless you choose another and set up again; apps' `bastion.yml` must say `proxy: nginx` (a new app's template already does).
 
 ## One-time setup on the server
 

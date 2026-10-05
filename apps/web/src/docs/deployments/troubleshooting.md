@@ -87,7 +87,7 @@ The previous release kept serving throughout.
 
 **Why.** Another web server (nginx, Apache, another Caddy or Traefik, a container publishing 80/443) owns the ports the proxy needs.
 
-**Fix.** Find it with `sudo ss -ltnp 'sport = :80 or sport = :443'`. If it is nginx serving other sites, use [nginx mode](nginx.md) (`setup --proxy nginx`, or choose nginx before **Set up**). Otherwise stop and disable it, then run setup again.
+**Fix.** Find it with `sudo ss -ltnp 'sport = :80 or sport = :443'`. If it is nginx serving other sites, use [nginx mode](nginx.md) (`setup --proxy nginx`, or choose **nginx on the host** as the proxy before **Set up deployments**). Otherwise stop and disable it, then run setup again.
 
 ## Integrity check failed: Reinstall
 
@@ -95,7 +95,7 @@ The previous release kept serving throughout.
 
 **Why.** Before every command BastionSSH checks the server's `bastionctl` against its own copy. After a BastionSSH update the shipped version is new, so every server asks for this once; a file edited on the server is refused for the same reason.
 
-**Fix.** Click **Reinstall** on the Deployments tab (manage access). Your apps, configs, secrets and releases are untouched. See [Reinstall](overview.md#reinstall).
+**Fix.** Click **Reinstall bastionctl** on the Deployments tab (manage access). Your apps, configs, secrets and releases are untouched. See [Reinstall](overview.md#reinstall).
 
 ## Build ran out of memory
 

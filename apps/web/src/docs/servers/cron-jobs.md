@@ -22,7 +22,7 @@ keywords: [cron, schedule, scheduled jobs, crontab, run history, timezone, redis
 
 A job runs either a saved command or an inline command, not both. A saved command used by a cron job runs with its `{{variables}}` left as written — there is no place to fill them in — so pick commands without variables, or use an inline command.
 
-Creating cron jobs needs the *manage* level on the Cron Jobs module, and the job's server needs *operate* access.
+Creating cron jobs needs the Cron Jobs module at *manage* (Operators, Admins and Owners by default), *operate* access to the job's server and, for a saved command, *operate* on that command.
 
 ## Cron syntax
 
@@ -53,7 +53,7 @@ An invalid expression is refused with the reason.
 The table shows each job's **Name**, **Schedule**, **Server**, **Next run** and **Status**. On each row:
 
 - the **toggle** enables or disables the job (a disabled job keeps its history and stops being scheduled);
-- **Run now** (the play icon) starts a run immediately, outside the schedule;
+- **Run now** (the play icon) starts a run immediately, outside the schedule — even while the job is disabled;
 - the **delete** icon removes the job;
 - the expand arrow on the left opens the **run history**.
 
@@ -63,7 +63,7 @@ The **Dashboard** also lists active cron jobs.
 
 ## Run history
 
-Each run shows its status (`success` or `failure`), exit code, duration, start time, and the command's standard output and standard error. The latest 50 runs are kept in the list. A run counts as a success only when the command exits with code `0`.
+Each run shows its status (`running`, then `success` or `failure`), exit code, duration, start time, and the command's standard output and standard error. The list shows the latest 50 runs. A run counts as a success only when the command exits with code `0`.
 
 Like saved commands, a run times out after **5 minutes**, and output is capped (about 64 KB of standard output, 8 KB of standard error).
 
@@ -79,17 +79,18 @@ Scheduled runs go through a queue held in **Redis**:
 - Without `SMT_REDIS_URL`, you can still create jobs and use **Run now**, but scheduled runs **do not fire**; the server logs "Cron job not scheduled — set SMT_REDIS_URL to run cron jobs".
 - Schedules are re-queued when the worker starts, so a restart or a flushed Redis does not lose them.
 
-> **Note:** The worker runs inside the app process by default (`SMT_WORKER_IN_PROCESS=true`). If you run it as a separate process instead, its cron jobs cannot reach servers behind a [connectivity agent](/docs/operations/connectivity-agents), because agent connections live in the app process.
+> **Note:** The queue worker runs inside the app process (`SMT_WORKER_IN_PROCESS=true`, the default). BastionSSH ships no separate worker process, so leave it at `true`: with Redis set and `SMT_WORKER_IN_PROCESS=false`, nothing takes jobs off the queue — scheduled runs, **Run now** and saved command runs stay queued and never execute.
 
 ## Permissions summary
 
 | Action | Needs |
 | --- | --- |
 | See jobs and their history | *view* on the job |
-| Enable or disable | *operate* on the job |
-| Run now | *operate* on the job and on its server |
-| Create | *manage* on the Cron Jobs module |
-| Delete | *manage* on the job |
+| Disable | *operate* on the job |
+| Enable | *operate* on the job, on its server and on the saved command it runs |
+| Run now | *operate* on the job, on its server and on the saved command it runs |
+| Create | Cron Jobs module at *manage*, plus *operate* on the server and the saved command |
+| Delete | *manage* on the job, or the Cron Jobs module at *manage* |
 
 Runs started with **Run now** are audited as `cron_job.run`.
 

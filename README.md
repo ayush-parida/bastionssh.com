@@ -13,109 +13,117 @@
 
 - 🌐 **100% Browser-Based** — Manage everything from a clean web UI. No desktop app, no terminal required.
 - 🔑 **SSH Key Management** — Generate, import, organize, and rotate multiple SSH keys.
-- 🖥️ **Server Inventory** — Add, tag, and group unlimited servers (production, staging, clients, personal, etc.).
+- 🖥️ **Server Inventory** — Add and tag unlimited servers (production, staging, clients, personal, etc.); tags drive filtering, fan-out runs and tag-based access grants.
 - 💻 **In-Browser Terminal** — Full interactive SSH sessions in your browser via WebSocket + xterm.js.
-- 📌 **Saved Commands per Server** — Save frequently-used commands against any server and run them with one click.
-- ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view history, logs, and failures.
+- 📁 **SFTP File Browser** — Browse, upload, download, rename and delete files on a server over its SSH connection (needs `operate` access to the server).
+- 📌 **Saved Commands** — Save frequently-used commands (optionally tied to a default server) and run them on one server, a list of servers, or every server with a tag.
+- ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view run history and output. Scheduled runs need Redis (`SMT_REDIS_URL`).
 - ☁️ **Cloud Inventory Sync** — Register an AWS, Google Cloud, Azure, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
 - 🌐 **DNS Lookup** — Check a domain's records and nameservers from inside the tool. Addresses that belong to a server you manage are labelled with its name, and the same lookup is run against several public resolvers plus the domain's own nameservers so you can see whether a change has propagated.
 - 🪣 **Object Storage** — Register AWS S3, MinIO, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, Google Cloud Storage, Hetzner Object Storage or any S3-compatible endpoint (presets fill in the endpoint shape and region). List, create and delete buckets; browse, upload, download, rename and delete objects — all from the same UI and audit log as your servers.
 - 📂 **FTP / FTPS** — Register FTP, explicit-FTPS or implicit-FTPS servers (shared hosting, cPanel, legacy appliances) with a stored, vault-encrypted password. Browse directories, upload, download, rename and delete — same roles and audit log as everything else.
 - 📊 **Agentless Health Monitoring** — Every server is polled over SSH for uptime, load, CPU, memory, disk and process count. Live status on the dashboard, per-server history charts, and alerts when a host goes down or fills up — delivered to Slack, Discord, Teams, Google Chat, Telegram, PagerDuty, Opsgenie, ntfy, Gotify, Pushover, email or any webhook. Nothing to install on the servers themselves.
-- 👥 **Team Collaboration** — Invite teammates, assign roles, share servers, keys, saved commands, and cron jobs across an organization with full audit logs.
-- 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or binary). Each team/company runs an isolated environment they fully control.
-- 🤖 **Bring Your Own AI** — Plug in OpenAI, Anthropic Claude, or any local model (Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible endpoint) to:
-  - Suggest shell commands from natural language
-  - Explain command output and logs
-  - Diagnose errors
-  - Generate scripts on the fly
+- 👥 **Team Collaboration** — Invite teammates, assign built-in or custom roles, grant access per server, cluster, connection, saved command or cron job (permanently or for a time), with full audit logs.
+- 🏠 **Self-Hosted Environments** — Spin up your own instance in minutes (Docker, Compose, or from source). Each team/company runs an isolated environment they fully control.
+- 🤖 **Bring Your Own AI** — Plug in OpenAI, Anthropic Claude, or any local model (Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible endpoint) and chat with an assistant that can:
+  - Suggest shell commands from natural language and run them on a server — anything that could change the server only after you approve it
+  - Read container and Kubernetes logs, events and object details (redacted) to explain what is wrong
+  - Explain output and errors you paste, and write scripts
 - 🩺 **Connectivity Diagnostics** — One click walks DNS, TCP, TLS or the SSH banner, the host key and (optionally) a login for a server, FTP/SFTP or storage connection, says which step failed and what to fix, and shows the app's egress IP for firewall rules.
 - 🎥 **Session Recording** — Terminal sessions and one-shot command runs are recorded as asciicast and can be replayed in the browser or downloaded, with a searchable command log.
 - ☸️ **Kubernetes** — See a cluster at a glance: nodes with their pods as coloured tiles, pods waiting for a node and why, workloads with their health and redacted details, all live — no kubectl. Clusters are reached directly, through a managed server's SSH connection or through an agent, with TLS always verified and Secret values never leaving the server.
 - 🐳 **Docker** — Containers, images, volumes and networks per server with live status, logs, stats and redacted inspect; container actions, pulls and prune, recorded shells in containers, Compose projects, a cross-server Containers view and opt-in container alerts — all over the server's existing SSH connection, no agent, no exposed daemon port.
 - 🪜 **Jump Hosts & Private Networks** — Reach servers through one or more bastions (like `ssh -J`), or through a small outbound agent on a private network that needs no inbound port.
+- 🚢 **Deployments** — Deploy static sites, Next.js and Dockerfile apps to your own servers with zero-downtime switches, automatic HTTPS and one-click rollback, driven by `bastionctl` on the server.
 - 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
 - 🔒 **Secure by Default** — All keys and credentials encrypted at rest. Self-hosted, no telemetry, no cloud lock-in.
-- 📦 **Easy to Distribute** — Single Docker image, `docker compose` one-liner, or prebuilt binaries.
+- 📦 **Easy to Distribute** — Single Docker image and a ready-made Compose file (app + Redis, optional HTTPS with Caddy).
+- 📖 **In-App Docs** — **Docs** in the sidebar has guides for every module, including the complete deployment guide; pages link to the right one where you need it.
 
 ---
 
 ## 📦 Installation
 
-The easiest way to run it — pick whichever you prefer.
+Every option needs three settings; the server refuses to start without them:
 
-### Option 1: Docker (recommended)
+| Variable | What it is |
+| --- | --- |
+| `SMT_BASE_URL` | The URL people open the app at, e.g. `http://localhost:8080` or `https://bastion.example.com` (passkeys are bound to its hostname) |
+| `SMT_ENCRYPTION_KEY` | Master key of the vault that encrypts keys and credentials, at least 32 characters: `openssl rand -base64 32`. Keep it safe — nothing stored (or backed up) can be decrypted without it |
+| `SMT_SESSION_SECRET` | Signs session cookies, at least 32 characters: `openssl rand -hex 32` |
+
+Everything is stored in one SQLite file (`/data/smt.db` by default; `SMT_DB_URL` is the path to that file — there is no PostgreSQL support). Redis (`SMT_REDIS_URL`) is needed for **scheduled** cron jobs: without it the app runs, saved commands and a cron job's **Run now** run in-process, but cron schedules are saved and never fire. [`.env.example`](.env.example) lists every setting.
+
+Images are published to `ghcr.io/ayush-parida/bastionssh` when a version is tagged (`latest`, `1`, `1.2`, `1.2.3`). There are no prebuilt binaries.
+
+### Option 1: Docker Compose (recommended)
+
+The repository's [`deploy/docker/docker-compose.yml`](deploy/docker/docker-compose.yml) runs the app with Redis, a data volume and a health check, and has an opt-in `https` profile with Caddy ([below](#-self-hosted-environment-setup)).
+
+```bash
+git clone https://github.com/ayush-parida/bastionssh.com.git
+cd bastionssh.com/deploy/docker
+printf 'SMT_BASE_URL=http://localhost:8080\nSMT_ENCRYPTION_KEY=%s\nSMT_SESSION_SECRET=%s\n' \
+  "$(openssl rand -base64 32)" "$(openssl rand -hex 32)" > .env
+docker compose up -d          # add --build to build the image from this checkout
+docker compose logs smt       # shows the generated first-admin password once
+```
+
+### Option 2: Docker
 
 ```bash
 docker run -d \
   --name bastionssh \
   -p 8080:8080 \
   -v bastionssh_data:/data \
+  -e SMT_BASE_URL=http://localhost:8080 \
+  -e SMT_ENCRYPTION_KEY="$(openssl rand -base64 32)" \
+  -e SMT_SESSION_SECRET="$(openssl rand -hex 32)" \
   ghcr.io/ayush-parida/bastionssh:latest
 ```
 
-Open http://localhost:8080 and you're done.
+Keep the encryption key (`docker inspect bastionssh` shows it) and pass the same one when you recreate the container — a new key cannot decrypt what the old one stored. This runs without Redis, so cron jobs do not run on their schedule; add `-e SMT_REDIS_URL=redis://<host>:6379` pointing at a Redis to enable them.
 
-### Option 2: Docker Compose
+### Option 3: From source
 
-```yaml
-# docker-compose.yml
-services:
-  bastionssh:
-    image: ghcr.io/ayush-parida/bastionssh:latest
-    ports:
-      - '8080:8080'
-    volumes:
-      - bastionssh_data:/data
-    restart: unless-stopped
-
-volumes:
-  bastionssh_data:
-```
+Needs Node.js 20+ and pnpm 9.
 
 ```bash
-docker compose up -d
+git clone https://github.com/ayush-parida/bastionssh.com.git
+cd bastionssh.com
+pnpm install
+pnpm --filter @smt/shared --filter @smt/cron-parser --filter @smt/agent --filter @smt/bastionctl run build   # the server imports their dist/
+cp .env.example .env          # then fill in the three required values
+pnpm dev                      # API on :8080, web app with hot reload on http://localhost:5173
 ```
 
-### Option 3: Prebuilt Binary
-
-Download the latest release for your platform from the [Releases page](#) and run:
-
-```bash
-./smt serve --port 8080
-```
-
-### Option 4: Build from Source
-
-```bash
-git clone https://github.com/<your-org>/server-management-tool.git
-cd server-management-tool
-# follow build instructions in CONTRIBUTING.md
-```
+For a production build run `pnpm build`, then start the server and let it serve the web build: `SMT_STATIC_DIR=apps/web/dist SMT_DB_URL=./data/smt.db node apps/server/dist/index.js`, with the required variables in the environment.
 
 ---
 
 ## 🚀 Quick Start
 
-1. Open `http://localhost:8080` in your browser.
+1. Open `SMT_BASE_URL` (e.g. `http://localhost:8080`) in your browser.
 2. Sign in as the first admin (an owner account seeded on first start):
    - Set `SMT_ADMIN_EMAIL` and `SMT_ADMIN_PASSWORD` before the first start to choose the credentials.
    - Unless `NODE_ENV` is explicitly `development` or `test`, an unset `SMT_ADMIN_PASSWORD` (or the dev default `admin1234`) gets a random password instead, printed **once** to the server's stderr (`Generated a random admin password`) whatever `SMT_LOG_LEVEL` is. This covers the Docker image and a bare `pnpm start` / `node dist/index.js`. Sign in and change it.
    - `pnpm dev` runs with `NODE_ENV=development`, where the defaults are `ayush.parida@fgshq.com` / `admin1234`.
 3. **Add an SSH key** — paste an existing one or generate a new keypair from the UI.
 4. **Add a server** — host, port, user, and select the SSH key.
-5. Click **Connect** to open an in-browser terminal, or use the **Run** button to execute saved commands.
+5. Click **Connect** on the server to open an in-browser terminal, or run a command from **Saved Commands**.
+
+**Docs** in the sidebar has the full guides for every module.
 
 ---
 
 ## 📌 Saved Commands
 
-Attach commands to any server for instant one-click execution.
+Save a command once and run it with one click.
 
-- Group by category (Maintenance, Deploy, Diagnostics, etc.)
-- Parameterize with variables (`{{branch}}`, `{{service}}`)
-- View output history per command
-- Share command libraries across servers via tags
+- Give it a category (Maintenance, Deploy, Diagnostics, etc.) and optionally a default server
+- Parameterize with variables (`{{branch}}`, `{{service}}`), filled in when you run it. Values are inserted into the command **as typed, without shell quoting**, so whoever runs it can add shell syntax through them — quote them in the command where that matters
+- Run on one server, several, or every server with a tag, and watch each server's output live
+- Running needs `operate` on the command and on each server; there is no separate approval step (only AI-proposed commands that could change something wait for approval)
 
 ---
 
@@ -127,17 +135,18 @@ Why this is better for many teams:
 
 - ✅ Nothing installed or modified on your servers
 - ✅ Centralized view of all scheduled tasks across your fleet
-- ✅ Unified logs, run history, and failure alerts
-- ✅ Pause / resume / edit schedules without SSH'ing in
+- ✅ Run history with output and exit codes in one place
+- ✅ Enable / disable a job, or **Run now**, without SSH'ing in
 - ✅ Works even on ephemeral or read-only servers
 
 Each cron job has:
 
-- A target server (or group)
-- A command (or saved command reference)
-- A schedule (cron expression or human-readable)
-- Run history with stdout/stderr and exit codes
-- Optional notifications on failure (webhook, email)
+- One target server
+- A command, typed in or a saved command
+- A schedule: a five-field cron expression in a time zone (the next run is previewed)
+- Run history (the last 50 runs) with stdout/stderr and exit codes
+
+Scheduled runs go through a Redis queue, so set `SMT_REDIS_URL` (the Docker Compose file does); without it jobs can be created and run with **Run now**, but never fire on schedule. A job cannot be edited in the UI after it is created — delete it and create it again. There are no failure notifications for cron runs yet; check the run history.
 
 ---
 
@@ -449,7 +458,7 @@ Permissions follow the **Deployments** module and your access to the server: vie
 
 **Who sees what.** Everyone with access to a cluster sees the map, workloads and details. Secret values never leave the server: Secrets show their type and key names only, and environment variables that come from a Secret show the reference, not the value; opening a Secret's (redacted) YAML is audited. ConfigMap values are shown unless an owner or admin turns that off under **Settings → Kubernetes**, where they also choose whether operators may scale and restart workloads, delete pods and open shells (all on by default). Restricted members see only the clusters granted to them in the Team **Access** dialog, permanently or for a time, like servers; a cluster's **namespace allowlist** limits what anyone sees on it. A member whose access is narrowed to some namespaces sees only those (not the rest of the allowlist) and not which server or agent the cluster is reached through — an error reaching it through one just says the cluster could not be reached. Where a role lets a member do more in a namespace than on the cluster as a whole, an object's panel there offers what they may do (Logs, YAML, shells, actions, Explain). A request for access to a cluster can name namespaces, and the admin approving it can narrow them further (or narrow a whole-cluster request); only those namespaces are granted. Approved at your base role's level, such access follows your role if it changes before it ends. Revoking access closes a member's live views at once. The cluster's own credential bounds everything: BastionSSH roles decide what the UI offers, Kubernetes RBAC decides what is possible. With **impersonation** on (off by default), every request carries `Impersonate-User: bastion:<email>` and `Impersonate-Group: bastion:<role>`, so the cluster's RBAC and audit log see the real person — the credential needs the `impersonate` verb for that, and you bind roles to those users and groups. **Diagnose** on a cluster runs DNS, TCP and TLS checks on its route (or the SSH checks of the server it goes through) and then the connection test.
 
-**Guided actions** fix the common problems with a button instead of a command. A Deployment or StatefulSet panel has a **scale** slider whose rings show the replicas now → after as you drag (pods that start in blue, pods that stop in red), with a warning when a HorizontalPodAutoscaler controls the workload and will change the count back; **Restart rollout** replaces every pod one by one (the confirmation warns when the workload's update strategy is `Recreate`, which stops them all at once, or `OnDelete`, which replaces nothing until pods are deleted). A Deployment's **revisions** are a timeline — when, the change-cause, the images, the one running now highlighted — and admins can **roll back** to a past one after seeing what changes (images, and environment variable *names* added or removed; values never leave the cluster). A pod with an owner offers **Restart this pod** (it is deleted and its controller starts a fresh one); a pod without one — or one whose Job already finished — gets a stronger warning, since nothing brings it back. Admins **cordon / uncordon** a node with the switch on its map card, in the Nodes table or in its panel — no new pods are placed there, the ones already there keep running. A CronJob can be **suspended / resumed** with a switch, or **run now** (a Job from its template, owned by the CronJob, under a generated name). Every action asks first, naming the object, and has a collapsible **What this does** with the equivalent `kubectl` command for learning — nothing runs it; BastionSSH sends the same minimal patch to the API server itself. Operators may scale, restart, run and suspend CronJobs and delete pods unless the org turns that off under **Settings → Kubernetes**; rolling back and cordoning are for admins. Each action is audited with the cluster, namespace, kind, name and the before/after of what it changed, and the cluster's RBAC can still refuse it (the reason is shown).
+**Guided actions** fix the common problems with a button instead of a command. A Deployment or StatefulSet panel has a **scale** slider whose rings show the replicas now → after as you drag (pods that start in blue, pods that stop in red), with a warning when a HorizontalPodAutoscaler controls the workload and will change the count back; **Restart rollout** replaces every pod one by one (the confirmation warns when the workload's update strategy is `Recreate`, which stops them all at once, or `OnDelete`, which replaces nothing until pods are deleted). A Deployment's **revisions** are a timeline — when, the change-cause, the images, the one running now highlighted — and admins can **roll back** to a past one after seeing what changes (images, and environment variable *names* added or removed; values never leave the cluster). A pod a controller owns offers **Restart this pod** (the pod is deleted and the controller that owns it starts a fresh one); a pod with no owner, or whose Job already finished, offers **Delete this pod** instead, with a stronger warning, since nothing brings it back. Admins **cordon / uncordon** a node with the switch on its map card, in the Nodes table or in its panel — no new pods are placed there, the ones already there keep running. A CronJob can be **suspended / resumed** with a switch, or **run now** (a Job from its template, owned by the CronJob, under a generated name). Every action asks first, naming the object, and has a collapsible **What this does** with the equivalent `kubectl` command for learning — nothing runs it; BastionSSH sends the same minimal patch to the API server itself. Operators may scale, restart, run and suspend CronJobs and delete pods unless the org turns that off under **Settings → Kubernetes**; rolling back and cordoning are for admins. Each action is audited with the cluster, namespace, kind, name and the before/after of what it changed, and the cluster's RBAC can still refuse it (the reason is shown).
 
 **Inside a pod.** A pod's panel draws where it is in its life — **Scheduled → Initialized → Started → Ready**, with the step it is stuck at in red and the cluster's reason ("worker: CrashLoopBackOff") — and then its containers as **lanes** in the order they run: init steps one after another, native sidecars, the app containers, debug containers. Each lane shows the container's state in a word and a colour, its restarts, how its previous run ended (OOMKilled, exit 137…), and **CPU and memory bars**: live usage (with metrics-server) against its limit, a dashed tick at what it asked for, amber near the limit and red at it. Operators and up get a **Logs** tab — pick a container, follow new lines, switch to the **previous run** to see why it crashed, search (matches are marked), choose how much history, and download as text — and the read-only **YAML** with line numbers and search. **Open shell** (operators when the org allows it, admins always) starts a shell in a running container — bash if it has it, else sh — over the Kubernetes exec WebSocket on the same verified route as everything else. It opens in the terminal page like a server shell, resizes with the window, is recorded when the org records sessions (listed under **Recordings** as "Shell in pod" with the cluster, namespace, pod and container), audited when it starts and ends with its exit code, and closed as soon as the member loses the cluster, the role, or the org's **operators may open shells** switch. Logs are what the container printed and are not redacted, which is why they need the operator role.
 
@@ -552,12 +561,11 @@ Per platform:
 Work as a team without sharing SSH keys over Slack ever again.
 
 - **Organizations & workspaces** — Group your team under a shared environment.
-- **Roles & permissions** — `Owner`, `Admin`, `Operator`, `Viewer`. Fine-grained access per server, key, command, or cron job.
+- **Roles & permissions** — `Owner`, `Admin`, `Operator`, `Viewer`, plus custom roles that set a level (view, operate, manage) per module and grant access per server (or server tag), cluster, FTP/storage connection, cloud account, saved command or cron job.
 - **Time-limited access** — Members restricted to some servers can request others for a reason and a duration (up to 8 hours by default, configurable). An admin other than the requester approves, optionally for less time, or denies. A suspended member's request cannot be approved, and suspending or removing a member cancels their pending requests. Access ends by itself: expired grants stop working immediately, and open terminals and file sessions on them are closed within a minute. Admins can also grant time-bound access directly. By default restricted members can see the *names* (only) of servers they cannot use, so they know what to ask for; an org setting turns this off, and then they can only extend access they already have.
-- **Shared resources** — Servers, SSH keys, saved commands, and cron jobs can be private to a user or shared with the team.
-- **Invite by email or link** — Onboard teammates in seconds.
+- **Shared resources** — Servers, SSH keys, saved commands and cron jobs belong to the organization; roles and grants decide who can see and use each one.
+- **Invite links** — Invite someone by email address and role; the app shows a one-time link, valid for 7 days, for you to send them (invites are not emailed). The link only works for that address.
 - **Audit log** — Every connection, command run, key access, and config change is recorded with the actor, timestamp, and target.
-- **Session sharing (optional)** — Pair-debug a server with a teammate in a live shared terminal.
 
 ---
 
@@ -583,40 +591,7 @@ A typical self-hosted setup:
 └─────────────────────────────────────────────────────┘
 ```
 
-**Recommended production setup:**
-
-```yaml
-# docker-compose.yml
-services:
-  bastionssh:
-    image: ghcr.io/ayush-parida/bastionssh:latest
-    environment:
-      - SMT_BASE_URL=https://bastionssh.yourcompany.com
-      - SMT_ENCRYPTION_KEY=${SMT_ENCRYPTION_KEY} # generate once, keep secret
-      - SMT_DB_URL=postgres://bastionssh:bastionssh@db:5432/bastionssh # optional; SQLite by default
-    ports:
-      - '8080:8080'
-    volumes:
-      - bastionssh_data:/data
-    depends_on: [db]
-    restart: unless-stopped
-
-  db:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: bastionssh
-      POSTGRES_PASSWORD: bastionssh
-      POSTGRES_DB: bastionssh
-    volumes:
-      - bastionssh_db:/var/lib/postgresql/data
-    restart: unless-stopped
-
-volumes:
-  bastionssh_data:
-  bastionssh_db:
-```
-
-Then put it behind your reverse proxy of choice (Caddy / Nginx / Traefik) with TLS, invite your team, and you're live.
+**Recommended production setup:** the repository's [`deploy/docker/docker-compose.yml`](deploy/docker/docker-compose.yml) (the app, Redis for cron jobs, a data volume for the SQLite database, backups and recordings) with its `https` profile below, or behind your own reverse proxy (Caddy / Nginx / Traefik) with TLS. Then invite your team, and you're live.
 
 **Behind a reverse proxy (upgrade note):** earlier versions trusted `X-Forwarded-For` from anyone. The server now trusts no proxy unless told to, so an existing Caddy/Nginx/Traefik deployment must set `SMT_TRUST_PROXY` (usually `1`) — otherwise every user shares the proxy's IP, and with it one rate-limit bucket (100 requests/min overall, 10 logins/min) and one audit-log IP. The server logs a warning the first time it sees a forwarded request while this is unset. Set `SMT_TRUST_PROXY` so client IPs (used for rate limiting and the audit log) come from `X-Forwarded-For`. It defaults to `false` — trust no proxy — because trusting every hop lets any client pick its own IP. Accepted values: `true` (trust all hops; only when the app is unreachable except through the proxy), a hop count such as `1`, or a comma-separated list of proxy IPs/CIDRs such as `10.0.0.0/8,127.0.0.1`.
 
@@ -637,21 +612,18 @@ docker compose --profile https up -d
 
 Caddy refuses to start (see `docker compose logs caddy`) until `SMT_BASE_URL` is `https://$SMT_DOMAIN`, `SMT_TRUST_PROXY` is set and `SMT_HTTP_BIND` is a loopback address: the first mistake breaks passkeys, the second puts every user behind one rate-limit bucket and one audit-log IP, and the third would let anyone reaching port 8080 directly claim any client address in `X-Forwarded-For`. Passkeys enrolled while the instance ran on `localhost` do not work on the domain (they are bound to the hostname), so enroll them after the switch.
 
-**Storage backends:**
-
-- **SQLite** (default) — zero-config, perfect for solo / small teams.
-- **PostgreSQL** — recommended for teams of 5+ or HA setups.
+**Storage:** one SQLite file (`SMT_DB_URL`, default `/data/smt.db`) in WAL mode, backed up by the app itself (below). Other databases are not supported.
 
 **Authentication options:**
 
 - Built-in email/password
 - Passkeys (WebAuthn) — passwordless sign-in, or a second step after the password
 - Single sign-on per organization over OpenID Connect (Google Workspace, Microsoft Entra ID, Okta, generic OIDC)
-- Optional 2FA (TOTP)
+- Backup codes for a lost passkey (there is no TOTP/authenticator-app 2FA; passkeys are the second factor)
 
 ### Passkeys
 
-Anyone can add passkeys under **Settings → Passkeys**. Once an account has one, signing in with the password also asks for it, and **Sign in with a passkey** on the login page works without the password. Owners can turn on **Team → Require passkeys for this organization**: members then have to have used a passkey in their current session to do anything in that org, and anyone without one is asked to create it right after signing in. Enabling it requires the owner's own session to be passkey-verified, so an owner cannot lock themselves out, and ends open terminals, file sessions and AI chats in that org for members who have no passkey-verified session. Under the policy only API tokens created from a passkey-verified session work; older tokens must be recreated.
+Anyone can add passkeys under **Settings → Passkeys**. Once an account has one, signing in with the password also asks for it, and **Sign in with a passkey** on the login page works without the password. Owners can turn on **Team & Access → Sign-in security → Require passkeys for this organization**: members then have to have used a passkey in their current session to do anything in that org, and anyone without one is asked to create it right after signing in. Enabling it requires the owner's own session to be passkey-verified, so an owner cannot lock themselves out, and ends open terminals, file sessions and AI chats in that org for members who have no passkey-verified session. Under the policy only API tokens created from a passkey-verified session work; older tokens must be recreated.
 
 A first passkey needs the account password again and a sign-in from the last 15 minutes; enrolling it signs out the account's other password-only sessions. Once an account has a passkey, changing the password, creating API tokens, and (for admins) issuing password-reset links or resetting someone's passkeys need a session that has used it. When SMTP is configured (`SMT_SMTP_URL`), people are emailed whenever a passkey is added to their account.
 
@@ -697,14 +669,14 @@ A bare name is looked up in `SMT_BACKUP_DIR`; a path works too (e.g. a backup yo
 
 ### Single sign-on (OpenID Connect)
 
-Owners set up SSO under **Team → Single sign-on**: pick Google Workspace, Microsoft Entra ID, Okta or any other OpenID Connect provider, enter its issuer URL (discovery is read from `<issuer>/.well-known/openid-configuration`), a client ID and secret (vault-encrypted, never shown again), and the email domains allowed to sign in. Register the redirect URI shown there — `SMT_BASE_URL` + `/api/auth/sso/callback` — as a web-application client at the provider. **Test discovery** checks that the discovery document and signing keys can be fetched; the client credentials are only proven by a real sign-in. Each org has one provider.
+Owners set up SSO under **Team & Access → Single sign-on**: pick Google Workspace, Microsoft Entra ID, Okta or any other OpenID Connect provider, enter its issuer URL (discovery is read from `<issuer>/.well-known/openid-configuration`), a client ID and secret (vault-encrypted, never shown again), and the email domains allowed to sign in. Register the redirect URI shown there — `SMT_BASE_URL` + `/api/auth/sso/callback` — as a web-application client at the provider. **Test discovery** checks that the discovery document and signing keys can be fetched; the client credentials are only proven by a real sign-in. Each org has one provider.
 
 Members use **Sign in with SSO** on the login page and enter the org's slug or their work email. The flow is authorization code + PKCE; the state, nonce and PKCE verifier stay on the server for 10 minutes and the state is also bound to the browser by a cookie. The ID token's signature (against the provider's JWKS), `iss`, `aud`, `exp` and nonce are verified, and every sign-in needs a verified email (`email_verified`, or Entra's `xms_edov` optional claim) in an allowed domain — subdomains must be listed separately. With Google (`https://accounts.google.com`) the token's `hd` claim must also name an allowed domain, so personal Google accounts registered with a work address are refused.
 
 - **Accounts.** An identity is remembered by the provider's `sub`. The first time, it is linked to an existing account with the same verified email only if that account is already a member of the org. Otherwise, with **Create accounts on first sign-in** on, a password-less account is created with the configured role (never owner); with it off, only existing members can use SSO. An account that exists but belongs only to other orgs is never taken over.
 - **Group → role mapping** (optional). Name the ID-token claim that lists groups (Okta is asked for the `groups` scope) and map values to viewer/operator/admin; at each sign-in the highest mapped role replaces the member's role. Owners are never changed.
 - **Require single sign-on.** Password and passkey sign-in stop working for members other than owners, who keep them as a break-glass way in if the IdP is down. Existing non-SSO sessions of those members are refused from their next request, and their open terminals and file sessions end. API tokens keep working.
-- **SSO sessions are tied to the org.** A session that signed in through an org's SSO only works in that org, and — when the account belongs to other orgs too — cannot add passkeys, backup codes or API tokens (those work in every org). Such a session also lists and signs out only that org's SSO sessions under **Active sessions**: password and passkey sessions (which can switch to any org) and other orgs' SSO sessions are neither shown to it nor ended by it. Sign in with a password or passkey to manage every session of the account. Disabling or removing the provider, or pointing it at another issuer or client, signs out every SSO session; a new issuer or client also forgets the old identity links.
+- **SSO sessions are tied to the org.** A session that signed in through an org's SSO only works in that org, and — when the account belongs to other orgs too — cannot add passkeys, backup codes or API tokens (those work in every org). Such a session also lists and signs out only that org's SSO sessions under **Settings → Your sessions**: password and passkey sessions (which can switch to any org) and other orgs' SSO sessions are neither shown to it nor ended by it. Sign in with a password or passkey to manage every session of the account. Disabling or removing the provider, or pointing it at another issuer or client, signs out every SSO session; a new issuer or client also forgets the old identity links.
 - **Passkey policy still applies.** An SSO sign-in is not passkey-verified, so in an org that requires passkeys the member is asked to create or use one after signing in. If you turn on **Trust phishing-resistant MFA reported by the provider**, a sign-in whose ID token says it used a hardware key (`amr` contains `hwk` or `fido`, or `acr` is `phr`/`phrh`) counts as passkey-verified. Only enable this if your IdP really enforces that; the claim is as trustworthy as the IdP.
 - **Suspension** is checked at every SSO sign-in and request, as for passwords. Every sign-in, refusal, link, provisioned account and configuration change is audited.
 
@@ -737,16 +709,18 @@ Configure any provider you want — your keys stay on your instance.
 
 | Provider                | Notes                                                            |
 | ----------------------- | ---------------------------------------------------------------- |
-| **OpenAI**              | GPT-4, GPT-4o, etc.                                              |
-| **Anthropic Claude**    | Claude 3.5 / Opus / Sonnet / Haiku                               |
-| **Local / Self-hosted** | Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible API |
+| **OpenAI**              | Any chat model your key can use                                  |
+| **Anthropic Claude**    | Any Claude model your key can use                                |
+| **OpenAI-compatible**   | Ollama, LM Studio, llama.cpp, vLLM, or any OpenAI-compatible API (with a base URL) |
 
-Configure from **Settings → AI Providers** in the UI, then use AI to:
+Configure from **Settings → AI Providers** in the UI (API keys are vault-encrypted), then open **AI Assistant** (or the assistant panel next to a terminal) to:
 
-- Generate commands from natural language
-- Explain output of any saved command or terminal session
-- Suggest fixes for failed cron runs
+- Generate commands from natural language — read-only commands (`df -h`, `ps`, `journalctl` …) run straight away, anything that could change the server waits for your approval
+- Explain output, logs and errors you paste in
+- Read container logs and inspect output, and Kubernetes objects, events and pod logs, with secrets redacted, under your own access
 - Write scripts and one-liners
+
+**Docs → AI** in the app describes what is sent to the provider and who may use the assistant.
 
 ---
 
@@ -782,7 +756,11 @@ Configure from **Settings → AI Providers** in the UI, then use AI to:
 - [x] Kubernetes K4: pod panel with container lanes, lifecycle and usage bars; logs (live, previous run, search, download); recorded shells over the exec WebSocket; read-only YAML
 - [x] Kubernetes K5: AI Explain and read-only AI tools, opt-in cluster alerts, fleet overview across clusters
 - [ ] Short-lived SSH certificates ([design notes](docs/ssh-certificates.md))
+- [x] Deployments: static sites, Next.js and Dockerfile apps with zero-downtime switches, HTTPS and rollback
+- [x] In-app documentation
 - [ ] Live shared terminal sessions
+- [ ] Cron job editing and failure notifications
+- [ ] TOTP (authenticator app) as a second factor
 - [ ] End-to-end encrypted secret sharing
 - [ ] Plugin marketplace
 
@@ -797,7 +775,7 @@ Contributions are welcome! This is an open-source project and we'd love your hel
 3. Commit your changes
 4. Open a Pull Request
 
-See `CONTRIBUTING.md` for development setup and guidelines.
+Development setup is [Option 3: From source](#option-3-from-source) above; [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes how the pieces fit together.
 
 ### Checks
 
@@ -805,10 +783,10 @@ CI (`.github/workflows/ci.yml`) runs these on every push and pull request; run t
 
 ```bash
 pnpm install
-pnpm --filter @smt/shared --filter @smt/cron-parser --filter @smt/agent run build   # the server imports their dist/
+pnpm --filter @smt/shared --filter @smt/cron-parser --filter @smt/agent --filter @smt/bastionctl run build   # the server imports their dist/
 pnpm typecheck
 pnpm lint          # ESLint flat config in eslint.config.js
-pnpm test          # vitest: server routes and cron-parser
+pnpm test          # unit tests in every package
 pnpm test:e2e      # Playwright browser tests (below)
 ```
 

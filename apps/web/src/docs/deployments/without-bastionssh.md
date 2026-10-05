@@ -57,7 +57,7 @@ bastionctl proxy apply                             Regenerate and reload the pro
 bastionctl version
 ```
 
-Every command takes `--json`. File arguments must be inside the deployments folder.
+Every command takes `--json`. File arguments must be inside the deployments folder. `deploy` and `rollback` take `--drain <seconds>` (default 10): how long both releases serve before the old container stops.
 
 ## Config and secrets
 

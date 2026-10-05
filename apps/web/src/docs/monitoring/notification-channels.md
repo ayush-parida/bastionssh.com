@@ -66,7 +66,7 @@ A changed host key is notified at most once an hour per server and presented key
 
 ## Delivery and failures
 
-Each delivery has a 10-second timeout and is retried once after a short pause. If it still fails, the error is shown on the channel ("Last delivery failed: …") and in the server log; the alert itself is unaffected. There is no queue of missed notifications, so fix a broken channel and use **Send test notification** to confirm.
+Each delivery has a 10-second timeout and is retried once after a short pause when it hits a network error or a 5xx answer (a 4xx is not retried). If it still fails, the error is shown on the channel ("Last delivery failed: …") and in the server log; the alert itself is unaffected. There is no queue of missed notifications, so fix a broken channel and use **Send test notification** to confirm.
 
 > **Warning:** Webhook URLs pointing at the cloud metadata address (`169.254.169.254`, `metadata.google.internal`) are refused. Other private addresses are allowed, so internal tools on your network work.
 

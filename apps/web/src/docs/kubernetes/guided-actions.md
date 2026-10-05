@@ -42,7 +42,7 @@ Nothing runs that command. BastionSSH sends the same patch to the API server its
 
 ## Scale
 
-On a Deployment or StatefulSet panel, click **Scale**. Drag the slider (or type a number) and the **replica rings** show now → after: pods that will start in blue, pods that will stop in red. Confirm with **Scale *name* to *N***.
+On a Deployment or StatefulSet panel, click **Scale**. Drag the slider (or type a number) and the **replica rings** show now → after: pods that will start in blue, pods that will stop in red. Confirm with **Scale *name* to *N***. The most you can ask for is 1,000 replicas.
 
 > **Warning:** If a HorizontalPodAutoscaler controls the workload, BastionSSH warns you: the autoscaler keeps the count between its minimum and maximum and will change your number back.
 

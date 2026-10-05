@@ -55,7 +55,7 @@ The deployments folder is `/opt/bastion` when the SSH user can write it (Setup c
 ## Setup
 
 1. Open the server's **Deployments** tab (or **Deployments** in the sidebar, then pick the server).
-2. Choose the proxy (**Automatic** picks nginx mode when an nginx on the host already owns port 80 or 443, Caddy otherwise).
+2. Choose the proxy (**Automatic** picks nginx mode when an nginx on the host is running and owns port 80 or 443, Caddy otherwise; on a server set up before, it keeps the mode it has).
 3. Click **Set up deployments**.
 
 Setup creates the folder, installs `bastionctl`, creates the `bastion-apps` network and starts `bastion-caddy`. It is safe to run again: it never touches your apps, their config or their secrets. The checklist under **Prerequisites** on the tab shows what was found (Docker, how the SSH user reaches the socket, whether `sudo` was used, the proxy's state).
@@ -75,10 +75,12 @@ Reinstall is Setup again: it keeps the server's proxy mode and every app. If the
 
 ## Creating an app and deploying
 
-1. On the Deployments tab, click **New app**, give it a name (lower case letters, digits and `-`) and its first domain.
+1. On the Deployments tab, click **New app**, give it a name (lower case letters, digits and `-`, at most 41 characters) and its first domain, and click **Next**.
 2. Edit the config the template starts with — the form or the YAML — and click **Create app**. The server validates it (see the [bastion.yml reference](bastion-yml.md)).
 3. Add secrets under **Environment** if the app needs any ([environment variables](environment.md)).
-4. Click **Deploy** and pick a folder, a `.zip`, or a `.tar.gz`. The log streams as the server builds.
+4. Click **Deploy** and pick a folder, or an archive (`.zip`, `.tar.gz`, `.tgz` or `.tar`). The log streams as the server builds.
+
+An upload may be up to 1 GiB (the BastionSSH host's `SMT_SFTP_MAX_UPLOAD_BYTES`), and may unpack to at most 2 GiB and 200,000 entries. A deploy, build included, must finish within 30 minutes. If you close the page, the deploy keeps running to its end.
 
 What a deploy does, in order:
 
@@ -87,7 +89,7 @@ What a deploy does, in order:
 3. Checks the upload makes sense for the build type (for example, refuses Next's `.next` folder for a static site — see [Troubleshooting](troubleshooting.md)).
 4. Builds the image `bastion-<app>:<release>` — one build per server at a time; others wait their turn.
 5. Starts the new container next to the running one and waits for its [health check](bastion-yml.md#healthcheck).
-6. Switches traffic to it, then stops the old container after a short drain.
+6. Switches traffic to it, then stops the old container after a drain of 10 seconds.
 7. Prunes releases beyond `keep_releases`.
 
 If the build or the health check fails, the previous release keeps serving and the failure is in the log and in the release's record.

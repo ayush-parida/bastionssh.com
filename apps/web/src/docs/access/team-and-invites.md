@@ -6,7 +6,7 @@ summary: Invite people with an invite link, choose their roles, and suspend, sig
 keywords: [team, invite, members, suspend, reactivate, password reset, sign out everywhere, remove member, default role]
 ---
 
-Everything about the people in your organization lives on **Team & Access** in the sidebar. The **Members** tab lists everyone with their roles, status, number of passkeys and when they were last active. People with **Roles & access** also see the **Roles** and **Access checker** tabs.
+Everything about the people in your organization lives on **Team & Access** in the sidebar. The **Members** tab lists everyone with their roles, status and when they were last active; people with **Members** at Operate also see each member's number of passkeys. People with **Roles & access** also see the **Roles** and **Access checker** tabs.
 
 What you can do here depends on the **Members** module of your roles:
 
@@ -15,7 +15,7 @@ What you can do here depends on the **Members** module of your roles:
 | View | See the member list |
 | Operate | Invite people, revoke invites, suspend and reactivate, sign members out, issue password reset links, reset passkeys, remove members |
 
-You can only act on members whose access is **within your own**. Password and passkey resets need the member's access to be **strictly less** than yours, since they hand over the account. Nobody can suspend, sign out or remove themselves from this page.
+You can only act on members whose access is **within your own and less than it** — someone with exactly your access is out of reach. Only an owner can suspend, sign out or remove another owner, and nobody, not even an owner, can reset an owner's password or passkeys. Nobody can suspend, sign out or remove themselves from this page.
 
 ## Invite someone
 
@@ -44,7 +44,7 @@ The accept form asks for the full email address and only shows a masked hint (`d
 
 ## Change a member's roles
 
-Click the access icon on a member's row to open their access dialog. Under **Roles**:
+This needs the **Roles & access** module at Manage, and you cannot change your own roles. Click the access icon on a member's row to open their access dialog. Under **Roles**:
 
 1. Pick a role from **Add a role…**.
 2. Choose how long it lasts: **Permanent**, or **For 30 minutes** up to **For 7 days**.

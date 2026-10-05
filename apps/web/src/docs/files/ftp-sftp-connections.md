@@ -39,6 +39,7 @@ The password is encrypted at rest with the same vault as SSH keys. It is never s
 
 For SFTP you can log in with one of the organisation's SSH keys instead of a password. Choose **SSH key** under **Authentication** and pick a key from the list (manage keys under **SSH Keys**).
 
+- Choosing a key (or changing the host, user or start directory of a key-based connection) also needs the **operate** level on **SSH Keys**.
 - A retired key (for example, one replaced by key rotation) cannot be chosen and is refused.
 - A key that a connection still uses cannot be deleted until you switch the connection to another key.
 
@@ -53,10 +54,10 @@ With **Restrict to the start directory** ticked, every path must stay inside the
 
 ## Host keys (SFTP)
 
-SFTP connections check the server's host key, just like managed servers. The connection card shows the host key status and fingerprint.
+SFTP connections check the server's host key, just like managed servers. The connection card shows the host key status and fingerprint. The buttons below need the **manage** level on the connection.
 
 - **Trust on first use:** with no key pinned, the first connection trusts the key the host presents and pins it.
-- **Scan & pin** (admins) reads the key the host presents now and asks you to confirm it before pinning.
+- **Scan & pin** reads the key the host presents now and asks you to confirm it before pinning.
 - **Pin…** lets you paste a known fingerprint (`SHA256:` followed by 43 base64 characters) before anyone connects. This is the safest option.
 - **Forget host key** (trash icon) removes the pin; the next connection trusts whatever key it sees.
 
@@ -71,14 +72,14 @@ Click **Browse** on a connection. You can:
 - download a file by clicking it or the download icon;
 - create a **New folder**, rename and delete files and whole folders.
 
-Recursive deletes over SFTP stop at 64 levels deep or 10,000 entries, checked before anything is removed.
+Over SFTP, a recursive delete is refused if the tree is more than 64 levels deep or has more than 10,000 entries; this is checked before anything is removed.
 
 ## Who can do what
 
 | Level | Can |
 | --- | --- |
 | view | Browse and download |
-| operate | Also upload, rename, create folders, delete files, and **Test** the connection |
+| operate | Also upload, rename, create folders, delete files, and **Test** and **Diagnose** the connection |
 | manage | Also add, edit and remove connections and manage the host key |
 
 Each user gets one logged-in session per connection, reused across clicks and closed after two minutes idle. Every list, download, upload, rename, delete and configuration change is in the audit log.
@@ -90,6 +91,7 @@ Each user gets one logged-in session per connection, reused across clicks and cl
 | Largest upload | 1 GiB | `SMT_FTP_MAX_UPLOAD_BYTES` |
 | One SFTP request, or a stalled transfer | 30 seconds | `SMT_SFTP_OP_TIMEOUT_MS` |
 | SFTP login (handshake and authentication) | 20 seconds, plus 10 s to open the file subsystem | fixed |
+| FTP/FTPS socket with no traffic | 30 seconds | fixed |
 
 An SFTP server that stops answering gets a timeout error and the session is closed, so the next click reconnects.
 

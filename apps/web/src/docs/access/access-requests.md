@@ -10,7 +10,7 @@ Not everyone needs standing access to everything. With **access requests**, a me
 
 ## Who can request
 
-Any member who does not already have everything can ask. That includes members with **No access**, who see a **Request access** button on their empty home page and on any "Page not found" page. Owners and admins, who already reach everything, cannot (and need not) request.
+Any member who does not already have everything can ask. That includes members with **No access**, who see a **Request access** button on their empty home page and on any "Page not found" page. Owners and admins, who already reach everything, cannot (and need not) request. People whose roles give **Roles & access** at Manage approve requests instead and do not get the **Request access** button.
 
 A request can be for:
 
@@ -25,7 +25,7 @@ For servers, members can pick servers they cannot use yet **by name**, when the 
 2. Choose a **Role**, or a **Type**, a **Level** and the items you need. Items you already have at that level are greyed out.
 3. Choose **For how long**. The default is 2 hours, or the organization's maximum if that is lower.
 4. Write a **Reason**, such as a ticket number or what you need to do.
-5. Submit. Your request appears under **Access requests** with its status; **Cancel** withdraws it while it is pending.
+5. Click **Send request**. Your request appears under **Access requests** with its status; **Cancel** withdraws it while it is pending.
 
 Limits keep the queue sane: at most 10 pending requests per member, 20 new requests per hour, and a pending request that nobody decides **lapses after 3 days**.
 
@@ -61,7 +61,7 @@ Approvers do not need to wait for a request. Anywhere access is given you can ch
 - When adding a member to a role (in the role editor or in the member's access dialog).
 - On each resource entry of a role or a member's personal grants.
 
-Temporary roles and grants show an expiry badge ("expires in 3h") in the member list, the access dialog and the [effective access](/docs/access/effective-access) view.
+Temporary roles and grants show how long they have left — a "3h left" badge on role chips, "expires in 3h" in the reasons of the [effective access](/docs/access/effective-access) view.
 
 ## Policy
 

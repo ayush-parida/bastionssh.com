@@ -28,7 +28,7 @@ Create a dedicated read-only credential for BastionSSH rather than reusing an ad
 4. For AWS, optionally list **Regions** (`us-east-1, eu-west-1`). Leave it blank to scan every enabled region, which is slower.
 5. Set the **SSH username for imported servers** (for example `ubuntu`, `ec2-user` or `root`) and the **SSH key for imported servers**. Every imported server starts with these; you can change them per server later.
 6. Leave **Auto-import new instances as servers** and **Sync periodically** on unless you want otherwise.
-7. Click **Add**. BastionSSH checks the credentials first ("Checking credentials…"), saves the account and starts the first sync.
+7. Click **Add**. BastionSSH checks the credentials first ("Checking credentials…") and saves the account only if they work. With **Sync periodically** on, the first sync starts right away; otherwise use **Sync now**.
 
 ## What a sync does
 
@@ -63,7 +63,7 @@ Each account has these actions:
 | **Edit** | Change name, regions, username, key, auto-import, sync | manage |
 | Delete (bin icon) | Removes the account; imported servers are **kept** and unlinked | manage |
 
-Adding an account and changing its credentials are for admins. A member who manages an account through a custom role can rename it, change its regions, username and auto-import, pause or resume sync, test, sync and delete it, but cannot swap in other credentials or choose the SSH key imported servers use. See [Resource grants](/docs/access/resource-grants).
+Adding an account and changing its credentials need **manage** on the Cloud Accounts module (admins have it by default). Choosing the SSH key for imported servers also needs **operate** on SSH Keys. A member who manages an account through a custom role can rename it, change its regions, username and auto-import, pause or resume sync, test, sync and delete it, but cannot swap in other credentials or choose the SSH key imported servers use. See [Resource grants](/docs/access/resource-grants).
 
 ## Instance settings
 

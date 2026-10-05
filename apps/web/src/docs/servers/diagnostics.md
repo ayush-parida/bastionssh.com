@@ -10,7 +10,7 @@ keywords: [diagnose, diagnostics, troubleshooting, connection failed, firewall, 
 
 ## Where to find it
 
-- **Servers** → **Diagnose** on a server card.
+- **Servers** → **Diagnose** on a server card, or on the server's **Health** page.
 - The error toast when a terminal or command cannot connect: **Run diagnostics**.
 - The terminal toolbar after a session drops: **Diagnose**.
 - The same button exists on FTP/SFTP connections, object storage connections and Kubernetes clusters.
@@ -41,7 +41,7 @@ By default diagnostics does not log in. Click **Test login too** to run the chec
 - Behind a **jump host**, the network steps (DNS, TCP, banner) check the **first hop** — the only machine BastionSSH connects to directly. The host key and login checks then go through the whole chain.
 - Behind a **connectivity agent**, the checks run over the agent's tunnel.
 
-People who cannot access a jump host are told only which hop failed, not its address; an admin running Diagnose sees the full error.
+People who cannot access a jump host are told only which hop failed, not its address; anyone who can access the jump host sees the full error.
 
 ## BastionSSH's outbound IP
 
@@ -54,22 +54,22 @@ On the host itself: sudo ufw allow from 203.0.113.7 to any port 22 proto tcp.
 
 If the target is a **private** address, the advice changes: the connection then comes from BastionSSH's own host or container network, not its public IP, so you allow the app host's private address or subnet instead.
 
-The bottom of every result shows "Connections leave from *IP*" with a copy button. The same address is under **Settings → Outbound IP**, with **Copy as CIDR** and a button to look it up again.
+The bottom of every result shows "Connections leave from *IP*" with a copy button (or says the IP is unknown). The same address is under **Settings → Outbound IP** for anyone with the DNS Lookup & Diagnostics module at *operate*, with **Copy as CIDR** and a button to look it up again.
 
 ### How the IP is found
 
 | Setting | Behaviour |
 | --- | --- |
-| *(default)* | Looked up from public IP echo services, `https://api.ipify.org` then `https://ifconfig.me/ip`, and cached for 10 minutes. |
+| *(default)* | Looked up from public IP echo services, `https://api.ipify.org` then `https://ifconfig.me/ip`, and cached for 10 minutes (a failed lookup is retried after a minute). |
 | `SMT_EGRESS_IP=203.0.113.7` | Use this address and never look it up. Use it when traffic leaves through a NAT gateway or proxy the echo services cannot see. |
 | `SMT_EGRESS_IP=off` | Never look it up. Firewall advice then asks you to find the address yourself. |
 | `SMT_EGRESS_IP_SERVICES=…` | A comma-separated list of other echo services to ask. |
 
-> **Note:** The egress lookup is the only outbound call BastionSSH makes on its own. Set `SMT_EGRESS_IP` to a fixed address or `off` if your network policy forbids it.
+> **Note:** The egress lookup calls third-party services without you configuring anything. Set `SMT_EGRESS_IP` to a fixed address or `off` if your network policy forbids it.
 
 ## Who can run it, and limits
 
-- You need the **DNS Lookup & Diagnostics** module (included in the built-in Operator, Admin and Owner roles) and the *operate* level on the server you diagnose.
+- You need the **DNS Lookup & Diagnostics** module (every built-in role has it) and the *operate* level on the server you diagnose — so Operators, Admins and Owners by default.
 - The presented host key in a mismatch is shown only to people who manage that server's host keys.
 - Each run is written to the audit log (`server.diagnose`).
 - Runs are limited to **10 per minute per user**.

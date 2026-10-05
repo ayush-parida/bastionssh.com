@@ -60,7 +60,7 @@ Alerts always appear in the app. To also receive them in Slack, email, PagerDuty
 
 ## Pausing checks for a server
 
-On a server's health page, **Pause checks** stops monitoring that server (its status shows as paused) and **Resume checks** turns it back on. Use this for machines that are often off on purpose.
+On a server's health page, **Pause checks** stops monitoring that server (its status shows as paused) and closes its open alerts without notifying anyone; **Resume checks** turns it back on. Use this for machines that are often off on purpose.
 
 Servers imported from a cloud account are skipped automatically while the provider reports them **stopped** or **missing**, so they do not raise offline alerts. See [Cloud accounts](/docs/operations/cloud-accounts).
 
@@ -68,9 +68,11 @@ Servers imported from a cloud account are skipped automatically while the provid
 
 | Action | Needs |
 | --- | --- |
-| See health and alerts | Access to the server, and the Monitoring & Alerts module at **view** |
-| Check now, acknowledge an alert | **operate** on that server (and Monitoring & Alerts at **operate** to acknowledge) |
-| Pause or resume checks | Permission to edit the server |
+| See a server's health page | Access to the server |
+| See the **Monitoring** page and alerts | Monitoring & Alerts at **view**; only servers you can access are shown |
+| Check now | **operate** on that server |
+| Acknowledge an alert | **operate** on that server and Monitoring & Alerts at **operate** (every built-in role has it) |
+| Pause or resume checks | **manage** on that server |
 | Manage notification channels | Monitoring & Alerts at **manage** (admins and owners by default) |
 
 ## Tuning (operators of the instance)

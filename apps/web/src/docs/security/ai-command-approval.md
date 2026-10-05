@@ -51,7 +51,7 @@ The classifier is a strict allowlist, not a sandbox:
 - A command is split on `;`, `&&`, `||`, `|`, `&`, newlines and parentheses. **Every** part must be a known read-only program with arguments that keep it read-only.
 - Unknown programs, command substitution (`` `…` `` or `$(…)`), process substitution, redirects into files, and wrappers such as `sudo`, `su`, `tee`, `xargs` or `eval` always need approval.
 - Programs with both read and write modes are checked by their arguments. For example `systemctl status` is read-only, `systemctl restart` is not; `find` with `-delete` or `-exec` needs approval.
-- Most `git` commands need approval, because repository configuration can make git run programs.
+- Most `git` commands, including `git status`, need approval, because repository configuration can make git run programs. `git diff`, `git log` and `git show` run without approval only when `--no-ext-diff --no-textconv` (plus `--no-show-signature` and an explicit format for `log` and `show`) come straight after the subcommand.
 
 A harmless command that the classifier does not understand costs you one extra click. That is deliberate: the rules stay strict rather than clever.
 

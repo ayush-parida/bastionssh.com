@@ -10,7 +10,7 @@ keywords: [release, releases, rollback, roll back, zero downtime, downtime, keep
 
 Every deploy makes a **release**, named by its UTC time and a short checksum of the upload (`20261005-120000-abcdef12`). It lives in `<root>/apps/<app>/releases/<id>/`:
 
-- `source.tar.gz` — the upload, as it arrived.
+- `source.tar.gz` (or `source.tar`) — the upload, as it arrived.
 - `build.log` — the build's output, with `.env` values masked.
 - `release.json` — who deployed it, when, the image, the result and any error.
 

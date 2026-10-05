@@ -24,7 +24,7 @@ As you type, the form lists the variables it found, e.g. `{{service}}`.
 sudo systemctl restart {{service}} && systemctl status {{service}} --no-pager
 ```
 
-Creating saved commands needs the *manage* level on the Saved Commands module (admins by default). Editing and deleting a command needs *manage* on that command; a command used by a cron job cannot be deleted until the job is deleted or switched to another command.
+Creating saved commands needs the Saved Commands module at *manage* (Operators, Admins and Owners by default). Editing a command (the pencil icon) needs *manage* on that command or the module at *manage*; deleting it needs *manage* on the command (Admins and Owners by default). Changing or deleting a command that cron jobs use also needs *operate* on every server those jobs run on, and a command used by a cron job cannot be deleted until the job is deleted.
 
 ## Running a command
 
@@ -32,8 +32,8 @@ Creating saved commands needs the *manage* level on the Saved Commands module (a
 2. In the run panel, choose the **Servers** to run on:
    - tick servers one by one, or
    - click a tag next to **By tag:** to tick every server carrying it (click again to untick them).
-   The command's default server, if it has one, is ticked for you. At least one server must be ticked.
-3. Fill in a value for each variable.
+   The command's default server, if it has one, is ticked for you. At least one server must be ticked, and at most 200.
+3. Fill in a value for each variable. A variable left empty is replaced by nothing.
 4. Click **Execute** (or **Execute on N servers**).
 
 Each server gets its own result block: **Queued…**, **Running…**, then **Success** or **Failed** with the exit code and duration, followed by standard output and, in red, standard error. With several servers the header counts how many have finished and how many failed.
@@ -56,7 +56,7 @@ To run a command, you need:
 - the *operate* level on the command, and
 - the *operate* level on **every** target server.
 
-If even one target is a server you can only view, the whole run is refused with a message naming it, rather than silently skipping it. A tag only ever expands to servers you can access, so restricted members reach only their own servers when running by tag.
+If even one target is a server you can only view, the whole run is refused with a message naming it, rather than silently skipping it. A tag ticks every server you can see that carries it — view-only ones included — so untick those before running. Restricted members only ever see, and so only reach, their own servers.
 
 If a member loses access between starting a queued run and the run beginning, the run is refused and recorded as failed rather than executed.
 
@@ -71,5 +71,5 @@ When Redis is configured (`SMT_REDIS_URL`, included in the standard Docker Compo
 ## Related
 
 - [Cron jobs](/docs/servers/cron-jobs) — run a saved command on a schedule.
-- [AI command approval](/docs/security/ai-command-approval) — commands proposed by the AI assistant need your explicit approval before they run.
+- [AI command approval](/docs/security/ai-command-approval) — commands the AI assistant proposes that could change something need your approval before they run.
 - [Session recordings](/docs/monitoring/session-recordings)

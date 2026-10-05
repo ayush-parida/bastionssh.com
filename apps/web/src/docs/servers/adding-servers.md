@@ -41,7 +41,7 @@ If any step fails, it rolls back and the server keeps its old key. A key still u
 
 ## The server form
 
-Open **Servers → Add server**, or **Edit** on an existing card. Adding servers needs the *manage* level on the Servers module (admins by default).
+Open **Servers → Add server**, or **Edit** on an existing card. Adding servers needs the Servers module at *manage* and the SSH Keys module at *operate* (Admins and Owners by default); choosing a connectivity agent needs the Agents module at *manage*.
 
 | Field | What to enter |
 | --- | --- |
@@ -56,7 +56,7 @@ Open **Servers → Add server**, or **Edit** on an existing card. Adding servers
 | **Host key fingerprint** | Optional. Pin the server's key up front instead of trusting it on first connect. |
 | **Docker** | Admins only: detect Docker automatically, set a socket path, or turn it off for this server. |
 
-When editing, changing **Host**, **Port**, **Username** or the jump host needs *manage* on Servers. Changing the host or port also forgets the pinned host key unless you enter the new fingerprint at the same time.
+Editing needs *manage* on that server. Changing **Host**, **Port**, **Username**, the jump host or the login key also needs the Servers module at *manage* and SSH Keys at *operate*, even for someone who manages that one server through a grant. Changing the host or port also forgets the pinned host key unless you enter the new fingerprint at the same time.
 
 ## Jump hosts
 
@@ -83,7 +83,7 @@ A server uses either a jump host or an agent, not both — the form disables one
 
 ## Server cards
 
-Each card shows the address, a status dot from the latest health check, the host key status, route badges (`via <jump host>` or the agent name), the key's age, cloud badges for imported instances, tags, and a timer when your access to it is time-limited. Buttons depend on your access level: **Connect** and **Files** need *operate*; **Edit** and delete need *manage*; **Health** and the access list are there for anyone who can see the server.
+Each card shows the address, a status dot from the latest health check, the host key status, route badges (`via <jump host>` or the agent name), the key's age, cloud badges for imported instances, tags, and a timer when your access to it is time-limited. Buttons depend on your access level: **Connect**, **Files** and **Diagnose** need *operate*; **Edit** and delete need *manage*; **Health** and the access list are there for anyone who can see the server.
 
 Restricted members also see **Request access** to ask for servers they cannot use — see [Access requests & time-limited access](/docs/access/access-requests).
 

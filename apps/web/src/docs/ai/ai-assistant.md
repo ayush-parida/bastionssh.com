@@ -34,10 +34,13 @@ The API key is encrypted at rest and never shown again. When editing, leave **AP
 
 ## Where to use it
 
-- **AI Assistant** in the sidebar opens a full-page chat. Pick a provider in the top-right if there is more than one.
+- **AI Assistant** in the sidebar opens a full-page chat. It uses the first provider in the list; pick another in the top-right.
 - In a server's terminal (**Servers → a server → Connect**), click **AI** in the toolbar to open the assistant next to the terminal. Here it knows which server you are on and sees the last part of your terminal output, so you can ask "why did that fail?". It offers quick actions such as **CPU & memory**, **Disk usage** and **Recent errors**. Commands in its answers get a button that types them into your terminal and runs them.
+- On a Kubernetes object, **Explain** asks an AI provider for a one-off explanation of that object. It always uses the provider marked as the default, which the Settings page cannot set yet: until one is marked (`PATCH /api/ai/providers/<id>` with `{"isDefault": true}`), Explain answers "No AI provider configured". See [Explain with AI](/docs/kubernetes/explain-with-ai).
 
 Conversations are not saved: they live in your browser tab and are gone when you leave the page.
+
+For each message, the assistant can go back and forth with its tools for at most six rounds; if it stops before finishing, send another message to let it continue.
 
 ## What the assistant can do
 
@@ -76,13 +79,13 @@ For more on how the checker decides, see [AI command approval](/docs/security/ai
 
 ## Who can use it
 
-The assistant needs the **AI Assistant** module in your role. Built-in operators, admins and owners have it; viewers do not. If your roles do not include it, the page says so and the sidebar link is hidden.
+The assistant needs the **AI Assistant** module in your role. Built-in operators, admins and owners have it; viewers do not. A member with a personal grant at operate on a server or cluster also gets it. If your roles do not include it, the sidebar link is hidden and the page shows "Page not found".
 
 The assistant never gives you more than you already have. Every tool checks your access on its own target:
 
 - `run_command` needs the **operate** level on the server, just like opening a terminal.
 - Servers you cannot access are answered as "not found".
-- Docker and Kubernetes reads follow the same rules as the UI: logs and inspect need operate.
+- Docker and Kubernetes reads follow the same rules as the UI: listing containers or workloads and reading events needs view; container logs, `docker_inspect`, `kube_describe` and pod logs need operate.
 
 Read-only API tokens cannot use the chat. If your access changes while a conversation is running, it is stopped with a message saying so.
 

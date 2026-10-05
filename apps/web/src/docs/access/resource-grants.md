@@ -39,11 +39,11 @@ Each grant is **View**, **Operate** or **Manage**; each includes the ones before
 
 | Type | View | Operate | Manage |
 | --- | --- | --- | --- |
-| Server | Status, health, metrics, Docker lists | Terminals, files, commands, Docker logs and actions, diagnostics with login | Edit, host keys, key rotation, Docker remove/prune/reveal, delete |
+| Server | Status, health, metrics, Docker lists, deployed apps and releases | Terminals, files, commands, Docker logs and actions, diagnostics with login, deploy, roll back and restart apps | Edit, tags, host keys, key rotation, Docker remove/prune/reveal, app setup, config and secrets, delete |
 | Cluster | Map, workloads, events, diagnoses | Logs, YAML, scale, restart, delete pods, shells, Explain | Roll back, cordon, cluster settings and credentials |
 | FTP/SFTP connection | Browse and download | Upload, rename, delete, test | Edit, host key, delete connection |
 | Storage connection | List and download objects | Upload, rename, delete objects, test | Create and delete buckets, edit, delete connection |
-| Cloud account | See it and its last sync | Sync now | Rename, regions, auto-import, delete (credentials stay admin-only) |
+| Cloud account | See it and its last sync | Sync now | Rename, regions, auto-import, test credentials, delete (changing the credentials also needs the **Cloud Accounts** module at Manage) |
 | Saved command | See it | Run it (also needs Operate on each target server) | Edit and delete |
 | Cron job | See it and its runs | Run now, pause and resume | Edit and delete |
 
@@ -55,7 +55,7 @@ Organization-wide switches still apply on top of these levels. For example, if *
 2. Under **Resources**, find the section (Servers, Kubernetes clusters, …).
 3. Type in the **Add** box and pick an item, the "All …" entry, or (for servers) a tag.
 4. Choose the level from the dropdown next to the entry. The dropdown explains each level, for example "Operate — terminals, files and commands".
-5. Optionally set an expiry (**For 1 hour** … **For 7 days**) instead of **Permanent**.
+5. Optionally set an expiry (**For 30 minutes** … **For 7 days**) instead of **Permanent**.
 6. For a cluster, add namespaces if the role should see only some of them.
 7. Check the preview and click **Save changes**.
 

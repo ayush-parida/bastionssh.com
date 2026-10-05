@@ -12,7 +12,7 @@ Everything on a cluster's pages updates live while the page is open. Nothing nee
 
 ## The cluster page
 
-Across the top are the cluster's name and health dot, **Diagnose**, a **Who has access** button (admins only) and the **namespace picker**. Below them are seven tabs:
+Across the top are the cluster's name and health dot, **Diagnose**, a **Who has access** button (for members who can see roles under **Team & Access**) and the **namespace picker**. Below them are seven tabs:
 
 | Tab | What it shows |
 | --- | --- |
@@ -65,7 +65,7 @@ Operators and up also get a read-only **YAML** tab, with line numbers and search
 
 ## Workloads
 
-The **Workloads** tab lists Deployments, StatefulSets, DaemonSets, Jobs and CronJobs. Filter by kind with the chips at the top, or search by name. Each row has a health dot and a one-line summary such as "2 of 3 ready", "Completed 1/1" or "Runs 0 3 * * *". Health words are **Healthy**, **Updating**, **Needs a look**, **Failing**, **Suspended**, **Completed** and **Idle**.
+The **Workloads** tab lists Deployments, StatefulSets, DaemonSets, Jobs and CronJobs. Filter by kind with the chips at the top, or by name or image in the search box. Each row has a health dot and a one-line summary such as "2 of 3 ready", "Completed 1/1" or "Runs 0 3 * * *". Health words are **Healthy**, **Updating**, **Needs a look**, **Failing**, **Suspended**, **Completed** and **Idle**.
 
 ## Events
 

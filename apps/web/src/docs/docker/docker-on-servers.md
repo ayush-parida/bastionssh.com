@@ -36,7 +36,7 @@ On first use, BastionSSH looks for the socket at:
 
 1. `/var/run/docker.sock` (the default);
 2. rootless Docker under `$XDG_RUNTIME_DIR`;
-3. Podman's Docker-compatible socket.
+3. Podman's Docker-compatible socket (`/run/podman/podman.sock`, then the rootless one under `$XDG_RUNTIME_DIR`).
 
 The result is remembered on the server. To change it, edit the server (**Servers → a server → Edit**). In the Docker part of the form you can:
 
@@ -88,7 +88,7 @@ Logs need the operate level because they routinely contain tokens and personal d
 
 ### Org-wide Docker settings
 
-Owners and admins set these under **Settings → Docker**:
+These are in the **Docker** section of the **Settings** page, shown to members with the **manage** level on the Containers module (admins and owners by default):
 
 - **Operators can open a shell in containers** (default on). Admins and owners always can.
 - **Operators can remove containers and images** (default off).

@@ -10,7 +10,7 @@ A few ideas come up on almost every page of these docs. Read this once and the r
 
 ## Organization
 
-Everything in BastionSSH — servers, keys, commands, clusters, members, settings — belongs to an **organization**. The first start creates one organization with you as its **owner**. One person can belong to more than one organization; when they do, a switcher at the top of the sidebar lets them change which one they are working in. Nothing is shared between organizations.
+Everything in BastionSSH — servers, keys, commands, clusters, members, settings — belongs to an **organization**. The first start creates one organization ("Default Organization") with you as its **owner**, and the app has no way to create another, so in practice an instance has one organization. The data model allows a person to belong to several; if they do, a switcher at the top of the sidebar lets them change which one they are working in, and nothing is shared between organizations.
 
 ## Servers and credentials
 
@@ -28,7 +28,7 @@ Every member has one **role**. Five are built in:
 
 | Role | In short |
 | --- | --- |
-| **Owner** | Everything, including transferring ownership, backups and deleting the organization. Cannot be edited. |
+| **Owner** | Everything, plus owner-only actions such as giving the Owner role, database backups, single sign-on and sign-in policy. Cannot be edited. |
 | **Admin** | Every module and every resource, at the highest level. |
 | **Operator** | Uses every resource (terminals, commands, actions), plus the AI assistant and diagnostics. |
 | **Viewer** | Sees every resource but does not change or connect to anything. |

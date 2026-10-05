@@ -43,8 +43,11 @@ Once your account has a passkey, some actions ask you to confirm with it again (
 - creating API tokens,
 - generating backup codes,
 - issuing password reset links or resetting someone's passkeys (admins),
-- revealing secret values, downloading database backups, and changing audit retention or forwarding,
-- changing single sign-on or the organization's passkey requirement (owners).
+- creating connectivity agents and rotating a server's SSH key,
+- downloading database backups, changing audit retention or forwarding, and changing recording settings or deleting recordings,
+- changing single sign-on or turning on the organization's passkey requirement (owners).
+
+Revealing container environment values or deployment secrets goes further: it always needs a passkey-verified session, so without a passkey on your account it is refused.
 
 ## Backup codes
 

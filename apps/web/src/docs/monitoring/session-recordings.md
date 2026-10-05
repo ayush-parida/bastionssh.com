@@ -13,7 +13,7 @@ BastionSSH records what happens in the terminals it opens, so you can replay a s
 | Kind | What it is |
 | --- | --- |
 | Terminal | An interactive SSH session opened from **Servers → a server → Connect** |
-| Command | A one-shot run: a saved command, or a command the AI assistant ran after your approval |
+| Command | A one-shot run: a saved command (one recording per server), or a command the AI assistant ran outside an open terminal |
 | Container | A shell opened inside a Docker container (see [Exec shells & recordings](/docs/docker/exec-shells-and-recordings)) |
 | Pod | A shell opened inside a Kubernetes pod (see [Logs & pod shells](/docs/kubernetes/logs-and-pod-shells)) |
 
@@ -40,7 +40,7 @@ Click a recording to open the player.
 
 - **Play / pause**, a **speed** selector and a seek bar.
 - Long idle stretches are shortened to 2 seconds, so a session where someone walked away for an hour does not play an hour of nothing.
-- **Commands run over this session** lists the commands BastionSSH itself ran on that connection (saved commands and AI-run commands), each with its exit code. Click one to jump to that point. Commands a person typed by hand are not in this list; watch the playback (or the keystroke stream, if recorded) for those.
+- **Commands run over this session** lists the commands the AI assistant ran over that terminal's SSH connection, each with its exit code. Click one to jump to that point. Commands a person typed by hand are not in this list; watch the playback (or the keystroke stream, if recorded) for those.
 - **Download .cast** saves the file so you can play it with `asciinema play` or keep it elsewhere.
 
 Viewing and downloading a recording are both written to the audit log.

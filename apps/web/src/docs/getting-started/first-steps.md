@@ -13,10 +13,10 @@ This page takes you from a freshly started instance to a working terminal on one
 On its very first start, BastionSSH creates one **owner** account for you.
 
 - If you set `SMT_ADMIN_EMAIL` and `SMT_ADMIN_PASSWORD` before the first start, sign in with those.
-- If you left `SMT_ADMIN_PASSWORD` unset, a random password was generated and printed **once** to the server log. With Docker Compose, find it with:
+- If you left `SMT_ADMIN_PASSWORD` unset, a random password was generated and printed **once** to the server log, together with the email to sign in with. With Docker Compose, find it with:
 
 ```bash
-docker compose logs smt | grep "Generated a random admin password"
+docker compose logs smt | grep -A3 "Generated a random admin password"
 ```
 
 Open the instance in your browser (for example `http://localhost:8080`), enter the email and password on the **Sign in** page and click **Sign in**.

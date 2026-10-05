@@ -13,10 +13,10 @@ Click any pod — a tile on the map, a row in a list, a pod in a replica ring �
 The top of the panel draws the pod's **lifecycle** as a strip of steps:
 
 ```text
-Scheduled → Pulled → Started → Ready
+Scheduled → Initialized → Started → Ready
 ```
 
-(A pod that finished successfully ends at **Completed** instead of Ready.) The step it is stuck at is red, with the cluster's reason, such as "worker: CrashLoopBackOff". If something is wrong, a **What's wrong** section above it explains it in plain words — see [Diagnoses and the attention list](/docs/kubernetes/diagnoses-and-attention).
+**Initialized** means every init container finished; **Started** means every app container is running (or exited cleanly). A step that failed is red, with the cluster's reason, such as "worker: CrashLoopBackOff"; a step still waiting shows why below the strip. If something is wrong, a **What's wrong** section above it explains it in plain words — see [Diagnoses and the attention list](/docs/kubernetes/diagnoses-and-attention).
 
 ### Containers as lanes
 
@@ -45,11 +45,11 @@ Each lane has its own buttons to open that container's logs or a shell in it.
 The **Logs** tab streams a container's output live.
 
 1. Pick the **Container** (the panel opens on the one that needs looking at).
-2. Use **Follow new lines** to keep the newest output in view, or stop following to read.
+2. Use **Follow** to keep the newest output in view, or stop following to read.
 3. Click **Previous run** to see what the container printed before its last restart — this is usually where a crash's error is. (It is only offered when the container has restarted.)
 4. Type in **Search** to mark and filter matching lines.
 5. Choose how much history to load: 100, 500, 2,000 or 10,000 lines.
-6. Toggle line wrapping, or **Download as text** for the whole log (up to 32 MiB).
+6. Toggle line wrapping, or **Download** the log as a text file: the last 10,000 lines, up to 32 MiB.
 
 The view keeps the latest 5,000 lines on screen; download the log to read more. When the container stops, the stream ends with "the container stopped; the log ended".
 
@@ -57,7 +57,7 @@ The view keeps the latest 5,000 lines on screen; download the log to read more. 
 
 ## YAML (operators and up)
 
-The **YAML** tab shows the object's manifest read-only, with line numbers, **Find** and a copy button. Secret values, and environment values taken from Secrets, are removed. Viewing a Secret's (redacted) YAML is audited.
+The **YAML** tab shows the object's manifest read-only, with line numbers, **Find**, **Copy** and **Download**. Secret values, and environment values taken from Secrets, are removed. Viewing a Secret's (redacted) YAML is audited.
 
 ## Open a shell in a pod
 
@@ -85,7 +85,7 @@ How it works and what is kept:
 | A red tile and "CrashLoopBackOff" | Logs → previous run, and read the last lines |
 | `OOMKilled`, exit code 137 | Compare the memory bar with its limit; raise the limit or reduce usage |
 | "Running, not ready" | The readiness probe fails — check the app answers its path and port |
-| Stuck at **Pulled** | The image cannot be downloaded — check the tag and pull secret |
+| **Started** fails with `ImagePullBackOff` or `ErrImagePull` | The image cannot be downloaded — check the tag and pull secret |
 | Stuck at **Scheduled** | No node can take it — see the **Waiting for a node** lane on the map |
 
 When a fix needs a restart, scale or rollback, use the [guided actions](/docs/kubernetes/guided-actions) on the workload's panel.

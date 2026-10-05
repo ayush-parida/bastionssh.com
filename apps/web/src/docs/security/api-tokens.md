@@ -69,6 +69,9 @@ See [Audit log](/docs/monitoring/audit-log) for the export options.
 Some actions hand over accounts or sensitive data and need a person at a browser, not a token:
 
 - issuing password reset links and resetting someone's passkeys,
+- changing your password, and managing passkeys or backup codes,
+- configuring single sign-on,
+- revealing container environment values or deployment secrets,
 - downloading database backups,
 - creating other API tokens.
 

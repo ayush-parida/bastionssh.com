@@ -28,7 +28,7 @@ BastionSSH starts `/bin/bash` in the container. If the container has no bash (Al
 | operate | Yes, while **Operators can open a shell in containers** is on (it is by default) |
 | manage (admins, owners) | Always |
 
-Owners and admins change this under **Settings → Docker**. Turning it off closes any container shells operators have open at that moment.
+Members with the **manage** level on the Containers module (admins and owners by default) change this in the **Docker** section of **Settings**. Turning it off closes any container shells operators have open at that moment.
 
 > **Warning:** A shell in a container runs as the container's default user, which is often root inside the container. Treat shell access like terminal access to the server.
 

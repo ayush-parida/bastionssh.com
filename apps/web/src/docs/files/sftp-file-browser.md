@@ -32,7 +32,7 @@ The table shows each entry's **Name**, **Size**, **Permissions** (for example `r
 | --- | --- | --- |
 | Download | Download icon on a file's row | Streams the file to your browser. |
 | View or edit | Click a file's name, or the edit icon | Opens an inline text editor. |
-| Upload | **Upload** button, or drag files onto the page | Several files can be chosen at once; each goes into the current folder. |
+| Upload | **Upload** button, or drag files onto the page | Several files can be chosen at once; each goes into the current folder. A file with the same name is replaced without asking. |
 | New folder | **New folder** | Asks for a name. |
 | Rename | Pencil icon | Renames within the current folder. |
 | Delete | Trash icon | Asks for confirmation (see below). |
@@ -41,7 +41,7 @@ The table shows each entry's **Name**, **Size**, **Permissions** (for example `r
 
 Clicking a file opens it in a full-screen editor. Make your changes and click **Save** (or press **Ctrl+S** / **Cmd+S**). An *unsaved* marker shows while you have pending changes, and closing asks before discarding them.
 
-- Files up to **2 MiB** can be opened in the editor. Larger files are refused with a message to download them instead.
+- Files up to **2 MiB** can be opened in the editor. Larger files are refused with a message to download them instead, and a file that looks binary (a null byte near the start) is refused too.
 - The editor is plain text. Use it for config files, scripts and logs, not binaries.
 - Saving writes the whole file back to the server.
 

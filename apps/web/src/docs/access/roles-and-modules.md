@@ -54,7 +54,7 @@ Every organization has five built-in roles. They cannot be deleted.
 
 | Role | What it gives | Can be edited |
 | --- | --- | --- |
-| **Owner** | Everything, plus owner-only actions: ownership, database backups, deleting the organization | No (locked) |
+| **Owner** | Everything, plus the owner-only actions listed below | No (locked) |
 | **Admin** | Every module at its highest level and every resource managed | Yes |
 | **Operator** | Operates every resource; AI Assistant, diagnostics with login, creates saved commands and cron jobs | Yes |
 | **Viewer** | Sees every resource; dashboard, alerts (acknowledge), DNS lookups, own recordings, key and member lists | Yes |
@@ -62,7 +62,7 @@ Every organization has five built-in roles. They cannot be deleted.
 
 A member who holds only **No access** (or no role at all) can still sign in and manage their own account — password, passkeys, sessions, backup codes. They see a page saying "You don't have access to anything yet", with **Request access** when the organization accepts requests.
 
-Some actions stay with Owners whatever a role says: giving or taking the Owner role, removing an owner, changing sign-in policy and single sign-on, database backups, and deleting the organization. An organization always keeps at least one owner.
+Some actions stay with Owners whatever a role says: giving or taking the Owner role; suspending, signing out or removing an owner; sign-in policy (required passkeys, backup-code policy) and single sign-on; database backups; audit-log retention and forwarding; and recording settings and deleting recordings. An organization always keeps at least one active owner. There is no way to delete an organization from the app.
 
 ## Create a custom role
 

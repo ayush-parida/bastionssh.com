@@ -46,7 +46,7 @@ Each account remembers the devices it signs in from. A "device" is deliberately 
 - the **browser and operating system family** (for example "Firefox on Linux" — versions are ignored, so browser updates do not count as new), and
 - the **network** you came from: the /24 block for IPv4 or the /48 block for IPv6, so a changing address inside the same network is not new either.
 
-The device is stored as a hash, not as your address. When you sign in from a combination the account has not used before:
+What is kept is the browser label and the network block (for example `203.0.113.0/24`), never your full address. When you sign in from a combination the account has not used before:
 
 - the sign-in is audited as `user.login_new_device`, and
 - with email configured, you get an email about it.
@@ -76,7 +76,7 @@ If you suspect someone else is using your account:
 
 ## What admins can do
 
-People with the **Members** module at Operate can act on members whose access is within theirs (on **Team & Access → Members**):
+People with the **Members** module at Operate can act on members whose access is within and less than theirs (on **Team & Access → Members**):
 
 - **Sign out everywhere** — ends every session and closes live terminals, file sessions and AI chats.
 - **Suspend** — signs them out and blocks them from the organization until reactivated.

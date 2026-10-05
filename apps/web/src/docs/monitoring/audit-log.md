@@ -77,7 +77,7 @@ Click **Send test** to deliver one test event now and see whether the target acc
 
 ### Delivery guarantees
 
-Delivery is **at least once**. A failed batch is retried three times, then the target backs off (30 seconds, doubling up to 15 minutes). Nothing is skipped: the next attempt resumes where the last success stopped. Failures are shown on the page, and the first one is audited as `audit.forwarding_failed`. Targets and secrets are stored encrypted.
+Delivery is **at least once**. Each batch is tried up to three times; if every try fails, the target backs off (30 seconds, doubling up to 15 minutes). Nothing is skipped: the next attempt resumes where the last success stopped. Failures are shown on the page, and the first failure after a success is audited as `audit.forwarding_failed`. Targets and secrets are stored encrypted.
 
 ### Private networks
 

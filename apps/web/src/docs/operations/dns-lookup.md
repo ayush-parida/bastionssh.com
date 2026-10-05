@@ -51,9 +51,9 @@ The same A lookup is run against four public resolvers and the domain's own name
 | Google | 8.8.8.8 |
 | Quad9 | 9.9.9.9 |
 | OpenDNS | 208.67.222.222 |
-| The domain's nameservers | as listed above |
+| The domain's nameservers | up to four of those listed above, at a public address |
 
-Any resolver whose answer differs from the others is flagged. Right after you repoint a domain, expect the authoritative nameservers to show the new address first and public resolvers to catch up as cached answers expire (see the record's TTL).
+Any resolver whose answer differs from the most common one is flagged **differs**; when all agree the table says **every resolver agrees**. A domain that does not exist skips this comparison. Right after you repoint a domain, expect the authoritative nameservers to show the new address first and public resolvers to catch up as cached answers expire (see the record's TTL).
 
 ## Typical uses
 

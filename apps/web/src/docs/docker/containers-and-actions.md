@@ -10,8 +10,8 @@ The **Containers** tab of a server's Docker page (**Servers → a server → Doc
 
 ## The containers list
 
-- By default only running containers are shown. Tick **Show stopped** to include exited and created ones.
-- Use the search box to filter by name, image or Compose project.
+- Stopped containers are included by default. Untick **Show stopped** to see only running ones.
+- Use the **Filter by name, image or project** box to narrow the list.
 - Each row shows the state (running, paused, exited…) and, when the container has a healthcheck, its health (healthy, unhealthy, starting).
 - Action buttons on the right of each row depend on the container's state and your permissions.
 
@@ -25,7 +25,7 @@ Click a container to open its drawer. It has these tabs:
 | --- | --- | --- |
 | **Overview** | State, created time, image, command, ports, Compose project and service, labels, and running processes | view (processes need operate) |
 | **Logs** | The container's output | operate |
-| **Stats** | Live CPU and memory | operate |
+| **Stats** | Live CPU and memory (with charts), process count, network and block I/O, for a running container | operate |
 | **Environment** | Environment variables, values hidden | operate |
 | **Inspect** | The full `docker inspect` output, with environment values hidden | operate |
 
@@ -33,15 +33,15 @@ Tabs you cannot use are greyed out with the reason.
 
 ### Logs
 
-- Choose how much history to load: 100, 500, 2,000 or 10,000 lines.
+- Choose how much history to load: 100, 500 (the default), 2,000 or 10,000 lines.
 - **Follow** new lines as they arrive (on by default), or pause.
 - Tick **Timestamps** to prefix each line with its time.
-- **Search** highlights matching lines.
+- **Search** shows only the lines that contain your text.
 - **Download** saves the same logs as a text file.
 
 ### Hidden environment values
 
-Environment values are shown as `KEY=••••` in the **Environment** and **Inspect** tabs, because they often hold passwords and API keys. An admin can click **Reveal values** to see them. This needs a passkey confirmation (an admin without a passkey must add one first, under **Settings → Passkeys**). The reveal is written to the audit log with the variable *names*, never the values.
+Environment values are shown as `KEY=••••` in the **Environment** and **Inspect** tabs, because they often hold passwords and API keys. On the **Environment** tab, an admin can click **Reveal values** to see them. This needs a passkey confirmation (an admin without a passkey must add one first, under **Settings → Passkeys**). The reveal is written to the audit log with the variable *names*, never the values.
 
 ## Container actions
 
@@ -66,7 +66,7 @@ For **Open shell**, see [Exec shells & recordings](/docs/docker/exec-shells-and-
 
 ## Pulling images
 
-1. Click **Pull image** at the top of the Docker page.
+1. Click **Pull image**, at the right of the tab bar on the server's Docker page.
 2. Enter an image reference, for example `nginx:1.27` or `ghcr.io/org/app:tag`.
 3. Watch the progress per layer.
 

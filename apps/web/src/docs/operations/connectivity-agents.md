@@ -94,4 +94,5 @@ sudo systemctl daemon-reload
 ## Limits
 
 - Agent connections live in the main BastionSSH process. If you run cron jobs in a separate worker process, those jobs cannot use agents.
-- Seeing agents needs the **Agents** module at **view**; creating, revoking and assigning them needs **manage** (admins and owners by default).
+- Creating, revoking and assigning agents needs the **Agents** module at **manage** (admins and owners by default). The **Agents** page only lists agents for members with **manage**; at **view** it shows "Only admins can manage connectivity agents."
+- Creating an agent asks for a passkey confirmation when you have a passkey.

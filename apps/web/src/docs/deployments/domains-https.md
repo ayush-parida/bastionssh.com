@@ -26,7 +26,7 @@ Point each domain at the server's public address at your DNS provider:
 
 > **Warning:** A stale `AAAA` record pointing somewhere else breaks certificates: Let's Encrypt prefers IPv6 when there is one. Remove it, or point it at this server.
 
-The app's **Domains** tab checks every domain now: its A/AAAA records against the server's public address — with the exact record to create when they do not match — and, for `tls: auto` and `staging`, whether ports 80 and 443 answer from outside. A domain is saved even when its DNS is not ready; the certificate follows once it is.
+The app's **Domains** tab checks every domain now: its A/AAAA records against the server's public address — with the exact record to create when they do not match — and, for `tls: auto` and `staging`, whether ports 80 and 443 answer when BastionSSH connects to the server (a port BastionSSH reaches may still be closed to the internet, or the other way round behind a VPN). A domain is saved even when its DNS is not ready; the certificate follows once it is.
 
 DNS changes can take minutes to hours to reach everyone. Once **Domains** shows the records as correct, the proxy gets the certificate on its next try (or click **Apply nginx again** in nginx mode).
 

@@ -174,7 +174,7 @@ See [Volumes for persistent data](releases-rollback.md#volumes-for-persistent-da
 
 | Type | Default | Accepted |
 | --- | --- | --- |
-| text | no limit | a number with `k`, `m` or `g` (`512m`, `1g`), or bytes; at least `6m` |
+| text | no limit | a whole number (up to 6 digits) with `k`, `m` or `g` (`512m`, `1g`); at least `6m` |
 
 The container's memory limit. When the app goes over it, it is killed and restarted.
 

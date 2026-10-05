@@ -24,7 +24,7 @@ Browser ──HTTPS/WebSocket──▶ BastionSSH (web app + API + worker) ─�
                                      └── SQLite database in the /data volume (encrypted credentials)
 ```
 
-Everything — the web app, the API and the background worker — runs from one Docker image. Each instance belongs to the team that runs it; there is no central service and no telemetry. See [Installing & upgrading](/docs/operations/installing-and-upgrading) to set one up.
+Everything — the web app, the API and the background worker — runs from one Docker image; the standard Docker Compose setup adds a small Redis container for the job queue. The database is SQLite (the only one supported), kept in the `/data` volume. Each instance belongs to the team that runs it; there is no central service and no telemetry. See [Installing & upgrading](/docs/operations/installing-and-upgrading) to set one up.
 
 ## A tour of the sidebar
 
@@ -50,6 +50,7 @@ What you see in the sidebar depends on your role: a module you have no access to
 | **Audit Log** | Every sign-in, connection, command and change, with export and forwarding. |
 | **Recordings** | Replays of terminal sessions and command runs. |
 | **Team & Access** | Members, invites, roles, access requests, single sign-on and sign-in security. |
+| **Docs** | This documentation, available to every member. |
 | **Settings** | Your own account (password, passkeys, sessions, API tokens) plus org-wide settings for those allowed to change them. |
 
 ## Security in one paragraph

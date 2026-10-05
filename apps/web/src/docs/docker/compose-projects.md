@@ -15,7 +15,7 @@ BastionSSH does not read your `docker-compose.yml` files directly. It finds proj
 This has two consequences:
 
 - A project only shows up while it has containers. After `down`, it has none left, so it disappears from the list until someone starts it again on the server.
-- Projects started with a very old Compose version, or whose containers disagree about their working directory or compose files, are listed but cannot be managed. Hover the greyed-out buttons to see why.
+- Projects started with a very old Compose version, or whose containers disagree about their working directory or compose files, are listed but cannot be managed. The project shows **Actions unavailable** with the reason, and its buttons are greyed out.
 
 ## Running an action
 
@@ -38,6 +38,8 @@ The command runs in the project's recorded working directory, with its recorded 
 
 > **Note:** If you close the dialog, the action keeps running on the server. Check the project list or the audit log for the result.
 
+Only one action can run on a project at a time; starting a second one while the first is running is refused. An action that runs longer than 15 minutes is stopped.
+
 ### What the server needs
 
 Actions run the `docker compose` command on the server, so the **Docker CLI with the Compose plugin** must be installed there (the `docker compose` form, not the old standalone `docker-compose`). Listing projects only needs the Docker API.
@@ -52,7 +54,8 @@ Click **Logs** on a project to see the output of all its containers merged into 
 
 - Pick a single service, or **All services**.
 - Follow new lines, or pause.
-- Choose how many lines of history to load per container.
+- Choose how many lines of history to load per container: 50, 200 (the default), 1,000 or 5,000.
+- Tick **Timestamps** to prefix each line with its time.
 
 Logs need the operate level on the server, as for single containers.
 

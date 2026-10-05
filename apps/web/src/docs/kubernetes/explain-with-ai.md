@@ -12,7 +12,8 @@ The AI only explains. It never changes the cluster — fixing stays with the [gu
 
 ## Before you start
 
-- An admin must have added an AI provider (OpenAI, Anthropic, or a local OpenAI-compatible model). See [AI assistant](/docs/ai/ai-assistant). Without one, Explain fails with "No AI provider" and a hint to add one.
+- Your organization needs an AI provider (OpenAI, Anthropic, or a local OpenAI-compatible model) **marked as the default**. See [AI assistant](/docs/ai/ai-assistant). Explain always uses the default provider, and without one it fails with "No AI provider configured".
+- A provider added under **Settings** is not marked as the default, and the form has no option for it. Mark one through the API with `PATCH /api/ai/providers/<id>` and the body `{"isDefault": true}` (needs **manage** on the AI Assistant module). Editing the provider in Settings later keeps the mark.
 - You need to be able to **operate** where the object lives: operators and up, or a member whose custom role lets them operate in that namespace (or on the whole cluster, for cluster-wide objects such as nodes).
 - You need access to the **AI Assistant** module. Members without it do not see the button.
 
