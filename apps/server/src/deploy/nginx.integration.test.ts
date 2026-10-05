@@ -316,14 +316,20 @@ describe.skipIf(!container)('nginx mode against a real nginx, certbot and an ACM
   }, 300_000);
 
   it("renews with certbot's own renewal, which reloads nginx through the deploy hook", async () => {
-    expect(admin('cat /etc/letsencrypt/renewal/bastion-site1.conf')).toMatch(/^renew_hook = nginx -s reload$/m);
+    // The hook reloads nginx and refreshes the public copy bastionctl's app list reads
+    expect(admin('cat /etc/letsencrypt/renewal/bastion-site1.conf')).toMatch(
+      /^renew_hook = nginx -s reload; mkdir -p \/var\/lib\/bastion-nginx\/certs && cp -f "\$RENEWED_LINEAGE\/cert\.pem" \/var\/lib\/bastion-nginx\/certs\/bastion-site1\.pem && chmod 0644 \/var\/lib\/bastion-nginx\/certs\/bastion-site1\.pem$/m,
+    );
+    const published = () => admin('openssl x509 -in /var/lib/bastion-nginx/certs/bastion-site1.pem -noout -serial').trim().replace(/^serial=/, '').toUpperCase();
     const before = await tlsGet('site1.test');
+    expect(published()).toBe(before.serial.toUpperCase());
     admin('certbot renew --cert-name bastion-site1 --force-renewal --no-random-sleep-on-renew 2>&1');
     // nginx only serves the renewed certificate once reloaded
     await settled(async () => {
       const after = await tlsGet('site1.test');
       expect(after).toMatchObject({ status: 200, body: 'v1' });
       expect(after.serial).not.toBe(before.serial);
+      expect(published()).toBe(after.serial.toUpperCase());
     });
   }, 300_000);
 

@@ -9,7 +9,8 @@ import path from 'node:path';
  * Releases end to end (deployments spec §5 steps 3–8, §9): two apps — a
  * `dockerfile` app and a `static` app built with Node — on two domains with
  * `tls: internal`, both served by Caddy by Host header; a redeploy while
- * requests keep coming (none may fail); rollback; a release failing its
+ * requests keep coming (none may fail); rollback; a config change that
+ * switches the proxy to a new Caddy, again under load; a release failing its
  * health check while the old one keeps serving; pruning beyond
  * keep_releases; delete. Optionally a real Next.js app.
  *
@@ -248,6 +249,35 @@ describe.skipIf(!host || !proxy)('releases against a live server: builds, zero-d
     expect(outcome).toMatchObject({ result: 'success', release: released.v1, previous: released.v2 });
     expect(failures, `${failures.length} of ${count} requests failed`).toEqual([]);
     expect(await get('web1.test')).toEqual({ status: 200, body: 'web-v1' });
+  }, 300_000);
+
+  it('switches the proxy to a changed config without failing a single request', async () => {
+    const load = hammer('web1.test');
+    const docsLoad = hammer('docs1.test');
+    // A second domain changes the Caddyfile: the front starts a new Caddy and moves new connections to it
+    await configure(
+      'web1',
+      'name: web1\ndomains: [web1.test, web1-alt.test]\ntls: internal\nbuild: { type: dockerfile }\nrun: { port: 3000 }\nhealthcheck: { path: /health, timeout: 15s }\nkeep_releases: 2\n',
+    );
+    await new Promise((r) => setTimeout(r, 2000));
+    const web = await load.stop();
+    const docs = await docsLoad.stop();
+    expect(web.failures, `${web.failures.length} of ${web.count} requests to web1 failed`).toEqual([]);
+    expect(docs.failures, `${docs.failures.length} of ${docs.count} requests to docs1 failed`).toEqual([]);
+    expect(web.count).toBeGreaterThan(20);
+    expect([...web.bodies]).toEqual(['web-v1']);
+    expect(await get('web1-alt.test')).toEqual({ status: 200, body: 'web-v1' });
+
+    // And back, the same way: the name is no longer served
+    const again = hammer('web1.test');
+    await configure(
+      'web1',
+      'name: web1\ndomains: [web1.test]\ntls: internal\nbuild: { type: dockerfile }\nrun: { port: 3000 }\nhealthcheck: { path: /health, timeout: 15s }\nkeep_releases: 2\n',
+    );
+    await new Promise((r) => setTimeout(r, 2000));
+    const back = await again.stop();
+    expect(back.failures, `${back.failures.length} of ${back.count} requests failed`).toEqual([]);
+    await expect(get('web1-alt.test')).rejects.toThrow();
   }, 300_000);
 
   it('keeps the old release serving when the new one fails its health check', async () => {
