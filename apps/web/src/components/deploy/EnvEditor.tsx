@@ -148,7 +148,15 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
           {newKey && !keyValid && <p className="text-xs text-red-600">Letters, digits and _, not starting with a digit</p>}
           {exists && <p className="text-xs text-amber-600">{newKey} exists; saving replaces its value.</p>}
           <div className="flex justify-end gap-2">
-            <button type="button" onClick={() => setAdding(false)} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
+            <button
+              type="button"
+              onClick={() => {
+                // A typed value is not kept for the next variable added
+                setAdding(false);
+                setNewKey('');
+                setNewValue('');
+              }}
+              className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
               Cancel
             </button>
             <button type="submit" disabled={!keyValid || set.isPending} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50">

@@ -39,17 +39,25 @@ export function isExcluded(path: string): boolean {
 const clean = (path: string) => path.replace(/\\/g, '/').replace(/^\.?\/+/, '');
 
 /**
+ * macOS metadata a Finder-made zip carries next to the folder itself
+ * (`__MACOSX/my-app/._package.json`). Left out before the top-level folder is
+ * looked for, or `my-app/` would stay and the project root be one level down.
+ */
+const isMacMetadata = (path: string) => path.split('/')[0] === '__MACOSX';
+
+/**
  * Drop a top-level folder every entry shares, and anything excluded.
  * `others` are paths already left out, which still count when deciding
  * whether there is a single top-level folder.
  */
 export function normalizeEntries(entries: SourceEntry[], others: string[] = []): { entries: SourceEntry[]; skipped: number } {
-  const cleaned = entries.map((e) => ({ ...e, path: clean(e.path) })).filter((e) => e.path && !e.path.endsWith('/'));
-  const all = [...cleaned.map((e) => e.path), ...others.map(clean).filter(Boolean)];
+  const files = entries.map((e) => ({ ...e, path: clean(e.path) })).filter((e) => e.path && !e.path.endsWith('/'));
+  const cleaned = files.filter((e) => !isMacMetadata(e.path));
+  const all = [...cleaned.map((e) => e.path), ...others.map(clean).filter((path) => path && !isMacMetadata(path))];
   const tops = new Set(all.map((path) => path.split('/')[0]));
   const strip = tops.size === 1 && all.every((path) => path.includes('/'));
   const out: SourceEntry[] = [];
-  let skipped = 0;
+  let skipped = files.length - cleaned.length;
   for (const e of cleaned) {
     const path = strip ? e.path.slice(e.path.indexOf('/') + 1) : e.path;
     if (isExcluded(path)) skipped++;

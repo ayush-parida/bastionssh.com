@@ -1,4 +1,4 @@
-import { gunzipSync } from 'node:zlib';
+import { crc32, gunzipSync } from 'node:zlib';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,6 +57,62 @@ function release(id: string, current: boolean) {
     current,
     imagePresent: true,
   };
+}
+
+/** The file names in an uploaded deploy source: a gzipped tar inside one multipart body, sorted. */
+function uploadedNames(raw: Buffer): string[] {
+  expect(raw.toString('latin1')).toContain('name="source"; filename="site1.tar.gz"');
+  const start = raw.indexOf(Buffer.from([0x1f, 0x8b]));
+  const end = raw.lastIndexOf(Buffer.from('\r\n--'));
+  const tar = gunzipSync(raw.subarray(start, end));
+  const names: string[] = [];
+  for (let at = 0; at + 512 <= tar.length; ) {
+    const name = tar.subarray(at, at + 100).toString('utf8').replace(/\0.*$/s, '');
+    if (!name) break;
+    const size = parseInt(tar.subarray(at + 124, at + 136).toString('ascii').replace(/\0.*$/s, '').trim(), 8);
+    names.push(name);
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  return names.sort();
+}
+
+/** A zip of `files` with stored (uncompressed) entries, as a test fixture. */
+function storedZip(files: Record<string, string>): Buffer {
+  const locals: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(files)) {
+    const nameBuf = Buffer.from(name);
+    const data = Buffer.from(text);
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    const cd = Buffer.alloc(46);
+    cd.writeUInt32LE(0x02014b50, 0);
+    cd.writeUInt16LE(20, 4);
+    cd.writeUInt16LE(20, 6);
+    cd.writeUInt32LE(crc, 16);
+    cd.writeUInt32LE(data.length, 20);
+    cd.writeUInt32LE(data.length, 24);
+    cd.writeUInt16LE(nameBuf.length, 28);
+    cd.writeUInt32LE(offset, 42);
+    locals.push(local, nameBuf, data);
+    central.push(cd, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+  const cdBuf = Buffer.concat(central);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(Object.keys(files).length, 8);
+  eocd.writeUInt16LE(Object.keys(files).length, 10);
+  eocd.writeUInt32LE(cdBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cdBuf, eocd]);
 }
 
 const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join('');
@@ -245,20 +301,32 @@ test.describe('Deployments', () => {
     // One multipart upload: a gzipped tar of the project root, without the excluded folders
     const upload = sent.find((s) => s.path === '/apps/site1/deploy');
     expect(upload).toBeTruthy();
-    const raw = upload!.raw!;
-    expect(raw.toString('latin1')).toContain('name="source"; filename="site1.tar.gz"');
-    const start = raw.indexOf(Buffer.from([0x1f, 0x8b]));
-    const end = raw.lastIndexOf(Buffer.from('\r\n--'));
-    const tar = gunzipSync(raw.subarray(start, end));
-    const names: string[] = [];
-    for (let at = 0; at + 512 <= tar.length; ) {
-      const name = tar.subarray(at, at + 100).toString('utf8').replace(/\0.*$/s, '');
-      if (!name) break;
-      const size = parseInt(tar.subarray(at + 124, at + 136).toString('ascii').replace(/\0.*$/s, '').trim(), 8);
-      names.push(name);
-      at += 512 + Math.ceil(size / 512) * 512;
-    }
-    expect(names.sort()).toEqual(['package.json', 'src/index.js']);
+    expect(uploadedNames(upload!.raw!)).toEqual(['package.json', 'src/index.js']);
+  });
+
+  test('deploys a Finder-made zip from its folder, without the __MACOSX metadata', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+
+    // What macOS "Compress" makes of a folder: the folder, and AppleDouble files beside it
+    const zip = storedZip({
+      'my-site/package.json': '{"name":"my-site"}',
+      'my-site/src/index.js': 'export default 1;',
+      '__MACOSX/my-site/._package.json': 'resource fork',
+    });
+    await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Deploy site1' });
+    await dialog.getByLabel('Archive file').setInputFiles({ name: 'my-site.zip', mimeType: 'application/zip', buffer: zip });
+    await dialog.getByRole('button', { name: 'Deploy' }).click();
+
+    await expect(page.getByRole('region', { name: 'Deploy log' })).toContainText('Deployed release');
+    const upload = sent.find((s) => s.path === '/apps/site1/deploy');
+    expect(upload).toBeTruthy();
+    // The project root is the upload's root, where build.dir `.` finds package.json
+    expect(uploadedNames(upload!.raw!)).toEqual(['package.json', 'src/index.js']);
   });
 
   test('rolls back to a kept release after a confirmation', async ({ page }) => {
@@ -341,9 +409,15 @@ test.describe('Deployments', () => {
     await page.getByRole('button', { name: 'Save' }).click();
     await expect(page.getByText('SECRET_KEY saved')).toBeVisible();
 
-    // Add one; a bad name is refused before anything is sent
+    // A value typed and cancelled is gone when the form opens again
     await page.getByRole('button', { name: 'Add variable' }).click();
     const form = page.getByRole('form', { name: 'Add variable' });
+    await form.getByLabel('Variable value').fill('abandoned-secret');
+    await form.getByRole('button', { name: 'Cancel' }).click();
+    await page.getByRole('button', { name: 'Add variable' }).click();
+    await expect(form.getByLabel('Variable value')).toHaveValue('');
+
+    // Add one; a bad name is refused before anything is sent
     await form.getByLabel('Variable name').fill('1BAD');
     await expect(form.getByRole('button', { name: 'Add' })).toBeDisabled();
     await form.getByLabel('Variable name').fill('API_TOKEN');
