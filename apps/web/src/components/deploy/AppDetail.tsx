@@ -267,7 +267,7 @@ export default function AppDetail({
       )}
 
       {dialog === 'deploy' && (
-        <DeploySourceDialog app={app} onDeploy={(label, pack) => void run.deploy(label, pack)} onClose={() => setDialog(null)} />
+        <DeploySourceDialog app={app} build={s.config?.build ?? null} onDeploy={(label, pack) => void run.deploy(label, pack)} onClose={() => setDialog(null)} />
       )}
       {(dialog === 'restart' || dialog === 'stop') && (
         <ConfirmDialog

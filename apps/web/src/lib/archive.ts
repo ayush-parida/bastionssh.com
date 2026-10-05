@@ -11,6 +11,8 @@
  * extracts (no absolute names, no `..`, size and count caps).
  */
 
+import { checkDeploySource, deploySourceViewFromPaths, joinSourcePath, type DeployAppConfig, type DeploySourceProblem } from '@smt/shared';
+
 /** Folders never uploaded, at any depth. */
 export const EXCLUDED_DIRS = ['node_modules', '.next', '.git'] as const;
 
@@ -50,13 +52,13 @@ const isMacMetadata = (path: string) => path.split('/')[0] === '__MACOSX';
  * `others` are paths already left out, which still count when deciding
  * whether there is a single top-level folder.
  */
-export function normalizeEntries(entries: SourceEntry[], others: string[] = []): { entries: SourceEntry[]; skipped: number } {
+export function normalizeEntries<T extends SourceEntry>(entries: T[], others: string[] = []): { entries: T[]; skipped: number } {
   const files = entries.map((e) => ({ ...e, path: clean(e.path) })).filter((e) => e.path && !e.path.endsWith('/'));
   const cleaned = files.filter((e) => !isMacMetadata(e.path));
   const all = [...cleaned.map((e) => e.path), ...others.map(clean).filter((path) => path && !isMacMetadata(path))];
   const tops = new Set(all.map((path) => path.split('/')[0]));
   const strip = tops.size === 1 && all.every((path) => path.includes('/'));
-  const out: SourceEntry[] = [];
+  const out: T[] = [];
   let skipped = files.length - cleaned.length;
   for (const e of cleaned) {
     const path = strip ? e.path.slice(e.path.indexOf('/') + 1) : e.path;
@@ -159,8 +161,17 @@ async function inflate(data: Blob): Promise<Blob> {
   return new Response(data.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob();
 }
 
-/** The files of a zip archive, decompressed. Links and folders are left out. */
-export async function readZip(file: Blob): Promise<{ entries: SourceEntry[]; skipped: number; left: string[] }> {
+interface ZipRecord {
+  name: string;
+  /** Unix file type and mode bits, 0 when the zip was not made on Unix. */
+  unixMode: number;
+  method: number;
+  compressed: number;
+  localOffset: number;
+}
+
+/** The central directory of a zip: every entry's name and where its data is, without reading any. */
+async function zipDirectory(file: Blob): Promise<ZipRecord[]> {
   // The end-of-central-directory record is in the last 64 KiB + 22 bytes
   const tailStart = Math.max(0, file.size - (0xffff + 22));
   const tail = new DataView(await file.slice(tailStart).arrayBuffer());
@@ -179,41 +190,57 @@ export async function readZip(file: Blob): Promise<{ entries: SourceEntry[]; ski
 
   const cd = new DataView(await file.slice(cdOffset, cdOffset + cdSize).arrayBuffer());
   const decoder = new TextDecoder();
-  const entries: SourceEntry[] = [];
-  // Left out before reading their data; still part of the layout
-  const left: string[] = [];
+  const records: ZipRecord[] = [];
   let p = 0;
   for (let n = 0; n < count; n++) {
     if (cd.getUint32(p, true) !== 0x02014b50) throw new Error('The zip file is damaged');
     const madeBy = cd.getUint16(p + 4, true) >> 8;
-    const method = cd.getUint16(p + 10, true);
-    const compressed = cd.getUint32(p + 20, true);
     const nameLen = cd.getUint16(p + 28, true);
     const extraLen = cd.getUint16(p + 30, true);
     const commentLen = cd.getUint16(p + 32, true);
     const external = cd.getUint32(p + 38, true);
-    const localOffset = cd.getUint32(p + 42, true);
-    const name = decoder.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nameLen));
+    records.push({
+      name: decoder.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nameLen)),
+      // Unix-made zips keep the file type and mode in the high bits
+      unixMode: madeBy === 3 ? external >>> 16 : 0,
+      method: cd.getUint16(p + 10, true),
+      compressed: cd.getUint32(p + 20, true),
+      localOffset: cd.getUint32(p + 42, true),
+    });
     p += 46 + nameLen + extraLen + commentLen;
-
-    // Unix-made zips keep the file type and mode in the high bits
-    const unixMode = madeBy === 3 ? external >>> 16 : 0;
-    const type = unixMode & S_IFMT;
-    if (name.endsWith('/') || type === S_IFDIR) continue;
-    if ((unixMode && type !== S_IFREG) || isExcluded(name)) {
-      left.push(name);
-      continue;
-    }
-    const local = new DataView(await file.slice(localOffset, localOffset + 30).arrayBuffer());
-    if (local.getUint32(0, true) !== 0x04034b50) throw new Error('The zip file is damaged');
-    const dataStart = localOffset + 30 + local.getUint16(26, true) + local.getUint16(28, true);
-    const raw = file.slice(dataStart, dataStart + compressed);
-    let data: Blob;
-    if (method === 0) data = raw;
-    else if (method === 8) data = await inflate(raw);
-    else throw new Error(`${name} uses a zip compression method this browser cannot read; upload a .tar.gz instead`);
-    entries.push({ path: name, data, mode: unixMode ? unixMode & 0o777 : 0o644 });
   }
+  return records;
+}
+
+/** Folders are skipped; links, devices and excluded paths are left out (their names kept in `left`). */
+function zipFiles(records: ZipRecord[]): { files: ZipRecord[]; left: string[] } {
+  const files: ZipRecord[] = [];
+  const left: string[] = [];
+  for (const r of records) {
+    const type = r.unixMode & S_IFMT;
+    if (r.name.endsWith('/') || type === S_IFDIR) continue;
+    if ((r.unixMode && type !== S_IFREG) || isExcluded(r.name)) left.push(r.name);
+    else files.push(r);
+  }
+  return { files, left };
+}
+
+async function zipData(file: Blob, r: ZipRecord): Promise<Blob> {
+  const local = new DataView(await file.slice(r.localOffset, r.localOffset + 30).arrayBuffer());
+  if (local.getUint32(0, true) !== 0x04034b50) throw new Error('The zip file is damaged');
+  const dataStart = r.localOffset + 30 + local.getUint16(26, true) + local.getUint16(28, true);
+  const raw = file.slice(dataStart, dataStart + r.compressed);
+  if (r.method === 0) return raw;
+  if (r.method === 8) return inflate(raw);
+  throw new Error(`${r.name} uses a zip compression method this browser cannot read; upload a .tar.gz instead`);
+}
+
+/** The files of a zip archive, decompressed. Links and folders are left out. */
+export async function readZip(file: Blob): Promise<{ entries: SourceEntry[]; skipped: number; left: string[] }> {
+  const { files, left } = zipFiles(await zipDirectory(file));
+  const entries: SourceEntry[] = [];
+  // Left out before reading their data; still part of the layout
+  for (const r of files) entries.push({ path: r.name, data: await zipData(file, r), mode: r.unixMode ? r.unixMode & 0o777 : 0o644 });
   return { entries, skipped: left.length, left };
 }
 
@@ -225,4 +252,39 @@ export async function packZip(file: File): Promise<PackedSource> {
 /** `.tar`, `.tar.gz` and `.tgz` go up as they are. */
 export function isTarball(name: string): boolean {
   return /\.(tar|tar\.gz|tgz)$/i.test(name);
+}
+
+// ── Sanity check before uploading ─────────────────────────────────────────────
+
+/**
+ * What a folder or zip would upload, checked against the app's build settings
+ * before anything is packed or sent (the shared check bastionctl runs again on
+ * the server): Next's `.next` folder as a static site, a package.json without
+ * a build script, an output folder that is not there. Only package.json is
+ * read, and only when the check needs it.
+ */
+export async function checkSource(
+  source: { kind: 'folder'; files: File[] } | { kind: 'zip'; file: File },
+  build: Pick<DeployAppConfig['build'], 'type' | 'dir' | 'output'>,
+): Promise<DeploySourceProblem | null> {
+  type Listed = SourceEntry & { read: () => Promise<Blob> };
+  let listed: Listed[];
+  let others: string[] = [];
+  if (source.kind === 'folder') {
+    listed = source.files.map((f) => ({ path: f.webkitRelativePath || f.name, data: f, mode: 0o644, read: async () => f }));
+  } else {
+    const { files, left } = zipFiles(await zipDirectory(source.file));
+    others = left;
+    listed = files.map((r) => ({ path: r.name, data: new Blob(), mode: 0o644, read: () => zipData(source.file, r) }));
+  }
+  const { entries } = normalizeEntries(listed, others);
+  const packageJson = joinSourcePath(build.dir, 'package.json');
+  const texts: Record<string, string> = {};
+  const pkg = entries.find((e) => e.path === packageJson);
+  // A package.json too large to be one is reported as unreadable rather than read
+  if (pkg) {
+    const blob = await pkg.read();
+    texts[packageJson] = blob.size <= 1024 * 1024 ? await blob.text() : '';
+  }
+  return checkDeploySource(deploySourceViewFromPaths(entries.map((e) => e.path), texts), build);
 }

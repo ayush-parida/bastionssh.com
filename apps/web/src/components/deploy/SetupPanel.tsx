@@ -6,6 +6,9 @@ import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { deployErrorCode, deployKeys, deployPath } from '@/lib/deploy.js';
 import { cn } from '@/lib/utils.js';
+import { deployLogHint } from '@/lib/deploy-help.js';
+import DocsLink from '@/components/docs/DocsLink.js';
+import { DEPLOY_DOCS } from '@smt/shared';
 
 export type SetupAnswer = DeploySetupResult & { sudo: boolean; socket: 'writable' | 'sudo' | 'denied' | 'missing' };
 
@@ -24,6 +27,16 @@ function Requirement({ ok, label, hint }: { ok: boolean | null; label: string; h
         {hint && <span className="block text-xs text-muted-foreground">{hint}</span>}
       </span>
     </li>
+  );
+}
+
+function SetupErrorHint({ message }: { message: string }) {
+  const hint = deployLogHint(message);
+  if (!hint) return null;
+  return (
+    <span className="mt-1 block">
+      <DocsLink to={hint.href}>How to fix: {hint.label}</DocsLink>
+    </span>
   );
 }
 
@@ -118,7 +131,10 @@ export default function SetupPanel({
           <span className="text-muted-foreground">
             bastionctl <span className="font-mono text-foreground">{state.version}</span>
           </span>
-          <span className="ml-auto">{button}</span>
+          <DocsLink to={`${DEPLOY_DOCS.overview}#reinstall`} className="ml-auto text-xs">
+            When to reinstall
+          </DocsLink>
+          <span>{button}</span>
         </div>
         {proxyState?.mode === 'nginx' && <NginxSteps proxy={proxyState} />}
       </div>
@@ -135,7 +151,10 @@ export default function SetupPanel({
           <p className="mt-1 text-sm text-muted-foreground">
             {state.integrity === 'mismatch'
               ? 'The bastionctl installed on this server is not the one this BastionSSH ships (another version, or the file was changed). Nothing runs until it is reinstalled.'
-              : 'Apps, their config, secrets and releases live on the server, in one folder. BastionSSH installs bastionctl there and runs it over SSH; it stores nothing about your apps.'}
+              : 'Apps, their config, secrets and releases live on the server, in one folder. BastionSSH installs bastionctl there and runs it over SSH; it stores nothing about your apps.'}{' '}
+            <DocsLink to={state.integrity === 'mismatch' ? `${DEPLOY_DOCS.overview}#reinstall` : `${DEPLOY_DOCS.overview}#setup`}>
+              {state.integrity === 'mismatch' ? 'When and why to reinstall' : 'Setup guide'}
+            </DocsLink>
           </p>
         </div>
         {button}
@@ -206,7 +225,10 @@ export default function SetupPanel({
 
       {proxyState && (result?.proxy ?? proxyState.mode) === 'nginx' && <NginxSteps proxy={proxyState} />}
       {setup.error && (
-        <p className="whitespace-pre-wrap break-words rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{(setup.error as Error).message}</p>
+        <p className="whitespace-pre-wrap break-words rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">
+          {(setup.error as Error).message}
+          <SetupErrorHint message={(setup.error as Error).message} />
+        </p>
       )}
       {result && (
         <p className="text-sm text-emerald-600 dark:text-emerald-400">

@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { FileArchive, FolderUp, ShieldAlert, Upload, X } from 'lucide-react';
-import { EXCLUDED_DIRS, isTarball, packFolder, packZip } from '@/lib/archive.js';
+import type { DeployAppConfig, DeploySourceProblem } from '@smt/shared';
+import { FileArchive, FolderUp, Loader2, ShieldAlert, TriangleAlert, Upload, X } from 'lucide-react';
+import { checkSource, EXCLUDED_DIRS, isTarball, packFolder, packZip } from '@/lib/archive.js';
+import { BUILD_TYPE_GUIDES } from '@/lib/deploy-help.js';
 import { formatBytes } from '@/lib/utils.js';
+import DocsLink from '@/components/docs/DocsLink.js';
 
 type Picked = { kind: 'file'; file: File } | { kind: 'folder'; name: string; files: File[] };
 
@@ -13,21 +16,45 @@ export interface PackedUpload {
 /**
  * Pick what to deploy: a `.zip`, `.tar.gz`/`.tgz`/`.tar`, or a folder. A
  * tarball goes up as it is; a zip or folder is packed in the browser first
- * (lib/archive.ts), without node_modules, .next and .git.
+ * (lib/archive.ts), without node_modules, .next and .git — and checked
+ * against the app's build settings first, so Next's `.next` folder picked
+ * for a static site is refused here, with what to pick instead. The server
+ * checks again (tarballs only there).
  */
 export default function DeploySourceDialog({
   app,
+  build,
   onDeploy,
   onClose,
 }: {
   app: string;
+  /** The app's build settings from bastion.yml; null when they could not be read (nothing is checked then). */
+  build: DeployAppConfig['build'] | null;
   /** `label` names the source; `pack` turns it into the upload, run while the log panel shows "Packing". */
   onDeploy: (label: string, pack: () => Promise<PackedUpload>) => void;
   onClose: () => void;
 }) {
   const [picked, setPicked] = useState<Picked | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [problem, setProblem] = useState<DeploySourceProblem | null>(null);
+  const [checking, setChecking] = useState(false);
   const folderInput = useRef<HTMLInputElement>(null);
+  const guide = build ? BUILD_TYPE_GUIDES[build.type] : null;
+
+  // Look at what was picked before anything is packed or sent
+  useEffect(() => {
+    setProblem(null);
+    if (!picked || !build || (picked.kind === 'file' && isTarball(picked.file.name))) return;
+    let stale = false;
+    setChecking(true);
+    checkSource(picked.kind === 'folder' ? { kind: 'folder', files: picked.files } : { kind: 'zip', file: picked.file }, build)
+      .then((found) => !stale && setProblem(found))
+      .catch((err: unknown) => !stale && setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => !stale && setChecking(false));
+    return () => {
+      stale = true;
+    };
+  }, [picked, build]);
 
   // React does not know the non-standard attribute
   useEffect(() => {
@@ -91,6 +118,11 @@ export default function DeploySourceDialog({
               value in the app&apos;s .env and its volumes. Deploy only code you trust.
             </span>
           </p>
+          {guide && (
+            <p className="text-xs text-muted-foreground" data-testid="deploy-hint">
+              {guide.hint} <DocsLink to={guide.docs}>How to deploy</DocsLink>
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <label className="flex cursor-pointer flex-col items-center gap-2 rounded-md border border-dashed border-border p-4 text-center hover:bg-muted/50">
               <FileArchive size={20} className="text-muted-foreground" />
@@ -127,6 +159,19 @@ export default function DeploySourceDialog({
           <p className="text-xs text-muted-foreground">
             Folders and zips are packed here first, leaving out {EXCLUDED_DIRS.join(', ')} — the server installs dependencies and builds again.
           </p>
+          {checking && (
+            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 size={12} className="animate-spin" /> Checking the files…
+            </p>
+          )}
+          {problem && (
+            <div role="alert" className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-sm text-red-600">
+              <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+              <span>
+                {problem.message} <DocsLink to={problem.docs}>Read how to fix it</DocsLink>
+              </span>
+            </div>
+          )}
           {error && <p className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{error}</p>}
           <div className="flex justify-end gap-2 pt-1">
             <button onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
@@ -134,7 +179,7 @@ export default function DeploySourceDialog({
             </button>
             <button
               onClick={start}
-              disabled={!picked}
+              disabled={!picked || checking || !!problem}
               className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"
             >
               <Upload size={14} /> Deploy

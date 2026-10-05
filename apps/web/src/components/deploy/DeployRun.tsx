@@ -3,7 +3,9 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { DeployLogLine, DeployOutcome, DeployStreamEvent } from '@smt/shared';
 import { CheckCircle2, Loader2, TriangleAlert, X, XCircle } from 'lucide-react';
 import { appPath, deployKeys, followDeployStream, uploadDeploy } from '@/lib/deploy.js';
+import { deployFailureHint } from '@/lib/deploy-help.js';
 import { cn, formatBytes } from '@/lib/utils.js';
+import DocsLink from '@/components/docs/DocsLink.js';
 
 const MAX_LINES = 5_000;
 
@@ -133,6 +135,17 @@ export function useDeployRun(serverId: string, app: string) {
   return { state, busy, deploy, rollback, dismiss };
 }
 
+/** A failure the docs know: a link to its troubleshooting section. */
+function FailureHint({ error, lines }: { error: string | null; lines: DeployLogLine[] }) {
+  const hint = deployFailureHint(error, lines);
+  if (!hint) return null;
+  return (
+    <p className="mx-4 mt-2 text-sm">
+      <DocsLink to={hint.href}>How to fix: {hint.label}</DocsLink>
+    </p>
+  );
+}
+
 /** The panel for a run: progress, the log, and how it ended. */
 export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; onDismiss: () => void }) {
   const box = useRef<HTMLDivElement>(null);
@@ -193,6 +206,7 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
       {state.error && state.phase === 'failed' && (
         <p className="mx-4 mt-3 whitespace-pre-wrap break-words rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{state.error}</p>
       )}
+      {state.phase === 'failed' && <FailureHint error={state.error} lines={state.lines} />}
       {state.outcome?.previous && state.phase === 'success' && (
         <p className="mx-4 mt-3 text-xs text-muted-foreground">
           Previously serving <span className="font-mono">{state.outcome.previous}</span> — roll back to it from Releases.

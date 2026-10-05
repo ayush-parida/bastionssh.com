@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom';
 import type { Server } from '@smt/shared';
 import { ChevronRight, Rocket, Search } from 'lucide-react';
 import { api } from '@/lib/api.js';
+import { DEPLOY_DOCS } from '@smt/shared';
+import DocsLink from '@/components/docs/DocsLink.js';
 
 /**
  * Deployments in navigation: the servers the member can reach, each opening
@@ -26,7 +28,7 @@ export default function DeploymentsPage() {
       </div>
       <p className="mb-4 max-w-2xl text-sm text-muted-foreground">
         Apps are deployed to a server and live there — config, secrets and releases are files on the server, not in BastionSSH. Pick a server to see
-        its apps or set it up.
+        its apps or set it up. <DocsLink to={DEPLOY_DOCS.overview}>How deployments work</DocsLink>
       </p>
       <label className="mb-4 flex max-w-sm items-center gap-2 rounded-md border border-input bg-background px-2.5 py-1.5">
         <Search size={14} className="text-muted-foreground" />

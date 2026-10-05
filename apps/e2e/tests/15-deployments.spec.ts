@@ -123,9 +123,15 @@ const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}
 
 /**
  * Answer the tab's calls; everything but GETs is recorded in `sent`. `state.setUp` flips when Setup runs;
- * `state.deployLevel` is site1's bastion.yml `permissions.deploy`.
+ * `state.deployLevel` is site1's bastion.yml `permissions.deploy`; `state.buildType` its build type
+ * (static: `output: .`); `state.deployFails` makes a deploy fail its health check.
  */
-async function stubDeploy(page: Page, serverId: string, sent: Sent[], state: { setUp: boolean; deployLevel?: 'operate' | 'manage' } = { setUp: true }) {
+async function stubDeploy(
+  page: Page,
+  serverId: string,
+  sent: Sent[],
+  state: { setUp: boolean; deployLevel?: 'operate' | 'manage'; buildType?: 'nextjs' | 'static'; deployFails?: boolean } = { setUp: true },
+) {
   // The app's Runtime section asks Docker; nothing to show here
   await page.route(`**/api/docker/servers/${serverId}**`, (route) => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found"}' }));
   await page.route(`**/api/deploy/servers/${serverId}**`, async (route: Route) => {
@@ -216,6 +222,7 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state: { s
     if (path === '/apps/site1' && method === 'GET') {
       return json({
         ...summary('site1'),
+        buildType: state.buildType ?? 'nextjs',
         // bastionctl reports the config's permissions at the top level too
         permissions: { deploy: state.deployLevel ?? 'operate' },
         config: {
@@ -223,7 +230,7 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state: { s
           domains: ['site1.example.com'],
           redirect_www: 'none',
           tls: 'auto',
-          build: { type: 'nextjs', node: null, dir: '.', output: null },
+          build: state.buildType === 'static' ? { type: 'static', node: null, dir: '.', output: '.' } : { type: 'nextjs', node: null, dir: '.', output: null },
           run: { port: 3000, env_file: '.env', volumes: [], memory: '512m', cpus: 1 },
           healthcheck: { path: '/', timeout: '30s' },
           keep_releases: 5,
@@ -252,6 +259,19 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state: { s
         );
       }
       return json({ app: 'site1', created: false });
+    }
+    if (path === '/apps/site1/deploy' && state.deployFails) {
+      const error = 'Health check failed after 30s: wget: server returned error: HTTP/1.1 500 Internal Server Error';
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: sse([
+          { type: 'log', lines: [{ stream: 'stderr', text: 'Health check: http://bastion-site1:3000/ (up to 30s)' }, { stream: 'stderr', text: `Deploy failed: ${error}` }] },
+          { type: 'result', outcome: { app: 'site1', release: '20261005-130000-99999999', previous: RELEASE, result: 'failed', error } },
+          { type: 'exit', exitCode: 1, signal: null, durationMs: 31000, timedOut: false },
+          { type: 'end' },
+        ]),
+      });
     }
     if (path === '/apps/site1/deploy') {
       return route.fulfill({
@@ -591,5 +611,87 @@ test.describe('Deployments', () => {
     await expect(page.getByLabel('Port')).toBeDisabled();
     await expect(page.getByRole('button', { name: 'Validate and save' })).toHaveCount(0);
     expect(sent).toEqual([]);
+  });
+  test("refuses Next's .next folder for a static app before uploading, with a link to the fix", async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent, { setUp: true, buildType: 'static' });
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+
+    const dir = mkdtempSync(join(tmpdir(), 'deploy-e2e-'));
+    try {
+      // What `next build` writes without output: 'export'
+      const next = join(dir, '.next');
+      for (const sub of ['server/app', 'static/chunks', 'cache']) mkdirSync(join(next, sub), { recursive: true });
+      writeFileSync(join(next, 'BUILD_ID'), 'abc123');
+      writeFileSync(join(next, 'server/app/index.html'), '<h1>hi</h1>');
+      writeFileSync(join(next, 'static/chunks/main.js'), '1');
+      // The export: index.html at the top
+      const out = join(dir, 'out');
+      mkdirSync(join(out, '_next/static'), { recursive: true });
+      writeFileSync(join(out, 'index.html'), '<h1>hi</h1>');
+      writeFileSync(join(out, '_next/static/main.js'), '1');
+
+      await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Deploy site1' });
+      await expect(dialog.getByTestId('deploy-hint')).toContainText('Static app: pick your out folder (it must contain index.html)');
+      await expect(dialog.getByTestId('deploy-hint').getByRole('link', { name: 'How to deploy' })).toHaveAttribute('href', '/docs/deployments/static-site');
+
+      await dialog.getByLabel('Project folder').setInputFiles(next);
+      const refusal = dialog.getByRole('alert');
+      await expect(refusal).toContainText("This is Next's .next build folder, not a static export. Set output: 'export'");
+      await expect(refusal).toContainText('upload the out folder (it contains index.html)');
+      await expect(refusal.getByRole('link', { name: 'Read how to fix it' })).toHaveAttribute('href', '/docs/deployments/troubleshooting#uploaded-a-nextjs-build-folder');
+      await expect(dialog.getByRole('button', { name: 'Deploy' })).toBeDisabled();
+      await snap(page, 'deploy-refuses-next-folder');
+
+      // The out folder is fine with output: .
+      await dialog.getByLabel('Project folder').setInputFiles(out);
+      await expect(dialog.getByRole('alert')).toHaveCount(0);
+      await expect(dialog.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+      await dialog.getByRole('button', { name: 'Deploy' }).click();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    await expect(page.getByRole('region', { name: 'Deploy log' })).toContainText('Deployed release');
+    // Nothing went up but the out folder
+    const uploads = sent.filter((s) => s.path === '/apps/site1/deploy');
+    expect(uploads).toHaveLength(1);
+    expect(uploadedNames(uploads[0]!.raw!)).toEqual(['_next/static/main.js', 'index.html']);
+  });
+
+  test('links the tab, the build type and a known failure to the docs', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent, { setUp: true, deployFails: true });
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await expect(page.getByRole('heading', { name: 'site1' })).toBeVisible();
+
+    // The header's guide opens the docs in a new tab, at the overview
+    const [docs] = await Promise.all([page.context().waitForEvent('page'), page.getByRole('link', { name: 'How to deploy' }).click()]);
+    await expect(docs).toHaveURL(/\/docs\/deployments\/overview$/);
+    await expect(docs.getByRole('heading', { name: 'How deployments work', level: 1 })).toBeVisible();
+    await docs.close();
+
+    // The config editor's guide for the app's build type
+    await page.getByRole('tab', { name: 'Config' }).click();
+    const guide = page.getByRole('group', { name: 'Build guide' });
+    await guide.getByText('How to deploy: Next.js (built on the server)').click();
+    await expect(guide).toContainText("output: 'standalone'");
+    await expect(guide.getByRole('link', { name: 'Full guide' })).toHaveAttribute('href', '/docs/deployments/nextjs-dynamic');
+
+    // A failed health check links its troubleshooting section, which opens at that heading
+    await page.getByRole('button', { name: 'Deploy', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Deploy site1' });
+    await dialog.getByLabel('Archive file').setInputFiles({ name: 'site1.tar.gz', mimeType: 'application/gzip', buffer: Buffer.from([0x1f, 0x8b, 0, 0]) });
+    await dialog.getByRole('button', { name: 'Deploy' }).click();
+    const log = page.getByRole('region', { name: 'Deploy log' });
+    await expect(log).toContainText('Deploy failed');
+    const fix = log.getByRole('link', { name: 'How to fix: Health check failed' });
+    await expect(fix).toHaveAttribute('href', '/docs/deployments/troubleshooting#health-check-failed');
+    const [help] = await Promise.all([page.context().waitForEvent('page'), fix.click()]);
+    await expect(help.getByRole('heading', { name: 'Health check failed' })).toBeInViewport();
+    await help.close();
   });
 });

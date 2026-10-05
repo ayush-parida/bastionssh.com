@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DeployNginxApplyResult, DeployValidationIssue } from '@smt/shared';
+import type { DeployBuildType, DeployNginxApplyResult, DeployValidationIssue } from '@smt/shared';
 import { parseDocument } from 'yaml';
 import { Loader2, RotateCcw, Save, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { appPath, deployKeys, issuesAt, nginxSyncMessage, validationIssues } from '@/lib/deploy.js';
 import { cn } from '@/lib/utils.js';
+import BuildGuide from './BuildGuide.js';
 
 type Path = (string | number)[];
 type Raw = Record<string, unknown>;
@@ -266,6 +267,8 @@ export default function ConfigEditor({
           )}
         </div>
       )}
+
+      {data && (['nextjs', 'dockerfile', 'static'] as string[]).includes(buildType) && <BuildGuide key={buildType} type={buildType as DeployBuildType} open={creating} />}
 
       {mode === 'yaml' ? (
         <textarea

@@ -11,6 +11,8 @@ import SetupPanel from '@/components/deploy/SetupPanel.js';
 import AppList from '@/components/deploy/AppList.js';
 import AppDetail from '@/components/deploy/AppDetail.js';
 import NewAppDialog from '@/components/deploy/NewAppDialog.js';
+import DocsLink from '@/components/docs/DocsLink.js';
+import { DEPLOY_DOCS } from '@smt/shared';
 
 /**
  * A server's Deployments tab (deployments spec §7): Setup, then the apps on
@@ -75,6 +77,9 @@ export default function ServerDeploymentsPage() {
           <h1 className="text-2xl font-bold">Deployments</h1>
           <p className="text-sm text-muted-foreground">{server?.name ?? serverId}</p>
         </div>
+        <DocsLink to={DEPLOY_DOCS.overview} className="ml-auto text-sm">
+          How to deploy
+        </DocsLink>
       </div>
 
       {state.isLoading ? (
@@ -92,7 +97,12 @@ export default function ServerDeploymentsPage() {
             ) : apps.error ? (
               <p className="rounded-lg border border-border bg-card p-4 text-sm text-red-600">
                 {(apps.error as Error).message}
-                {appsCode === 'bastionctl_mismatch' && ' — reinstall bastionctl above.'}
+                {appsCode === 'bastionctl_mismatch' && (
+                  <>
+                    {' — reinstall bastionctl above. '}
+                    <DocsLink to={`${DEPLOY_DOCS.troubleshooting}#integrity-check-failed-reinstall`}>Why?</DocsLink>
+                  </>
+                )}
               </p>
             ) : (
               <AppList apps={apps.data ?? []} onOpen={openApp} onNew={levels.manage ? () => setCreating(true) : undefined} />

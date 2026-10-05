@@ -349,7 +349,9 @@ Deploy web apps — Next.js, anything with a Dockerfile, or a static site — to
     current -> releases/<id>
 ```
 
-**Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>`, starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
+**Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>`, starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. Before building — and in the browser before uploading a folder or zip — the upload is checked against the build type: Next's `.next` build folder given to a static app, a `package.json` with no `build` script, or an output folder that is not there is refused with what to upload instead. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
+
+The step-by-step guides (static sites, Next.js built on the server or prebuilt, Dockerfiles, every `bastion.yml` field, secrets, domains, troubleshooting) are in the app under **Docs → Deployments**, and the Deployments tab links to the right page from its setup, config editor, deploy dialog and failed deploys.
 
 ### `bastion.yml`
 
