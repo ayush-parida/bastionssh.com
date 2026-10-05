@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page, Route } from '@playwright/test';
-import { createMember, expect, ownerApi, signInWithPassword, test } from './fixtures.js';
+import { createMember, expect, ownerApi, signInWithPassword, snap, test } from './fixtures.js';
 
 /**
  * The Deployments tab against a stubbed `/api/deploy`: no SSH server or
@@ -264,6 +264,7 @@ test.describe('Deployments', () => {
     await expect(page.getByText('/opt/bastion', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reinstall' })).toBeVisible();
     await expect(apps.getByRole('button', { name: 'New app' })).toBeVisible();
+    await snap(page, 'deployments-tab');
   });
 
   test('deploys a folder without node_modules, .next and .git, and shows the log as it streams', async ({ page }) => {
@@ -297,6 +298,7 @@ test.describe('Deployments', () => {
     await expect(log.getByTestId('deploy-log')).toContainText('Unpacking the upload');
     await expect(log.getByTestId('deploy-log')).toContainText('Health check passed');
     await expect(log).toContainText(`Previously serving ${RELEASE}`);
+    await snap(page, 'deploy-log');
 
     // One multipart upload: a gzipped tar of the project root, without the excluded folders
     const upload = sent.find((s) => s.path === '/apps/site1/deploy');
@@ -341,12 +343,14 @@ test.describe('Deployments', () => {
     await page.getByRole('button', { name: `Roll back to ${OLD}` }).click();
     const confirm = page.getByRole('alertdialog');
     await expect(confirm).toContainText(OLD);
+    await snap(page, 'releases-rollback-confirm');
     expect(sent).toEqual([]);
     await confirm.getByRole('button', { name: 'Roll back' }).click();
 
     const log = page.getByRole('region', { name: 'Rollback log' });
     await expect(log).toContainText(`Rolled back to release ${OLD}`);
     await expect(log.getByTestId('deploy-log')).toContainText('Proxy switched');
+    await snap(page, 'releases-rolled-back');
     expect(sent.map((s) => [s.method, s.path, s.body])).toEqual([['POST', '/apps/site1/rollback', { release: OLD }]]);
   });
 
@@ -364,6 +368,8 @@ test.describe('Deployments', () => {
 
     await expect(page.getByRole('alert')).toContainText('bastionctl refused this config (1 problem)');
     await expect(page.getByText('A port from 1 to 65535')).toBeVisible();
+    await page.getByText('A port from 1 to 65535').scrollIntoViewIfNeeded();
+    await snap(page, 'config-editor-errors');
     // The form edits the YAML in place: the comment it does not show survives
     const put = sent.find((s) => s.method === 'PUT')!;
     expect((put.body as { text: string }).text).toContain('# managed by the web e2e');
@@ -375,6 +381,7 @@ test.describe('Deployments', () => {
     await yaml.fill(`${CONFIG}extra: true\n`);
     await page.getByRole('button', { name: 'Validate and save' }).click();
     await expect(page.getByRole('alert')).toContainText('extra: Unknown key');
+    await snap(page, 'config-editor-yaml');
 
     // Fixed: saved
     await yaml.fill(CONFIG.replace('3000', '8080'));
