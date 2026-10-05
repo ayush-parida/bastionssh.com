@@ -5,7 +5,8 @@ import images from './images.json' with { type: 'json' };
 import { appNames, tryLoadConfig } from './config.js';
 import type { Ctx } from './context.js';
 import { certPaths, generateCaddyfile, PROXY_MOUNT, type ProxySite } from './caddy.js';
-import { BastionError, isInside, LABEL_MANAGED, NETWORK, PROXY_CONTAINER } from './names.js';
+import { waitForLock } from './lock.js';
+import { BastionError, containerName, isInside, LABEL_MANAGED, NETWORK, PROXY_CONTAINER } from './names.js';
 import { currentRelease, readRelease } from './releases.js';
 
 /**
@@ -46,6 +47,11 @@ export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyO
     const record = readRelease(ctx.layout, app, current);
     if (!record || !record.container || !record.port) {
       ctx.log(`warning: ${app} is left out of the proxy: release ${current} has no release.json`);
+      continue;
+    }
+    // Only ever our own name and a port go into the Caddyfile, whatever release.json says
+    if (record.container !== containerName(app, current) || !Number.isInteger(record.port) || record.port < 1 || record.port > 65535) {
+      ctx.log(`warning: ${app} is left out of the proxy: release.json of ${current} names another container or port`);
       continue;
     }
     sites.push(siteFor(config, current, record.container, record.port));
@@ -101,13 +107,50 @@ function lastLines(text: string, n = 6): string {
   return text.trim().split('\n').slice(-n).join('\n');
 }
 
+/** How long a run waits for another run's proxy switch to finish. */
+export const PROXY_LOCK_WAIT_MS = 5 * 60_000;
+
 /**
  * Regenerate the Caddyfile from every app (with `overrides`), validate it,
  * swap it in and reload. On a failed validation nothing changes; on a failed
  * reload the previous file is restored and reloaded. Throws in both cases.
+ *
+ * The whole switch holds `proxy.lock`, and so does `applied` — what makes the
+ * change permanent on disk (moving `current`): the config is built from every
+ * app's `current`, so two apps switching at once must not each write a config
+ * that leaves out the other's new release, or one built before the other's
+ * link moved.
  */
-export async function applyProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride = new Map()): Promise<void> {
+export async function applyProxy(
+  ctx: Pick<Ctx, 'layout' | 'docker' | 'log' | 'actor' | 'now'>,
+  overrides: ProxyOverride = new Map(),
+  applied?: () => void,
+): Promise<void> {
   await requireProxy(ctx);
+  await withProxyLock(ctx, async () => {
+    await switchProxy(ctx, overrides);
+    applied?.();
+  });
+}
+
+/** Run `fn` holding `proxy.lock` (see {@link applyProxy}); waits for another run's switch to finish. */
+export async function withProxyLock<T>(ctx: Pick<Ctx, 'layout' | 'docker' | 'actor' | 'now'>, fn: () => Promise<T>): Promise<T> {
+  const release = await waitForLock(ctx.layout.proxyLock, {
+    holder: ctx.actor,
+    docker: ctx.docker,
+    now: ctx.now,
+    what: 'proxy config',
+    waitMs: PROXY_LOCK_WAIT_MS,
+  });
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+/** The switch itself; the caller holds `proxy.lock` and checked the proxy runs. */
+export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride): Promise<void> {
   const sites = collectSites(ctx, overrides);
   copyCertificates(ctx, sites);
   const text = generateCaddyfile(sites);

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { parseEnv, quote, setEnv, unsetEnv } from './env.js';
-import { Layout, newReleaseId, NAME_PATTERN } from './names.js';
+import { containerName, Layout, newReleaseId, NAME_PATTERN, volumeName } from './names.js';
 import { currentRelease, previousRelease, pruneCandidates, releaseIds, setCurrent } from './releases.js';
 
 describe('release ids', () => {
@@ -13,6 +13,15 @@ describe('release ids', () => {
     expect(NAME_PATTERN.test(id)).toBe(true);
     // Sortable by time
     expect(newReleaseId(new Date('2026-10-05T10:00:00Z'), 'ff'.repeat(16)) > id).toBe(true);
+  });
+});
+
+describe('Docker names', () => {
+  it('never give two apps the same volume', () => {
+    // App a's volume b-data and app a-b's volume data were one volume, and purging a deleted a-b's data
+    expect(volumeName('a', 'b-data')).not.toBe(volumeName('a-b', 'data'));
+    expect(volumeName('site1', 'uploads')).toBe('bastion-site1.uploads');
+    expect(containerName('site1', '20261005-090807-abcdef01')).toBe('bastion-site1-20261005-090807-abcdef01');
   });
 });
 

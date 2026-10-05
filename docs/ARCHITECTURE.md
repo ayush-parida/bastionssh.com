@@ -614,8 +614,13 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   proxy container, regenerates the Caddyfile from every app (`caddy.ts`), has Caddy validate
   it, swaps and reloads (restoring the previous file on failure), moves `current`, removes the
   old container after a drain delay and prunes beyond `keep_releases` (never current or
-  previous). Locks are `O_EXCL` files, stale after 30 minutes or when the holder's bastionctl
-  container is gone. `--json` prints one result line; progress goes to stderr.
+  previous). Locks are files linked into place whole (never readable half written), stale
+  after 30 minutes or when the holder's bastionctl container is gone, and taken over only if
+  the file is still the stale one: `apps/<app>/deploy.lock` per app, `build.lock` (a second
+  build waits its turn) and `proxy.lock`, held from building the Caddyfile until `current`
+  has moved, so two apps switching at once never write a config that drops the other's
+  release. Named volumes are `bastion-<app>.<name>` (the `.` keeps apps' volumes apart).
+  `--json` prints one result line; progress goes to stderr.
 - **Install and integrity** (`deploy/bundle.ts`, `deploy/install.ts`): the server ships the
   built files; setup uploads them over SFTP (0755) and every other request first hashes the
   installed program and wrapper — a mismatch is refused with 409 `bastionctl_mismatch`
@@ -629,7 +634,8 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   `deploy_operate` / `deploy_manage`). Deploy is `multipart/form-data` (one `source` file,
   streamed to `<root>/tmp`), then an SSE log (`log`, `result`, `exit`, `end`) on the shared
   stream machinery (`deploy/sse.ts`, feature `deploy`, per-user cap); like compose actions a
-  deploy keeps running when the browser leaves and is audited as `detached`. Revocation, or
+  deploy keeps running when the browser leaves and is audited as `detached` (a failure's
+  first line only: the app log after it may hold its secrets). Revocation, or
   losing Servers or Deployments, ends deploy streams. `PUT …/config` validates with bastionctl
   first (422 with every problem). Env reveal needs a browser session and a passkey step-up.
 - Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with

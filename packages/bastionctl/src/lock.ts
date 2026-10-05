@@ -80,6 +80,51 @@ export async function isStale(info: LockInfo | null, opts: Pick<LockOptions, 'do
   return holderGone(info, opts.docker);
 }
 
+/** Create `file` holding `body` only if it does not exist — whole or not at all, so nobody reads it half written. */
+function createExclusive(file: string, body: string): boolean {
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  fs.writeFileSync(tmp, body, { mode: 0o644 });
+  try {
+    fs.linkSync(tmp, file);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+    throw err;
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
+
+/**
+ * Remove a lock judged stale, but only the one judged: it is renamed aside
+ * first (atomic), and if what was moved is not the file we read — another
+ * run took the lock over meanwhile — it is put back.
+ */
+export function removeStale(file: string, judged: string): void {
+  const aside = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.stale`;
+  try {
+    fs.renameSync(file, aside);
+  } catch {
+    return; // someone else cleared it first; the retry decides
+  }
+  if (readRaw(aside) !== judged) {
+    try {
+      fs.linkSync(aside, file);
+    } catch {
+      // a third run holds it now; theirs stands
+    }
+  }
+  fs.rmSync(aside, { force: true });
+}
+
+function readRaw(file: string): string | null {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Take the lock or throw (exit code 4) naming who holds it. Returns the
  * release, which removes the file only while it is still ours.
@@ -88,8 +133,7 @@ export async function acquireLock(file: string, opts: LockOptions): Promise<() =
   const info: LockInfo = { holder: opts.holder, host: os.hostname(), pid: process.pid, since: (opts.now?.() ?? new Date()).toISOString() };
   const body = JSON.stringify(info) + '\n';
   for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      fs.writeFileSync(file, body, { flag: 'wx', mode: 0o644 });
+    if (createExclusive(file, body)) {
       return () => {
         try {
           if (fs.readFileSync(file, 'utf8') === body) fs.unlinkSync(file);
@@ -97,19 +141,32 @@ export async function acquireLock(file: string, opts: LockOptions): Promise<() =
           // already gone
         }
       };
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
+    const raw = readRaw(file);
     const held = readLock(file);
+    // Gone between our try and the read: whoever holds it now decides on the retry
+    if (raw === null) continue;
     if (attempt === 0 && (await isStale(held, opts))) {
-      try {
-        fs.unlinkSync(file);
-      } catch {
-        // someone else cleared it first; the retry decides
-      }
+      removeStale(file, raw);
       continue;
     }
     throw new BastionError(`The ${opts.what} is locked by ${held?.holder ?? 'another run'} since ${held?.since ?? 'just now'}; try again when it finishes`, 4);
   }
   throw new BastionError(`Could not lock the ${opts.what}`, 4);
+}
+
+/**
+ * {@link acquireLock}, waiting up to `waitMs` for a busy lock — for the
+ * short sections every run must take in turn (the proxy switch).
+ */
+export async function waitForLock(file: string, opts: LockOptions & { waitMs: number; intervalMs?: number }): Promise<() => void> {
+  const deadline = Date.now() + opts.waitMs;
+  for (;;) {
+    try {
+      return await acquireLock(file, opts);
+    } catch (err) {
+      if (!(err instanceof BastionError) || err.exitCode !== 4 || Date.now() >= deadline) throw err;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, opts.intervalMs ?? 250));
+  }
 }

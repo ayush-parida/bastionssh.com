@@ -8,9 +8,10 @@ import type { Ctx } from './context.js';
 import { DockerApi } from './docker.js';
 import { startFakeDocker, type FakeDocker } from './fake-docker.test-helper.js';
 import { Layout, PROXY_CONTAINER } from './names.js';
+import { loadConfig } from './config.js';
 import * as ops from './ops.js';
-import { CADDY_IMAGE } from './proxy.js';
-import { currentRelease, previousRelease, readRelease, releaseIds } from './releases.js';
+import { applyProxy, CADDY_IMAGE, siteFor } from './proxy.js';
+import { currentRelease, previousRelease, readRelease, releaseIds, setCurrent, writeRelease } from './releases.js';
 import { tarBuffer } from './tar.js';
 
 /**
@@ -129,7 +130,7 @@ describe('deploy', () => {
       RestartPolicy: { Name: 'unless-stopped' },
       Memory: 256 * 1024 * 1024,
       NanoCpus: 5e8,
-      Mounts: [{ Type: 'volume', Source: 'bastion-site1-data', Target: '/data', ReadOnly: false }],
+      Mounts: [{ Type: 'volume', Source: 'bastion-site1.data', Target: '/data', ReadOnly: false }],
     });
     expect(c.HostConfig).not.toHaveProperty('PortBindings');
 
@@ -251,6 +252,67 @@ describe('deploy', () => {
     fs.rmSync(outside);
   });
 
+  it('deploys two apps at once: the second build waits its turn and both stay in the proxy', async () => {
+    // Each switch rebuilds the config from every app's `current`: without one
+    // proxy lock, the second writer dropped the first app's new release (its
+    // old container then stopped after the drain) or validated the other's file
+    await app();
+    await app('blog', 'name: blog\ndomains: [blog.com]\nbuild: { type: dockerfile }\n');
+    const [a, b] = await Promise.all([ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1')), ops.deploy(ctx(), 'blog', upload('b.tgz', 'v1'))]);
+    expect([a.result, b.result]).toEqual(['success', 'success']);
+    const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
+    expect(caddyfile).toContain(`reverse_proxy bastion-site1-${a.release}:3000`);
+    expect(caddyfile).toContain(`reverse_proxy bastion-blog-${b.release}:3000`);
+    expect([currentRelease(layout, 'site1'), currentRelease(layout, 'blog')]).toEqual([a.release, b.release]);
+
+    const [a2, b2] = await Promise.all([ops.deploy(ctx(), 'site1', upload('c.tgz', 'v2')), ops.deploy(ctx(), 'blog', upload('d.tgz', 'v2'))]);
+    expect([a2.result, b2.result]).toEqual(['success', 'success']);
+    const after = fs.readFileSync(layout.caddyfile, 'utf8');
+    expect(after).toContain(`reverse_proxy bastion-site1-${a2.release}:3000`);
+    expect(after).toContain(`reverse_proxy bastion-blog-${b2.release}:3000`);
+    expect(fake.containers.get(`bastion-site1-${a2.release}`)!.State.Running).toBe(true);
+    expect(fake.containers.get(`bastion-blog-${b2.release}`)!.State.Running).toBe(true);
+    expect(fs.existsSync(layout.proxyLock)).toBe(false);
+    expect(fs.existsSync(layout.buildLock)).toBe(false);
+  });
+
+  it('takes proxy switches in turn, each built on the last one’s `current`', async () => {
+    await app();
+    await app('blog', 'name: blog\ndomains: [blog.com]\nbuild: { type: dockerfile }\n');
+    const a = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    const b = (await ops.deploy(ctx(), 'blog', upload('b.tgz', 'v1'))).release;
+    // Two switches at once, as two deploys' activations would run them
+    const next = (name: string, from: string) => {
+      const id = `${from.slice(0, -8)}ffffffff`;
+      const old = readRelease(layout, name, from)!;
+      fs.mkdirSync(layout.release(name, id));
+      writeRelease(layout, { ...old, id, container: `bastion-${name}-${id}` });
+      return id;
+    };
+    const a2 = next('site1', a);
+    const b2 = next('blog', b);
+    const config = (name: string) => loadConfig(layout, name);
+    await Promise.all([
+      applyProxy(ctx(), new Map([['site1', siteFor(config('site1'), a2, `bastion-site1-${a2}`, 3000)]]), () => setCurrent(layout, 'site1', a2)),
+      applyProxy(ctx(), new Map([['blog', siteFor(config('blog'), b2, `bastion-blog-${b2}`, 3000)]]), () => setCurrent(layout, 'blog', b2)),
+    ]);
+    const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
+    expect(caddyfile).toContain(`reverse_proxy bastion-site1-${a2}:3000`);
+    expect(caddyfile).toContain(`reverse_proxy bastion-blog-${b2}:3000`);
+    expect(fs.existsSync(layout.proxyLock)).toBe(false);
+  });
+
+  it('puts only its own container name in the proxy config, whatever release.json says', async () => {
+    await app();
+    const id = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    writeRelease(layout, { ...readRelease(layout, 'site1', id)!, container: 'x:1\n}\nevil.com {\n\treverse_proxy attacker' });
+    await ops.proxyApply(ctx());
+    const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
+    expect(caddyfile).not.toContain('evil.com');
+    expect(caddyfile).not.toContain('site1.com');
+    expect(logs.join('\n')).toMatch(/site1 is left out of the proxy: release.json of .* names another container/);
+  });
+
   it('needs the proxy running', async () => {
     await app();
     await new DockerApi(fake.socket).stop(PROXY_CONTAINER);
@@ -308,7 +370,7 @@ describe('rollback, restart, stop and delete', () => {
 
     await ops.remove(ctx(), 'site1', { purge: true });
     expect(fs.existsSync(layout.app('site1'))).toBe(false);
-    expect(fake.volumesRemoved).toEqual(['bastion-site1-data']);
+    expect(fake.volumesRemoved).toEqual(['bastion-site1.data']);
     expect((await ops.list(ctx())).map((a) => a.name)).toEqual(['blog']);
   });
 });

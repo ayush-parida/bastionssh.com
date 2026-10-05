@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DockerApi } from './docker.js';
 import { startFakeDocker, type FakeDocker } from './fake-docker.test-helper.js';
-import { acquireLock, readLock, STALE_AFTER_MS } from './lock.js';
+import { acquireLock, readLock, removeStale, STALE_AFTER_MS, waitForLock } from './lock.js';
 
 let dir: string;
 let file: string;
@@ -68,5 +68,33 @@ describe('deploy locks', () => {
     // An unreadable lock (half written by a run that died) is stale
     fs.writeFileSync(file, '{"holder":');
     await expect(acquireLock(file, { holder: 'new', what: 'x' })).resolves.toBeTypeOf('function');
+  });
+
+  it('removes only the stale lock it judged, never one another run took meanwhile', () => {
+    // Two runs found the same stale lock; the first replaced it with its own,
+    // and the second must not delete that fresh one
+    const stale = JSON.stringify({ holder: 'old', host: 'x', pid: 1, since: '2020-01-01T00:00:00Z' });
+    held({ holder: 'fresh', host: os.hostname(), pid: process.pid, since: new Date().toISOString() });
+    removeStale(file, stale);
+    expect(readLock(file)?.holder).toBe('fresh');
+    expect(fs.readdirSync(dir)).toEqual(['deploy.lock']);
+
+    fs.writeFileSync(file, stale);
+    removeStale(file, stale);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it('never leaves a lock file readable half written, and waits for a busy lock when asked', async () => {
+    const release = await acquireLock(file, { holder: 'ann', what: 'x' });
+    // Created whole (linked into place), so no temp files are left beside it
+    expect(fs.readdirSync(dir)).toEqual(['deploy.lock']);
+    const waiting = waitForLock(file, { holder: 'bob', what: 'x', waitMs: 5000, intervalMs: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    release();
+    const second = await waiting;
+    expect(readLock(file)?.holder).toBe('bob');
+    second();
+    await acquireLock(file, { holder: 'carol', what: 'x' });
+    await expect(waitForLock(file, { holder: 'dan', what: 'x', waitMs: 30, intervalMs: 10 })).rejects.toThrow(/locked by carol/);
   });
 });

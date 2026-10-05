@@ -18,7 +18,7 @@ import { appNames, durationMs, envFilePath, formatIssues, loadConfig, memoryByte
 import { sleep, type Ctx } from './context.js';
 import { DockerApiError } from './docker.js';
 import { containerEnv, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
-import { acquireLock, lockView, readLock } from './lock.js';
+import { acquireLock, lockView, readLock, waitForLock } from './lock.js';
 import {
   appName,
   BastionError,
@@ -35,7 +35,7 @@ import {
   releaseId,
   volumeName,
 } from './names.js';
-import { applyProxy, CADDY_IMAGE, proxyContainer, proxyEnv, proxySpec, siteFor, writeInitialCaddyfile } from './proxy.js';
+import { applyProxy, CADDY_IMAGE, proxyContainer, proxyEnv, proxySpec, siteFor, switchProxy, withProxyLock, writeInitialCaddyfile } from './proxy.js';
 import {
   clearCurrent,
   currentRelease,
@@ -57,6 +57,8 @@ import { BASTIONCTL_VERSION } from './version.js';
 
 /** Uploads left in `<root>/tmp` longer than this are removed by setup and deploy. */
 const TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/** How long a deploy waits for another app's image build (BastionSSH gives a deploy 30 minutes). */
+const BUILD_LOCK_WAIT_MS = 20 * 60_000;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -184,15 +186,17 @@ async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord
   try {
     await ctx.docker.start(name);
     await waitHealthy(ctx, config, name, record.port);
-    await applyProxy(ctx, new Map([[config.name, siteFor(config, record.id, name, record.port)]]));
+    // `current` moves while the proxy lock is still held, so another app's switch builds on it
+    await applyProxy(ctx, new Map([[config.name, siteFor(config, record.id, name, record.port)]]), () => {
+      // Release dirs may be gone for a CLI user who deleted them; the link still moves
+      fs.mkdirSync(ctx.layout.release(config.name, record.id), { recursive: true });
+      setCurrent(ctx.layout, config.name, record.id);
+    });
   } catch (err) {
     ctx.log(`Removing ${name}; the previous release keeps serving`);
     await ctx.docker.remove(name).catch(() => {});
     throw err;
   }
-  // Release dirs may be gone for a CLI user who deleted them; the link still moves
-  fs.mkdirSync(ctx.layout.release(config.name, record.id), { recursive: true });
-  setCurrent(ctx.layout, config.name, record.id);
 
   const others = (await ctx.docker.listContainers([`${LABEL_APP}=${config.name}`])).filter((c) => !c.Names.includes(`/${name}`));
   if (others.length > 0) {
@@ -297,25 +301,29 @@ export async function init(ctx: Ctx, app: string, opts: { config?: string; force
   const existed = fs.existsSync(configFile);
   if (existed && !opts.force) throw new BastionError(`${app} already has a bastion.yml (use --force to replace it)`);
   const text = opts.config ? fs.readFileSync(fileInRoot(ctx, opts.config), 'utf8') : templateConfig(app);
-  const result = validateForServer(ctx.layout, app, text);
-  if (!result.ok) throw new BastionError(`Invalid config: ${formatIssues(result.errors)}`, 3);
+  // Under the proxy lock: two configs written at once must not both pass the
+  // check for domains another app uses, and the switch must see this one
+  await withProxyLock(ctx, async () => {
+    const result = validateForServer(ctx.layout, app, text);
+    if (!result.ok) throw new BastionError(`Invalid config: ${formatIssues(result.errors)}`, 3);
 
-  fs.mkdirSync(ctx.layout.releases(app), { recursive: true, mode: 0o755 });
-  const envFile = envFilePath(ctx.layout, app, result.config!);
-  if (!fs.existsSync(envFile)) writeEnvFile(envFile, '');
-  const previous = existed ? fs.readFileSync(configFile, 'utf8') : null;
-  const tmp = `${configFile}.tmp`;
-  fs.writeFileSync(tmp, text, { mode: 0o644 });
-  fs.renameSync(tmp, configFile);
+    fs.mkdirSync(ctx.layout.releases(app), { recursive: true, mode: 0o755 });
+    const envFile = envFilePath(ctx.layout, app, result.config!);
+    if (!fs.existsSync(envFile)) writeEnvFile(envFile, '');
+    const previous = existed ? fs.readFileSync(configFile, 'utf8') : null;
+    const tmp = `${configFile}.tmp`;
+    fs.writeFileSync(tmp, text, { mode: 0o644 });
+    fs.renameSync(tmp, configFile);
 
-  if (existed && currentRelease(ctx.layout, app) && (await proxyContainer(ctx))?.state === 'running') {
-    try {
-      await applyProxy(ctx);
-    } catch (err) {
-      if (previous !== null) fs.writeFileSync(configFile, previous, { mode: 0o644 });
-      throw err;
+    if (existed && currentRelease(ctx.layout, app) && (await proxyContainer(ctx))?.state === 'running') {
+      try {
+        await switchProxy(ctx, new Map());
+      } catch (err) {
+        if (previous !== null) fs.writeFileSync(configFile, previous, { mode: 0o644 });
+        throw err;
+      }
     }
-  }
+  });
   ctx.log(existed ? `Updated the config of ${app}` : `Created app ${app}`);
   return { app, created: !existed };
 }
@@ -439,7 +447,13 @@ export async function deploy(baseCtx: Ctx, app: string, source: string): Promise
       ctx.log(`Unpacked ${extracted.files} entries (${Math.round(extracted.bytes / 1024)} KiB)`);
       const plan = planBuild(work, config);
       for (const note of plan.notes) ctx.log(note);
-      const buildLock = await acquireLock(ctx.layout.buildLock, { holder: `${ctx.actor} (${app})`, docker: ctx.docker, now: ctx.now, what: 'image build on this server' });
+      // One build per server at a time: a second deploy waits its turn rather than failing
+      const buildOpts = { holder: `${ctx.actor} (${app})`, docker: ctx.docker, now: ctx.now, what: 'image build on this server' };
+      const buildLock = await acquireLock(ctx.layout.buildLock, buildOpts).catch(async (err: unknown) => {
+        if (!(err instanceof BastionError) || err.exitCode !== 4) throw err;
+        ctx.log(`Waiting for another image build to finish (${err.message})`);
+        return waitForLock(ctx.layout.buildLock, { ...buildOpts, waitMs: BUILD_LOCK_WAIT_MS, intervalMs: 1000 });
+      });
       try {
         await ctx.docker.build(
           packDirectory(plan.context, plan.generated ? [{ name: GENERATED_DOCKERFILE, content: plan.generated }] : [], plan.exclude),
@@ -535,7 +549,8 @@ export async function remove(ctx: Ctx, app: string, opts: { purge?: boolean } = 
   requireApp(ctx, app);
   const releaseLock = await acquireLock(ctx.layout.lock(app), { holder: ctx.actor, docker: ctx.docker, now: ctx.now, what: `deploy of ${app}` });
   try {
-    if ((await proxyContainer(ctx))?.state === 'running') await applyProxy(ctx, new Map([[app, null]]));
+    // Out of the proxy, and `current` gone before another app's switch could put it back
+    if ((await proxyContainer(ctx))?.state === 'running') await applyProxy(ctx, new Map([[app, null]]), () => clearCurrent(ctx.layout, app));
     else ctx.log('warning: the proxy is not running; its config is updated when it is set up again');
     for (const c of await ctx.docker.listContainers([`${LABEL_APP}=${app}`])) {
       ctx.log(`Removing container ${c.Names[0]?.slice(1) ?? c.Id.slice(0, 12)}`);

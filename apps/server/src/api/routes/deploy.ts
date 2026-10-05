@@ -71,6 +71,17 @@ function gate(level: Level) {
 
 const tmpName = (root: string, prefix: string, ext: string) => `${root}/tmp/${prefix}-${randomBytes(12).toString('hex')}${ext}`;
 
+/**
+ * A failure as the audit records it: its first line only. Deploy errors end
+ * with the app's last log lines (health check, crash), and an app may print
+ * its own secrets there; the full text stays in the release's build.log on
+ * the server.
+ */
+export function auditError(message: string | null | undefined): string | null {
+  if (!message) return null;
+  return message.split('\n')[0]!.slice(0, 300);
+}
+
 function auditDeploy(req: FastifyRequest, action: AuditAction, ctx: Pick<DeployContext, 'server'>, metadata: Record<string, unknown>) {
   return audit(req, action, 'server', ctx.server.id, ctx.server.name, metadata);
 }
@@ -283,7 +294,7 @@ export async function deployRoutes(app: FastifyInstance) {
           app: name,
           release: outcome?.release ?? null,
           result: outcome?.result ?? 'failed',
-          error: outcome?.error ?? error,
+          error: auditError(outcome?.error ?? error),
           exitCode: result.exitCode,
           durationMs: result.durationMs,
           ...(result.timedOut && { timedOut: true }),
@@ -310,7 +321,7 @@ export async function deployRoutes(app: FastifyInstance) {
         release,
         previous: outcome?.previous ?? null,
         result: outcome?.result ?? 'failed',
-        error: outcome?.error ?? error,
+        error: auditError(outcome?.error ?? error),
         exitCode: result.exitCode,
         ...(sse.closed && { detached: true }),
       });

@@ -539,6 +539,18 @@ describe('deployment routes', () => {
       expect(fake.released).toBe(fake.opened);
     });
 
+    it('audits a failed deploy with the first line of its error, never the app log after it', async () => {
+      const failed = { ...OUTCOME, result: 'failed', error: 'Health check failed after 30s: no answer\nContainer log:\nDATABASE_URL=postgres://app:hunter2@db/app' };
+      fake.bastionctl = (args) => (args[0] === 'deploy' ? { ...defaultBastionctl(args), stdout: failed, exitCode: 1 } : defaultBastionctl(args));
+      const { res } = await postForm(operator, api('/apps/site1/deploy'), tarGz());
+      const events = await allEvents(res);
+      // The person deploying sees all of it in the log
+      expect(events).toContainEqual({ type: 'result', outcome: failed });
+      const meta = audits('deploy.finish')[0]!.meta;
+      expect(meta).toMatchObject({ result: 'failed', error: 'Health check failed after 30s: no answer' });
+      expect(JSON.stringify(meta)).not.toContain('hunter2');
+    });
+
     it('answers problems before the upload as JSON', async () => {
       const noFile = await postForm(operator, api('/apps/site1/deploy'), null);
       expect(noFile.res.status).toBe(400);

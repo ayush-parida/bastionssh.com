@@ -62,8 +62,13 @@ export function newReleaseId(now: Date, checksum: string): string {
 
 export const imageName = (app: string, release: string) => `bastion-${app}:${release}`;
 export const containerName = (app: string, release: string) => `bastion-${app}-${release}`;
-/** Named Docker volume for `volumes: ["<name>:/path"]`. */
-export const volumeName = (app: string, name: string) => `bastion-${app}-${name}`;
+/**
+ * Named Docker volume for `volumes: ["<name>:/path"]`. The `.` cannot occur
+ * in an app or volume name, so no two apps share one: with `-`, app `a`'s
+ * volume `b-data` and app `a-b`'s `data` were the same volume (and deleting
+ * one app purged the other's data).
+ */
+export const volumeName = (app: string, name: string) => `bastion-${app}.${name}`;
 
 /** Paths under the root directory (`/opt/bastion` or `$HOME/bastion`). */
 export class Layout {
@@ -87,6 +92,10 @@ export class Layout {
   /** Held while an image builds: one build per server at a time. */
   get buildLock() {
     return path.join(this.root, 'build.lock');
+  }
+  /** Held while the proxy config is rebuilt and switched: every app's switch in turn. */
+  get proxyLock() {
+    return path.join(this.root, 'proxy.lock');
   }
   app(app: string) {
     return path.join(this.apps, appName(app));
