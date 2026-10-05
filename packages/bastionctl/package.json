@@ -11,7 +11,8 @@
     "build": "tsc --project tsconfig.json --noEmit && node build.mjs",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "update-images": "node update-images.mjs"
   },
   "devDependencies": {
     "@smt/shared": "workspace:*",

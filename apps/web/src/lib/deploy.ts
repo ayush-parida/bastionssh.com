@@ -27,14 +27,11 @@ export const deployKeys = {
 };
 
 /**
- * What the app list shows beyond the summary when the server reports it:
+ * A row of the app list: the summary with, when bastionctl reports them,
  * certificate status (spec §6) and the container's memory and CPU. Older
  * bastionctl versions leave them out, and the list shows a dash.
  */
-export type DeployAppRow = DeployAppSummary & {
-  certificate?: { issuer: string | null; expiresAt: string | null; error: string | null } | null;
-  usage?: { memoryBytes: number; memoryLimitBytes: number | null; cpuPercent: number } | null;
-};
+export type DeployAppRow = DeployAppSummary;
 
 /** The codes the deploy API answers with that the page acts on (server deploy/errors.ts). */
 export function deployErrorCode(err: unknown): string | null {

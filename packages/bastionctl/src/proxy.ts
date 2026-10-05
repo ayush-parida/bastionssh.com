@@ -1,34 +1,36 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DeployAppConfig, DeployContainer, DeployProxyMode } from '@smt/shared';
-import images from './images.json' with { type: 'json' };
 import { appNames, tryLoadConfig } from './config.js';
 import type { Ctx } from './context.js';
-import { certPaths, generateCaddyfile, PROXY_MOUNT, type ProxySite } from './caddy.js';
+import { certPaths, generateCaddyfile, PROXY_MOUNT, splitRedirects, type ProxySite } from './caddy.js';
+import { CADDY_IMAGE } from './images.js';
 import { waitForLock } from './lock.js';
 import { BastionError, containerName, isInside, LABEL_MANAGED, LIVE_NETWORK, liveAlias, NETWORK, PROXY_CONTAINER } from './names.js';
 import { NGINX_HELPER_PATH, NGINX_UPSTREAM_PORT, proxyMode, syncSiteFiles } from './nginx.js';
+import { FRONT_PATH, PROXY_IMAGE } from './proxy-image.js';
 import { currentRelease, readRelease } from './releases.js';
 
 /**
  * The Caddy proxy (deployments spec §2.5, §5 step 6): one `bastion-caddy`
  * container owning ports 80 and 443 on the `bastion-apps` network, with
- * `<root>/proxy` mounted at /bastion-proxy. Applying a new Caddyfile writes it
- * beside the old one, has Caddy validate it, swaps it in and reloads
- * gracefully; a failed reload puts the previous file back and reloads that.
+ * `<root>/proxy` mounted at /bastion-proxy. Its image (proxy-image.ts) runs
+ * the proxy front (front.ts), which owns the ports and runs Caddy behind
+ * them. Applying a new Caddyfile writes it beside the old one, has Caddy
+ * validate it, swaps it in and has the front start a Caddy with it and move
+ * new connections over once it serves every certificate the old one did —
+ * the old Caddy finishes its open connections first, so no request is lost.
+ * A refused switch puts the previous file back; the old Caddy never stopped.
  *
  * Caddy reaches each app by its live alias on `bastion-live` (names.ts
  * liveAlias), not by container name. A deploy moves traffic by attaching the
  * healthy new container under that alias and stopping the old one, with no
- * reload at all: even a graceful reload drops the odd connection Caddy had
- * just accepted (Go's server shutdown closes a connection whose request
- * arrives after it began), and on a busy site that is a failed request on
- * every deploy of any app. Only config changes (domains, TLS, port, apps
- * added or removed) reload.
+ * switch of Caddy at all; only config changes (domains, TLS, port, apps added
+ * or removed) start a new one.
  */
 
-/** Pinned image reference for creating the container (`repo@sha256:…`). */
-export const CADDY_IMAGE = images.caddy.replace(/:[^/@]*@/, '@');
+export { CADDY_IMAGE };
 
 /** An app whose entry in the proxy changes: a new upstream, or null to drop it. */
 export type ProxyOverride = Map<string, ProxySite | null>;
@@ -135,6 +137,15 @@ async function caddy(ctx: Pick<Ctx, 'docker'>, args: string[]) {
   return ctx.docker.exec(PROXY_CONTAINER, ['caddy', ...args, '--adapter', 'caddyfile'], 60_000);
 }
 
+/** The names whose certificates a new Caddy must serve before it takes traffic (those the running one has). */
+export function probeNames(sites: readonly ProxySite[]): string[] {
+  const names = sites.flatMap((s) => {
+    const { served, redirects } = splitRedirects(s.domains, s.redirect_www);
+    return [...served, ...redirects.map(([from]) => from)];
+  });
+  return [...new Set(names.filter((d) => !d.startsWith('*.')))].slice(0, 200);
+}
+
 function readText(file: string): string | null {
   try {
     return fs.readFileSync(file, 'utf8');
@@ -205,6 +216,10 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
     ctx.log('Proxy config unchanged; traffic moves over the live network');
     return;
   }
+  const info = await ctx.docker.inspectContainer(PROXY_CONTAINER);
+  if (info && info.Config.Image !== PROXY_IMAGE) {
+    throw new BastionError(`${PROXY_CONTAINER} runs a proxy from an older bastionctl; run bastionctl setup (Reinstall in BastionSSH) to replace it, then try again`);
+  }
   const next = `${file}.next`;
   const prev = `${file}.prev`;
   fs.writeFileSync(next, text, { mode: 0o644 });
@@ -218,10 +233,11 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
   const hadPrevious = fs.existsSync(file);
   if (hadPrevious) fs.copyFileSync(file, prev);
   fs.renameSync(next, file);
-  // Caddy skips a reload whose config is unchanged, and would keep serving the old certificate
-  const reloaded = await caddy(ctx, ['reload', '--config', `${PROXY_MOUNT}/Caddyfile`, ...(certificatesChanged ? ['--force'] : [])]);
+  // A new Caddy reads the file (and any renewed certificate files); the running one serves until it is ready
+  const sha256 = createHash('sha256').update(text).digest('hex');
+  const reloaded = await ctx.docker.exec(PROXY_CONTAINER, ['node', FRONT_PATH, 'reload', '--sha256', sha256, ...(mode === 'caddy' ? probeNames(sites) : [])], 120_000);
   if (reloaded.exitCode === 0) {
-    ctx.log(`Proxy reloaded (${sites.length} app${sites.length === 1 ? '' : 's'})`);
+    ctx.log(`Proxy switched to the new config (${sites.length} app${sites.length === 1 ? '' : 's'}); open connections finish on the previous one`);
     if (mode === 'nginx') {
       // The host's nginx follows through the helper (BastionSSH runs it; see nginx.ts)
       const { changed, removed } = syncSiteFiles(ctx.layout, sites);
@@ -231,11 +247,9 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
     return;
   }
   const reason = lastLines(reloaded.stderr || reloaded.stdout);
-  if (hadPrevious) {
-    fs.renameSync(prev, file);
-    const restored = await caddy(ctx, ['reload', '--config', `${PROXY_MOUNT}/Caddyfile`]);
-    if (restored.exitCode !== 0) ctx.log(`warning: reloading the previous proxy config failed too: ${lastLines(restored.stderr)}`);
-  }
+  // The running Caddy never stopped: putting the file back is all there is to undo
+  if (hadPrevious) fs.renameSync(prev, file);
+  else fs.rmSync(file, { force: true });
   throw new BastionError(`Reloading the proxy failed; the previous config was restored:\n${reason}`);
 }
 
@@ -251,9 +265,9 @@ export async function joinLive(ctx: Pick<Ctx, 'docker'>, container: string, alia
   return true;
 }
 
-/** Write the Caddyfile without a running proxy (first setup). */
-export function writeInitialCaddyfile(ctx: Pick<Ctx, 'layout' | 'log'>): void {
-  if (fs.existsSync(ctx.layout.caddyfile)) return;
+/** Write the Caddyfile without a running proxy: at first setup, or (`replace`) for a proxy container being created anew. */
+export function writeInitialCaddyfile(ctx: Pick<Ctx, 'layout' | 'log'>, replace = false): void {
+  if (!replace && fs.existsSync(ctx.layout.caddyfile)) return;
   fs.writeFileSync(ctx.layout.caddyfile, generateCaddyfile(collectSites(ctx), proxyMode(ctx.layout)), { mode: 0o644 });
 }
 
@@ -283,14 +297,12 @@ export function proxySpec(ctx: Pick<Ctx, 'layout'>, env: string[], mode: DeployP
       : {
           '80/tcp': [{ HostPort: '80' }],
           '443/tcp': [{ HostPort: '443' }],
-          '443/udp': [{ HostPort: '443' }],
         };
   return {
-    Image: CADDY_IMAGE,
-    Cmd: ['caddy', 'run', '--config', `${PROXY_MOUNT}/Caddyfile`, '--adapter', 'caddyfile'],
-    Env: env,
+    Image: PROXY_IMAGE,
+    Env: [...env, `BASTION_PROXY_LISTEN=${mode === 'nginx' ? '80:http' : '80:http,443:https'}`, `BASTION_PROXY_CONFIG=${PROXY_MOUNT}/Caddyfile`],
     Labels: { [LABEL_MANAGED]: 'proxy', [LABEL_PROXY_MODE]: mode },
-    ExposedPorts: mode === 'nginx' ? { '80/tcp': {} } : { '80/tcp': {}, '443/tcp': {}, '443/udp': {} },
+    ExposedPorts: mode === 'nginx' ? { '80/tcp': {} } : { '80/tcp': {}, '443/tcp': {} },
     HostConfig: {
       Binds: [`${proxy}:${PROXY_MOUNT}`, `${path.join(proxy, 'data')}:/data`, `${path.join(proxy, 'config')}:/config`],
       PortBindings: ports,

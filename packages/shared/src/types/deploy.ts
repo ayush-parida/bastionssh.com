@@ -15,6 +15,17 @@ export type DeployRedirectWww = 'apex' | 'www' | 'none';
 /** `auto` | `staging` | `internal` | `dns:<provider>`, or certificate files in the app folder. */
 export type DeployTls = string | { cert: string; key: string };
 
+/**
+ * Who may deploy and roll back an app (`permissions.deploy` in bastion.yml):
+ * members with operate on the server (the default) or only those with
+ * manage. BastionSSH enforces it; bastionctl validates and reports it.
+ */
+export type DeployPermissionLevel = 'operate' | 'manage';
+
+export interface DeployAppPermissions {
+  deploy: DeployPermissionLevel;
+}
+
 /** `bastion.yml` after validation, defaults filled in (spec §4). */
 export interface DeployAppConfig {
   name: string;
@@ -32,6 +43,7 @@ export interface DeployAppConfig {
   healthcheck: { path: string; timeout: string };
   keep_releases: number;
   proxy: DeployProxyMode;
+  permissions: DeployAppPermissions;
 }
 
 export interface DeployValidationIssue {
@@ -69,6 +81,32 @@ export interface DeployAppSummary {
   /** Set when bastion.yml is missing or invalid. */
   configError: string | null;
   locked: boolean;
+  /** From bastion.yml (default deploy: operate); null when the config is missing or invalid. Absent from older bastionctl versions. */
+  permissions?: DeployAppPermissions | null;
+  /**
+   * The app's certificate as the proxy has it (the one expiring first across
+   * its domains): Caddy's storage, or certbot's in nginx mode. Null when there
+   * is none to read (not deployed, proxy down); absent from older versions.
+   */
+  certificate?: DeployAppCertificate | null;
+  /** The live container's CPU and memory, from one Docker stats read; null when it is not running. */
+  usage?: DeployAppUsage | null;
+}
+
+export interface DeployAppCertificate {
+  issuer: string | null;
+  notAfter: string | null;
+  /** Whole days until notAfter, when bastionctl read it (negative once expired). */
+  daysLeft: number | null;
+  /** The latest issuance or renewal error logged for one of the domains. */
+  lastError: string | null;
+}
+
+export interface DeployAppUsage {
+  cpuPercent: number;
+  memoryBytes: number;
+  /** The container's memory limit (run.memory); null without one. */
+  memoryLimitBytes: number | null;
 }
 
 export interface DeployAppStatus extends DeployAppSummary {
@@ -120,7 +158,7 @@ export interface DeploySetupResult {
 export interface DeployVersion {
   version: string;
   node: string;
-  images: { node: string; caddy: string };
+  images: { node: string; caddy: string; bun?: string; build?: Record<string, string> };
 }
 
 /**
