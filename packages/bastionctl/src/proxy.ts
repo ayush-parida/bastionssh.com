@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import type { DeployAppConfig, DeployContainer, DeployProxyMode } from '@smt/shared';
 import { appNames, tryLoadConfig } from './config.js';
 import type { Ctx } from './context.js';
-import { certPaths, generateCaddyfile, PROXY_MOUNT, splitRedirects, type ProxySite } from './caddy.js';
+import { certPaths, generateCaddyfile, NGINX_LOOPBACK, PROXY_MOUNT, splitRedirects, type ProxySite } from './caddy.js';
 import { CADDY_IMAGE } from './images.js';
 import { waitForLock } from './lock.js';
 import { BastionError, containerName, isInside, LABEL_MANAGED, LIVE_NETWORK, liveAlias, NETWORK, PROXY_CONTAINER } from './names.js';
@@ -205,12 +206,32 @@ export async function withProxyLock<T>(ctx: Pick<Ctx, 'layout' | 'docker' | 'act
   }
 }
 
+/**
+ * In nginx mode, the addresses the host's nginx reaches Caddy from, whose
+ * X-Forwarded-For Caddy keeps: the port published on 127.0.0.1 is forwarded
+ * into the container from the gateway of {@link NETWORK} (Docker's proxy, or
+ * its NAT), and 127.0.0.1 itself. Not the private ranges: every app container
+ * on the network is in them, and could claim any client address.
+ */
+export async function nginxTrustedProxies(ctx: Pick<Ctx, 'docker' | 'log'>): Promise<string[]> {
+  const network = await ctx.docker.inspectNetwork(NETWORK);
+  const gateways = (network?.IPAM?.Config ?? []).map((c) => c.Gateway?.split('/')[0] ?? '').filter((g) => net.isIPv4(g));
+  if (gateways.length === 0) ctx.log(`warning: no gateway address for ${NETWORK}; forwarded headers are trusted from 127.0.0.1 only`);
+  return [...gateways.map((g) => `${g}/32`), NGINX_LOOPBACK];
+}
+
+/** The Caddyfile for `sites` in the server's mode. */
+async function caddyfileFor(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, sites: ProxySite[]): Promise<string> {
+  const mode = proxyMode(ctx.layout);
+  return generateCaddyfile(sites, mode, mode === 'nginx' ? await nginxTrustedProxies(ctx) : undefined);
+}
+
 /** The switch itself; the caller holds `proxy.lock` and checked the proxy runs. */
 export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, overrides: ProxyOverride, opts: SwitchOptions = {}): Promise<void> {
   const sites = collectSites(ctx, overrides);
   const mode = proxyMode(ctx.layout);
   const certificatesChanged = copyCertificates(ctx, sites);
-  const text = generateCaddyfile(sites, mode);
+  const text = await caddyfileFor(ctx, sites);
   const file = ctx.layout.caddyfile;
   if (opts.onlyIfChanged && !certificatesChanged && readText(file) === text) {
     ctx.log('Proxy config unchanged; traffic moves over the live network');
@@ -265,10 +286,10 @@ export async function joinLive(ctx: Pick<Ctx, 'docker'>, container: string, alia
   return true;
 }
 
-/** Write the Caddyfile without a running proxy: at first setup, or (`replace`) for a proxy container being created anew. */
-export function writeInitialCaddyfile(ctx: Pick<Ctx, 'layout' | 'log'>, replace = false): void {
+/** Write the Caddyfile without a running proxy: at first setup, or (`replace`) for a proxy container being created anew. The network exists. */
+export async function writeInitialCaddyfile(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, replace = false): Promise<void> {
   if (!replace && fs.existsSync(ctx.layout.caddyfile)) return;
-  fs.writeFileSync(ctx.layout.caddyfile, generateCaddyfile(collectSites(ctx), proxyMode(ctx.layout)), { mode: 0o644 });
+  fs.writeFileSync(ctx.layout.caddyfile, await caddyfileFor(ctx, collectSites(ctx)), { mode: 0o644 });
 }
 
 /** Read `<root>/proxy/.env` (DNS provider tokens) for the proxy container's environment. */

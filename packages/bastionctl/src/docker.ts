@@ -288,6 +288,10 @@ export class DockerApi {
     if (pending) onLine(pending);
   }
 
+  inspectNetwork(name: string) {
+    return this.inspect<NetworkInspect>(`/networks/${encodeURIComponent(name)}`);
+  }
+
   async ensureNetwork(name: string, labels: Record<string, string>, opts: { internal?: boolean } = {}): Promise<boolean> {
     const existing = await this.inspect(`/networks/${encodeURIComponent(name)}`);
     if (existing) return false;
@@ -413,4 +417,9 @@ export function usageFrom(stats: ContainerStats): { cpuPercent: number; memoryBy
   const cpus = cpu?.online_cpus || 1;
   const cpuPercent = cpuDelta > 0 && systemDelta > 0 ? (cpuDelta / systemDelta) * cpus * 100 : 0;
   return { cpuPercent: Math.round(cpuPercent * 10) / 10, memoryBytes: Math.max(0, mem.usage - cache) };
+}
+
+export interface NetworkInspect {
+  Name: string;
+  IPAM?: { Config?: Array<{ Subnet?: string; Gateway?: string }> | null } | null;
 }

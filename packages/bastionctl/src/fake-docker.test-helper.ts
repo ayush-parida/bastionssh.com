@@ -263,7 +263,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         return void res.end(`${JSON.stringify({ stream: 'Step 1/2 : FROM busybox\n' })}\n${extra}${JSON.stringify({ stream: ' ---> 1234\nSuccessfully built 1234\n' })}\n`);
       }
       if ((m = /^\/networks\/([^/]+)$/.exec(p)) && req.method === 'GET') {
-        return fake.networks.has(m[1]!) ? json(200, { Name: m[1] }) : notFound('network');
+        return fake.networks.has(m[1]!) ? json(200, { Name: m[1], IPAM: { Config: [{ Subnet: '172.30.0.0/16', Gateway: '172.30.0.1' }] } }) : notFound('network');
       }
       if (p === '/networks/create' && req.method === 'POST') {
         const spec = JSON.parse(body.toString()) as { Name: string; Internal?: boolean };

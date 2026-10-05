@@ -328,7 +328,7 @@ export interface DeployNginxState {
   running: boolean;
   ports: { http: boolean; https: boolean };
   certbot: boolean;
-  /** nginx.conf includes /etc/nginx/conf.d/*.conf, where the server blocks go. */
+  /** nginx.conf includes /etc/nginx/conf.d/*.conf (Alpine: http.d), where the server blocks go. */
   confInclude: boolean;
   /** The root-owned helper at {@link DeployProxyState.helperPath}: missing, not the shipped one, or ok. */
   helper: 'missing' | 'mismatch' | 'ok';

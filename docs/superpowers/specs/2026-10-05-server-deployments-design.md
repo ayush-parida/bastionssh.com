@@ -78,7 +78,7 @@ Other commands: `init <app>` (scaffold from template or an uploaded `bastion.yml
 - BastionSSH pre-checks each domain with the existing DNS lookup (A/AAAA must point to the server's public address) and, for `tls: auto`, that ports 80/443 are reachable (existing diagnostics). Problems are shown with the exact DNS record to create; the domain is still saved.
 - Caddy obtains and renews certificates automatically; HTTP → HTTPS; `www` redirect per config; `staging` for testing; `internal` for private names; `dns:<provider>` for wildcards with the provider token in `<root>/proxy/.env` (never in BastionSSH); custom cert/key files in the app folder.
 - Certificate status (issuer, expiry, last error) is read from the server and shown; renewal failures raise an alert through existing notification channels (alert state derived on read, not stored).
-- **nginx mode:** existing nginx is detected (ports 80/443 owned by a host process). Generated server blocks go to `/etc/nginx/conf.d/bastion-<app>.conf` (only files with that prefix are touched), certificates via `certbot certonly --webroot`, renewal via certbot's own timer with a reload hook; requires passwordless `sudo` for the listed commands, shown during setup.
+- **nginx mode:** existing nginx is detected (ports 80/443 owned by a host process). Generated server blocks go to `/etc/nginx/conf.d/bastion-<app>.conf` (`http.d` on Alpine; only files with that prefix are touched, and those of apps no longer served are removed on the next apply), certificates via `certbot certonly --webroot`, renewal via certbot's own timer with a reload hook; requires passwordless `sudo` for the listed commands, shown during setup.
 
 ## 7. BastionSSH side
 

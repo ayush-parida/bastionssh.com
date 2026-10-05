@@ -334,7 +334,7 @@ async function setupLocked(ctx: Ctx, opts: { proxy?: DeployProxyMode }): Promise
   // Internal: apps reach the outside over bastion-apps; this one only carries the proxy's traffic to them
   if (await docker.ensureNetwork(LIVE_NETWORK, { [LABEL_MANAGED]: 'network' }, { internal: true })) ctx.log(`Created network ${LIVE_NETWORK}`);
   await ensureProxyImage(ctx);
-  writeInitialCaddyfile(ctx);
+  await writeInitialCaddyfile(ctx);
 
   let info = await docker.inspectContainer(PROXY_CONTAINER);
   if (info && info.Config.Image !== PROXY_IMAGE) {
@@ -350,7 +350,7 @@ async function setupLocked(ctx: Ctx, opts: { proxy?: DeployProxyMode }): Promise
   }
   if (!info) {
     // From this version's generator: a Caddyfile written before the front would have Caddy take the front's ports
-    writeInitialCaddyfile(ctx, true);
+    await writeInitialCaddyfile(ctx, true);
     ctx.log(`Creating ${PROXY_CONTAINER}${mode === 'nginx' ? ` behind the host's nginx (127.0.0.1:${NGINX_UPSTREAM_PORT})` : ''}`);
     await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv), mode));
   }

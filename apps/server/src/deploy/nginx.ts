@@ -19,7 +19,7 @@ import type { Remote } from './remote.js';
  * (packages/bastionctl/bastion-nginx.sh) that an administrator installs
  * root-owned at {@link NGINX_HELPER_PATH} and allows through passwordless
  * sudo — the only command BastionSSH ever runs as root. It writes
- * `/etc/nginx/conf.d/bastion-<app>.conf` from the facts bastionctl left in
+ * `/etc/nginx/conf.d/bastion-<app>.conf` (Alpine: `http.d`) from the facts bastionctl left in
  * `<root>/proxy/nginx/<app>.site`, runs `nginx -t` and reloads (restoring the
  * previous file on failure), and gets certificates with `certbot certonly
  * --webroot`, renewed by certbot's timer with a reload hook.
@@ -41,13 +41,16 @@ export const DETECT_SCRIPT = [
   'set -u',
   `h=${NGINX_HELPER_PATH}`,
   'if command -v nginx >/dev/null 2>&1 || [ -x /usr/sbin/nginx ]; then echo installed=yes; else echo installed=no; fi',
-  'if pgrep -x nginx >/dev/null 2>&1; then echo running=yes; else echo running=no; fi',
+  // nginx retitles its processes ("nginx: master process …"), which BusyBox's pgrep -x matches against
+  "if pgrep -x nginx >/dev/null 2>&1 || pgrep -f '^nginx: master process' >/dev/null 2>&1; then echo running=yes; else echo running=no; fi",
   // The local address is the 4th column of both `ss -Hltn` and `netstat -ltn`
   'listening() { (ss -Hltn 2>/dev/null || netstat -ltn 2>/dev/null) | awk -v p=":$1" \'substr($4, length($4) - length(p) + 1) == p { f = 1 } END { exit !f }\'; }',
   'if listening 80; then echo http=yes; else echo http=no; fi',
   'if listening 443; then echo https=yes; else echo https=no; fi',
   'if command -v certbot >/dev/null 2>&1; then echo certbot=yes; else echo certbot=no; fi',
-  "if grep -qsE '^[[:space:]]*include[[:space:]]+/etc/nginx/conf\\.d/\\*\\.conf' /etc/nginx/nginx.conf; then echo include=yes; else echo include=no; fi",
+  // Where the helper writes server blocks: Alpine's conf.d is included outside http { }, its http.d inside
+  'd=conf; if [ -d /etc/nginx/http.d ]; then d=http; fi',
+  `if grep -qsE "^[[:space:]]*include[[:space:]]+/etc/nginx/$d\\.d/\\*\\.conf" /etc/nginx/nginx.conf; then echo include=yes; else echo include=no; fi`,
   'if sudo -n -l "$h" >/dev/null 2>&1; then echo sudo=yes; else echo sudo=no; fi',
 ].join('\n');
 
@@ -84,7 +87,9 @@ export function nginxInstructions(root: string, username: string, nginx: DeployN
   const steps: string[] = [];
   if (!nginx.installed) steps.push('sudo apt-get install -y nginx    # or your distribution’s package; nginx mode is for servers that already run nginx');
   if (!nginx.certbot) steps.push('sudo apt-get install -y certbot    # or your distribution’s certbot package (its timer renews certificates)');
-  if (nginx.installed && !nginx.confInclude) steps.push('# /etc/nginx/nginx.conf must include /etc/nginx/conf.d/*.conf inside http { }: the server blocks are written there');
+  if (nginx.installed && !nginx.confInclude) {
+    steps.push('# /etc/nginx/nginx.conf must include /etc/nginx/conf.d/*.conf (on Alpine /etc/nginx/http.d/*.conf) inside http { }: the server blocks are written there');
+  }
   if (nginx.helper !== 'ok') steps.push(shellCommand(['sudo', 'install', '-o', 'root', '-g', 'root', '-m', '0755', `${root}/bin/bastion-nginx`, NGINX_HELPER_PATH]));
   if (!nginx.sudo) {
     const rule = `${username} ALL=(root) NOPASSWD: ${NGINX_HELPER_PATH}`;
