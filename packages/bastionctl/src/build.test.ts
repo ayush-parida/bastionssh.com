@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { DeployAppConfig } from '@smt/shared';
 import { detectPackageManager, GENERATED_DOCKERFILE, nodeVersion, planBuild } from './build.js';
-import { CADDY_IMAGE } from './proxy.js';
+import { BUN_IMAGE, CADDY_IMAGE, IMAGES, nodeBuildImage } from './images.js';
 
 let dir: string;
 beforeEach(() => {
@@ -42,12 +42,13 @@ describe('Next.js builds', () => {
     expect(plan.generated).toContain(`COPY ["package.json", "${lockfile}", "./"]`);
     expect(plan.generated).toContain(`RUN ${install}\n`);
     expect(plan.generated).toContain(`RUN ${build} && mkdir -p public`);
-    expect(plan.generated).toContain('FROM node:20-alpine AS run');
+    expect(plan.generated).toContain(`FROM ${nodeBuildImage('20')} AS run`);
+    expect(plan.notes).toContain(`Node.js 20: ${IMAGES.build['20']}`);
     expect(plan.generated).toContain('PORT=3000 HOSTNAME=0.0.0.0');
     expect(plan.generated).toContain('CMD ["node", "server.js"]');
     // Bun is brought into the install and build stages only; the server runs on Node
-    const bunLines = plan.generated!.split('\n').filter((l) => l.includes('oven/bun'));
-    expect(bunLines).toEqual(manager === 'bun' ? Array(2).fill('COPY --from=oven/bun:1-alpine /usr/local/bin/bun /usr/local/bin/bun') : []);
+    const bunLines = plan.generated!.split('\n').filter((l) => l.includes(BUN_IMAGE));
+    expect(bunLines).toEqual(manager === 'bun' ? Array(2).fill(`COPY --from=${BUN_IMAGE} /usr/local/bin/bun /usr/local/bin/bun`) : []);
   });
 
   it('uses yarn berry, npm install without a lockfile, and the configured port', () => {
@@ -79,6 +80,16 @@ describe('Next.js builds', () => {
     write('package.json', '{}');
     expect(nodeVersion(dir, null)).toBe('20');
   });
+
+  it('builds on the pinned image of the major version, and refuses a version it has none for', () => {
+    write('package.json', '{}');
+    write('next.config.js', NEXT_CONFIG);
+    const plan = planBuild(dir, config({ node: '22.11' }));
+    expect(plan.generated).toContain(`FROM ${nodeBuildImage('22')} AS deps`);
+    expect(plan.notes).toContain(`Node.js 22.11 asked for; building with the pinned Node.js 22 image: ${IMAGES.build['22']}`);
+    write('.nvmrc', '16\n');
+    expect(() => planBuild(dir, config())).toThrow(/Node.js 16 is not available for builds; use one of 18, 20, 22, 24/);
+  });
 });
 
 describe('dockerfile and static builds', () => {
@@ -99,12 +110,14 @@ describe('dockerfile and static builds', () => {
     write('package.json', '{}');
     write('pnpm-lock.yaml');
     plan = planBuild(dir, config({ type: 'static', output: 'dist' }));
-    expect(plan.generated).toMatch(/FROM node:20-alpine AS build[\s\S]*pnpm run build[\s\S]*FROM caddy@sha256:[0-9a-f]{64}\nCOPY --from=build \["\/app\/dist","\/srv\/"\]/);
+    expect(plan.generated).toContain(`FROM ${nodeBuildImage('20')} AS build`);
+    expect(plan.generated).toMatch(/AS build[\s\S]*pnpm run build[\s\S]*FROM caddy@sha256:[0-9a-f]{64}\nCOPY --from=build \["\/app\/dist","\/srv\/"\]/);
 
     fs.rmSync(path.join(dir, 'pnpm-lock.yaml'));
     write('bun.lock');
     plan = planBuild(dir, config({ type: 'static', output: 'dist' }));
-    expect(plan.generated).toMatch(/AS build\nWORKDIR \/app\nCOPY --from=oven\/bun:1-alpine \/usr\/local\/bin\/bun \/usr\/local\/bin\/bun\nCOPY \["package.json", "bun.lock", ".\/"\]\nRUN bun install --frozen-lockfile\nCOPY . .\nRUN bun run build\n/);
+    expect(plan.generated).toContain(`AS build\nWORKDIR /app\nCOPY --from=${BUN_IMAGE} /usr/local/bin/bun /usr/local/bin/bun\n`);
+    expect(plan.generated).toMatch(/\/usr\/local\/bin\/bun\nCOPY \["package.json", "bun.lock", ".\/"\]\nRUN bun install --frozen-lockfile\nCOPY . .\nRUN bun run build\n/);
   });
 
   it('never reads a config file through a link', () => {

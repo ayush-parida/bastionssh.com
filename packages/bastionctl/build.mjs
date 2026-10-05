@@ -11,6 +11,18 @@ const images = JSON.parse(readFileSync('src/images.json', 'utf8'));
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 
 mkdirSync('dist', { recursive: true });
+
+// The proxy front (src/front-main.ts) goes into the proxy image setup builds; bastionctl carries its source
+const front = await build({
+  entryPoints: ['src/front-main.ts'],
+  bundle: true,
+  write: false,
+  platform: 'node',
+  target: 'node22',
+  format: 'esm',
+  legalComments: 'none',
+});
+
 await build({
   entryPoints: ['src/main.ts'],
   outfile: 'dist/bastionctl.mjs',
@@ -19,6 +31,7 @@ await build({
   target: 'node22',
   format: 'esm',
   legalComments: 'inline',
+  define: { BASTION_FRONT_SOURCE: JSON.stringify(front.outputFiles[0].text) },
   // yaml's Node build is CommonJS and requires Node built-ins; give the bundle a require
   banner: { js: "#!/usr/bin/env node\nimport { createRequire as __bastionRequire } from 'node:module';\nconst require = __bastionRequire(import.meta.url);" },
 });

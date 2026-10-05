@@ -317,6 +317,11 @@ export class DockerApi {
     }
   }
 
+  /** One stats read (Docker samples twice, about a second apart, for CPU); null when the container is gone. */
+  stats(name: string): Promise<ContainerStats | null> {
+    return this.inspect<ContainerStats>(`/containers/${encodeURIComponent(name)}/stats?stream=false`);
+  }
+
   async logsTail(name: string, tail = 30): Promise<string> {
     try {
       const { body } = await this.request('GET', `/containers/${encodeURIComponent(name)}/logs`, { query: { stdout: true, stderr: true, tail } });
@@ -388,4 +393,24 @@ export interface ContainerInspect {
   State: { Status: string; Running: boolean; Restarting?: boolean; StartedAt?: string; ExitCode?: number; Health?: { Status: string } };
   RestartCount?: number;
   NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null; IPAddress?: string } | null> | null };
+}
+
+export interface ContainerStats {
+  cpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number; online_cpus?: number };
+  precpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number };
+  memory_stats?: { usage?: number; limit?: number; stats?: Record<string, number> };
+}
+
+/** CPU % (of one CPU, as `docker stats` shows it) and memory without the page cache, from one stats read. */
+export function usageFrom(stats: ContainerStats): { cpuPercent: number; memoryBytes: number } | null {
+  const mem = stats.memory_stats;
+  if (!mem || typeof mem.usage !== 'number') return null;
+  const cache = mem.stats?.inactive_file ?? mem.stats?.total_inactive_file ?? 0;
+  const cpu = stats.cpu_stats;
+  const pre = stats.precpu_stats;
+  const cpuDelta = (cpu?.cpu_usage?.total_usage ?? 0) - (pre?.cpu_usage?.total_usage ?? 0);
+  const systemDelta = (cpu?.system_cpu_usage ?? 0) - (pre?.system_cpu_usage ?? 0);
+  const cpus = cpu?.online_cpus || 1;
+  const cpuPercent = cpuDelta > 0 && systemDelta > 0 ? (cpuDelta / systemDelta) * cpus * 100 : 0;
+  return { cpuPercent: Math.round(cpuPercent * 10) / 10, memoryBytes: Math.max(0, mem.usage - cache) };
 }

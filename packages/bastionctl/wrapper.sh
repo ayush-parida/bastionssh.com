@@ -15,9 +15,13 @@ DOCKER=docker
 # Not in the docker group: passwordless sudo for docker, if allowed
 if [ ! -w "$SOCKET" ]; then DOCKER='sudo -n docker'; fi
 SOCKET_GID=$(stat -L -c %g "$SOCKET" 2>/dev/null || stat -L -f %g "$SOCKET")
+# nginx mode: the helper's public certificate copies and certbot errors, read-only (list, certificates)
+NGINX_STATE=/var/lib/bastion-nginx
+NGINX_MOUNT=
+if [ -d "$NGINX_STATE" ]; then NGINX_MOUNT="-v $NGINX_STATE:$NGINX_STATE:ro"; fi
 exec $DOCKER run --rm -i --init --network none \
   --user "$(id -u):$(id -g)" --group-add "$SOCKET_GID" \
-  -v "$ROOT:$ROOT" -v "$SOCKET:/var/run/docker.sock" \
+  -v "$ROOT:$ROOT" -v "$SOCKET:/var/run/docker.sock" $NGINX_MOUNT \
   -e BASTION_ROOT="$ROOT" -e BASTION_ACTOR="${BASTION_ACTOR:-$(id -un)}" -e HOME=/tmp \
   -w "$ROOT" --label bastion.managed=bastionctl \
   --entrypoint node "$IMAGE" "$ROOT/bin/bastionctl.mjs" "$@"

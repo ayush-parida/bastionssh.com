@@ -47,6 +47,8 @@ export interface FakeDocker {
   exec: (call: ExecCall) => { exitCode: number; stdout?: string; stderr?: string };
   /** Make a build fail with this message. */
   buildError: string | null;
+  /** Extra build output, one stream message per entry (what a project's build prints). */
+  buildOutput: string[];
   /** Containers whose start leaves them exited (a crashing app). */
   crashOnStart: (name: string) => boolean;
   close: () => Promise<void>;
@@ -93,6 +95,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
     exec: () => ({ exitCode: 0 }),
     buildError: null,
     crashOnStart: () => false,
+    buildOutput: [],
     close: async () => {},
   };
   const execs = new Map<string, ExecCall>();
@@ -183,6 +186,16 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           NetworkSettings: { Networks: { [String(c.HostConfig.NetworkMode ?? 'bridge')]: { Aliases: null, IPAddress: c.IPAddress }, ...c.Networks } },
         });
       }
+      if ((m = /^\/containers\/([^/]+)\/stats$/.exec(p))) {
+        const c = find(m[1]!);
+        if (!c) return notFound('container');
+        // Half a CPU of 2 between the samples; 64 MiB used of which 4 MiB page cache
+        return json(200, {
+          cpu_stats: { cpu_usage: { total_usage: 2_000_000_000 }, system_cpu_usage: 10_000_000_000, online_cpus: 2 },
+          precpu_stats: { cpu_usage: { total_usage: 1_500_000_000 }, system_cpu_usage: 8_000_000_000 },
+          memory_stats: { usage: 64 * 1024 ** 2, limit: Number(c.HostConfig.Memory ?? 8 * 1024 ** 3), stats: { inactive_file: 4 * 1024 ** 2 } },
+        });
+      }
       if ((m = /^\/containers\/([^/]+)\/logs$/.exec(p))) {
         if (!find(m[1]!)) return notFound('container');
         res.writeHead(200, { 'Content-Type': 'application/vnd.docker.multiplexed-stream' });
@@ -246,7 +259,8 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         if (fake.buildError) return void res.end(`${JSON.stringify({ stream: 'Step 1/2 : FROM busybox\n' })}\n${JSON.stringify({ error: fake.buildError, errorDetail: { message: fake.buildError } })}\n`);
         fake.images.set(q.get('t')!, { Id: `sha256:${hexId()}`, Labels: JSON.parse(q.get('labels') ?? '{}') as Record<string, string> });
-        return void res.end(`${JSON.stringify({ stream: 'Step 1/2 : FROM busybox\n' })}\n${JSON.stringify({ stream: ' ---> 1234\nSuccessfully built 1234\n' })}\n`);
+        const extra = fake.buildOutput.map((stream) => `${JSON.stringify({ stream })}\n`).join('');
+        return void res.end(`${JSON.stringify({ stream: 'Step 1/2 : FROM busybox\n' })}\n${extra}${JSON.stringify({ stream: ' ---> 1234\nSuccessfully built 1234\n' })}\n`);
       }
       if ((m = /^\/networks\/([^/]+)$/.exec(p)) && req.method === 'GET') {
         return fake.networks.has(m[1]!) ? json(200, { Name: m[1] }) : notFound('network');

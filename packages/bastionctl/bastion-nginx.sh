@@ -216,6 +216,19 @@ install_conf() {
   changed=yes
 }
 
+# The certificate (public, no key) where bastionctl can read it for the app list: certbot's live
+# folder is root's only. Also run by certbot's deploy hook after each renewal.
+publish_cert() {
+  mkdir -p "$STATE_DIR/certs"
+  if [ -f "$LIVE_DIR/$1/cert.pem" ]; then
+    cp -f "$LIVE_DIR/$1/cert.pem" "$STATE_DIR/certs/$1.pem.new"
+    chmod 0644 "$STATE_DIR/certs/$1.pem.new"
+    mv -f "$STATE_DIR/certs/$1.pem.new" "$STATE_DIR/certs/$1.pem"
+  else
+    rm -f "$STATE_DIR/certs/$1.pem"
+  fi
+}
+
 fingerprint() {
   if [ -f "$1" ]; then cksum <"$1"; else say none; fi
 }
@@ -263,12 +276,14 @@ apply() {
 
   before=$(fingerprint "$live/fullchain.pem")
   set -- certonly --webroot -w "$STATE_DIR/acme" --cert-name "$cn" --non-interactive --agree-tos \
-    --register-unsafely-without-email --keep-until-expiring --expand --deploy-hook 'nginx -s reload'
+    --register-unsafely-without-email --keep-until-expiring --expand \
+    --deploy-hook "nginx -s reload; mkdir -p $STATE_DIR/certs && cp -f \"\$RENEWED_LINEAGE/cert.pem\" $STATE_DIR/certs/$cn.pem && chmod 0644 $STATE_DIR/certs/$cn.pem"
   if [ "$site_tls" = staging ]; then set -- "$@" --test-cert; fi
   for d in $site_domains; do set -- "$@" -d "$d"; done
   log "certbot: $cn for $site_domains"
   if out=$(certbot "$@" 2>&1); then
     rm -f "$STATE_DIR/$cn.error"
+    publish_cert "$cn"
     if [ "$have_cert" = no ]; then
       install_conf yes
       certificate=issued
@@ -312,7 +327,7 @@ remove() {
     if [ -d "$LIVE_DIR/$cn" ]; then
       certbot delete --cert-name "$cn" --non-interactive >/dev/null 2>&1 || log "warning: certbot delete $cn failed"
     fi
-    rm -f "$STATE_DIR/$cn.error"
+    rm -f "$STATE_DIR/$cn.error" "$STATE_DIR/certs/$cn.pem"
   done
   say "result=removed"
   say "certificate=skipped"
@@ -323,6 +338,7 @@ status() {
   valid_app "$app" || die "invalid app name"
   for cn in "bastion-$app" "bastion-$app-staging"; do
     cert="$LIVE_DIR/$cn/cert.pem"
+    publish_cert "$cn" 2>/dev/null || true
     if [ -f "$cert" ]; then
       say "cert=$cn"
       say "issuer=$(oneline "$(openssl x509 -in "$cert" -noout -issuer 2>/dev/null)")"

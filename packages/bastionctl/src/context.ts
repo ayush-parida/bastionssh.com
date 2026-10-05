@@ -16,6 +16,8 @@ export interface Ctx {
   healthIntervalMs: number;
   /** Cap on an upload's unpacked size. */
   maxSourceBytes?: number;
+  /** Where the nginx helper's state is mounted (default /var/lib/bastion-nginx; tests use a temp folder). */
+  nginxStateDir?: string;
 }
 
 export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

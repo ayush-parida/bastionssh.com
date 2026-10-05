@@ -119,6 +119,9 @@ function helper(...args: string[]) {
   return { status: r.status, values, stderr: r.stderr };
 }
 
+/** certbot's deploy hook: reload nginx, and publish the renewed certificate for bastionctl. */
+const hook = (cert: string) => `nginx -s reload; mkdir -p ${state}/certs && cp -f "$RENEWED_LINEAGE/cert.pem" ${state}/certs/${cert}.pem && chmod 0644 ${state}/certs/${cert}.pem`;
+
 const calls = () => (fs.existsSync(path.join(ctl, 'log')) ? fs.readFileSync(path.join(ctl, 'log'), 'utf8').trim().split('\n') : []);
 const confFile = () => fs.readFileSync(path.join(conf, 'bastion-site1.conf'), 'utf8');
 
@@ -130,7 +133,7 @@ describe('bastion-nginx apply', () => {
     expect(calls()).toEqual([
       'nginx -t',
       'nginx -s reload',
-      `certbot certonly --webroot -w ${state}/acme --cert-name bastion-site1 --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring --expand --deploy-hook nginx -s reload -d site1.com -d www.site1.com`,
+      `certbot certonly --webroot -w ${state}/acme --cert-name bastion-site1 --non-interactive --agree-tos --register-unsafely-without-email --keep-until-expiring --expand --deploy-hook ${hook('bastion-site1')} -d site1.com -d www.site1.com`,
       'nginx -t',
       'nginx -s reload',
     ]);
@@ -145,6 +148,9 @@ describe('bastion-nginx apply', () => {
     expect(text).toContain('proxy_set_header Host $host;');
     expect(text).not.toContain('[::]');
     expect(fs.statSync(path.join(state, 'acme')).isDirectory()).toBe(true);
+    // The public certificate where bastionctl reads it (certbot's live folder is root's only)
+    expect(fs.readFileSync(path.join(state, 'certs/bastion-site1.pem'), 'utf8')).toBe(PEM);
+    expect(fs.statSync(path.join(state, 'certs/bastion-site1.pem')).mode & 0o777).toBe(0o644);
     // Nothing but bastion-site1.conf in conf.d changed
     expect(fs.readdirSync(conf).sort()).toEqual(['bastion-site1.conf', 'default.conf']);
     expect(fs.readFileSync(path.join(conf, 'default.conf'), 'utf8')).toBe('server { listen 80 default_server; }\n');
@@ -275,6 +281,17 @@ describe('bastion-nginx apply', () => {
   });
 });
 
+describe("certbot's deploy hook", () => {
+  it('reloads nginx and publishes the renewed certificate', () => {
+    fs.mkdirSync(path.join(live, 'bastion-site1'), { recursive: true });
+    fs.writeFileSync(path.join(live, 'bastion-site1/cert.pem'), 'RENEWED');
+    const env = { ...process.env, PATH: `${path.join(dir, 'bin')}:/usr/bin:/bin`, RENEWED_LINEAGE: path.join(live, 'bastion-site1') };
+    expect(spawnSync(SHELL, ['-c', hook('bastion-site1')], { encoding: 'utf8', env }).status).toBe(0);
+    expect(calls()).toEqual(['nginx -s reload']);
+    expect(fs.readFileSync(path.join(state, 'certs/bastion-site1.pem'), 'utf8')).toBe('RENEWED');
+  });
+});
+
 describe('bastion-nginx remove, status and check', () => {
   it('removes the server block and certificates, and reports certificates with openssl', () => {
     helper('apply', root, 'site1');
@@ -287,6 +304,7 @@ describe('bastion-nginx remove, status and check', () => {
     expect(fs.readdirSync(conf)).toEqual(['default.conf']);
     expect(calls()).toEqual(['nginx -t', 'nginx -s reload', 'certbot delete --cert-name bastion-site1 --non-interactive']);
     expect(helper('status', 'site1').values).toEqual({ status: 'ok' });
+    expect(fs.existsSync(path.join(state, 'certs/bastion-site1.pem'))).toBe(false);
     // Removing again is fine
     expect(helper('remove', 'site1').values.result).toBe('removed');
   });

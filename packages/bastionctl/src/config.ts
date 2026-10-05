@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseDocument } from 'yaml';
 import type { DeployAppConfig, DeployBuildType, DeployValidation, DeployValidationIssue } from '@smt/shared';
+import { NODE_BUILD_VERSIONS } from './images.js';
 import { BastionError, Layout, NAME_PATTERN } from './names.js';
 import { NGINX_TLS, proxyMode } from './nginx.js';
 
@@ -34,14 +35,16 @@ export const DEFAULTS = {
   healthTimeout: '30s',
   keep_releases: 5,
   proxy: 'caddy',
+  deployPermission: 'operate',
 } as const;
 
 const KEYS = {
-  root: ['name', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy'],
+  root: ['name', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy', 'permissions'],
   build: ['type', 'node', 'dir', 'output'],
   run: ['port', 'env_file', 'volumes', 'memory', 'cpus'],
   healthcheck: ['path', 'timeout'],
   tls: ['cert', 'key'],
+  permissions: ['deploy'],
 };
 
 /** A domain Caddy can serve: lower-case labels, at least two, `*.` only as the first label. */
@@ -190,6 +193,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       const v = typeof node === 'number' ? String(node) : node;
       if (known && buildType === 'dockerfile') issues.add('build.node', 'Only for nextjs and static builds (a Dockerfile picks its own base image)');
       else if (typeof v !== 'string' || !NODE_VERSION.test(v)) issues.add('build.node', 'A Node.js version like "20" or "22.11"');
+      else if (!NODE_BUILD_VERSIONS.includes(v.split('.')[0]!)) issues.add('build.node', `Builds use Node.js ${NODE_BUILD_VERSIONS.join(', ')}`);
       else nodeVersion = v;
     }
     let buildDir = '.';
@@ -288,6 +292,21 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
     if (data.proxy === 'caddy' || data.proxy === 'nginx') proxy = data.proxy;
     else issues.add('proxy', 'Must be caddy or nginx');
   }
+  // Who may deploy and roll back on BastionSSH: members who operate the server (default) or only those who manage it
+  const permissions: DeployAppConfig['permissions'] = { deploy: DEFAULTS.deployPermission };
+  if (data.permissions !== undefined) {
+    if (!isObject(data.permissions)) {
+      issues.add('permissions', 'Must be a mapping like { deploy: manage }');
+    } else {
+      issues.unknownKeys(data.permissions, KEYS.permissions, 'permissions');
+      const { deploy } = data.permissions;
+      if (deploy !== undefined) {
+        if (deploy === 'operate' || deploy === 'manage') permissions.deploy = deploy;
+        else issues.add('permissions.deploy', 'Must be operate or manage');
+      }
+    }
+  }
+
   // certbot's webroot challenge on the host: no wildcards, no DNS providers, no internal CA
   if (proxy === 'nginx' && (typeof tls !== 'string' || !(NGINX_TLS as readonly string[]).includes(tls))) {
     issues.add('tls', 'With proxy: nginx, tls must be auto or staging (certificates come from certbot on the host)');
@@ -305,6 +324,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       healthcheck,
       keep_releases: keep,
       proxy,
+      permissions,
     },
     issues: [],
   };

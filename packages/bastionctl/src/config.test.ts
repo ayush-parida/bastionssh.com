@@ -41,7 +41,21 @@ describe('bastion.yml validation', () => {
       healthcheck: { path: '/', timeout: '30s' },
       keep_releases: 5,
       proxy: 'caddy',
+      permissions: { deploy: 'operate' },
     });
+  });
+
+  it('takes who may deploy: operate (the default) or manage', () => {
+    expect(checkConfigText(`${valid}permissions: { deploy: manage }\n`, 'site1').config?.permissions).toEqual({ deploy: 'manage' });
+    expect(checkConfigText(`${valid}permissions: {}\n`, 'site1').config?.permissions).toEqual({ deploy: 'operate' });
+    expect(checkConfigText(`${valid}permissions: { deploy: admin }\n`, 'site1').issues).toEqual([{ path: 'permissions.deploy', message: 'Must be operate or manage' }]);
+    expect(paths(`${valid}permissions: { deploy: manage, rollback: view }\n`)).toEqual(['permissions.rollback']);
+    expect(paths(`${valid}permissions: manage\n`)).toEqual(['permissions']);
+  });
+
+  it('takes only Node.js versions it has a pinned build image for', () => {
+    expect(checkConfigText(valid.replace("node: \"20\"", 'node: "22.11"'), 'site1').issues).toEqual([]);
+    expect(paths(valid.replace("node: \"20\"", 'node: "16"'))).toEqual(['build.node']);
   });
 
   it('fills in defaults for a minimal config', () => {

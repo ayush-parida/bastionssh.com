@@ -72,11 +72,14 @@ beforeEach(() => {
 describe('Caddy behind nginx', () => {
   it('serves plain HTTP with automatic HTTPS off and trusts the forwarded headers of the proxy in front', () => {
     const text = generateCaddyfile([site()], 'nginx');
-    expect(text).toContain('\tauto_https off\n\tservers {\n\t\ttrusted_proxies static private_ranges\n\t}\n}');
+    expect(text).toContain('\tauto_https off\n');
+    expect(text).toContain('\t\tprotocols h1\n\t\ttrusted_proxies static private_ranges\n\t}\n}');
+    // No HTTP to HTTPS redirect of its own: nginx does that
+    expect(text).not.toContain('http:// {');
     expect(text).toContain('http://site1.com {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-r1:3000 {\n\t\tlb_try_duration 5s\n\t}\n}');
     // The www redirect still happens in Caddy, to HTTPS (nginx terminates TLS)
     expect(text).toContain('http://www.site1.com {\n\tredir https://site1.com{uri} permanent\n}');
-    expect(text).not.toContain('tls');
+    expect(text.split('# app site1')[1]).not.toContain('tls');
   });
 });
 

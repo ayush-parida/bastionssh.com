@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DeployAppConfig } from '@smt/shared';
+import { BUN_IMAGE, CADDY_IMAGE, IMAGES, nodeBuildImage } from './images.js';
 import { BastionError, isInside } from './names.js';
-import { CADDY_IMAGE } from './proxy.js';
 
 /**
  * How an app's image is built (deployments spec §5 step 3):
@@ -23,9 +23,6 @@ export const GENERATED_DOCKERFILE = '.bastion.Dockerfile';
 const DEFAULT_NODE = '20';
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'yarn-berry' | 'bun';
-
-/** Bun is copied into the Node.js stages from its official image; Next itself still runs on Node. */
-const BUN_IMAGE = 'oven/bun:1-alpine';
 
 export interface BuildPlan {
   /** The build context directory (`build.dir` inside the extraction). */
@@ -91,6 +88,7 @@ function runScript(manager: PackageManager, script: string): string {
 }
 
 /** Lines a Node.js stage needs before it can run `manager` (corepack ships with Node for pnpm and yarn). */
+/** Bun is copied into the Node.js stages from its official image (pinned); Next itself still runs on Node. */
 function toolLines(manager: PackageManager): string[] {
   return manager === 'bun' ? [`COPY --from=${BUN_IMAGE} /usr/local/bin/bun /usr/local/bin/bun`] : [];
 }
@@ -129,7 +127,7 @@ export function nextjsDockerfile(dir: string, config: Pick<DeployAppConfig, 'bui
         '(e.g. `const nextConfig = { output: "standalone" }`), then deploy again.',
     );
   }
-  const node = `node:${nodeVersion(dir, config.build.node)}-alpine`;
+  const node = nodeBuildImage(nodeVersion(dir, config.build.node));
   const { manager, lockfile } = detectPackageManager(dir);
   const manifests = manifestFiles(dir, lockfile).map((f) => JSON.stringify(f)).join(', ');
   return [
@@ -168,7 +166,7 @@ export function staticDockerfile(dir: string, config: Pick<DeployAppConfig, 'bui
   if (!exists(dir, 'package.json')) {
     return [...serve.slice(0, 1), `COPY ${JSON.stringify([output, '/srv/'])}`, ...serve.slice(1), ''].join('\n');
   }
-  const node = `node:${nodeVersion(dir, config.build.node)}-alpine`;
+  const node = nodeBuildImage(nodeVersion(dir, config.build.node));
   const { manager, lockfile } = detectPackageManager(dir);
   const manifests = manifestFiles(dir, lockfile).map((f) => JSON.stringify(f)).join(', ');
   return [
@@ -185,6 +183,15 @@ export function staticDockerfile(dir: string, config: Pick<DeployAppConfig, 'bui
     ...serve.slice(1),
     '',
   ].join('\n');
+}
+
+/** The build log's line naming the Node.js image a build uses (by tag and digest). */
+function nodeNote(dir: string, configured: string | null): string {
+  const version = nodeVersion(dir, configured);
+  nodeBuildImage(version);
+  const major = /^\d+/.exec(version)![0];
+  const ref = (IMAGES.build as Record<string, string>)[major]!;
+  return version === major ? `Node.js ${major}: ${ref}` : `Node.js ${version} asked for; building with the pinned Node.js ${major} image: ${ref}`;
 }
 
 /** Work out how to build the extracted upload at `extracted`. */
@@ -210,7 +217,7 @@ export function planBuild(extracted: string, config: Pick<DeployAppConfig, 'buil
         dockerfile: GENERATED_DOCKERFILE,
         generated: nextjsDockerfile(context, config),
         exclude: ['.git', 'node_modules', '.next'],
-        notes: [`Building Next.js (standalone) with ${manager.replace('-berry', '')}`],
+        notes: [`Building Next.js (standalone) with ${manager.replace('-berry', '')}`, nodeNote(context, config.build.node)],
       };
     }
     case 'static':
@@ -231,7 +238,7 @@ export function planBuild(extracted: string, config: Pick<DeployAppConfig, 'buil
         dockerfile: GENERATED_DOCKERFILE,
         generated: staticDockerfile(context, config),
         exclude: ['.git', 'node_modules'],
-        notes: ['Building a static site served by Caddy'],
+        notes: ['Building a static site served by Caddy', ...(exists(context, 'package.json') ? [nodeNote(context, config.build.node)] : [])],
       };
   }
 }

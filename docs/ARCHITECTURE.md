@@ -604,7 +604,7 @@ Deployments section.
   custom and "(modules only)" roles none) and changes no table or column.
 - **bastionctl** (`packages/bastionctl`): TypeScript bundled by esbuild into one
   zero-dependency ES module (`yaml` inside) plus a POSIX wrapper that runs it in the pinned
-  `node:22-alpine` image (by digest, `src/images.json`) with the root and the Docker socket
+  `node:22-alpine` image (by digest) with the root and the Docker socket
   mounted, as the SSH user (`--user`, the socket's group added). It talks to the Engine API
   over the socket (`docker.ts`), validates `bastion.yml` strictly (`config.ts`: unknown keys,
   domains, ports, paths that leave the upload or app folder, named volumes only, a domain
@@ -617,10 +617,12 @@ Deployments section.
   proxy container by its address there (a long app name makes the container name no valid DNS
   label), then attaches it to the internal `bastion-live` network under the app's
   live alias `bastion-<app>-live-<port>`, which is what the Caddyfile (`caddy.ts`) proxies
-  to. Caddy is reloaded only when the regenerated file differs (first deploy, another port,
-  domains or TLS) or a custom certificate changed (then forced, as Caddy skips an unchanged config): validated, swapped, reloaded, the previous file restored on failure —
-  even a graceful reload drops the odd just-accepted connection, so a plain redeploy or
-  rollback moves traffic over the alias alone and loses no request. It then moves
+  to. The proxy config changes only when the regenerated file differs (first deploy, another
+  port, domains or TLS) or a custom certificate changed: validated (`caddy validate`),
+  swapped, then switched by the proxy front, the previous file restored on failure; a plain
+  redeploy or rollback moves traffic over the alias alone. bastion.yml is read again under
+  `proxy.lock` at switch time, so a config saved during a build never has stale domains or
+  TLS served. It then moves
   `current`, stops and removes the old container after a drain delay (Caddy retries a GET
   it dropped) and prunes releases and labelled images beyond `keep_releases` (never current
   or previous). Locks are files linked into place whole (never readable half written), stale
@@ -630,7 +632,48 @@ Deployments section.
   build waits its turn) and `proxy.lock`, held from building the Caddyfile until `current`
   has moved, so two apps switching at once never write a config that drops the other's
   release. Named volumes are `bastion-<app>.<name>` (the `.` keeps apps' volumes apart).
-  `--json` prints one result line; progress goes to stderr.
+  `--json` prints one result line; progress goes to stderr. `.env` values of 6 characters or
+  more are masked (`••••`, `mask.ts`) in everything a deploy or rollback prints and in
+  `build.log`/`release.json` (an app's log or health check answer may print them) — also
+  each line of a multi-line value (a build prints one line at a time) and its JSON-escaped
+  form; `releases` masks a kept record's error again as it reads it, and a rollback's
+  Docker failure is a masked failed outcome like a deploy's.
+  `list --json` adds per app `certificate` (the one expiring first: issuer, notAfter,
+  daysLeft, lastError — Caddy's storage listed and read in one `find` and one `cat` run, or in
+  nginx mode the helper's public copies under `/var/lib/bastion-nginx`, which the wrapper
+  mounts read-only when present) and `usage` (CPU %, memory without page cache, the limit
+  when `run.memory` is set — one Docker stats read per running container); `status` and
+  `list` report `permissions` (`permissions: { deploy: operate | manage }` in bastion.yml,
+  default operate; BastionSSH enforces it).
+- **Pinned images** (`src/images.json`, `images.ts`): bastionctl's own Node.js, Caddy (proxy
+  and static sites), Bun (copied into bun builds) and one Node.js build image per supported
+  major (18, 20, 22, 24; `build.node` must be one of them, `22.11` builds on 22), each
+  `repo:tag@sha256:…` and used by digest only. `images.test.ts` fails on any reference that is
+  not, in images.json, in every generated Dockerfile or anywhere in the source.
+  To move them: `pnpm --filter @smt/bastionctl run update-images` (resolves each tag's
+  multi-platform digest with `docker buildx imagetools`, rewrites images.json), review, test,
+  rebuild; servers get them at their next Reinstall.
+- **Proxy front** (`front.ts`, `front-main.ts`, `proxy-image.ts`): `bastion-caddy` runs an
+  image setup builds from the pinned Node.js and Caddy images (`bastion-proxy:<hash>`; a
+  container from an older bastionctl is replaced at setup, and a switch refuses to run against
+  it). Its PID 1 is the front: it owns ports 80/443 (in nginx mode 80, published on
+  127.0.0.1:18480) and hands each connection to a Caddy child on loopback ports with a PROXY
+  protocol header (Caddy's `proxy_protocol` listener wrapper trusts 127.0.0.1 only, so apps
+  see the client's address). A switch is `node /usr/local/lib/bastion-proxy.mjs reload
+  --sha256 <hash of the validated text> <names>`: the front copies the config (once it reads
+  that exact text), starts a second Caddy on another slot's ports, waits until it listens and
+  completes a TLS handshake for every name the running one does, then sends new connections to
+  it; the old Caddy keeps its connections until they close or 10 s pass, then stops with
+  Caddy's 10 s grace period. Caddy's own reload cannot do this — it binds a new
+  SO_REUSEPORT socket (connections queued on the old one are reset) and Go 1.25+'s server
+  drops a request it reads after shutdown began — so no request is lost here, except that an
+  idle kept-alive connection closed at the end of the drain may race a client's next request
+  (retried by browsers, curl and Node's documented pattern, as for any idle timeout). The
+  Caddyfile takes its ports from the front (`{$BASTION_HTTP_PORT:80}` …, `default_bind
+  127.0.0.1`), disables Caddy's own redirects (they would name the loopback port) for an
+  `http://` site redirecting to HTTPS, and serves HTTP/1.1 and HTTP/2 (no HTTP/3: the front is
+  TCP). `proxy-live.test.ts` (`BASTION_TEST_DOCKER=1`) runs the real image on unusual ports
+  and switches domains, upstream port and TLS under continuous requests with none failing.
 - **Install and integrity** (`deploy/bundle.ts`, `deploy/install.ts`): the server ships the
   built files; setup uploads them over SFTP (0755) and every other request first hashes the
   installed program and wrapper — a mismatch is refused with 409 `bastionctl_mismatch`
@@ -688,7 +731,9 @@ Deployments section.
   --deploy-hook 'nginx -s reload'` (renewal is certbot's timer). A certbot failure leaves the
   HTTP block serving and is kept in `/var/lib/bastion-nginx/<cert>.error` for `status`. One run
   at a time (a `mkdir` lock holding its pid: a run killed outright is taken over, signals release it); a domain `nginx -t` warns another server block already claims ("conflicting server name") restores the previous file, since nginx would serve whichever it read first. BastionSSH hashes the installed helper before each run (409
-  `nginx_helper_missing` / `nginx_helper_mismatch`), runs `apply` after a successful deploy
+  `nginx_helper_missing` / `nginx_helper_mismatch`), publishes each certificate's public part
+  to `/var/lib/bastion-nginx/certs/<cert>.pem` (on apply and status, and from certbot's deploy
+  hook) for bastionctl's app list, runs `apply` after a successful deploy
   (its lines join the deploy log before `result`) or config change once the site file exists,
   and `remove` after a delete; failures are reported in the response and audited as
   `deploy.proxy_sync`, never undoing what came before. `POST …/apps/:app/proxy` (operate)

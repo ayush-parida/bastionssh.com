@@ -36,6 +36,10 @@ function summary(name: string) {
     container: { name: `bastion-${name}-${RELEASE}`, id: 'c'.repeat(64), state: 'running', status: 'Up 2 hours', health: 'healthy' },
     configError: null,
     locked: false,
+    permissions: { deploy: 'operate' },
+    // What bastionctl's list reports per app: the certificate expiring first and one stats read
+    certificate: name === 'site1' ? { issuer: "Let's Encrypt R11", notAfter: '2099-01-01T00:00:00Z', daysLeft: 45, lastError: null } : null,
+    usage: name === 'site1' ? { cpuPercent: 2.5, memoryBytes: 128 * 1024 * 1024, memoryLimitBytes: 512 * 1024 * 1024 } : null,
   };
 }
 
@@ -304,6 +308,8 @@ test.describe('Deployments', () => {
     await expect(apps.getByRole('row', { name: /site1/ })).toContainText('site1.example.com');
     await expect(apps.getByRole('row', { name: /site1/ })).toContainText('healthy');
     await expect(apps.getByRole('row', { name: /site1/ })).toContainText(RELEASE);
+    await expect(apps.getByRole('row', { name: /site1/ })).toContainText('45 d');
+    await expect(apps.getByRole('row', { name: /site1/ })).toContainText('2.5%');
     await expect(apps.getByRole('row', { name: /blog/ })).toBeVisible();
     await expect(page.getByText('/opt/bastion', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Reinstall' })).toBeVisible();

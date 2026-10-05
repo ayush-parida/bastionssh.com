@@ -25,9 +25,9 @@ export function HealthBadge({ app }: { app: Pick<DeployAppSummary, 'container' |
 function certText(row: DeployAppRow): { text: string; warn: boolean } {
   const cert = row.certificate;
   if (!cert) return { text: '—', warn: false };
-  if (cert.error) return { text: 'Error', warn: true };
-  if (!cert.expiresAt) return { text: 'Pending', warn: false };
-  const days = Math.floor((new Date(cert.expiresAt).getTime() - Date.now()) / 86_400_000);
+  if (cert.lastError) return { text: 'Error', warn: true };
+  if (!cert.notAfter) return { text: 'Pending', warn: false };
+  const days = cert.daysLeft ?? Math.floor((new Date(cert.notAfter).getTime() - Date.now()) / 86_400_000);
   return { text: days < 0 ? 'Expired' : `${days} d`, warn: days < 14 };
 }
 
@@ -35,8 +35,8 @@ function certText(row: DeployAppRow): { text: string; warn: boolean } {
  * The server's apps (spec §7): domains, health, current release, certificate
  * and memory/CPU. Read from the server on every load; a row opens the app.
  * The certificate and memory/CPU columns show only when the server reports
- * them for some app (bastionctl's list leaves them out today; an app's
- * Domains tab and its Overview have both) rather than as a column of dashes.
+ * them for some app (an older bastionctl's list leaves them out) rather than
+ * as a column of dashes.
  */
 export default function AppList({
   apps,
@@ -118,7 +118,14 @@ export default function AppList({
                       <HealthBadge app={app} />
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs">{app.currentRelease ?? '—'}</td>
-                    {showCert && <td className={cn('px-4 py-2.5 text-xs', cert.warn && 'text-amber-600')}>{cert.text}</td>}
+                    {showCert && (
+                      <td
+                        className={cn('px-4 py-2.5 text-xs', cert.warn && 'text-amber-600')}
+                        title={[app.certificate?.issuer, app.certificate?.lastError].filter(Boolean).join(' — ') || undefined}
+                      >
+                        {cert.text}
+                      </td>
+                    )}
                     {showUsage && (
                       <td className="px-4 py-2.5 text-xs">
                         {app.usage

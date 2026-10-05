@@ -360,7 +360,7 @@ redirect_www: apex                  # apex: www → apex · www: apex → www ·
 tls: auto                           # see TLS below
 build:
   type: nextjs                      # nextjs | dockerfile | static
-  node: "20"                        # nextjs and static: Node.js version (default: .nvmrc, engines, else 20)
+  node: "20"                        # nextjs and static: Node.js 18, 20, 22 or 24 (default: .nvmrc, engines, else 20)
   dir: .                            # project folder inside the upload
   output: out                       # static only: the folder to serve after the build
 run:
@@ -372,9 +372,10 @@ run:
 healthcheck: { path: /, timeout: 30s }
 keep_releases: 5                    # 2–50; the current and previous release are always kept
 proxy: caddy                        # caddy | nginx — must match how the server was set up
+permissions: { deploy: operate }    # who may deploy and roll back: operate (default) or manage
 ```
 
-Unknown keys are refused, and the editor shows every problem at once. Next.js apps need `output: 'standalone'` in `next.config.js`; the build explains how if it is missing.
+Unknown keys are refused, and the editor shows every problem at once. Builds use Node.js images pinned by digest (one per supported major version; `22.11` builds on the pinned 22), so a build never changes under you between BastionSSH updates. A config saved while a deploy runs is the one the deploy goes live with: the domains and TLS are read again when traffic switches. Next.js apps need `output: 'standalone'` in `next.config.js`; the build explains how if it is missing.
 
 ### Caddy or nginx
 
@@ -395,11 +396,15 @@ echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/bastion-nginx' | sudo tee /etc
 sudo chmod 0440 /etc/sudoers.d/bastion-nginx
 ```
 
-The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails, or when `nginx -t` reports one of the app's domains as already claimed by another server block on the host (a site you serve yourself is never taken over). It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu). From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`.
+The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails, or when `nginx -t` reports one of the app's domains as already claimed by another server block on the host (a site you serve yourself is never taken over). It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu). From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`. It also keeps a copy of each app's certificate — the public part only — in `/var/lib/bastion-nginx/certs/` (refreshed by certbot's renewal hook), which bastionctl reads for the app list; after updating BastionSSH, install the helper again (the tab says when it differs).
 
 ### Several sites on one server
 
-Each app is its own folder, container and image, all behind the one proxy, which routes by domain. A domain belongs to one app (a second app claiming it is refused), each app has its own `.env` and volumes (`bastion-<app>.<name>`), and a deploy or rollback of one app reloads the proxy without touching the others. Nothing but the proxy publishes a port.
+Each app is its own folder, container and image, all behind the one proxy, which routes by domain. A domain belongs to one app (a second app claiming it is refused), each app has its own `.env` and volumes (`bastion-<app>.<name>`), and a deploy or rollback of one app never touches the others. Nothing but the proxy publishes a port.
+
+A deploy or rollback moves traffic without touching the proxy's config. When the config does change (domains, TLS, another port, an app added or removed), the proxy starts a second Caddy with the new config, moves new connections over once it serves every certificate the old one did, and lets the old one finish the connections it has: no request is dropped (a browser's idle kept-alive connection may be closed after 10 seconds, which browsers retry on their own). The proxy speaks HTTP/1.1 and HTTP/2; HTTP/3 is not offered.
+
+Nothing an app's log prints of its `.env` values (6 characters or longer) reaches the deploy log, `build.log` or `release.json`: each is shown as `••••`.
 
 ### Domains and TLS
 
@@ -411,7 +416,7 @@ Each app is its own folder, container and image, all behind the one proxy, which
 | `dns:<provider>` | via the DNS provider's API — the only way to get wildcards (`*.site1.com`) | the API token in `/opt/bastion/proxy/.env` as `<PROVIDER>_API_TOKEN` (never in BastionSSH), and a Caddy build with that provider's DNS module — the pinned standard image has none yet |
 | `{ cert: cert.pem, key: key.pem }` | your own files, in the app folder | renewing them yourself |
 
-**Domains** on an app checks each domain now: its A/AAAA records against the server's public address (with the exact record to create when they do not match — a domain is saved either way), whether ports 80 and 443 answer from BastionSSH for `auto`/`staging`, and each certificate's issuer, expiry and last issuance or renewal error, read from Caddy (or from certbot through the helper in nginx mode). A certificate that is past its renewal point, has a renewal error logged, or has expired raises a **Certificate not renewing** alert through your notification channels — once when it starts, and again when it recovers. The state is worked out from the server whenever certificate status is read (opening Domains, or the API); BastionSSH stores none of it and does not poll on its own.
+**Domains** on an app checks each domain now: its A/AAAA records against the server's public address (with the exact record to create when they do not match — a domain is saved either way), whether ports 80 and 443 answer from BastionSSH for `auto`/`staging`, and each certificate's issuer, expiry and last issuance or renewal error, read from Caddy (or from certbot through the helper in nginx mode). The app list shows each app's certificate (days left, or an error) and its container's CPU and memory, read from the server when the list loads. A certificate that is past its renewal point, has a renewal error logged, or has expired raises a **Certificate not renewing** alert through your notification channels — once when it starts, and again when it recovers. The state is worked out from the server whenever certificate status is read (opening Domains, or the API); BastionSSH stores none of it and does not poll on its own.
 
 ### Sizing
 

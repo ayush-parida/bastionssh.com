@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,7 +11,9 @@ import { startFakeDocker, type FakeDocker } from './fake-docker.test-helper.js';
 import { Layout, PROXY_CONTAINER } from './names.js';
 import { loadConfig } from './config.js';
 import * as ops from './ops.js';
-import { applyProxy, CADDY_IMAGE, siteFor } from './proxy.js';
+import { CADDY_IMAGE, NODE_IMAGE } from './images.js';
+import { applyProxy, siteFor } from './proxy.js';
+import { FRONT_PATH, PROXY_IMAGE } from './proxy-image.js';
 import { currentRelease, previousRelease, readRelease, releaseIds, setCurrent, writeRelease } from './releases.js';
 import { tarBuffer } from './tar.js';
 
@@ -53,9 +56,17 @@ function upload(name: string, version: string): string {
   return file;
 }
 
+/** What ran in the proxy container: `caddy validate`, and `proxy reload` (the front switching to a new Caddy). */
 function caddyCommands() {
-  return fake.execs.filter((e) => e.container === PROXY_CONTAINER && e.cmd[0] === 'caddy').map((e) => e.cmd.slice(0, 2).join(' '));
+  return fake.execs
+    .filter((e) => e.container === PROXY_CONTAINER && (e.cmd[0] === 'caddy' || (e.cmd[0] === 'node' && e.cmd[1] === FRONT_PATH)))
+    .map((e) => (e.cmd[0] === 'caddy' ? e.cmd.slice(0, 2).join(' ') : `proxy ${e.cmd[2]}`));
 }
+
+const isReload = (cmd: string[]) => cmd[0] === 'node' && cmd[1] === FRONT_PATH && cmd[2] === 'reload';
+
+/** What setup built (the proxy image), before beforeEach clears the list for the test. */
+let setupBuilds: Array<{ query: URLSearchParams; tar: Buffer }> = [];
 
 async function app(name = 'site1', config = SITE1) {
   fs.writeFileSync(path.join(layout.tmp, `${name}.yml`), config);
@@ -77,7 +88,10 @@ beforeEach(async () => {
   fake.exec = () => ({ exitCode: 0 });
   fake.buildError = null;
   fake.crashOnStart = () => false;
+  fake.buildOutput = [];
   await ops.setup(ctx());
+  setupBuilds = [...fake.builds];
+  fake.builds.length = 0;
   fake.execs.length = 0;
 });
 
@@ -87,23 +101,49 @@ describe('setup', () => {
     expect(fs.statSync(layout.tmp).mode & 0o777).toBe(0o700);
     expect(fake.networks.has('bastion-apps')).toBe(true);
     expect([...fake.internalNetworks]).toEqual(['bastion-live']);
-    expect(fake.pulls).toEqual([CADDY_IMAGE]);
+    // The proxy image, built from the pinned Node.js and Caddy images: the front owns the ports, Caddy runs behind it
+    expect(fake.pulls).toEqual([NODE_IMAGE, CADDY_IMAGE]);
+    expect(setupBuilds.map((b) => b.query.get('t'))).toEqual([PROXY_IMAGE]);
+    const dockerfile = setupBuilds[0]!.tar.toString('latin1');
+    expect(dockerfile).toContain(`FROM ${NODE_IMAGE}\nCOPY --from=${CADDY_IMAGE} /usr/bin/caddy /usr/bin/caddy\nCOPY bastion-proxy.mjs ${FRONT_PATH}\n`);
+    expect(dockerfile).toContain('startFront');
     const proxy = fake.containers.get(PROXY_CONTAINER)!;
-    expect(proxy.Image).toBe(CADDY_IMAGE);
+    expect(proxy.Image).toBe(PROXY_IMAGE);
     expect(proxy.State.Running).toBe(true);
+    expect(proxy.Env).toEqual(['BASTION_PROXY_LISTEN=80:http,443:https', 'BASTION_PROXY_CONFIG=/bastion-proxy/Caddyfile']);
+    expect(proxy.HostConfig.PortBindings).toEqual({ '80/tcp': [{ HostPort: '80' }], '443/tcp': [{ HostPort: '443' }] });
     expect(proxy.HostConfig).toMatchObject({
       Binds: [`${root}/proxy:/bastion-proxy`, `${root}/proxy/data:/data`, `${root}/proxy/config:/config`],
       NetworkMode: 'bastion-apps',
       RestartPolicy: { Name: 'unless-stopped' },
     });
     expect(proxy.Networks).toEqual({ 'bastion-live': { Aliases: [] } });
-    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('admin localhost:2019');
+    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('admin localhost:{$BASTION_ADMIN_PORT:2019}');
 
     const id = proxy.Id;
     const again = await ops.setup(ctx());
     expect(again).toMatchObject({ root, proxy: 'caddy', network: 'bastion-apps', proxyContainer: { state: 'running' } });
     expect(fake.containers.get(PROXY_CONTAINER)!.Id).toBe(id);
-    expect(fake.pulls).toHaveLength(1);
+    expect(fake.pulls).toHaveLength(2);
+    expect(fake.builds).toHaveLength(0);
+  });
+
+  it('replaces a proxy container of an older bastionctl, with a Caddyfile for the front, and removes old proxy images', async () => {
+    await app();
+    await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'));
+    const proxy = fake.containers.get(PROXY_CONTAINER)!;
+    // Before the front: Caddy itself on the ports, with the old global block
+    proxy.Image = CADDY_IMAGE;
+    fake.images.set('bastion-proxy:0123456789abcdef', { Id: 'sha256:oldproxy', Labels: { 'bastion.proxy-image': '1' } });
+    fs.writeFileSync(layout.caddyfile, '{\n\tadmin localhost:2019\n}\n');
+    await expect(ops.proxyApply(ctx())).rejects.toThrow(/older bastionctl; run bastionctl setup/);
+
+    await ops.setup(ctx());
+    expect(fake.containers.get(PROXY_CONTAINER)!.Image).toBe(PROXY_IMAGE);
+    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('https_port {$BASTION_HTTPS_PORT:443}');
+    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('site1.com');
+    expect(fake.images.has('bastion-proxy:0123456789abcdef')).toBe(false);
+    expect(fake.images.has(PROXY_IMAGE)).toBe(true);
   });
 
   it('runs two setups at once in turn, both successfully', async () => {
@@ -175,8 +215,10 @@ describe('deploy', () => {
     // Health check from the proxy by the container's address on bastion-apps, then validate before reload
     expect(fake.execs[0]).toEqual({ container: PROXY_CONTAINER, cmd: ['wget', '-q', '-O', '/dev/null', '-T', '5', `http://${c.IPAddress}:3000/health`] });
     expect(logs).toContain(`Health check: http://bastion-site1-${id}:3000/health (up to 2s)`);
-    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
+    expect(caddyCommands()).toEqual(['caddy validate', 'proxy reload']);
     const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
+    // The front starts exactly the text validated, and checks the names it serves before switching
+    expect(fake.execs.find((e) => isReload(e.cmd))!.cmd.slice(3)).toEqual(['--sha256', createHash('sha256').update(caddyfile).digest('hex'), 'site1.com', 'www.site1.com']);
     expect(caddyfile).toContain('site1.com {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-live-3000:3000 {\n\t\tlb_try_duration 5s\n\t}\n}');
     expect(caddyfile).toContain('www.site1.com {\n\tredir https://site1.com{uri} permanent\n}');
     expect(fs.existsSync(`${layout.caddyfile}.next`)).toBe(false);
@@ -195,10 +237,10 @@ describe('deploy', () => {
   it('replaces the old container only after the new one serves, and prunes beyond keep_releases', async () => {
     await app();
     const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
-    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
+    expect(caddyCommands()).toEqual(['caddy validate', 'proxy reload']);
     const second = (await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'))).release;
     // Same domains and port: traffic moved over the live alias, Caddy was not reloaded
-    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
+    expect(caddyCommands()).toEqual(['caddy validate', 'proxy reload']);
     expect(logs).toContain('Proxy config unchanged; traffic moves over the live network');
     expect(fake.containers.has(`bastion-site1-${first}`)).toBe(false);
     expect(fake.containers.get(`bastion-site1-${second}`)!.State.Running).toBe(true);
@@ -225,7 +267,7 @@ describe('deploy', () => {
     expect(logs).toContain('Removed 1 image of releases no longer kept');
   });
 
-  it('reloads Caddy, forced, when a custom certificate changed though the config did not', async () => {
+  it('switches to a new Caddy when a custom certificate changed though the config did not', async () => {
     await app('site1', SITE1.replace('redirect_www: apex\n', 'redirect_www: apex\ntls: { cert: tls/cert.pem, key: tls/key.pem }\n'));
     fs.mkdirSync(path.join(layout.app('site1'), 'tls'));
     fs.writeFileSync(path.join(layout.app('site1'), 'tls/cert.pem'), 'CERT 1');
@@ -233,14 +275,14 @@ describe('deploy', () => {
     await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'));
     await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'));
     // Same file, same certificate: no reload
-    expect(caddyCommands()).toEqual(['caddy validate', 'caddy reload']);
+    expect(caddyCommands()).toEqual(['caddy validate', 'proxy reload']);
 
     // A renewed certificate under the same path is only read by a forced reload
     fs.writeFileSync(path.join(layout.app('site1'), 'tls/cert.pem'), 'CERT 2');
     await ops.deploy(ctx(), 'site1', upload('c.tgz', 'v3'));
-    const reloads = fake.execs.filter((e) => e.cmd[1] === 'reload').map((e) => e.cmd.slice(2));
-    // (the first deploy copied the certificate for the first time)
-    expect(reloads).toEqual(Array(2).fill(['--config', '/bastion-proxy/Caddyfile', '--force', '--adapter', 'caddyfile']));
+    // A new Caddy reads the files; it takes traffic once it serves both names (the first deploy copied them first)
+    const reloads = fake.execs.filter((e) => isReload(e.cmd)).map((e) => e.cmd.slice(5));
+    expect(reloads).toEqual(Array(2).fill(['site1.com', 'www.site1.com']));
     expect(fs.readFileSync(path.join(layout.proxy, 'certs/site1/cert.pem'), 'utf8')).toBe('CERT 2');
   });
 
@@ -294,14 +336,15 @@ describe('deploy', () => {
     await ops.init(ctx(), 'site1', { config: 'tmp/port.yml', force: true });
     const before = fs.readFileSync(layout.caddyfile, 'utf8');
     let reloads = 0;
-    fake.exec = ({ cmd }) => (cmd[1] === 'reload' && ++reloads === 1 ? { exitCode: 1, stderr: 'Error: loading new config: bad things' } : { exitCode: 0 });
+    fake.exec = ({ cmd }) => (isReload(cmd) && ++reloads === 1 ? { exitCode: 1, stderr: 'Caddy did not start with the new config:\nError: loading new config: bad things' } : { exitCode: 0 });
 
     const outcome = await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'));
     expect(outcome.result).toBe('failed');
-    expect(outcome.error).toMatch(/Reloading the proxy failed; the previous config was restored:\nError: loading new config: bad things/);
+    expect(outcome.error).toMatch(/Reloading the proxy failed; the previous config was restored:\nCaddy did not start with the new config:\nError: loading new config: bad things/);
     expect(fs.readFileSync(layout.caddyfile, 'utf8')).toBe(before);
-    // validate, reload (refused), reload of the restored file
-    expect(caddyCommands().slice(-3)).toEqual(['caddy validate', 'caddy reload', 'caddy reload']);
+    // validate, then the front refused the new Caddy: the running one never stopped, so only the file goes back
+    expect(caddyCommands().slice(-2)).toEqual(['caddy validate', 'proxy reload']);
+    expect(reloads).toBe(1);
     expect(currentRelease(layout, 'site1')).toBe(good);
     expect(fake.containers.has(`bastion-site1-${outcome.release}`)).toBe(false);
   });
@@ -409,6 +452,195 @@ describe('deploy', () => {
     await app();
     await new DockerApi(fake.socket).stop(PROXY_CONTAINER);
     await expect(ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).rejects.toThrow(/run bastionctl setup/);
+  });
+});
+
+describe('secrets in what bastionctl prints and keeps', () => {
+  it('masks .env values in the deploy log, build.log, release.json and the outcome', async () => {
+    await app();
+    fs.writeFileSync(layout.env('site1'), 'API_KEY="sk-live-0123456789"\nDB_PASSWORD=hunter2hunter2\nMODE=prod\n', { mode: 0o600 });
+    const good = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    // The app answers its health check with its config, and its log prints it too
+    fake.exec = ({ cmd }) =>
+      cmd[0] === 'wget' ? { exitCode: 1, stderr: 'wget: server returned error: HTTP/1.1 500 key=sk-live-0123456789 pw=hunter2hunter2 mode=prod' } : { exitCode: 0 };
+    const out: string[] = [];
+    const outcome = await ops.deploy({ ...ctx(), log: (line) => out.push(line) }, 'site1', upload('b.tgz', 'v2'));
+    expect(outcome.result).toBe('failed');
+    const kept = [
+      outcome.error!,
+      out.join('\n'),
+      fs.readFileSync(path.join(layout.release('site1', outcome.release), 'build.log'), 'utf8'),
+      fs.readFileSync(path.join(layout.release('site1', outcome.release), 'release.json'), 'utf8'),
+    ];
+    for (const text of kept) {
+      expect(text).toContain('key=•••• pw=••••');
+      expect(text).not.toContain('sk-live-0123456789');
+      expect(text).not.toContain('hunter2hunter2');
+      // Values under 6 characters would mask ordinary words
+      expect(text).toContain('mode=prod');
+    }
+    expect(currentRelease(layout, 'site1')).toBe(good);
+  });
+
+  it('masks them in a rollback that fails, and the CLI prints the masked outcome', async () => {
+    await app();
+    fs.writeFileSync(layout.env('site1'), 'TOKEN=abcdef123456\n', { mode: 0o600 });
+    const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'));
+    fake.exec = ({ cmd }) => (cmd[0] === 'wget' ? { exitCode: 1, stderr: 'boom TOKEN=abcdef123456' } : { exitCode: 0 });
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await run(['rollback', 'site1', first, '--json'], {
+      env: { BASTION_ROOT: root },
+      stdout: (t) => out.push(t),
+      stderr: (t) => err.push(t),
+      readStdin: async () => '',
+      ctx: { docker: new DockerApi(fake.socket), drainMs: 0, healthIntervalMs: 1, now: () => new Date((clock += 1000)) },
+    });
+    expect(code).toBe(1);
+    expect(JSON.parse(out.join('')).error).toContain('TOKEN=••••');
+    expect(out.join('') + err.join('')).not.toContain('abcdef123456');
+  });
+
+  it('answers a Docker failure during a rollback as a failed outcome, the current release serving', async () => {
+    await app();
+    const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    const second = (await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'))).release;
+    fake.networks.delete('bastion-live');
+    const outcome = await ops.rollback(ctx(), 'site1', first);
+    expect(outcome).toMatchObject({ release: first, previous: second, result: 'failed', error: expect.stringMatching(/network/) });
+    expect(currentRelease(layout, 'site1')).toBe(second);
+    expect(fake.containers.has(`bastion-site1-${first}`)).toBe(false);
+  });
+
+  it('masks each line of a multi-line value the app logs, and errors kept before masking existed', async () => {
+    await app();
+    const pem = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw\n-----END PRIVATE KEY-----';
+    fs.writeFileSync(layout.env('site1'), `TLS_KEY="${pem.replace(/\n/g, '\\n')}"\n`, { mode: 0o600 });
+    // A build that prints it reaches bastionctl line by line
+    fake.buildOutput = [`config:\n${pem}\nbye\n`];
+    fake.crashOnStart = () => true;
+    const out: string[] = [];
+    const failed = await ops.deploy({ ...ctx(), log: (line) => out.push(line) }, 'site1', upload('a.tgz', 'v1'));
+    expect(failed.result).toBe('failed');
+    for (const text of [out.join('\n'), fs.readFileSync(path.join(layout.release('site1', failed.release), 'build.log'), 'utf8')]) {
+      expect(text).toContain('••••\n••••\n••••\nbye');
+      expect(text).not.toContain('MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcw');
+    }
+    // A release.json written by an older bastionctl, unmasked: `releases` masks it as it reads it
+    const record = readRelease(layout, 'site1', failed.release)!;
+    writeRelease(layout, { ...record, error: `crashed: ${pem}` });
+    const [listed] = await ops.releases(ctx(), 'site1');
+    expect(listed!.error).toBe('crashed: ••••');
+  });
+});
+
+describe('the app list', () => {
+  /** Self-signed for list.test, valid 2026-10-05 to 2027-01-03 (certs.test.ts has the same). */
+  const PEM = fs.readFileSync(path.join(import.meta.dirname, 'certs.test.ts'), 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----\n/)![0];
+
+  it('reports each app’s certificate, its usage and who may deploy, from a few reads', async () => {
+    await app();
+    await app('blog', 'name: blog\ndomains: [blog.com]\nbuild: { type: dockerfile }\npermissions: { deploy: manage }\n');
+    await app('idle', 'name: idle\ndomains: [idle.com]\nbuild: { type: dockerfile }\n');
+    await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'));
+    await ops.deploy(ctx(), 'blog', upload('b.tgz', 'v1'));
+    const dir = '/data/caddy/certificates/acme-v02.api.letsencrypt.org-directory';
+    fake.exec = ({ cmd }) => {
+      if (cmd[0] === 'find') return { exitCode: 0, stdout: `${dir}/site1.com/site1.com.crt\n${dir}/www.site1.com/www.site1.com.crt\n${dir}/other.com/other.com.crt\n` };
+      if (cmd[0] === 'sh') return { exitCode: 0, stdout: cmd.slice(4).map((f) => `\n==> ${f}\n${PEM}`).join('') };
+      return { exitCode: 0 };
+    };
+    fake.execs.length = 0;
+    const list = await ops.list(ctx());
+    // One listing and one read of every certificate file of the apps' domains, never of others'
+    expect(fake.execs.map((e) => e.cmd[0])).toEqual(['find', 'sh']);
+    expect(fake.execs[1]!.cmd.slice(0, 4)).toEqual(['sh', '-c', 'for f in "$@"; do printf "\\n==> %s\\n" "$f"; cat -- "$f"; done', 'sh']);
+    expect(fake.execs[1]!.cmd.slice(4)).toEqual([`${dir}/site1.com/site1.com.crt`, `${dir}/www.site1.com/www.site1.com.crt`]);
+
+    const byName = new Map(list.map((a) => [a.name, a]));
+    expect(byName.get('site1')).toMatchObject({
+      permissions: { deploy: 'operate' },
+      certificate: { issuer: 'Test Issuer T1', notAfter: '2027-01-03T14:36:30.000Z', daysLeft: expect.any(Number), lastError: null },
+      // 0.5 s of CPU over 2 s of 2 CPUs; 64 MiB less 4 MiB page cache, of the 256m limit
+      usage: { cpuPercent: 50, memoryBytes: 60 * 1024 ** 2, memoryLimitBytes: 256 * 1024 ** 2 },
+    });
+    expect(byName.get('site1')!.certificate!.daysLeft).toBe(Math.floor((Date.parse('2027-01-03T14:36:30Z') - clock) / 86_400_000));
+    // No certificate yet; no memory limit configured
+    expect(byName.get('blog')).toMatchObject({ permissions: { deploy: 'manage' }, certificate: { issuer: null, notAfter: null, daysLeft: null, lastError: null }, usage: { memoryLimitBytes: null } });
+    // Not deployed: nothing to read
+    expect(byName.get('idle')).toMatchObject({ certificate: null, usage: null });
+    expect((await ops.status(ctx(), 'blog')).permissions).toEqual({ deploy: 'manage' });
+  });
+
+  it('reads certificate files of tls: { cert, key } apps, and certbot’s in nginx mode', async () => {
+    await app('site1', SITE1.replace('redirect_www: apex\n', 'redirect_www: apex\ntls: { cert: tls/cert.pem, key: tls/key.pem }\n'));
+    fs.mkdirSync(path.join(layout.app('site1'), 'tls'));
+    fs.writeFileSync(path.join(layout.app('site1'), 'tls/cert.pem'), PEM);
+    fs.writeFileSync(path.join(layout.app('site1'), 'tls/key.pem'), 'KEY');
+    await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'));
+    fake.execs.length = 0;
+    expect((await ops.list(ctx()))[0]!.certificate).toMatchObject({ issuer: 'Test Issuer T1', notAfter: '2027-01-03T14:36:30.000Z' });
+    expect(fake.execs).toEqual([]);
+
+    // nginx mode: the helper's public copy and certbot's last error
+    const state = fs.mkdtempSync(path.join(os.tmpdir(), 'bastion-nginx-state-'));
+    fs.writeFileSync(path.join(layout.proxy, 'mode'), 'nginx\n');
+    fs.writeFileSync(layout.config('site1'), 'name: site1\ndomains: [site1.com]\nbuild: { type: dockerfile }\nproxy: nginx\n');
+    fs.mkdirSync(path.join(state, 'certs'));
+    fs.writeFileSync(path.join(state, 'certs/bastion-site1.pem'), PEM);
+    fs.writeFileSync(path.join(state, 'bastion-site1.error'), '2026-10-05T11:00:00Z\ncertbot: Some challenges have failed.\n');
+    expect((await ops.list({ ...ctx(), nginxStateDir: state }))[0]!.certificate).toEqual({
+      issuer: 'Test Issuer T1',
+      notAfter: '2027-01-03T14:36:30.000Z',
+      daysLeft: expect.any(Number),
+      lastError: 'certbot: Some challenges have failed.',
+    });
+    fs.rmSync(state, { recursive: true, force: true });
+  });
+
+  it('lists apps when the proxy cannot be read, without certificates', async () => {
+    await app();
+    await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'));
+    await new DockerApi(fake.socket).stop(PROXY_CONTAINER);
+    expect((await ops.list(ctx()))[0]).toMatchObject({ name: 'site1', certificate: null });
+  });
+});
+
+describe('config changes during a deploy', () => {
+  it('serves the domains bastion.yml has at switch time, not those it had when the deploy began', async () => {
+    await app();
+    const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    // Another port, so the switch rebuilds the proxy config; the domains change while the new release is checked
+    fs.writeFileSync(layout.config('site1'), SITE1.replace('port: 3000', 'port: 4000'));
+    let changed = false;
+    fake.exec = ({ cmd }) => {
+      if (cmd[0] === 'wget' && !changed) {
+        changed = true;
+        fs.writeFileSync(layout.config('site1'), SITE1.replace('port: 3000', 'port: 4000').replace('[site1.com, www.site1.com]', '[site1.org]'));
+      }
+      return { exitCode: 0 };
+    };
+    const outcome = await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'));
+    expect(outcome).toMatchObject({ result: 'success', previous: first });
+    const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
+    expect(caddyfile).toContain('site1.org {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-live-4000:4000 {');
+    expect(caddyfile).not.toContain('site1.com');
+    // The new Caddy is checked for the names it will serve
+    expect(fake.execs.filter((e) => isReload(e.cmd)).at(-1)!.cmd.slice(5)).toEqual(['site1.org']);
+  });
+
+  it('fails the deploy, the old release serving, when bastion.yml became invalid meanwhile', async () => {
+    await app();
+    const first = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    fake.exec = ({ cmd }) => {
+      if (cmd[0] === 'wget') fs.writeFileSync(layout.config('site1'), 'name: site1\n');
+      return { exitCode: 0 };
+    };
+    const outcome = await ops.deploy(ctx(), 'site1', upload('b.tgz', 'v2'));
+    expect(outcome).toMatchObject({ result: 'failed', error: expect.stringMatching(/bastion.yml of site1 is invalid/) });
+    expect(currentRelease(layout, 'site1')).toBe(first);
+    expect(fake.containers.has(`bastion-site1-${outcome.release}`)).toBe(false);
   });
 });
 
