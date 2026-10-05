@@ -665,7 +665,9 @@ Deployments section.
   protocol header (Caddy's `proxy_protocol` listener wrapper trusts 127.0.0.1 only, so apps
   see the client's address). A switch is `node /usr/local/lib/bastion-proxy.mjs reload
   --sha256 <hash of the validated text> <names>`: the front copies the config (once it reads
-  that exact text), starts a second Caddy on another slot's ports, waits until it listens and
+  that exact text), starts a second Caddy on another slot's ports, waits until it listens (on
+  the ports its admin API reports: a config with no TLS site has no HTTPS listener, and nginx
+  mode with no app none at all, so a new server's empty config starts too) and
   completes a TLS handshake for every name the running one does, then sends new connections to
   it; the old Caddy keeps its connections until they close or 10 s pass, then stops with
   Caddy's 10 s grace period. Caddy's own reload cannot do this — it binds a new

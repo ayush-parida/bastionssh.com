@@ -5,7 +5,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { proxyHeader, requestReload, serveControl, startFront, type Front } from './front.js';
+import { configuredPorts, proxyHeader, requestReload, serveControl, startFront, type Front } from './front.js';
 
 /**
  * The proxy front (front.ts) with a stand-in for Caddy: a small Node server
@@ -38,8 +38,14 @@ const front = net.createServer((socket) => {
   socket.on('data', onData);
 });
 front.listen(Number(process.env.BASTION_HTTP_PORT), '127.0.0.1');
+// Caddy's admin API, as the front reads it: a config without a TLS site has no HTTPS listener
+const admin = http.createServer((req, res) =>
+  res.end(req.url === '/config/' ? JSON.stringify({ apps: { http: { servers: { srv0: { listen: ['127.0.0.1:' + process.env.BASTION_HTTP_PORT] } } } } }) : 'null'),
+);
+admin.listen(Number(process.env.BASTION_ADMIN_PORT), '127.0.0.1');
 process.on('SIGTERM', () => {
   front.close();
+  admin.close();
   server.close(() => process.exit(0));
   server.closeIdleConnections();
 });
@@ -158,6 +164,49 @@ describe('the proxy front', () => {
     await expect(front!.reload([])).rejects.toThrow(/Caddy did not start with the new config \(exit code 1\):\nError: adapting config: bad things/);
     expect(await get(false)).toBe('gen-a 127.0.0.1');
     expect(front!.generations().map(({ generation, serving }) => ({ generation, serving }))).toEqual([{ generation: 1, serving: true }]);
+  });
+
+  it('starts and switches when the config has no listener for one of its ports (no TLS site yet)', async () => {
+    // A server set up with no app: Caddy has only its HTTP redirect site, and nothing on the HTTPS port
+    const httpsPort = await freePort();
+    const other = await startFront({
+      config: path.join(dir, 'Caddyfile'),
+      listen: [
+        { port: await freePort(), kind: 'http' },
+        { port: httpsPort, kind: 'https' },
+      ],
+      host: '127.0.0.1',
+      control: path.join(dir, 'other.sock'),
+      caddy: process.execPath,
+      caddyArgs: (file) => [path.join(dir, 'caddy.mjs'), file],
+      slotPorts: (slot) => ({ http: base + 30 + slot, https: base + 40 + slot, admin: base + 50 + slot }),
+      readyMs: 5000,
+      log: () => {},
+    });
+    try {
+      expect(await configuredPorts(base + 50)).toEqual(new Set([base + 30]));
+      config('gen-b');
+      await other.reload([]);
+      expect(other.generations().find((g) => g.serving)?.generation).toBe(2);
+      // Nothing behind the HTTPS port: the connection is closed, as an unknown name's would be
+      await new Promise<void>((resolve) => {
+        const c = net.connect({ host: '127.0.0.1', port: httpsPort });
+        c.on('close', () => resolve());
+        c.on('error', () => {});
+      });
+    } finally {
+      await other.stop();
+    }
+    // Nothing answering on the admin port: unknown, so the front keeps waiting for the port itself
+    expect(await configuredPorts(await freePort())).toBeNull();
+    // nginx mode with no app: a config without an HTTP app listens on nothing
+    const empty = http.createServer((req, res) => res.end(req.url === '/config/' ? JSON.stringify({ admin: { listen: 'localhost:2019' } }) : 'null'));
+    await new Promise<void>((resolve) => empty.listen(0, '127.0.0.1', resolve));
+    try {
+      expect(await configuredPorts((empty.address() as net.AddressInfo).port)).toEqual(new Set());
+    } finally {
+      empty.close();
+    }
   });
 
   it('answers reload over its control socket, with progress and the result', async () => {

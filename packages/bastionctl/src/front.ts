@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -113,6 +114,45 @@ function connectOnce(port: number): Promise<boolean> {
       s.destroy();
       resolve(false);
     });
+  });
+}
+
+/**
+ * The ports a Caddy's loaded config listens on, from its admin API; null
+ * while the API does not answer. A config without a site of a kind has no
+ * listener for it — no TLS site, no HTTPS port; in nginx mode with no app,
+ * none at all — so the front must not wait for that port.
+ */
+export function configuredPorts(adminPort: number, timeoutMs = 1000): Promise<Set<number> | null> {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port: adminPort, path: '/config/', timeout: timeoutMs }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c: string) => (body += c));
+      res.on('end', () => {
+        if (res.statusCode !== 200) return resolve(null);
+        try {
+          // The whole config: a path into it (apps/http/servers) is an error when the config has no HTTP app
+          const loaded = JSON.parse(body) as { apps?: { http?: { servers?: Record<string, { listen?: unknown } | null> } } } | null;
+          const servers = loaded?.apps?.http?.servers ?? {};
+          const ports = new Set<number>();
+          for (const server of Object.values(servers)) {
+            for (const address of Array.isArray(server?.listen) ? server.listen : []) {
+              // `:18001`, `127.0.0.1:18001`, `tcp/127.0.0.1:18001`, or a range `:18000-18001`
+              const m = typeof address === 'string' ? /:(\d+)(?:-(\d+))?$/.exec(address) : null;
+              if (!m) continue;
+              for (let p = Number(m[1]); p <= Number(m[2] ?? m[1]); p++) ports.add(p);
+            }
+          }
+          resolve(ports);
+        } catch {
+          resolve(null);
+        }
+      });
+      res.on('error', () => resolve(null));
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(null));
   });
 }
 
@@ -248,6 +288,9 @@ export async function startFront(opts: FrontOptions): Promise<Front> {
     const deadline = Date.now() + readyMs;
     for (const { kind } of opts.listen) {
       while (!(await connectOnce(ports[kind]))) {
+        // Loaded without a listener on this port: connections of this kind are refused, as Caddy would
+        const configured = await configuredPorts(ports.admin);
+        if (configured && !configured.has(ports[kind])) break;
         if (inst.exited || Date.now() > deadline) {
           await stopInstance(inst, 0);
           const reason = failureReason(inst.tail);
