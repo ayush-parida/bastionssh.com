@@ -20,6 +20,10 @@ export interface FakeContainer {
   Cmd: string[] | null;
   State: { Status: string; Running: boolean; Restarting: boolean; ExitCode: number; StartedAt: string };
   RestartCount: number;
+  /** Networks joined after create (network connect), with their aliases. */
+  Networks: Record<string, { Aliases: string[] }>;
+  /** Address on the network it was created on. */
+  IPAddress: string;
 }
 
 export interface ExecCall {
@@ -32,6 +36,8 @@ export interface FakeDocker {
   containers: Map<string, FakeContainer>;
   images: Map<string, { Id: string; Labels: Record<string, string> }>;
   networks: Set<string>;
+  /** Networks created internal. */
+  internalNetworks: Set<string>;
   volumesRemoved: string[];
   execs: ExecCall[];
   builds: Array<{ query: URLSearchParams; bytes: number; tar: Buffer }>;
@@ -78,6 +84,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
     containers: new Map(),
     images: new Map(),
     networks: new Set(),
+    internalNetworks: new Set(),
     volumesRemoved: [],
     execs: [],
     builds: [],
@@ -144,6 +151,8 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           Cmd: spec.Cmd ?? null,
           State: { Status: 'created', Running: false, Restarting: false, ExitCode: 0, StartedAt: '' },
           RestartCount: 0,
+          Networks: {},
+          IPAddress: `172.30.0.${fake.containers.size + 2}`,
         };
         fake.containers.set(name, c);
         return json(201, { Id: c.Id, Warnings: [] });
@@ -164,7 +173,15 @@ export async function startFakeDocker(): Promise<FakeDocker> {
       if ((m = /^\/containers\/([^/]+)\/json$/.exec(p))) {
         const c = find(m[1]!);
         if (!c) return notFound('container');
-        return json(200, { Id: c.Id, Name: `/${c.Name}`, Config: { Image: c.Image, Labels: c.Labels, Env: c.Env }, State: c.State, RestartCount: c.RestartCount, HostConfig: c.HostConfig });
+        return json(200, {
+          Id: c.Id,
+          Name: `/${c.Name}`,
+          Config: { Image: c.Image, Labels: c.Labels, Env: c.Env },
+          State: c.State,
+          RestartCount: c.RestartCount,
+          HostConfig: c.HostConfig,
+          NetworkSettings: { Networks: { [String(c.HostConfig.NetworkMode ?? 'bridge')]: { Aliases: null, IPAddress: c.IPAddress }, ...c.Networks } },
+        });
       }
       if ((m = /^\/containers\/([^/]+)\/logs$/.exec(p))) {
         if (!find(m[1]!)) return notFound('container');
@@ -235,8 +252,19 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         return fake.networks.has(m[1]!) ? json(200, { Name: m[1] }) : notFound('network');
       }
       if (p === '/networks/create' && req.method === 'POST') {
-        fake.networks.add((JSON.parse(body.toString()) as { Name: string }).Name);
+        const spec = JSON.parse(body.toString()) as { Name: string; Internal?: boolean };
+        fake.networks.add(spec.Name);
+        if (spec.Internal) fake.internalNetworks.add(spec.Name);
         return json(201, { Id: hexId() });
+      }
+      if ((m = /^\/networks\/([^/]+)\/connect$/.exec(p)) && req.method === 'POST') {
+        if (!fake.networks.has(m[1]!)) return notFound('network');
+        const spec = JSON.parse(body.toString()) as { Container: string; EndpointConfig?: { Aliases?: string[] } };
+        const c = find(spec.Container);
+        if (!c) return notFound('container');
+        if (c.Networks[m[1]!]) return json(403, { message: `endpoint with name ${c.Name} already exists in network ${m[1]}` });
+        c.Networks[m[1]!] = { Aliases: spec.EndpointConfig?.Aliases ?? [] };
+        return json(200, undefined);
       }
       if ((m = /^\/volumes\/([^/]+)$/.exec(p)) && req.method === 'DELETE') {
         fake.volumesRemoved.push(m[1]!);

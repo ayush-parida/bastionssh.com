@@ -67,7 +67,7 @@ Strictly validated by `bastionctl validate` (unknown keys rejected, domain synta
 3. Build image `bastion-<app>:<id>` with labels `bastion.app`, `bastion.release`: **nextjs** → generated multi-stage Dockerfile (lockfile-detected package manager, `output: 'standalone'` required — a clear error explains how to enable it); **dockerfile** → project's Dockerfile; **static** → build then serve `output` with a minimal Caddy image. Build log written to `build.log` and streamed. One build per server at a time.
 4. Start container `bastion-<app>-<id>` on `bastion-apps` with env file, volumes, limits, `restart: unless-stopped`.
 5. Health check from inside the network (`docker exec bastion-caddy wget …`) until healthy or timeout → on failure stop and remove the new container, keep the old one serving, mark the release failed.
-6. Regenerate the proxy config from all apps, validate, reload gracefully (Caddy admin API inside the container / `nginx -t` + reload). On failure restore the previous config.
+6. Regenerate the proxy config from all apps, validate, reload gracefully (Caddy admin API inside the container / `nginx -t` + reload). On failure restore the previous config. *(Phase B: Caddy proxies to a per-app alias `bastion-<app>-live-<port>` on an internal `bastion-live` network, which the new container joins after its health check; the config is reloaded only when its text changes, because even a graceful Caddy reload drops the odd just-accepted connection.)*
 7. Point `current` at the new release, write `release.json` (who — passed by BastionSSH, when, checksum, image, result), stop and remove the old container after a drain delay.
 8. Prune releases and images beyond `keep_releases` (never the current or previous).
 

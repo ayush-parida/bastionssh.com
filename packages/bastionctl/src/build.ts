@@ -8,9 +8,9 @@ import { CADDY_IMAGE } from './proxy.js';
  * How an app's image is built (deployments spec §5 step 3):
  *
  * - **nextjs** — a generated multi-stage Dockerfile: dependencies installed
- *   with the package manager the lockfile names, `next build`, and a small
- *   runtime stage from Next's standalone output (required: `output:
- *   'standalone'` in next.config).
+ *   with the package manager the lockfile names (npm, pnpm, yarn or bun),
+ *   `next build`, and a small runtime stage from Next's standalone output
+ *   (required: `output: 'standalone'` in next.config).
  * - **dockerfile** — the project's own `Dockerfile`.
  * - **static** — built with Node when there is a package.json, then the
  *   `output` folder served by Caddy on port 80.
@@ -22,7 +22,10 @@ import { CADDY_IMAGE } from './proxy.js';
 export const GENERATED_DOCKERFILE = '.bastion.Dockerfile';
 const DEFAULT_NODE = '20';
 
-export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'yarn-berry';
+export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'yarn-berry' | 'bun';
+
+/** Bun is copied into the Node.js stages from its official image; Next itself still runs on Node. */
+const BUN_IMAGE = 'oven/bun:1-alpine';
 
 export interface BuildPlan {
   /** The build context directory (`build.dir` inside the extraction). */
@@ -58,6 +61,8 @@ function readText(dir: string, name: string): string | null {
 export function detectPackageManager(dir: string): { manager: PackageManager; lockfile: string | null } {
   if (exists(dir, 'pnpm-lock.yaml')) return { manager: 'pnpm', lockfile: 'pnpm-lock.yaml' };
   if (exists(dir, 'yarn.lock')) return { manager: exists(dir, '.yarnrc.yml') ? 'yarn-berry' : 'yarn', lockfile: 'yarn.lock' };
+  if (exists(dir, 'bun.lock')) return { manager: 'bun', lockfile: 'bun.lock' };
+  if (exists(dir, 'bun.lockb')) return { manager: 'bun', lockfile: 'bun.lockb' };
   if (exists(dir, 'package-lock.json')) return { manager: 'npm', lockfile: 'package-lock.json' };
   if (exists(dir, 'npm-shrinkwrap.json')) return { manager: 'npm', lockfile: 'npm-shrinkwrap.json' };
   return { manager: 'npm', lockfile: null };
@@ -71,6 +76,8 @@ function installCommand(manager: PackageManager, lockfile: string | null): strin
       return 'corepack enable && yarn install --frozen-lockfile';
     case 'yarn-berry':
       return 'corepack enable && yarn install --immutable';
+    case 'bun':
+      return 'bun install --frozen-lockfile';
     default:
       return lockfile ? 'npm ci' : 'npm install';
   }
@@ -79,7 +86,13 @@ function installCommand(manager: PackageManager, lockfile: string | null): strin
 function runScript(manager: PackageManager, script: string): string {
   if (manager === 'pnpm') return `pnpm run ${script}`;
   if (manager === 'yarn' || manager === 'yarn-berry') return `yarn ${script}`;
+  if (manager === 'bun') return `bun run ${script}`;
   return `npm run ${script}`;
+}
+
+/** Lines a Node.js stage needs before it can run `manager` (corepack ships with Node for pnpm and yarn). */
+function toolLines(manager: PackageManager): string[] {
+  return manager === 'bun' ? [`COPY --from=${BUN_IMAGE} /usr/local/bin/bun /usr/local/bin/bun`] : [];
 }
 
 /** Major Node version: config, then .nvmrc / .node-version, then package.json engines, then 20. */
@@ -123,12 +136,14 @@ export function nextjsDockerfile(dir: string, config: Pick<DeployAppConfig, 'bui
     `FROM ${node} AS deps`,
     'WORKDIR /app',
     'RUN apk add --no-cache libc6-compat',
+    ...toolLines(manager),
     `COPY [${manifests}, "./"]`,
     `RUN ${installCommand(manager, lockfile)}`,
     '',
     `FROM ${node} AS build`,
     'WORKDIR /app',
     'ENV NEXT_TELEMETRY_DISABLED=1',
+    ...toolLines(manager),
     'COPY --from=deps /app/node_modules ./node_modules',
     'COPY . .',
     `RUN ${runScript(manager, 'build')} && mkdir -p public`,
@@ -159,6 +174,7 @@ export function staticDockerfile(dir: string, config: Pick<DeployAppConfig, 'bui
   return [
     `FROM ${node} AS build`,
     'WORKDIR /app',
+    ...toolLines(manager),
     `COPY [${manifests}, "./"]`,
     `RUN ${installCommand(manager, lockfile)}`,
     'COPY . .',

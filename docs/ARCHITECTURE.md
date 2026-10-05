@@ -589,8 +589,9 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
 
 ### 4.15b Deployments (`packages/bastionctl`, `/server/deploy`, `api/routes/deploy.ts`)
 
-Design: `docs/superpowers/specs/2026-10-05-server-deployments-design.md`. Phase A is in place
-(bastionctl, install and integrity check, migration 0026, the server routes); the web tab,
+Design: `docs/superpowers/specs/2026-10-05-server-deployments-design.md`. Phases A and B are
+in place (bastionctl, install and integrity check, migration 0026, the server routes, build
+types, zero-downtime switches, pruning); the web tab,
 nginx mode, DNS/TLS checks and certificate alerts come in later phases.
 
 - **No deployment data in the database.** Apps, `bastion.yml`, `.env`, releases and the proxy
@@ -609,12 +610,19 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   another app serves), extracts uploads itself with every entry checked (`tar.ts`: no absolute
   paths or `..`, nothing written through a link, links followed on disk must stay inside, no
   hard links or devices, size and entry caps), builds `bastion-<app>:<release>` (`build.ts`:
-  generated Next.js standalone or static Dockerfiles, or the project's), starts
+  generated Next.js standalone or static Dockerfiles — npm, pnpm, yarn or bun from the
+  lockfile, Node from config, `.nvmrc` or `engines` — or the project's), starts
   `bastion-<app>-<release>` on the private `bastion-apps` network, health-checks it from the
-  proxy container, regenerates the Caddyfile from every app (`caddy.ts`), has Caddy validate
-  it, swaps and reloads (restoring the previous file on failure), moves `current`, removes the
-  old container after a drain delay and prunes beyond `keep_releases` (never current or
-  previous). Locks are files linked into place whole (never readable half written), stale
+  proxy container by its address there (a long app name makes the container name no valid DNS
+  label), then attaches it to the internal `bastion-live` network under the app's
+  live alias `bastion-<app>-live-<port>`, which is what the Caddyfile (`caddy.ts`) proxies
+  to. Caddy is reloaded only when the regenerated file differs (first deploy, another port,
+  domains or TLS) or a custom certificate changed (then forced, as Caddy skips an unchanged config): validated, swapped, reloaded, the previous file restored on failure —
+  even a graceful reload drops the odd just-accepted connection, so a plain redeploy or
+  rollback moves traffic over the alias alone and loses no request. It then moves
+  `current`, stops and removes the old container after a drain delay (Caddy retries a GET
+  it dropped) and prunes releases and labelled images beyond `keep_releases` (never current
+  or previous). Locks are files linked into place whole (never readable half written), stale
   after 30 minutes or when the holder's bastionctl container is gone, and taken over only if
   the file is still the stale one: `apps/<app>/deploy.lock` per app, `build.lock` (a second
   build waits its turn) and `proxy.lock`, held from building the Caddyfile until `current`
@@ -640,7 +648,10 @@ nginx mode, DNS/TLS checks and certificate alerts come in later phases.
   first (422 with every problem). Env reveal needs a browser session and a passkey step-up.
 - Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with
   the remote layer faked (matrix, integrity, streams, audit, no rows but audit); an env-gated
-  integration test over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`).
+  integration tests over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`;
+  `release.integration.test.ts`: dockerfile and static apps by Host header through Caddy,
+  redeploy and rollback under continuous requests, a failing health check, pruning, delete,
+  and a real Next.js build with `SMT_TEST_DEPLOY_NEXTJS=1`).
 
 ### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
 
