@@ -1,4 +1,4 @@
-import type { DeployAppSummary, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
+import type { DeployAppSummary, DeployNginxApplyResult, DeployProxyMode, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
 import { api, ApiError } from '@/lib/api.js';
 import { readSSE } from '@/lib/sse.js';
 import { useAuthStore } from '@/store/auth.js';
@@ -17,11 +17,13 @@ export const appPath = (serverId: string, app: string, rest = '') => deployPath(
 export const deployKeys = {
   all: (serverId: string) => ['deploy', serverId] as const,
   state: (serverId: string) => ['deploy', serverId, 'state'] as const,
+  proxy: (serverId: string) => ['deploy', serverId, 'proxy'] as const,
   apps: (serverId: string) => ['deploy', serverId, 'apps'] as const,
   app: (serverId: string, app: string) => ['deploy', serverId, 'app', app] as const,
   releases: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'releases'] as const,
   config: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'config'] as const,
   env: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'env'] as const,
+  domains: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'domains'] as const,
 };
 
 /**
@@ -158,8 +160,19 @@ export async function followDeployStream(
   }
 }
 
-/** A starting `bastion.yml` for a new app. */
-export function configTemplate(name: string, domain: string): string {
+/**
+ * In nginx mode, what the host's nginx helper did after a config save or a
+ * delete (`proxy` in their answer): a toast when it needs attention.
+ */
+export function nginxSyncMessage(proxy: DeployNginxApplyResult | null | undefined): string | null {
+  if (!proxy) return null;
+  if (proxy.result === 'failed') return `The host's nginx was not updated: ${proxy.error ?? 'the nginx helper failed'}`;
+  if (proxy.certificate === 'failed') return `nginx is updated, but no certificate could be obtained${proxy.error ? `: ${proxy.error}` : ''}. Check DNS under Domains.`;
+  return null;
+}
+
+/** A starting `bastion.yml` for a new app, for the server's proxy mode. */
+export function configTemplate(name: string, domain: string, proxy: DeployProxyMode = 'caddy'): string {
   return [
     `name: ${name}`,
     `domains: [${domain || `${name}.example.com`}]`,
@@ -171,7 +184,7 @@ export function configTemplate(name: string, domain: string): string {
     '  port: 3000',
     'healthcheck: { path: /, timeout: 30s }',
     'keep_releases: 5',
-    'proxy: caddy',
+    `proxy: ${proxy}`,
     '',
   ].join('\n');
 }

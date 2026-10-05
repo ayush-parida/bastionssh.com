@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
-import type { DeployServerState, Server } from '@smt/shared';
+import type { DeployProxyState, DeployServerState, Server } from '@smt/shared';
 import { ArrowLeft, Rocket } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { deployErrorCode, deployKeys, deployPath, type DeployAppRow } from '@/lib/deploy.js';
@@ -42,6 +42,15 @@ export default function ServerDeploymentsPage() {
     retry: false,
   });
   const ready = state.data?.integrity === 'ok';
+  // The proxy mode and, in nginx mode, what an administrator still has to do; optional (an older server answers 404)
+  const proxy = useQuery<DeployProxyState>({
+    queryKey: deployKeys.proxy(serverId),
+    queryFn: () => api.get(deployPath(serverId, '/proxy')),
+    enabled: !!state.data,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const proxyMode = proxy.data?.mode ?? 'caddy';
   const apps = useQuery<DeployAppRow[]>({
     queryKey: deployKeys.apps(serverId),
     queryFn: () => api.get(deployPath(serverId, '/apps')),
@@ -74,10 +83,10 @@ export default function ServerDeploymentsPage() {
         <p className="rounded-lg border border-border bg-card p-4 text-sm text-red-600">{state.error ? (state.error as Error).message : 'Server not found.'}</p>
       ) : (
         <>
-          <SetupPanel serverId={serverId} state={state.data} canManage={levels.manage} compact={ready} />
+          <SetupPanel serverId={serverId} state={state.data} proxy={proxy.data ?? null} canManage={levels.manage} compact={ready} />
           {ready &&
             (app ? (
-              <AppDetail serverId={serverId} app={app} host={server?.host ?? null} levels={levels} onBack={() => openApp(null)} />
+              <AppDetail serverId={serverId} app={app} proxyMode={proxyMode} levels={levels} onBack={() => openApp(null)} />
             ) : apps.isLoading ? (
               <p className="text-sm text-muted-foreground">Reading apps from the server…</p>
             ) : apps.error ? (
@@ -95,6 +104,7 @@ export default function ServerDeploymentsPage() {
         <NewAppDialog
           serverId={serverId}
           existing={(apps.data ?? []).map((a) => a.name)}
+          proxyMode={proxyMode}
           onCreated={(name) => {
             setCreating(false);
             openApp(name);

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { DeployServerState, DeploySetupResult } from '@smt/shared';
+import type { DeployProxyMode, DeployProxyState, DeployServerState, DeploySetupResult } from '@smt/shared';
 import { CheckCircle2, Circle, Loader2, ShieldAlert, TriangleAlert, Wrench } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
@@ -27,30 +27,57 @@ function Requirement({ ok, label, hint }: { ok: boolean | null; label: string; h
   );
 }
 
+/** What an administrator still runs once on the server for nginx mode (spec §6). */
+function NginxSteps({ proxy }: { proxy: DeployProxyState }) {
+  if (proxy.instructions.length === 0) return null;
+  return (
+    <div aria-label="nginx setup steps" className="space-y-1.5 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
+      <p className="font-medium text-foreground">
+        nginx mode needs these commands run once on the server, as an administrator (then deploy, or use Apply nginx again under Domains):
+      </p>
+      <ol className="list-decimal space-y-1 pl-5">
+        {proxy.instructions.map((step) => (
+          <li key={step}>
+            <code className="block whitespace-pre-wrap break-all rounded bg-muted px-1.5 py-0.5 font-mono">{step}</code>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 /**
  * Deployments on this server: where they live, whether its bastionctl is the
  * one this BastionSSH ships, and Set up / Reinstall (spec §7). Setting up
  * creates the root folder (with sudo when the SSH user may), installs
  * bastionctl, the `bastion-apps` network and the proxy; it is safe to run
  * again. Prerequisites are checked by the server during setup; their state
- * shows after one has run, as nothing about the server is kept here.
+ * shows after one has run, as nothing about the server is kept here. The
+ * proxy mode is read from the server (`GET …/proxy`); a first setup picks
+ * nginx when the host's nginx owns ports 80/443, or the mode chosen here.
+ * Reinstalling keeps the mode the server has.
  */
 export default function SetupPanel({
   serverId,
   state,
+  proxy: proxyState,
   canManage,
   compact,
 }: {
   serverId: string;
   state: DeployServerState;
+  /** The proxy mode and nginx state; null while unknown (or from a server that cannot say). */
+  proxy: DeployProxyState | null;
   canManage: boolean;
   /** A set-up server: one line, with Reinstall. */
   compact?: boolean;
 }) {
   const qc = useQueryClient();
   const [result, setResult] = useState<SetupAnswer | null>(null);
+  const [choice, setChoice] = useState<DeployProxyMode | 'auto'>('auto');
   const setup = useMutation({
-    mutationFn: () => api.post<SetupAnswer>(deployPath(serverId, '/setup')),
+    // Reinstall (or no choice): the server keeps its mode, or detects one
+    mutationFn: () => api.post<SetupAnswer>(deployPath(serverId, '/setup'), choice === 'auto' || compact ? undefined : { proxy: choice }),
     onSuccess: (res) => {
       setResult(res);
       toast.success(state.integrity === 'ok' ? 'bastionctl reinstalled' : 'Deployments are set up');
@@ -58,7 +85,8 @@ export default function SetupPanel({
     },
   });
   const code = deployErrorCode(setup.error);
-  const proxy = result?.proxy ?? 'caddy';
+  const proxy = result?.proxy ?? proxyState?.mode ?? null;
+  const nginxDetected = !proxyState?.mode && proxyState?.nginx.detected;
 
   const button = canManage && (
     <button
@@ -76,20 +104,23 @@ export default function SetupPanel({
 
   if (compact && state.integrity === 'ok' && !setup.error) {
     return (
-      <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-card px-4 py-2.5 text-sm">
-        <span className="flex items-center gap-1.5">
-          <CheckCircle2 size={14} className="text-emerald-500" /> Set up
-        </span>
-        <span className="text-muted-foreground">
-          Root <span className="font-mono text-foreground">{state.root}</span>
-        </span>
-        <span className="text-muted-foreground">
-          Proxy <span className="text-foreground">{proxy}</span>
-        </span>
-        <span className="text-muted-foreground">
-          bastionctl <span className="font-mono text-foreground">{state.version}</span>
-        </span>
-        <span className="ml-auto">{button}</span>
+      <div className="mb-4 space-y-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-card px-4 py-2.5 text-sm">
+          <span className="flex items-center gap-1.5">
+            <CheckCircle2 size={14} className="text-emerald-500" /> Set up
+          </span>
+          <span className="text-muted-foreground">
+            Root <span className="font-mono text-foreground">{state.root}</span>
+          </span>
+          <span className="text-muted-foreground">
+            Proxy <span className="text-foreground">{proxy === 'nginx' ? 'nginx on the host' : (proxy ?? 'caddy')}</span>
+          </span>
+          <span className="text-muted-foreground">
+            bastionctl <span className="font-mono text-foreground">{state.version}</span>
+          </span>
+          <span className="ml-auto">{button}</span>
+        </div>
+        {proxyState?.mode === 'nginx' && <NginxSteps proxy={proxyState} />}
       </div>
     );
   }
@@ -117,7 +148,30 @@ export default function SetupPanel({
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">Proxy</dt>
-          <dd>{proxy === 'caddy' ? 'Caddy (bastion-caddy, ports 80 and 443)' : 'nginx on the host'}</dd>
+          <dd>
+            {proxy === 'nginx'
+              ? 'nginx on the host'
+              : proxy === 'caddy'
+                ? 'Caddy (bastion-caddy, ports 80 and 443)'
+                : nginxDetected
+                  ? 'nginx on the host (detected on ports 80/443)'
+                  : 'Caddy (bastion-caddy, ports 80 and 443)'}
+          </dd>
+          {canManage && !proxyState?.mode && !result && (
+            <label className="mt-1 block text-xs text-muted-foreground">
+              <span className="sr-only">Proxy mode</span>
+              <select
+                aria-label="Proxy mode"
+                value={choice}
+                onChange={(e) => setChoice(e.target.value as DeployProxyMode | 'auto')}
+                className="rounded-md border border-input bg-background px-1.5 py-0.5 text-xs"
+              >
+                <option value="auto">Automatic</option>
+                <option value="caddy">Caddy</option>
+                <option value="nginx">nginx on the host</option>
+              </select>
+            </label>
+          )}
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">bastionctl</dt>
@@ -140,7 +194,7 @@ export default function SetupPanel({
           />
           <Requirement
             ok={result ? (result.proxyContainer?.state === 'running') : null}
-            label="Ports 80 and 443 free for the proxy"
+            label={(result?.proxy ?? proxy) === 'nginx' ? 'A loopback port free for bastion-caddy behind the host’s nginx' : 'Ports 80 and 443 free for the proxy'}
             hint={result?.proxyContainer ? `bastion-caddy: ${result.proxyContainer.status}` : undefined}
           />
           <Requirement
@@ -150,6 +204,7 @@ export default function SetupPanel({
         </ul>
       </div>
 
+      {proxyState && (result?.proxy ?? proxyState.mode) === 'nginx' && <NginxSteps proxy={proxyState} />}
       {setup.error && (
         <p className="whitespace-pre-wrap break-words rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{(setup.error as Error).message}</p>
       )}

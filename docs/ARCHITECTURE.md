@@ -625,7 +625,8 @@ Deployments section.
   it dropped) and prunes releases and labelled images beyond `keep_releases` (never current
   or previous). Locks are files linked into place whole (never readable half written), stale
   after 30 minutes or when the holder's bastionctl container is gone, and taken over only if
-  the file is still the stale one: `apps/<app>/deploy.lock` per app, `build.lock` (a second
+  the file is still the stale one: `apps/<app>/deploy.lock` per app, `setup.lock` (two setups
+  run in turn; a network created meanwhile by anyone counts as there), `build.lock` (a second
   build waits its turn) and `proxy.lock`, held from building the Caddyfile until `current`
   has moved, so two apps switching at once never write a config that drops the other's
   release. Named volumes are `bastion-<app>.<name>` (the `.` keeps apps' volumes apart).
@@ -654,7 +655,12 @@ Deployments section.
   list, and per app Deploy, Releases with Rollback, Restart/Stop, `bastion.yml` (a form that
   edits the YAML text in place with `yaml`'s Document API, so comments survive, and the raw
   YAML; a 422's problems show by key path), `.env` (names only; values write-only; reveal with
-  `withStepUp`), Domains (a DNS check through DNS Lookup) and Delete. A folder or `.zip` is
+  `withStepUp`), Domains (`GET …/domains`: DNS against the server's address with the records
+  to create, ports 80/443, certificate issuer, expiry and last error; in nginx mode an operator
+  can run the helper again) and Delete. Setup shows the server's proxy mode from `GET …/proxy`
+  (a first setup may pick Caddy or nginx; automatic detects), and in nginx mode the
+  administrator's one-time steps; a new app's template uses that mode, and a config save or
+  delete warns when the host's nginx was not updated. A folder or `.zip` is
   packed into a `.tar.gz` in the browser without `node_modules`, `.next` and `.git` (a single
   top-level folder dropped); the upload goes by XMLHttpRequest for progress, and its SSE
   answer is read from the growing response. Live memory/CPU and logs of an app's container

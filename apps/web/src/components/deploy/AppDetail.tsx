@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DeployAppStatus, DockerServerStatus } from '@smt/shared';
+import type { DeployAppStatus, DeployNginxApplyResult, DeployProxyMode, DockerServerStatus } from '@smt/shared';
 import { ArrowLeft, Lock, Power, RefreshCw, RotateCw, Trash2, TriangleAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
-import { appPath, deployKeys, when, type DeployAppRow } from '@/lib/deploy.js';
+import { appPath, deployKeys, nginxSyncMessage, when } from '@/lib/deploy.js';
 import { dockerKeys, dockerPath } from '@/lib/docker.js';
 import { cn } from '@/lib/utils.js';
 import ConfirmDialog from '@/components/docker/ConfirmDialog.js';
@@ -82,13 +82,14 @@ function Runtime({ serverId, containerId, running }: { serverId: string; contain
 export default function AppDetail({
   serverId,
   app,
-  host,
+  proxyMode,
   levels,
   onBack,
 }: {
   serverId: string;
   app: string;
-  host: string | null;
+  /** The server's proxy mode (Domains). */
+  proxyMode: DeployProxyMode;
   levels: DeployLevels;
   onBack: () => void;
 }) {
@@ -97,7 +98,7 @@ export default function AppDetail({
   const [dialog, setDialog] = useState<'deploy' | 'restart' | 'stop' | 'delete' | null>(null);
   const run = useDeployRun(serverId, app);
 
-  const status = useQuery<DeployAppStatus & Pick<DeployAppRow, 'certificate'>>({
+  const status = useQuery<DeployAppStatus>({
     queryKey: deployKeys.app(serverId, app),
     queryFn: () => api.get(appPath(serverId, app)),
     retry: false,
@@ -227,7 +228,7 @@ export default function AppDetail({
             <Fact label="Container">
               {s.container ? (
                 <>
-                  <span className="font-mono">{s.container.name}</span>
+                  <span className="break-all font-mono">{s.container.name}</span>
                   <span className="block text-xs text-muted-foreground">{s.container.status}</span>
                 </>
               ) : (
@@ -247,7 +248,9 @@ export default function AppDetail({
       )}
       {tab === 'config' && <ConfigEditor serverId={serverId} app={app} canManage={levels.manage} />}
       {tab === 'env' && levels.manage && <EnvEditor serverId={serverId} app={app} />}
-      {tab === 'domains' && <DomainsPanel serverId={serverId} host={host} status={s} onEdit={levels.manage ? () => setTab('config') : undefined} />}
+      {tab === 'domains' && (
+        <DomainsPanel serverId={serverId} app={app} status={s} proxyMode={proxyMode} canOperate={levels.operate} onEdit={levels.manage ? () => setTab('config') : undefined} />
+      )}
 
       {dialog === 'deploy' && (
         <DeploySourceDialog app={app} onDeploy={(label, pack) => void run.deploy(label, pack)} onClose={() => setDialog(null)} />
@@ -275,8 +278,10 @@ export default function AppDetail({
           confirmLabel="Delete app"
           options={[{ key: 'purge', label: 'Also delete its bastion.yml, .env and volumes', hint: 'Without this they stay on the server, and deploying again restores the app.' }]}
           onConfirm={async (opts) => {
-            await api.delete(appPath(serverId, app, opts.purge ? '?purge=1' : ''));
+            const res = await api.delete<{ proxy?: DeployNginxApplyResult }>(appPath(serverId, app, opts.purge ? '?purge=1' : ''));
             toast.success(`${app} deleted`);
+            const nginx = nginxSyncMessage(res?.proxy);
+            if (nginx) toast.warning(nginx);
             await qc.invalidateQueries({ queryKey: deployKeys.apps(serverId) });
             onBack();
           }}

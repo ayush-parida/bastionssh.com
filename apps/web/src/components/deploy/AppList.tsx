@@ -34,6 +34,9 @@ function certText(row: DeployAppRow): { text: string; warn: boolean } {
 /**
  * The server's apps (spec §7): domains, health, current release, certificate
  * and memory/CPU. Read from the server on every load; a row opens the app.
+ * The certificate and memory/CPU columns show only when the server reports
+ * them for some app (bastionctl's list leaves them out today; an app's
+ * Domains tab and its Overview have both) rather than as a column of dashes.
  */
 export default function AppList({
   apps,
@@ -45,6 +48,8 @@ export default function AppList({
   /** Shown to members who manage deployments on this server. */
   onNew?: () => void;
 }) {
+  const showCert = apps.some((a) => a.certificate !== undefined);
+  const showUsage = apps.some((a) => a.usage !== undefined);
   return (
     <section aria-label="Apps" className="rounded-lg border border-border bg-card">
       <div className="flex items-center gap-2 border-b border-border px-4 py-3">
@@ -70,8 +75,8 @@ export default function AppList({
                 <th className="px-4 py-2 font-medium">Domains</th>
                 <th className="px-4 py-2 font-medium">Health</th>
                 <th className="px-4 py-2 font-medium">Release</th>
-                <th className="px-4 py-2 font-medium">Certificate</th>
-                <th className="px-4 py-2 font-medium">Memory / CPU</th>
+                {showCert && <th className="px-4 py-2 font-medium">Certificate</th>}
+                {showUsage && <th className="px-4 py-2 font-medium">Memory / CPU</th>}
               </tr>
             </thead>
             <tbody>
@@ -113,12 +118,14 @@ export default function AppList({
                       <HealthBadge app={app} />
                     </td>
                     <td className="px-4 py-2.5 font-mono text-xs">{app.currentRelease ?? '—'}</td>
-                    <td className={cn('px-4 py-2.5 text-xs', cert.warn && 'text-amber-600')}>{cert.text}</td>
-                    <td className="px-4 py-2.5 text-xs">
-                      {app.usage
-                        ? `${formatBytes(app.usage.memoryBytes, 0)}${app.usage.memoryLimitBytes ? ` / ${formatBytes(app.usage.memoryLimitBytes, 0)}` : ''} · ${app.usage.cpuPercent.toFixed(1)}%`
-                        : '—'}
-                    </td>
+                    {showCert && <td className={cn('px-4 py-2.5 text-xs', cert.warn && 'text-amber-600')}>{cert.text}</td>}
+                    {showUsage && (
+                      <td className="px-4 py-2.5 text-xs">
+                        {app.usage
+                          ? `${formatBytes(app.usage.memoryBytes, 0)}${app.usage.memoryLimitBytes ? ` / ${formatBytes(app.usage.memoryLimitBytes, 0)}` : ''} · ${app.usage.cpuPercent.toFixed(1)}%`
+                          : '—'}
+                      </td>
+                    )}
                   </tr>
                 );
               })}

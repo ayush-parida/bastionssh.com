@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DEPLOY_NAME_PATTERN } from '@smt/shared';
+import { DEPLOY_NAME_PATTERN, type DeployProxyMode } from '@smt/shared';
 import { X } from 'lucide-react';
 import { configTemplate } from '@/lib/deploy.js';
 import ConfigEditor from './ConfigEditor.js';
@@ -11,12 +11,15 @@ import ConfigEditor from './ConfigEditor.js';
 export default function NewAppDialog({
   serverId,
   existing,
+  proxyMode,
   onCreated,
   onClose,
 }: {
   serverId: string;
   /** Apps already on the server: saving a config under one of their names would replace its bastion.yml. */
   existing: string[];
+  /** The server's proxy mode: bastionctl refuses a config for the other one. */
+  proxyMode: DeployProxyMode;
   onCreated: (app: string) => void;
   onClose: () => void;
 }) {
@@ -75,7 +78,7 @@ export default function NewAppDialog({
               </div>
             </form>
           ) : (
-            <ConfigEditor serverId={serverId} app={name} canManage creating initialText={configTemplate(name, domain)} onSaved={() => onCreated(name)} />
+            <ConfigEditor serverId={serverId} app={name} canManage creating initialText={configTemplate(name, domain, proxyMode)} onSaved={() => onCreated(name)} />
           )}
         </div>
       </div>

@@ -153,7 +153,51 @@ async function stubDeploy(page: Page, serverId: string, sent: Sent[], state = { 
         socket: 'writable',
       });
     }
+    if (path === '/proxy') {
+      return json({
+        mode: state.setUp ? 'caddy' : null,
+        nginx: { detected: false, installed: false, running: false, ports: { http: false, https: false }, certbot: false, confInclude: false, helper: 'missing', sudo: false },
+        helperPath: '/usr/local/sbin/bastion-nginx',
+        instructions: [],
+      });
+    }
     if (path === '/apps') return json(state.setUp ? [summary('site1'), summary('blog')] : []);
+    if (path === '/apps/site1/domains') {
+      return json({
+        app: 'site1',
+        proxy: 'caddy',
+        tls: 'auto',
+        serverAddresses: ['203.0.113.10'],
+        addressSource: 'host',
+        domains: [
+          {
+            domain: 'site1.example.com',
+            dns: {
+              status: 'wrong',
+              addresses: ['198.51.100.7'],
+              detail: 'site1.example.com points at 198.51.100.7, not this server (203.0.113.10). Set the record below at your DNS provider, replacing the old value.',
+              records: [{ type: 'A', name: 'site1.example.com', value: '203.0.113.10' }],
+            },
+            certificate: {
+              domain: 'site1.example.com',
+              source: 'acme',
+              issuer: "Let's Encrypt R11",
+              notBefore: new Date(Date.now() - 30 * 86_400_000).toISOString(),
+              notAfter: new Date(Date.now() + 60 * 86_400_000).toISOString(),
+              lastError: null,
+              state: 'valid',
+              daysLeft: 59,
+            },
+          },
+        ],
+        ports: [
+          { port: 80, status: 'open', detail: 'Connected' },
+          { port: 443, status: 'filtered', detail: 'No answer', remediation: 'Allow inbound TCP 443 from anywhere' },
+        ],
+        certificatesError: null,
+        checkedAt: new Date().toISOString(),
+      });
+    }
     if (path === '/apps/site1' && method === 'GET') {
       return json({
         ...summary('site1'),
@@ -443,6 +487,25 @@ test.describe('Deployments', () => {
       ['PUT', '/apps/site1/env/API_TOKEN', { value: 'tok-123' }],
       ['DELETE', '/apps/site1/env/SECRET_KEY', null],
     ]);
+  });
+
+  test('domains: DNS checked by the server, with the record to create, ports and the certificate', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await page.getByRole('tab', { name: 'Domains' }).click();
+
+    const domain = page.getByRole('list', { name: 'Domains' }).getByRole('listitem', { name: 'site1.example.com' });
+    await expect(domain).toContainText('Points elsewhere');
+    await expect(domain).toContainText('203.0.113.10');
+    await expect(domain).toContainText("Let's Encrypt R11");
+    await expect(domain).toContainText('59 d');
+    const ports = page.getByRole('list', { name: 'Ports' });
+    await expect(ports).toContainText('Port 443: filtered');
+    await expect(ports).toContainText('Allow inbound TCP 443');
+    await snap(page, 'domains');
+    expect(sent).toEqual([]);
   });
 
   test('a viewer sees apps and releases, but no actions, config editing or .env', async ({ page }) => {

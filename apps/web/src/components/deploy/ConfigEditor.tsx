@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DeployValidationIssue } from '@smt/shared';
+import type { DeployNginxApplyResult, DeployValidationIssue } from '@smt/shared';
 import { parseDocument } from 'yaml';
 import { Loader2, RotateCcw, Save, TriangleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
-import { appPath, deployKeys, issuesAt, validationIssues } from '@/lib/deploy.js';
+import { appPath, deployKeys, issuesAt, nginxSyncMessage, validationIssues } from '@/lib/deploy.js';
 import { cn } from '@/lib/utils.js';
 
 type Path = (string | number)[];
@@ -127,10 +127,12 @@ export default function ConfigEditor({
   const dirty = loaded !== undefined && current !== loaded;
 
   const save = useMutation({
-    mutationFn: () => api.put<{ app: string; created: boolean }>(appPath(serverId, app, '/config'), { text: current }),
+    mutationFn: () => api.put<{ app: string; created: boolean; proxy?: DeployNginxApplyResult }>(appPath(serverId, app, '/config'), { text: current }),
     onSuccess: (res) => {
       setIssues(null);
       toast.success(res.created ? `${app} created` : 'bastion.yml saved');
+      const nginx = nginxSyncMessage(res.proxy);
+      if (nginx) toast.warning(nginx);
       qc.setQueryData(deployKeys.config(serverId, app), { text: current });
       qc.invalidateQueries({ queryKey: deployKeys.all(serverId) });
       onSaved?.();
