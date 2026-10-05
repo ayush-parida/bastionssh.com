@@ -288,6 +288,10 @@ export class DockerApi {
     if (pending) onLine(pending);
   }
 
+  inspectNetwork(name: string) {
+    return this.inspect<NetworkInspect>(`/networks/${encodeURIComponent(name)}`);
+  }
+
   async ensureNetwork(name: string, labels: Record<string, string>, opts: { internal?: boolean } = {}): Promise<boolean> {
     const existing = await this.inspect(`/networks/${encodeURIComponent(name)}`);
     if (existing) return false;
@@ -388,4 +392,9 @@ export interface ContainerInspect {
   State: { Status: string; Running: boolean; Restarting?: boolean; StartedAt?: string; ExitCode?: number; Health?: { Status: string } };
   RestartCount?: number;
   NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null; IPAddress?: string } | null> | null };
+}
+
+export interface NetworkInspect {
+  Name: string;
+  IPAM?: { Config?: Array<{ Subnet?: string; Gateway?: string }> | null } | null;
 }

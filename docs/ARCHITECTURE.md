@@ -669,8 +669,10 @@ Deployments section.
   setup keeps a server's mode, and a first setup picks nginx when `deploy/nginx.ts`'s constant
   probe finds a running host nginx listening on 80/443. In nginx mode `bastion-caddy` stays —
   it publishes only `127.0.0.1:18480`, its Caddyfile is plain `http://` sites with
-  `auto_https off` and `trusted_proxies static private_ranges` — so switches, health checks
-  and rollbacks are unchanged; the host's nginx terminates TLS and forwards each app's domains
+  `auto_https off` and `trusted_proxies static <gateway>/32 127.0.0.1/32` — forwarded headers
+  count only from where the host's nginx reaches it (the `bastion-apps` gateway the loopback
+  port forwards from, read from the network at each switch), not from an app container on
+  the same network — so switches, health checks and rollbacks are unchanged; the host's nginx terminates TLS and forwards each app's domains
   to it. A config's `proxy:` must match the server's mode (validated), and nginx mode allows
   `tls: auto | staging` only. After each successful proxy switch bastionctl writes
   `proxy/nginx/<app>.site` (app, tls, upstream port, domains) for every served app and removes
@@ -680,14 +682,19 @@ Deployments section.
   at `/usr/local/sbin/bastion-nginx` with a sudoers rule for that path only — the one command
   BastionSSH runs as root (`sudo -n`, argv quoted; `GET /proxy` lists the missing setup
   steps). It re-validates every value of the site file (`LC_ALL=C`, no links, size and count
-  caps), generates `/etc/nginx/conf.d/bastion-<app>.conf` from those values only (port 80:
+  caps), generates `/etc/nginx/conf.d/bastion-<app>.conf` (`/etc/nginx/http.d` when that
+  exists: Alpine includes its conf.d outside `http { }`) from those values only (port 80:
   ACME webroot `/var/lib/bastion-nginx/acme` and, with a certificate, a redirect; 443: TLS and
   `proxy_pass` to the loopback port), runs `nginx -t` and `nginx -s reload` and restores the
   previous file on either failure, skips the reload when nothing changed, and runs `certbot
   certonly --webroot --cert-name bastion-<app>[-staging] --keep-until-expiring --expand
   --deploy-hook 'nginx -s reload'` (renewal is certbot's timer). A certbot failure leaves the
   HTTP block serving and is kept in `/var/lib/bastion-nginx/<cert>.error` for `status`. One run
-  at a time (a `mkdir` lock holding its pid: a run killed outright is taken over, signals release it); a domain `nginx -t` warns another server block already claims ("conflicting server name") restores the previous file, since nginx would serve whichever it read first. BastionSSH hashes the installed helper before each run (409
+  at a time (a `mkdir` lock holding its pid: a run killed outright is taken over, signals release it). `apply`
+  first removes the server blocks of apps the root no longer serves — a `bastion-<other>.conf`
+  whose first line names this root's site file, which bastionctl removed (deleted from a shell,
+  or left out of the proxy) — keeping their certificates, and puts them back if `nginx -t`
+  refuses the result. A domain `nginx -t` warns another server block already claims ("conflicting server name") restores the previous file, since nginx would serve whichever it read first. BastionSSH hashes the installed helper before each run (409
   `nginx_helper_missing` / `nginx_helper_mismatch`), runs `apply` after a successful deploy
   (its lines join the deploy log before `result`) or config change once the site file exists,
   and `remove` after a delete; failures are reported in the response and audited as
@@ -717,6 +724,12 @@ Deployments section.
   `nginx`/`certbot`; `deploy-domains.test.ts` covers mode detection at setup, the helper after
   deploy/config/delete, the domains report in both modes and alerts. Playwright
   `15-deployments.spec.ts` drives the tab against a stubbed `/api/deploy`.
+  `nginx.integration.test.ts` runs nginx mode against real software (env-gated; images in
+  `deploy/nginx-it/`): a `docker:dind`-based server with sshd, Alpine's nginx and certbot, and
+  Pebble as the ACME CA — setup and the administrator's steps as shown, an app on two domains
+  with a certificate by webroot over verified TLS, certbot's renewal reloading nginx, redeploy
+  and rollback, forwarded headers from nginx only, `nginx -t` refusing a change, a stale server
+  block removed by the next apply, delete.
 
 ### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
 

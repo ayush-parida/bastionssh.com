@@ -97,6 +97,7 @@ esac
     .readFileSync(SCRIPT, 'utf8')
     .replace(/^PATH=.*$/m, `PATH=${bin}:/usr/bin:/bin:/usr/sbin:/sbin`)
     .replace(/^CONF_DIR=.*$/m, `CONF_DIR=${conf}`)
+    .replace(/^ALPINE_CONF_DIR=.*$/m, `ALPINE_CONF_DIR=${dir}/etc/nginx/http.d`)
     .replace(/^STATE_DIR=.*$/m, `STATE_DIR=${state}`)
     .replace(/^LIVE_DIR=.*$/m, `LIVE_DIR=${live}`)
     .replace(/^IPV6_PROBE=.*$/m, `IPV6_PROBE=${dir}/no-ipv6`)
@@ -195,6 +196,42 @@ describe('bastion-nginx apply', () => {
     // A conflict on a name that is not the app's own is not its business
     write(path.join(ctl, 'warn'), 'nginx: [warn] conflicting server name "www.shop.example.com" on 0.0.0.0:80, ignored\n');
     expect(helper('apply', root, 'site1').values.result).toBe('applied');
+  });
+
+  it('removes the server blocks of apps this root no longer serves, and only those', () => {
+    site('app=blog\ntls=auto\nupstream=18480\ndomain=blog.io\n', 'blog');
+    helper('apply', root, 'site1');
+    helper('apply', root, 'blog');
+    const blog = fs.readFileSync(path.join(conf, 'bastion-blog.conf'), 'utf8');
+    // Generated from another deployments folder on this host, and one an administrator wrote
+    write(path.join(conf, 'bastion-other.conf'), blog.replaceAll(root, '/srv/other').replaceAll('blog', 'other'));
+    write(path.join(conf, 'bastion-mine.conf'), 'server { listen 80; server_name mine.io; }\n');
+    // bastionctl removed blog's site file: deleted from a shell, or left out of the proxy
+    fs.rmSync(path.join(root, 'proxy/nginx/blog.site'));
+    fs.rmSync(path.join(ctl, 'log'));
+
+    const r = helper('apply', root, 'site1');
+    expect(r.values).toEqual({ result: 'unchanged', certificate: 'present' });
+    expect(r.stderr).toContain(`nginx: removed the server block of blog, which ${root} no longer serves`);
+    expect(fs.readdirSync(conf).sort()).toEqual(['bastion-mine.conf', 'bastion-other.conf', 'bastion-site1.conf', 'default.conf']);
+    expect(calls().filter((c) => c.startsWith('nginx'))).toEqual(['nginx -t', 'nginx -s reload']);
+    // Its certificate stays (remove deletes it)
+    expect(fs.existsSync(path.join(live, 'bastion-blog/fullchain.pem'))).toBe(true);
+
+    fs.rmSync(path.join(ctl, 'log'));
+    helper('apply', root, 'site1');
+    expect(calls().filter((c) => c.startsWith('nginx'))).toEqual([]);
+  });
+
+  it('puts stale server blocks back when nginx refuses the config without them', () => {
+    site('app=blog\ntls=auto\nupstream=18480\ndomain=blog.io\n', 'blog');
+    helper('apply', root, 'site1');
+    helper('apply', root, 'blog');
+    fs.rmSync(path.join(root, 'proxy/nginx/blog.site'));
+    write(path.join(ctl, 'fail-test'), '');
+    const r = helper('apply', root, 'site1');
+    expect(r.stderr).toContain('warning: nginx refused the config without the stale server blocks of blog; they are back');
+    expect(fs.readdirSync(conf).sort()).toEqual(['bastion-blog.conf', 'bastion-site1.conf', 'default.conf']);
   });
 
   it('takes over the lock of a run that was killed, and waits for one that is alive', () => {
@@ -296,6 +333,23 @@ describe('bastion-nginx remove, status and check', () => {
     write(path.join(ctl, 'fail-test'), '');
     expect(helper('remove', 'site1').values.error).toMatch(/^nginx -t failed without the server block of site1; it is back/);
     expect(fs.existsSync(path.join(conf, 'bastion-site1.conf'))).toBe(true);
+  });
+
+  it("writes into Alpine's http.d, which its nginx.conf includes inside http { } (conf.d is outside)", () => {
+    const httpd = path.join(dir, 'etc/nginx/http.d');
+    fs.mkdirSync(httpd);
+    expect(helper('apply', root, 'site1').values.result).toBe('applied');
+    expect(fs.readdirSync(httpd)).toEqual(['bastion-site1.conf']);
+    expect(fs.readdirSync(conf)).toEqual(['default.conf']);
+    expect(helper('remove', 'site1').values.result).toBe('removed');
+    expect(fs.readdirSync(httpd)).toEqual([]);
+  });
+
+  it('keeps messages readable and on one line', () => {
+    write(path.join(ctl, 'fail-certbot'), '');
+    // Not [:print:]: BusyBox tr does not know the class and would blank out most letters
+    expect(fs.readFileSync(SCRIPT, 'utf8')).not.toMatch(/tr -c '\[:/);
+    expect(helper('apply', root, 'site1').values.error).toBe('certbot: Some challenges have failed. Domain: site1.com Type: unauthorized ');
   });
 
   it('reports what is installed', () => {

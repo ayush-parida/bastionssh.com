@@ -383,7 +383,7 @@ Unknown keys are refused, and the editor shows every problem at once. Next.js ap
 | For | servers with nothing on ports 80/443 | servers that already run nginx for other sites |
 | Ports 80/443 | the `bastion-caddy` container | your nginx; `bastion-caddy` listens on `127.0.0.1:18480` only |
 | Certificates | Caddy, automatically, renewed by Caddy | `certbot certonly --webroot`, renewed by certbot's timer, which reloads nginx |
-| What changes on the host | nothing outside the deployments folder | only `/etc/nginx/conf.d/bastion-<app>.conf`, one file per app |
+| What changes on the host | nothing outside the deployments folder | only `/etc/nginx/conf.d/bastion-<app>.conf` (`/etc/nginx/http.d/` on Alpine), one file per app |
 | TLS options | all below | `auto` and `staging` |
 
 Setup picks nginx mode by itself when an nginx on the host owns port 80 or 443 (and keeps whichever mode a server was set up with). In nginx mode every app still goes through `bastion-caddy`, so zero-downtime switches, health checks and rollbacks work the same; nginx terminates TLS and forwards each app's domains to it. Its server block only changes when an app's domains do, and it is written by `bastion-nginx`, a small script that is the only thing BastionSSH runs as root. Install it once, root-owned, and allow just that command — the Deployments tab shows these lines with your server's paths and user, and lists only what is still missing:
@@ -395,7 +395,7 @@ echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/bastion-nginx' | sudo tee /etc
 sudo chmod 0440 /etc/sudoers.d/bastion-nginx
 ```
 
-The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails, or when `nginx -t` reports one of the app's domains as already claimed by another server block on the host (a site you serve yourself is never taken over). It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu). From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`.
+The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and `certbot delete` when an app is deleted) — nothing else — and puts the previous server block back when `nginx -t` or the reload fails, or when `nginx -t` reports one of the app's domains as already claimed by another server block on the host (a site you serve yourself is never taken over). It reads only the checked values of `proxy/nginx/<app>.site`, and BastionSSH checks it is byte for byte the shipped copy before each use. `/etc/nginx/nginx.conf` must include `/etc/nginx/conf.d/*.conf` in its `http { }` block (the default on Debian and Ubuntu; on Alpine the blocks go to `/etc/nginx/http.d/`, which its default config includes there). The server block of an app that is no longer served — deleted with `bastionctl` from a shell, say — is removed by the next `apply` of any app; its certificate stays until `bastion-nginx remove`. Caddy keeps the `X-Forwarded-For` of requests from your nginx only; anything else reaching it has the header replaced by its own address. From a shell: `sudo bastion-nginx apply /opt/bastion site1`, `sudo bastion-nginx status site1`.
 
 ### Several sites on one server
 

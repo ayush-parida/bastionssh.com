@@ -1,4 +1,8 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { BastionctlBundle } from './bundle.js';
 import { DETECT_SCRIPT, detectNginx, helperCommand, nginxCertificates, nginxInstructions, NGINX_HELPER_PATH, opensslIssuer, parseHelperStatus, proxyState, runHelper } from './nginx.js';
@@ -67,11 +71,25 @@ describe('detecting the host nginx', () => {
     expect(await detectNginx(tampered.r, BUNDLE)).toMatchObject({ detected: false, running: false, helper: 'mismatch', certbot: false, sudo: false });
   });
 
+  it("finds a running nginx with BusyBox's pgrep too, which matches nginx's retitled processes", () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'bastion-detect-'));
+    try {
+      // BusyBox: -x compares "nginx: master process nginx", so only -f finds it
+      fs.writeFileSync(path.join(bin, 'pgrep'), `#!/bin/sh\n[ "$1" = -f ] && [ "$2" = '^nginx: master process' ]\n`, { mode: 0o755 });
+      const r = spawnSync('/bin/sh', ['-c', DETECT_SCRIPT], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin` } });
+      expect(r.stdout).toContain('running=yes\n');
+      fs.writeFileSync(path.join(bin, 'pgrep'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+      expect(spawnSync('/bin/sh', ['-c', DETECT_SCRIPT], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin` } }).stdout).toContain('running=no\n');
+    } finally {
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   it('lists the one-time commands for what is missing, nothing once ready', async () => {
     const missing = { detected: true, installed: true, running: true, ports: { http: true, https: true }, certbot: false, confInclude: false, helper: 'missing' as const, sudo: false };
     expect(nginxInstructions('/opt/bastion', 'deploy', missing)).toEqual([
       'sudo apt-get install -y certbot    # or your distribution’s certbot package (its timer renews certificates)',
-      '# /etc/nginx/nginx.conf must include /etc/nginx/conf.d/*.conf inside http { }: the server blocks are written there',
+      '# /etc/nginx/nginx.conf must include /etc/nginx/conf.d/*.conf (on Alpine /etc/nginx/http.d/*.conf) inside http { }: the server blocks are written there',
       "'sudo' 'install' '-o' 'root' '-g' 'root' '-m' '0755' '/opt/bastion/bin/bastion-nginx' '/usr/local/sbin/bastion-nginx'",
       "echo 'deploy ALL=(root) NOPASSWD: /usr/local/sbin/bastion-nginx' | sudo tee /etc/sudoers.d/bastion-nginx && sudo chmod 0440 /etc/sudoers.d/bastion-nginx",
     ]);

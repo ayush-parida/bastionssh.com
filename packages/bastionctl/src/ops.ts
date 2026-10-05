@@ -330,7 +330,7 @@ async function setupLocked(ctx: Ctx, opts: { proxy?: DeployProxyMode }): Promise
     ctx.log(`Pulling ${images.caddy}`);
     await docker.pull(images.caddy, (line) => ctx.log(line));
   }
-  writeInitialCaddyfile(ctx);
+  await writeInitialCaddyfile(ctx);
 
   let info = await docker.inspectContainer(PROXY_CONTAINER);
   if (info && info.Config.Image !== CADDY_IMAGE) {

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { generateCaddyfile, type ProxySite } from './caddy.js';
+import { generateCaddyfile, isAddressRange, type ProxySite } from './caddy.js';
 import { checkConfigText, validateForServer } from './config.js';
 import type { Ctx } from './context.js';
 import { DockerApi } from './docker.js';
@@ -70,13 +70,23 @@ beforeEach(() => {
 });
 
 describe('Caddy behind nginx', () => {
-  it('serves plain HTTP with automatic HTTPS off and trusts the forwarded headers of the proxy in front', () => {
-    const text = generateCaddyfile([site()], 'nginx');
-    expect(text).toContain('\tauto_https off\n\tservers {\n\t\ttrusted_proxies static private_ranges\n\t}\n}');
+  it('serves plain HTTP with automatic HTTPS off and trusts the forwarded headers of the host nginx only', () => {
+    const text = generateCaddyfile([site()], 'nginx', ['172.18.0.1/32', '127.0.0.1/32']);
+    expect(text).toContain('\tauto_https off\n\tservers {\n\t\ttrusted_proxies static 172.18.0.1/32 127.0.0.1/32\n\t}\n}');
+    expect(text).not.toContain('private_ranges');
+    // Without the gateway: loopback only
+    expect(generateCaddyfile([site()], 'nginx')).toContain('\t\ttrusted_proxies static 127.0.0.1/32\n');
     expect(text).toContain('http://site1.com {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-r1:3000 {\n\t\tlb_try_duration 5s\n\t}\n}');
     // The www redirect still happens in Caddy, to HTTPS (nginx terminates TLS)
     expect(text).toContain('http://www.site1.com {\n\tredir https://site1.com{uri} permanent\n}');
     expect(text).not.toContain('tls');
+  });
+
+  it('puts nothing but addresses into trusted_proxies', () => {
+    expect(['127.0.0.1', '10.0.0.1/32', '::1', 'fd00::/8'].every(isAddressRange)).toBe(true);
+    for (const bad of ['private_ranges', '10.0.0.1/33', '10.0.0.1/8/8', '1.2.3.4\n}', '', '1.2.3.4/']) expect(isAddressRange(bad), bad).toBe(false);
+    expect(() => generateCaddyfile([site()], 'nginx', ['10.0.0.1 }\nimport x'])).toThrow(/Invalid trusted proxy/);
+    expect(() => generateCaddyfile([site()], 'nginx', [])).toThrow(/Invalid trusted proxy/);
   });
 });
 
@@ -149,6 +159,8 @@ describe('setup and deploy in nginx mode', () => {
     const outcome = await ops.deploy(ctx(), 'site1', source);
     expect(outcome.result).toBe('success');
     expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('http://site1.com {');
+    // Forwarded headers count only from the bastion-apps gateway (where the loopback port forwards from) and loopback
+    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toContain('\t\ttrusted_proxies static 172.30.0.1/32 127.0.0.1/32\n');
     expect(fs.readFileSync(siteFile(layout, 'site1'), 'utf8')).toContain('domain=www.site1.com');
     expect(logs).toContain(`nginx: the server block of site1 changed; run: sudo /usr/local/sbin/bastion-nginx apply ${root} site1`);
 
