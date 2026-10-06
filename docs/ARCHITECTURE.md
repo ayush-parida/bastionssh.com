@@ -626,7 +626,10 @@ Deployments section.
   TLS served. It then moves
   `current`, stops and removes the old container after a drain delay (Caddy retries a GET
   it dropped) and prunes releases and labelled images beyond `keep_releases` (never current
-  or previous). Locks are files linked into place whole (never readable half written), stale
+  or previous). `restart` runs the same switch for the current release: a fresh container
+  (created as `<name>-next`, renamed to the release's name once the old one is gone — the
+  live alias survives the rename) so `.env`, volumes, limits and domains changed since apply
+  without a build; an unhealthy one is removed and the old container keeps serving. Locks are files linked into place whole (never readable half written), stale
   after 30 minutes or when the holder's bastionctl container is gone, and taken over only if
   the file is still the stale one: `apps/<app>/deploy.lock` per app, `setup.lock` (two setups
   run in turn; a network created meanwhile by anyone counts as there), `build.lock` (a second

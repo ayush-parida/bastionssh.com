@@ -55,6 +55,9 @@ import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
 const serverParams = z.object({ id: z.string().min(1) });
 const appParams = serverParams.extend({ app: z.string().regex(DEPLOY_NAME_PATTERN, 'Invalid app name') });
 const envParams = appParams.extend({ key: z.string().regex(DEPLOY_ENV_KEY_PATTERN, 'Invalid variable name') });
+/** A restart waits for the new container's health check (bastion.yml timeout, default 30s) and the drain. */
+const RESTART_TIMEOUT_MS = 15 * 60_000;
+
 const rollbackBody = z.object({ release: z.string().regex(DEPLOY_NAME_PATTERN, 'Invalid release id') }).strict();
 const configBody = z.object({ text: z.string().max(64 * 1024) }).strict();
 const envBody = z.object({ value: z.string().max(64 * 1024) }).strict();
@@ -376,7 +379,8 @@ export async function deployRoutes(app: FastifyInstance) {
       const { id, app: name } = appParams.parse(req.params);
       try {
         return await withDeploy(req, id, async (ctx) => {
-          const { value } = await ctx.run<{ app: string; container: string }>([action, name]);
+          // A restart starts and health-checks a fresh container before switching: allow for it
+          const { value } = await ctx.run<{ app: string; container: string }>([action, name], action === 'restart' ? { timeoutMs: RESTART_TIMEOUT_MS } : undefined);
           await auditDeploy(req, `deploy.${action}`, ctx, { app: name, container: value.container });
           return value;
         });

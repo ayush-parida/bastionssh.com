@@ -160,6 +160,16 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         fake.containers.set(name, c);
         return json(201, { Id: c.Id, Warnings: [] });
       }
+      if ((m = /^\/containers\/([^/]+)\/rename$/.exec(p)) && req.method === 'POST') {
+        const c = find(m[1]!);
+        if (!c) return notFound('container');
+        const to = q.get('name') ?? '';
+        if (fake.containers.has(to)) return json(409, { message: `Conflict. The container name "/${to}" is already in use` });
+        fake.containers.delete(c.Name);
+        c.Name = to;
+        fake.containers.set(to, c);
+        return json(204, undefined);
+      }
       if ((m = /^\/containers\/([^/]+)\/(start|stop|restart)$/.exec(p)) && req.method === 'POST') {
         const c = find(m[1]!);
         if (!c) return notFound('container');

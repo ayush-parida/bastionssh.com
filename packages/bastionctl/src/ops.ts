@@ -82,6 +82,8 @@ const TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BUILD_LOCK_WAIT_MS = 20 * 60_000;
 /** How long a setup waits for another one (BastionSSH gives setup 10 minutes; pulling the proxy image is most of it). */
 const SETUP_LOCK_WAIT_MS = 8 * 60_000;
+/** A restart's new container, until the old one is gone and it takes the release's name. */
+const NEXT_SUFFIX = '-next';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -215,10 +217,16 @@ async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string,
  *
  * Any failure before step 3 removes the new container (and with it its
  * alias) and leaves the old one serving.
+ *
+ * With `recreate` (restart) the new container is the same release as the
+ * live one, so it starts under a temporary name and takes the release's
+ * name once the old container is gone; Caddy follows the live alias, which
+ * a rename keeps.
  */
-async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord): Promise<void> {
-  const name = containerName(config.name, record.id);
-  // A container of this release left from an earlier activation (rollback to it)
+async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord, opts: { recreate?: boolean } = {}): Promise<void> {
+  const releaseName = containerName(config.name, record.id);
+  const name = opts.recreate ? `${releaseName}${NEXT_SUFFIX}` : releaseName;
+  // A container of this release left from an earlier activation (rollback to it), or a restart cut off
   await ctx.docker.remove(name);
   ctx.log(`Starting ${name}`);
   await ctx.docker.createContainer(name, appContainerSpec(ctx, config, record.id, record.image));
@@ -255,6 +263,10 @@ async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord
       await ctx.docker.stop(c.Id).catch((err: Error) => ctx.log(`warning: ${err.message}`));
       await ctx.docker.remove(c.Id).catch((err: Error) => ctx.log(`warning: ${err.message}`));
     }
+  }
+  if (opts.recreate) {
+    // It serves already; a failed rename only leaves the temporary name, which liveContainer finds too
+    await ctx.docker.rename(name, releaseName).catch((err: Error) => ctx.log(`warning: could not rename ${name}: ${err.message}`));
   }
 }
 
@@ -675,15 +687,42 @@ async function liveContainer(ctx: Ctx, app: string): Promise<string> {
   const current = currentRelease(ctx.layout, app);
   if (!current) throw new BastionError(`${app} has no current release`);
   const name = containerName(app, current);
-  if (!(await ctx.docker.inspectContainer(name))) throw new BastionError(`The container of ${app}'s current release is gone; deploy or roll back to recreate it`);
-  return name;
+  if (await ctx.docker.inspectContainer(name)) return name;
+  // A restart whose final rename failed
+  if (await ctx.docker.inspectContainer(`${name}${NEXT_SUFFIX}`)) return `${name}${NEXT_SUFFIX}`;
+  throw new BastionError(`The container of ${app}'s current release is gone; deploy or roll back to recreate it`);
 }
 
-export async function restart(ctx: Ctx, app: string): Promise<{ app: string; container: string }> {
-  const name = await liveContainer(ctx, app);
-  ctx.log(`Restarting ${name}`);
-  await ctx.docker.restart(name);
-  return { app, container: name };
+/**
+ * `restart <app>`: a fresh container of the current release, so it starts
+ * with the `.env`, volumes, limits and domains as they are now — a change to
+ * any of them applies without a new build. Same zero-downtime switch as a
+ * deploy: the old container serves until the new one is healthy.
+ */
+export async function restart(baseCtx: Ctx, app: string): Promise<{ app: string; container: string }> {
+  requireApp(baseCtx, app);
+  const config = loadConfig(baseCtx.layout, app);
+  const mask = envFileMasker(envFilePath(baseCtx.layout, app, config));
+  const ctx: Ctx = { ...baseCtx, log: (line) => baseCtx.log(mask(line)) };
+  const releaseLock = await acquireLock(ctx.layout.lock(app), { holder: ctx.actor, docker: ctx.docker, now: ctx.now, what: `deploy of ${app}` });
+  try {
+    const current = currentRelease(ctx.layout, app);
+    if (!current) throw new BastionError(`${app} has no current release`);
+    const record = readRelease(ctx.layout, app, current);
+    if (!record) throw new BastionError(`${app} has no record of release ${current}; deploy it again`);
+    if (!(await ctx.docker.imageExists(record.image))) throw new BastionError(`The image of release ${current} is gone; deploy it again instead`);
+    ctx.log(`Restarting ${app} (release ${current}) with its current settings, by ${ctx.actor}`);
+    try {
+      await activate(ctx, config, record, { recreate: true });
+    } catch (err) {
+      (err as Error).message = mask((err as Error).message);
+      throw err;
+    }
+    ctx.log(`${app} restarted`);
+    return { app, container: await liveContainer(ctx, app) };
+  } finally {
+    releaseLock();
+  }
 }
 
 export async function stop(ctx: Ctx, app: string): Promise<{ app: string; container: string }> {

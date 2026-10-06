@@ -26,6 +26,10 @@ After a successful deploy, releases beyond `keep_releases` (default 5) are delet
 - Rollback follows the same permission as deploy (see [Permissions](permissions.md)).
 - The config used is today's `bastion.yml` (domains, port, limits), not the one of that time.
 
+## Restart
+
+**Restart** on an app's page starts a fresh container of the **current** release the same way: today's `.env`, volumes, limits and domains, a health check, then the switch, then the old container stops. Use it to apply a `.env` or config change without uploading again. If the new container is unhealthy, the old one keeps serving and the restart reports the failure. `NEXT_PUBLIC_*` values are baked into the build, so they still need a deploy.
+
 ## Zero downtime
 
 A deploy or rollback never stops the site:

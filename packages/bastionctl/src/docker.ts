@@ -181,6 +181,11 @@ export class DockerApi {
     await this.request('POST', `/containers/${encodeURIComponent(name)}/restart`, { query: { t: timeoutS }, timeoutMs: (timeoutS + 30) * 1000 });
   }
 
+  /** Rename a container; its network endpoints (and aliases) are kept. */
+  async rename(name: string, newName: string): Promise<void> {
+    await this.request('POST', `/containers/${encodeURIComponent(name)}/rename`, { query: { name: newName } });
+  }
+
   /** Force-remove; gone already is fine. */
   async remove(name: string): Promise<void> {
     try {

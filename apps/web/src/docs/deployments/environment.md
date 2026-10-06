@@ -15,8 +15,9 @@ DATABASE_URL="postgres://app:…@db.internal:5432/app"
 STRIPE_SECRET_KEY="sk_live_…"
 ```
 
-- The values are given to the container **when it is created**: at each deploy, and at a rollback. They are not part of the image, the upload or any release.
-- **Restart does not pick up changes**: it restarts the same container with the environment it was created with. After changing `.env`, deploy again (the same upload is fine) to apply it.
+- The values are given to the container **when it is created**: at each deploy, rollback and restart. They are not part of the image, the upload or any release.
+- **Restart applies changes without a rebuild**: it starts a fresh container of the current release with the `.env` (and volumes, limits and domains) as they are now, health-checks it, switches traffic to it and then stops the old one — no downtime. If the new container fails its health check, the old one keeps serving.
+- `NEXT_PUBLIC_*` values are the exception: they are baked into the build, so changing one needs a new deploy.
 - Names are letters, digits and `_`, not starting with a digit, at most 128 characters. A value may be up to 64 KiB, the whole file up to 256 KiB.
 
 > **Note:** The build does not see `.env`. Builds use only the upload, so a secret is never baked into an image.

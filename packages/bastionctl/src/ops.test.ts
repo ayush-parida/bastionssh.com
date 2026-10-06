@@ -675,6 +675,36 @@ describe('rollback, restart, stop and delete', () => {
     expect((await ops.status(ctx(), 'site1')).container).toMatchObject({ state: 'running' });
   });
 
+  it('restarts into a fresh container that picks up a changed .env, without a build', async () => {
+    await app();
+    const id = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    const before = fake.containers.get(`bastion-site1-${id}`)!;
+    const builds = fake.builds.length;
+    ops.envSet(ctx(), 'site1', 'GREETING', 'hello-new');
+
+    expect(await ops.restart(ctx(), 'site1')).toEqual({ app: 'site1', container: `bastion-site1-${id}` });
+    const after = fake.containers.get(`bastion-site1-${id}`)!;
+    expect(after.Id).not.toBe(before.Id);
+    expect(after.Env).toContain('GREETING=hello-new');
+    expect(after.State.Running).toBe(true);
+    expect(after.Networks).toEqual({ 'bastion-live': { Aliases: ['bastion-site1-live-3000'] } });
+    expect([...fake.containers.keys()].filter((n) => n.startsWith('bastion-site1'))).toEqual([`bastion-site1-${id}`]);
+    expect(fake.builds).toHaveLength(builds);
+    expect(currentRelease(layout, 'site1')).toBe(id);
+  });
+
+  it('keeps the old container serving when the restarted one is unhealthy', async () => {
+    await app();
+    const id = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    const before = fake.containers.get(`bastion-site1-${id}`)!;
+    fake.crashOnStart = (name) => name.endsWith('-next');
+
+    await expect(ops.restart(ctx(), 'site1')).rejects.toThrow();
+    expect(fake.containers.get(`bastion-site1-${id}`)).toBe(before);
+    expect(before.State.Running).toBe(true);
+    expect(fake.containers.has(`bastion-site1-${id}-next`)).toBe(false);
+  });
+
   it('deletes an app: out of the proxy, containers and images gone, data kept unless purged', async () => {
     await app();
     await app('blog', 'name: blog\ndomains: [blog.com]\nbuild: { type: dockerfile }\n');
