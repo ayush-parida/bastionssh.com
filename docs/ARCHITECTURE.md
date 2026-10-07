@@ -631,8 +631,8 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
 
 Design: `docs/superpowers/specs/2026-10-05-server-deployments-design.md`, and for proxy
 upgrades and services `docs/superpowers/specs/2026-10-07-services-and-proxy-upgrade-design.md`
-(the foundation is in place: automatic proxy upgrades and the config for image services; the
-quick-service catalog and its UI come next). All four phases are
+(automatic proxy upgrades, image services, and the quick-services catalog with its UI and
+backups are in place). All four phases are
 in place: A (bastionctl, install and integrity check, migration 0026, the server routes), B
 (build types, zero-downtime switches, health checks, pruning), C (the web tab) and D (nginx
 mode, DNS/port pre-checks, certificate status and alerts); the user guide is the README's
@@ -777,6 +777,61 @@ Deployments section.
   arguments, 128 KiB, no NUL) in the live container through `execStream` (frames demultiplexed
   as they arrive; with `--json` the program's output goes to stderr and the result line
   `{ app, container, exitCode }` to stdout; the exit code is passed on). No server route yet.
+  `run.command` / `run.entrypoint` replace the image's CMD / ENTRYPOINT (argv lists), and
+  `run.publish` takes a third part, the container port (`public:19000:9000`), for a service
+  whose domain serves another port than the one apps use.
+- **Quick services** (services spec §3; `packages/shared/src/services/catalog.ts`): the
+  catalog is code shared by web, server and bastionctl (which bundles it). Each template has
+  its lines, each pinned in `services/images.json` as `repo:<exact tag>@sha256:<index digest>`
+  (`update-service-images` follows each line's moving `track` tag with `docker buildx
+  imagetools`, names the exact tag of the digest from Docker Hub, refuses a line that moved to
+  another major; `catalog.test.ts` in bastionctl checks every reference is digest-pinned and
+  that every template × line × publish × domain makes a bastion.yml `config.ts` accepts). A
+  template carries ports, an optional UI and domain, fixed env and secrets (names and byte
+  lengths), volumes, health check, memory, connection formats (`{host}`, `{port}`, `{KEY}`),
+  backup/restore commands and its upgrade scope (`major` for databases). Commands that need a
+  credential read it inside the container (`sh -c '… "$POSTGRES_PASSWORD"'`), so no secret is
+  on a command line BastionSSH builds. `serviceConfigYaml` writes the service's bastion.yml.
+- **Service routes** (`api/routes/deploy-services.ts`): `POST /servers/:id/services`
+  (manage): body checked against the catalog (template, line, memory ≥ the template's
+  minimum, publish port ≥ 1024, a domain only for a UI), then `status` (409 `exists`),
+  `validate --file` (422), `init --config`, `env set` for fixed values (stdin), `env generate
+  --bytes N --if-missing` per secret, audit `deploy.service_create` (template, line, image,
+  options, which secrets were generated — never values), then the deploy streamed as SSE and
+  audited as any deploy. `GET …/apps/:app/connection` (view) from `status` alone: strings and
+  fields with secrets as `{KEY}`; the browser fills them with the env reveal (step-up).
+  `POST …/service/version` (manage) checks `serviceUpgradeAllowed` (409
+  `major_upgrade_refused` with a docs link, 409 `up_to_date`), runs `set-image` (the runner
+  accepts an argument shaped like an image reference: it starts with `[a-z0-9]`, never an
+  option) and streams the deploy; a failed deploy puts the previous image back
+  (`deploy.service_update`). Backups: list (view), `backup` (operate, 2 h timeout,
+  `deploy.backup_create` with the outcome), download (manage, browser session + passkey
+  step-up, streamed from SFTP — `Remote.download` lstat's a regular file — with
+  `Cache-Control: no-store`, `deploy.backup_download`), restore (manage, `{ confirm: <name> }`
+  or 400 `confirm_mismatch`, `deploy.backup_restore` with the pre-restore file), delete and
+  `PUT …/backups/schedule` (manage; `deploy.backup_delete`, `deploy.backup_schedule`).
+- **Backups in bastionctl** (`backups.ts`, `cron.ts`, `service-config.ts`): `backup` takes the
+  app's deploy lock, execs the template's dump in the live container and streams its stdout to
+  `backups/.<file>.<rand>.partial` with backpressure (`DockerApi.execToFile`), renamed to
+  `<yyyymmddThhmmssZ>[-scheduled|-pre-restore].<ext>` (mode 0600, folder 0700) on exit 0 and
+  a non-empty file; stderr (masked) is the error otherwise. Retention removes the oldest beyond
+  `backups.keep` (or `--keep`). `restore` checks the file name pattern and extension, takes a
+  `pre-restore` backup first (its failure stops the restore), then either copies the file into
+  the container's `/tmp` (`PUT /containers/{id}/archive`, a one-file tar streamed from disk)
+  and runs the restore argv with `{file}` replaced, removing the copy after; or (Redis, Valkey:
+  `replace-file`) stops the container, unpacks the file over `/data/dump.rdb` and starts and
+  health-checks it. `backups schedule` and `set-image` edit bastion.yml with yaml's Document
+  API (comments kept, no folding), validate and write it under `proxy.lock`. `bastion-cron`
+  (created by `ensureCron` on schedule changes, setup and purge; removed when no schedule is
+  left; recreated when its spec hash label differs) is the pinned Node.js image running
+  `while :; do node <root>/bin/bastionctl.mjs backups run-due --json; sleep 60; done` as the
+  SSH user's uid:gid with the socket's group, the root bind-mounted at its own path and the
+  host socket (`BASTION_HOST_SOCKET`, which the wrapper now passes) at `/var/run/docker.sock`,
+  `NetworkMode: none`, `--init`, 256 MiB, `unless-stopped`. `run-due` backs up each scheduled
+  service whose newest backup is a period old (minus a minute), skips one whose lock is held,
+  records each run in `backups/.last-scheduled.json` and retries a failure after 15 minutes. A
+  container rather than the host's crontab: nothing to install or own on the host, survives
+  reboots, follows Reinstall, and each tick runs the bastionctl file BastionSSH last verified.
 - **Install and integrity** (`deploy/bundle.ts`, `deploy/install.ts`, `deploy/upgrade.ts`): the
   server ships the built files; setup uploads them over SFTP (0755) and every other request
   first hashes the installed program and wrapper. A missing one is `not_set_up` (never set up

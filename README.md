@@ -34,7 +34,7 @@
 - ☸️ **Kubernetes** — See a cluster at a glance: nodes with their pods as coloured tiles, pods waiting for a node and why, workloads with their health and redacted details, all live — no kubectl. Clusters are reached directly, through a managed server's SSH connection or through an agent, with TLS always verified and Secret values never leaving the server.
 - 🐳 **Docker** — Containers, images, volumes and networks per server with live status, logs, stats and redacted inspect; container actions, pulls and prune, recorded shells in containers, Compose projects, a cross-server Containers view and opt-in container alerts — all over the server's existing SSH connection, no agent, no exposed daemon port.
 - 🪜 **Jump Hosts & Private Networks** — Reach servers through one or more bastions (like `ssh -J`), or through a small outbound agent on a private network that needs no inbound port.
-- 🚢 **Deployments** — Deploy static sites, Next.js and Dockerfile apps to your own servers with zero-downtime switches, automatic HTTPS and one-click rollback, driven by `bastionctl` on the server.
+- 🚢 **Deployments** — Deploy static sites, Next.js and Dockerfile apps to your own servers with zero-downtime switches, automatic HTTPS and one-click rollback, and start databases, caches, object storage and more from a catalog with backups — driven by `bastionctl` on the server.
 - 💾 **Automatic Database Backups** — Online, consistent backups of the app's own database on a schedule and before every upgrade, with retention, optional off-site copies to object storage, and a one-command restore.
 - 🔒 **Secure by Default** — All keys and credentials encrypted at rest. Self-hosted, no telemetry, no cloud lock-in.
 - 📦 **Easy to Distribute** — Single Docker image and a ready-made Compose file (app + Redis, optional HTTPS with Caddy).
@@ -410,6 +410,12 @@ healthcheck: { type: command, command: [pg_isready, -h, 127.0.0.1, -U, app], tim
 
 `bastionctl env generate orders-db POSTGRES_PASSWORD` writes a random password to the app's `.env` without printing it (also `POST …/env/<KEY>/generate`), and `bastionctl exec orders-db -- psql -U app` runs a program in the live container. A recreate deploy that fails starts the previous container again.
 
+### Quick services
+
+**New service** on the Deployments tab starts a backing service from a catalog: PostgreSQL (18, 17, 16), MySQL (8.4, 9), MariaDB (11.8, 11.4), MongoDB (8.0, 7.0), Redis (8, 7.4), Valkey (9, 8), Memcached, MinIO (the community `pgsty/minio` build — MinIO no longer publishes images), RabbitMQ with its management UI, Meilisearch, ClickHouse (25.8, 26.3), Mailpit, Adminer, Grafana (13, 12) and Uptime Kuma. Pick a version, memory, whether it is reachable from apps on the server only (the default), the server's localhost (for SSH tunnels) or the internet (with a warning), and a domain for services with a web UI. Every image is pinned by digest in BastionSSH's catalog (`pnpm --filter @smt/shared run update-service-images` re-pins them); passwords and keys are generated on the server and never sent to BastionSSH unless revealed with a passkey.
+
+A service's page shows how to connect — its name on the private network (`orders-db:5432`), ports, the published address and ready connection strings with the password masked until revealed — and offers **Update version** within its line (a database's major-version change is refused: move with a backup and restore). Databases (PostgreSQL, MySQL, MariaDB, MongoDB, Redis, Valkey) get **Backups**: back up now (the dump runs inside the container and is written to `apps/<name>/backups/` on the server — nothing passes through BastionSSH), retention, an hourly or daily schedule run by a small `bastion-cron` container on the server, download (passkey) and restore (type the name; the current data is backed up first). Viewers see services and backups, operators also back up, managers create, update, download, restore and delete; every step is audited. Guides for each service, with Node.js/Next.js/Prisma, Python and Go examples, are under **Docs → Deployments → Quick services**.
+
 Unknown keys are refused, and the editor shows every problem at once. Builds use Node.js images pinned by digest (one per supported major version; `22.11` builds on the pinned 22), so a build never changes under you between BastionSSH updates. A config saved while a deploy runs is the one the deploy goes live with: the domains and TLS are read again when traffic switches. Next.js apps need `output: 'standalone'` in `next.config.js`; the build explains how if it is missing.
 
 ### Caddy or nginx
@@ -460,7 +466,7 @@ Nothing an app's log prints of its `.env` values (6 characters or longer) reache
 - **Disk**: each kept release keeps its image (often 150–500 MB for Node apps; layers are shared between releases of an app). `keep_releases: 5` with a few apps fits comfortably in 20 GB; lower it on small disks.
 - As a rule of thumb: 1 vCPU / 1 GB for a few static or small Dockerfile sites, 2 vCPU / 2–4 GB to build and run several Next.js apps.
 
-Permissions follow the **Deployments** module and your access to the server: view sees apps, releases, status and domains; operate deploys, rolls back, restarts and stops; manage sets up, edits `bastion.yml` and `.env` (values are write-only; revealing one needs a passkey and is audited), and deletes apps.
+Permissions follow the **Deployments** module and your access to the server: view sees apps, releases, status, domains, connection details and backups; operate deploys, rolls back, restarts, stops and backs up; manage sets up, creates services, edits `bastion.yml` and `.env` (values are write-only; revealing one needs a passkey and is audited), downloads and restores backups, and deletes apps.
 
 ---
 
