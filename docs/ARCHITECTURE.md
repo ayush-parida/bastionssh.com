@@ -523,7 +523,39 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
   passkey step-up required outright (`DOCKER_REVEAL_NEEDS_PASSKEY` without one). Each is
   audited against the server (`docker.container_*`, `docker.image_pull` with its outcome,
   `docker.image_remove`, `docker.prune` with what was reclaimed — also after a partial
-  failure — and `docker.env_reveal` with variable names only).
+  failure — and `docker.env_reveal` with variable names only). `DELETE images/:id?unused=1`
+  removes an image only by its full id, with no tags left and no container (any state)
+  using it — 409 and nothing changed otherwise — so the cleanup after an upload can never
+  take a tag away (still `remove`, audited with `unusedOnly`).
+- **Image upload** (`image-load.ts`, `api/routes/docker-image-load.ts`):
+  `POST …/images/load?name=` takes what `docker save` writes as the raw request body
+  (`application/octet-stream`; this plugin's content parser hands the stream over unread)
+  and pipes it through `ArchiveMeter` into the Engine's `POST /images/load`
+  (`DockerClient.send`, a chunked body) over the same transport — no temp file on the
+  BastionSSH host, no file on the server. The engine itself reads plain tar and gzip, xz,
+  bzip2 and (API ≥ 1.42, Docker 23) zstd archives — checked live against Docker 27 — so
+  nothing is decompressed on the way; the meter reads the format from the first 512 bytes
+  (magic numbers, `ustar` at 257) and refuses anything else with 400 before the engine gets
+  a byte. `SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES` (default 5 GiB) is enforced from
+  `Content-Length` before reading (413, `Connection: close`) and again while streaming;
+  past it, or when the browser leaves or access is revoked mid-upload, the engine request
+  is destroyed, so the daemon sees a cut-off archive and loads nothing. The request holds
+  one of the user's 8 stream places (`reserveStream`) from its start. The engine answers
+  only after reading the whole archive, so the SSE opens then: `uploaded` (bytes, format),
+  the engine's `load` lines (`Loaded image: …`), then `loaded` — each image inspected and
+  compared with `/version`'s `Os`/`Arch` (`x86_64`/`amd64` and `aarch64`/`arm64` alike; a
+  mismatch adds an "exec format error … rebuild with --platform" warning), with the image
+  its tag pointed at before (from an `/images/json` snapshot) as `replacedId`. From the
+  last byte on, the load runs to its end even if the browser leaves (30 min deadline).
+  Gate `pull`; audited as `docker.image_load` (file name, bytes, format, outcome
+  `loaded`/`failed`/`too_large`/`cancelled`, refs and ids, platform mismatch). The server's
+  limit is in `GET /servers/:id` (`imageUploadMaxBytes`) so the dialog checks files first.
+  The web side (`components/docker/UploadImageDialog.tsx`, `lib/docker-upload.ts`) sends
+  the file with XHR for upload progress, shows the `docker build --platform <server's>` /
+  `docker save | gzip` commands, then offers the optional service update (`up --no-deps`
+  on the service whose configured image matches a loaded tag) and the unused-only cleanup
+  of `replacedId`. What it remembers (image name, project, service) is per server in
+  `localStorage` only. The guide is `src/docs/docker/upload-image.md`.
 - **Exec** (`exec.ts`, `api/routes/docker-exec.ts`): `POST …/containers/:cid/exec` checks
   the container runs, picks `/bin/bash` or `/bin/sh` (a detached `<shell> -c 'exit 0'` must
   exit 0; recent engines refuse the start with a 400 when the binary is missing), creates a
@@ -543,7 +575,11 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
   (`com.docker.compose.project`, `.service`, `.project.working_dir`,
   `.project.config_files`, `.container-number`; one-off `run` containers skipped), so a
   project taken `down` is no longer listed. Actions — only `up --detach`, `down`, `pull`,
-  `restart` — run the CLI on an exec channel of the caller's pooled connection:
+  `restart` on a project, and `up --detach --no-deps`, `restart`, `pull`, `stop` on one
+  service (`POST compose/:project/services/:service/:verb`, the name matched against
+  Compose's pattern — never a leading `-` — and against the services the project's
+  containers carry, then passed last as its own argument) — run the CLI on an exec
+  channel of the caller's pooled connection:
   `sh -c 'cd -- "$1" && shift && exec "$@"' sh <dir> env DOCKER_HOST=unix://<socket>
   docker compose --ansi=never --project-name=… --project-directory=… --file=… <verb>`.
   The script is constant; every label value is its own single-quoted argument
@@ -553,8 +589,11 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
   One action per (server, project) at a time. Output streams as SSE `logs` batches, then
   `exit` (code, signal, duration, timed out after 15 min). An action keeps running when
   the browser leaves; revocation evicts the connection and so ends it. Each is audited as
-  `docker.compose_<verb>` with project, working dir, files and exit code (`null` when cut
-  off). `GET compose/:project/logs` merges up to 32 containers' log streams into one SSE,
+  `docker.compose_<verb>` with project, service (when one), working dir, files and exit
+  code (`null` when cut off); service actions share the project's lock.
+  `GET compose/service-images` inspects one container per service (≤ 100, 8 at a time) for
+  its `Config.Image` — the list's `Image` turns into the old id once an upload moves the
+  tag — so the upload dialog can preselect the service using a loaded tag. `GET compose/:project/logs` merges up to 32 containers' log streams into one SSE,
   each line tagged `source: "<service>-<n>"`, optionally one `service`. Listing is `view`,
   logs `inspect`, actions `pull` (operators and up).
 - **Fleet view** (`fleet.ts`, `api/routes/docker-fleet.ts`): `GET /api/docker/containers
@@ -1625,6 +1664,7 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_SFTP_MAX_UPLOAD_BYTES` | no    | Max SFTP upload size in bytes (default 1 GiB)                 |
 | `SMT_STORAGE_MAX_UPLOAD_BYTES` | no | Max object-storage upload size in bytes (default 5 GiB)       |
 | `SMT_FTP_MAX_UPLOAD_BYTES` | no     | Max FTP upload size in bytes (default 1 GiB)                  |
+| `SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES` | no | Max image archive for Docker → Upload image (default 5 GiB) |
 | `SMT_MONITORING_ENABLED` | no       | Run agentless health checks (default `true`)                  |
 | `SMT_MONITORING_INTERVAL` | no      | Seconds between health sweeps (default 60, minimum 15)        |
 | `SMT_MONITORING_CONCURRENCY` | no   | Servers probed in parallel (default 5)                        |
