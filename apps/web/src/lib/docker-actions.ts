@@ -4,6 +4,7 @@ import type {
   DockerActionResult,
   DockerExecRequest,
   DockerExecSession,
+  DockerImageRemoveResult,
   DockerPullProgress,
   DockerPullRequest,
   DockerStreamEvent,
@@ -30,6 +31,15 @@ export function removeContainer(serverId: string, containerId: string, opts: { f
 
 export function removeImage(serverId: string, imageId: string, force: boolean) {
   return api.delete(dockerPath(serverId, `/images/${encodeURIComponent(imageId)}?force=${force ? 1 : 0}`));
+}
+
+/**
+ * Remove an image by its full id only if nothing needs it any more: no tags
+ * left and no container using it. The server answers 409 (and keeps it)
+ * otherwise — it never takes a tag away.
+ */
+export function removeUnusedImage(serverId: string, imageId: string): Promise<DockerImageRemoveResult> {
+  return api.delete<DockerImageRemoveResult>(dockerPath(serverId, `/images/${encodeURIComponent(imageId)}?unused=1`));
 }
 
 /**

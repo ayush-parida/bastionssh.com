@@ -99,7 +99,8 @@ Changes apply to the next action. Turning off shells for operators also closes o
 
 ## Limits
 
-- Each user may keep **8** live log, stats or event streams open at a time. Close a log view to open another.
+- Each user may keep **8** live log, stats or event streams open at a time — an image upload counts as one while it runs. Close a log view to open another.
+- Image uploads are capped at **5 GiB** by default (`SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES`).
 - Log tails are capped at **10,000** lines.
 - Revoking someone's access to a server, or suspending them, closes their Docker connections and streams immediately.
 
@@ -108,3 +109,4 @@ Changes apply to the next action. Turning off shells for operators also closes o
 - [Containers & actions](/docs/docker/containers-and-actions)
 - [Exec shells & recordings](/docs/docker/exec-shells-and-recordings)
 - [Compose projects](/docs/docker/compose-projects)
+- [Deploy an image built on your machine](/docs/docker/upload-image)

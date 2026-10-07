@@ -9,7 +9,7 @@ import type {
   DockerServerStatus,
   DockerVolume,
 } from '@smt/shared';
-import { ArrowLeft, Container, Download, Eraser, Radar } from 'lucide-react';
+import { ArrowLeft, Container, Download, Eraser, Radar, Upload } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { dockerKeys, dockerPath, useDockerEvents } from '@/lib/docker.js';
@@ -21,6 +21,9 @@ import { DetectDockerButton, DockerProblem, problemOf } from '@/components/docke
 import ContainerActions from '@/components/docker/ContainerActions.js';
 import ImageActions from '@/components/docker/ImageActions.js';
 import PullImageDialog from '@/components/docker/PullImageDialog.js';
+import UploadImageDialog from '@/components/docker/UploadImageDialog.js';
+import DocsLink from '@/components/docs/DocsLink.js';
+import { DOCKER_DOCS } from '@/lib/docker-upload.js';
 import PruneDialog from '@/components/docker/PruneDialog.js';
 import ComposeProjects from '@/components/docker/ComposeProjects.js';
 
@@ -43,7 +46,7 @@ export default function ServerDockerPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>('containers');
   const [showAll, setShowAll] = useState(true);
-  const [dialog, setDialog] = useState<'pull' | 'prune' | null>(null);
+  const [dialog, setDialog] = useState<'pull' | 'upload' | 'prune' | null>(null);
   // `?container=<id>` opens that container's drawer (links from the Containers page)
   const [params] = useSearchParams();
   const [selected, setSelected] = useState<string | null>(params.get('container'));
@@ -164,6 +167,20 @@ export default function ServerDockerPage() {
                   <Download size={14} /> Pull image
                 </button>
               )}
+              {data.permissions.pull && (
+                <span className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setDialog('upload')}
+                    title="Upload an image you built on your own machine (docker save), then update the Compose service that uses it"
+                    className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted"
+                  >
+                    <Upload size={14} /> Upload image
+                  </button>
+                  <DocsLink to={DOCKER_DOCS.upload} className="text-xs" icon={false}>
+                    How?
+                  </DocsLink>
+                </span>
+              )}
               {data.permissions.prune && (
                 <button
                   onClick={() => setDialog('prune')}
@@ -243,6 +260,15 @@ export default function ServerDockerPage() {
         />
       )}
       {dialog === 'pull' && <PullImageDialog serverId={serverId} onClose={() => setDialog(null)} />}
+      {dialog === 'upload' && (
+        <UploadImageDialog
+          serverId={serverId}
+          info={info.data}
+          permissions={data.permissions}
+          maxBytes={data.imageUploadMaxBytes}
+          onClose={() => setDialog(null)}
+        />
+      )}
       {dialog === 'prune' && <PruneDialog serverId={serverId} onClose={() => setDialog(null)} />}
     </div>
   );

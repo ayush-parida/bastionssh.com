@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import type { DockerComposeProject, DockerComposeVerb, DockerPermissions } from '@smt/shared';
+import type { DockerComposeProject, DockerComposeServiceVerb, DockerComposeVerb, DockerPermissions } from '@smt/shared';
 import { ArrowDownToLine, Layers, Lock, Play, RotateCw, ScrollText, Square, TriangleAlert } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { cn } from '@/lib/utils.js';
 import { HEALTH_STYLE, STATE_STYLE, dockerKeys, dockerPath, uptimeText } from '@/lib/docker.js';
 import { DockerProblem, problemOf } from './DetectDocker.js';
-import ComposeAction from './ComposeAction.js';
+import ComposeAction, { COMPOSE_SERVICE_COMMAND } from './ComposeAction.js';
 import ComposeLogs from './ComposeLogs.js';
 
 /**
@@ -28,13 +28,26 @@ const ACTIONS: { verb: DockerComposeVerb; label: string; icon: typeof Play }[] =
   { verb: 'down', label: 'Down', icon: Square },
 ];
 
+/** On one service: `up -d --no-deps` (picks up a new image), restart, pull, stop. */
+const SERVICE_ACTIONS: { verb: DockerComposeServiceVerb; label: string; icon: typeof Play; hint: string }[] = [
+  { verb: 'up', label: 'Up', icon: Play, hint: 'Recreate it if its image or configuration changed' },
+  { verb: 'restart', label: 'Restart', icon: RotateCw, hint: 'Restart its containers as they are' },
+  { verb: 'pull', label: 'Pull', icon: ArrowDownToLine, hint: 'Pull its image from the registry' },
+  { verb: 'stop', label: 'Stop', icon: Square, hint: 'Stop its containers' },
+];
+
 /**
  * Compose projects on a server, discovered from their containers' labels:
  * services with their containers and state, `up`/`restart`/`pull`/`down`
- * for operators and up, and merged logs.
+ * on a project and `up`/`restart`/`pull`/`stop` on one service for
+ * operators and up, and merged logs.
  */
 export default function ComposeProjects({ serverId, permissions }: { serverId: string; permissions: DockerPermissions }) {
-  const [action, setAction] = useState<{ project: DockerComposeProject; verb: DockerComposeVerb } | null>(null);
+  const [action, setAction] = useState<
+    | { project: DockerComposeProject; verb: DockerComposeVerb; service?: undefined }
+    | { project: DockerComposeProject; verb: DockerComposeServiceVerb; service: string }
+    | null
+  >(null);
   const [logsOf, setLogsOf] = useState<DockerComposeProject | null>(null);
 
   const projects = useQuery<DockerComposeProject[]>({
@@ -128,6 +141,26 @@ export default function ComposeProjects({ serverId, permissions }: { serverId: s
                           </span>
                         </td>
                         <td className="whitespace-nowrap px-4 py-1.5 text-xs text-muted-foreground">{uptimeText(c.status)}</td>
+                        <td className="w-px whitespace-nowrap px-3 py-1 text-right align-top">
+                          {i === 0 && permissions.pull && !p.unmanageable && s.name !== '(unknown)' && (
+                            <span className="inline-flex items-center gap-0.5">
+                              {SERVICE_ACTIONS.map(({ verb, label, icon: Icon, hint }) => (
+                                <button
+                                  key={verb}
+                                  onClick={() => setAction({ project: p, verb, service: s.name })}
+                                  title={`${hint}: docker compose ${COMPOSE_SERVICE_COMMAND[verb]} ${s.name}`}
+                                  aria-label={`${label} service ${s.name}`}
+                                  className={cn(
+                                    'rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground',
+                                    verb === 'stop' && 'hover:text-red-600',
+                                  )}
+                                >
+                                  <Icon size={13} />
+                                </button>
+                              ))}
+                            </span>
+                          )}
+                        </td>
                       </tr>
                     )),
                   )}
@@ -143,6 +176,7 @@ export default function ComposeProjects({ serverId, permissions }: { serverId: s
           serverId={serverId}
           project={action.project}
           verb={action.verb}
+          service={action.service}
           onClose={() => {
             setAction(null);
             projects.refetch();

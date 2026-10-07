@@ -122,6 +122,7 @@ The compose file passes a fixed list of variables to the container. To set one t
 | `SMT_SFTP_MAX_UPLOAD_BYTES` | 1 GiB | Upload cap in the server file browser |
 | `SMT_FTP_MAX_UPLOAD_BYTES` | 1 GiB | Upload cap for FTP/SFTP connections |
 | `SMT_STORAGE_MAX_UPLOAD_BYTES` | 5 GiB | Upload cap for object storage |
+| `SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES` | 5 GiB | Largest image archive for Docker → [Upload image](/docs/docker/upload-image) |
 | `SMT_SFTP_OP_TIMEOUT_MS` | `30000` | Timeout of one SFTP operation on a file connection |
 | `SMT_AI_REQUEST_TIMEOUT` | `60000` | AI provider request timeout (ms) |
 | `SMT_MONITORING_*`, `SMT_ALERT_*` | see [Health monitoring](/docs/monitoring/health-monitoring) | Health checks and thresholds |

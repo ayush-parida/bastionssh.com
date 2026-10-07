@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { DEPLOY_DOCS, DEPLOY_TROUBLESHOOTING_ANCHORS } from '@smt/shared';
+import { DOCKER_DOCS } from './docker-upload.js';
 import DocMarkdown from '@/components/docs/DocMarkdown.js';
 import { DOC_SECTIONS } from '@/docs/sections.js';
 import {
@@ -151,6 +152,15 @@ describe('the docs', () => {
     const trouble = findDoc('deployments', 'troubleshooting')!;
     for (const anchor of Object.values(DEPLOY_TROUBLESHOOTING_ANCHORS)) {
       expect(trouble.headings.map((h) => h.id), anchor).toContain(anchor);
+    }
+  });
+
+  it('the links the app makes into the Docker docs resolve, anchors included', () => {
+    for (const href of Object.values(DOCKER_DOCS)) {
+      const [path, hash] = href.split('#') as [string, string | undefined];
+      const doc = findDoc(path.split('/')[2]!, path.split('/')[3]!);
+      expect(doc, href).toBeTruthy();
+      if (hash) expect(doc!.headings.map((h) => h.id), href).toContain(hash);
     }
   });
 

@@ -72,6 +72,10 @@ For **Open shell**, see [Exec shells & recordings](/docs/docker/exec-shells-and-
 
 The reference is checked against Docker's naming rules before anything runs. You can pull public images, or images from registries the server is already logged in to. Closing the dialog cancels the pull. Pulling needs the operate level.
 
+## Uploading an image
+
+An image you built on your own computer does not have to go through a registry: save it with `docker save <image> | gzip > image.tar.gz` and click **Upload image**, next to **Pull image**. The file goes straight into the server's Docker, and the dialog can then recreate the Compose service that runs it. See [Deploy an image built on your machine](/docs/docker/upload-image).
+
 ## Pruning
 
 **Prune…** removes things nothing uses any more. It is available to admins when **Allow pruning** is on under **Settings → Docker** (it is by default).
@@ -85,4 +89,4 @@ The reference is checked against Docker's naming rules before anything runs. You
 
 ## Auditing
 
-Every action, pull, prune and reveal is recorded in the audit log against the server, naming the container or image. Use **Audit Log** to see who stopped what and when.
+Every action, pull, upload, prune and reveal is recorded in the audit log against the server, naming the container or image. Use **Audit Log** to see who stopped what and when.
