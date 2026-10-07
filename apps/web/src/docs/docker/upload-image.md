@@ -138,6 +138,13 @@ An upload may be at most **5 GiB** by default. Whoever runs BastionSSH sets this
 
 If BastionSSH sits behind a reverse proxy, the proxy's own body size limit applies first — for nginx, `client_max_body_size` (1 MB by default). Set it at least as high as the BastionSSH limit, or uploads fail with a lost connection or a 413 from the proxy.
 
+Two more nginx defaults get in the way of large uploads:
+
+- `proxy_request_buffering on` makes nginx write the whole file to its own disk before passing any of it on. Set `proxy_request_buffering off` for BastionSSH so the file streams through, as it does without a proxy.
+- `proxy_read_timeout 60s` gives up when BastionSSH sends nothing for a minute. BastionSSH answers only once Docker has read the whole file and starts loading it, which for a large image can take longer. Raise it (for example `proxy_read_timeout 30m;`).
+
+The Caddy configuration that ships with BastionSSH needs none of this: Caddy streams request bodies and has no such limits by default.
+
 ## Troubleshooting
 
 ### The container fails with exec format error
