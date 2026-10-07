@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { deployPermissionLevel, serviceTemplate, serviceVersionOfImage, type DeployAppStatus, type DeployNginxApplyResult, type DeployProxyMode, type DockerServerStatus } from '@smt/shared';
+import { deployPermissionLevel, imageRepoAndTag, serviceTemplate, serviceVersionOfImage, type DeployAppStatus, type DeployNginxApplyResult, type DeployProxyMode, type DockerServerStatus } from '@smt/shared';
 import { ArrowLeft, ArrowUpCircle, Lock, Power, RefreshCw, RotateCw, ShieldAlert, Trash2, TriangleAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
@@ -158,7 +158,7 @@ export default function AppDetail({
         <h2 className="font-mono text-xl font-bold">{app}</h2>
         {template && (
           <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary" title={image ?? undefined}>
-            {template.name} {line ? line.version : (image?.split('@')[0]?.split(':').pop() ?? '')}
+            {template.name} {image ? (imageRepoAndTag(image).tag ?? '') : ''}
           </span>
         )}
         <HealthBadge app={s} />
