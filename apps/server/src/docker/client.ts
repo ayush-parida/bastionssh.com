@@ -215,11 +215,12 @@ export class DockerClient {
   /**
    * Send `body` as a chunked request body (image load) and resolve with the
    * response once its headers arrive, whatever the status. The body is piped
-   * with backpressure, so nothing is buffered here. The body failing (an
-   * upload over its limit, the browser gone) or `signal` aborting before the
-   * headers destroys the request, so the daemon sees a cut-off body and
-   * rejects it; the promise rejects with the body's error. After the headers
-   * nothing here cancels the call: the caller owns the response.
+   * with backpressure, so nothing is buffered here. Until the body has been
+   * sent whole, the body failing (an upload over its limit, the browser gone)
+   * or `signal` aborting destroys the request, so the daemon sees a cut-off
+   * body and loads nothing; before the headers the promise rejects with that
+   * error, after them the response errors. Once the body is sent nothing here
+   * cancels the call: the caller owns the response.
    */
   send(req: Omit<DaemonRequest, 'body'> & { body: Readable; contentType: string }): Promise<IncomingMessage> {
     return new Promise((resolve, reject) => {
@@ -231,15 +232,18 @@ export class DockerClient {
         headers: { 'Content-Type': req.contentType, 'Transfer-Encoding': 'chunked', ...req.headers },
       });
       let settled = false;
-      const fail = (err: unknown) => {
-        if (settled) return;
-        settled = true;
+      let sent = false;
+      const cut = (err: unknown) => {
         req.signal?.removeEventListener('abort', onAbort);
         req.body.unpipe(request);
-        request.destroy();
+        request.destroy(err instanceof Error ? err : undefined);
+        if (settled) return;
+        settled = true;
         reject(fromTransportError(err));
       };
-      const onAbort = () => fail(req.signal?.reason instanceof Error ? req.signal.reason : new DockerError('Request cancelled', 499));
+      const onAbort = () => {
+        if (!sent) cut(req.signal?.reason instanceof Error ? req.signal.reason : new DockerError('Request cancelled', 499));
+      };
       if (req.signal?.aborted) return onAbort();
       req.signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -249,11 +253,18 @@ export class DockerClient {
           return;
         }
         settled = true;
-        req.signal?.removeEventListener('abort', onAbort);
         resolve(res);
       });
-      request.on('error', fail);
-      req.body.on('error', fail);
+      request.on('error', (err) => {
+        if (!settled) cut(err);
+      });
+      req.body.on('error', (err) => {
+        if (!sent) cut(err);
+      });
+      req.body.on('end', () => {
+        sent = true;
+        req.signal?.removeEventListener('abort', onAbort);
+      });
       req.body.pipe(request);
     });
   }

@@ -126,6 +126,7 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
       outcome: 'loaded' | 'failed' | 'too_large' | 'cancelled';
       images: DockerLoadedImage[];
       error?: string;
+      cut?: Error;
     } = { started: false, outcome: 'cancelled', images: [] };
     let sse: DockerSse | null = null;
     let timer: NodeJS.Timeout | undefined;
@@ -152,6 +153,8 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
               ),
         );
         run.meter = meter;
+        // Why the upload was cut, when it was (the engine's side then only sees a broken request)
+        meter.on('error', (e) => (run.cut ??= e));
         // The engine imports after the last byte; give that a deadline of its own
         meter.once('end', () => {
           timer = setTimeout(() => upload.abort(new DockerError('Docker did not finish loading the image in time', 504)), LOAD_TIMEOUT_MS);
@@ -218,7 +221,8 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
         send({ type: 'loaded', result });
         send({ type: 'end' });
       });
-    } catch (err) {
+    } catch (caught) {
+      const err = run.cut ?? caught;
       const status = (err as { statusCode?: unknown }).statusCode;
       run.outcome = status === 413 ? 'too_large' : status === 499 ? 'cancelled' : 'failed';
       run.error = err instanceof Error ? err.message : String(err);
