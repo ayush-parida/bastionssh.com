@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import type { DeployProxyMode, DeployProxyState, DeployServerState, DeploySetupResult } from '@smt/shared';
-import { CheckCircle2, Circle, Loader2, Pin, ShieldAlert, TriangleAlert, Wrench } from 'lucide-react';
+import type { DeployProxyMode, DeployProxyState, DeployProxyStatus, DeployProxyUpgrade, DeployServerState, DeploySetupResult } from '@smt/shared';
+import { CheckCircle2, Circle, Loader2, Pin, RefreshCw, ShieldAlert, TriangleAlert, Wrench } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { deployErrorCode, deployKeys, deployPath } from '@/lib/deploy.js';
@@ -88,6 +88,74 @@ function PinNotice({ state }: { state: DeployServerState }) {
   );
 }
 
+/** What a proxy upgrade replaced, in words. */
+export function upgradedParts(replaced: DeployProxyUpgrade['replaced']): string {
+  return replaced.includes('front') ? (replaced.includes('caddy') ? 'the proxy container and Caddy' : 'the proxy container') : 'Caddy';
+}
+
+/**
+ * The proxy against the bastionctl the server runs (services spec §2): up to
+ * date, or from an older bastionctl — then it is replaced at the next deploy,
+ * rollback, restart or setup (not on a pinned server), or now with Update
+ * proxy now (operate). Caddy alone is replaced behind the running front with
+ * no connection dropped; a changed front replaces the container (in-flight
+ * connections may drop for about a second).
+ */
+function ProxyStatus({ serverId, status, canOperate }: { serverId: string; status: DeployProxyStatus; canOperate: boolean }) {
+  const qc = useQueryClient();
+  const upgrade = useMutation({
+    mutationFn: () => api.post<{ proxyUpgrade: DeployProxyUpgrade | null; status: DeployProxyStatus }>(deployPath(serverId, '/proxy/upgrade')),
+    onSuccess: (res) => {
+      toast.success(res.proxyUpgrade ? `Proxy updated: ${upgradedParts(res.proxyUpgrade.replaced)} replaced` : 'The proxy is up to date');
+      qc.invalidateQueries({ queryKey: deployKeys.state(serverId) });
+    },
+  });
+  const outdated = status.state === 'outdated';
+  return (
+    <div
+      aria-label="Proxy status"
+      className={cn(
+        'flex flex-wrap items-start gap-2 rounded-md border px-3 py-2 text-xs text-muted-foreground',
+        outdated ? 'border-amber-500/30 bg-amber-500/5' : 'border-border',
+      )}
+    >
+      {outdated ? <TriangleAlert size={14} className="mt-0.5 shrink-0 text-amber-500" /> : <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-500" />}
+      <span className="min-w-0 flex-1">
+        {outdated ? (
+          <>
+            The proxy is from an older bastionctl (<span className="font-mono text-foreground">{status.build ?? 'unknown'}</span>
+            {status.outdated.length > 0 && `: ${status.outdated.includes('front') ? 'its container' : ''}${status.outdated.length === 2 ? ' and ' : ''}${status.outdated.includes('caddy') ? 'Caddy' : ''}`}).{' '}
+            {status.pinned
+              ? 'This server is pinned, so it is not updated automatically.'
+              : 'It is updated at the next deploy, rollback, restart or Reinstall.'}{' '}
+            {status.outdated.includes('front')
+              ? 'Replacing the proxy container can drop connections in flight for about a second.'
+              : 'Caddy is replaced behind the running proxy, without dropping a connection.'}
+          </>
+        ) : status.state === 'ok' ? (
+          <>
+            Proxy up to date (from bastionctl <span className="font-mono text-foreground">{status.build ?? status.target}</span>).
+          </>
+        ) : (
+          <>The proxy container is {status.state}: set up again (Reinstall).</>
+        )}{' '}
+        <DocsLink to={`${DEPLOY_DOCS.overview}#proxy-upgrades`}>About proxy upgrades</DocsLink>
+        {upgrade.error && <span className="mt-1 block whitespace-pre-wrap break-words text-red-600">{(upgrade.error as Error).message}</span>}
+      </span>
+      {outdated && canOperate && (
+        <button
+          onClick={() => upgrade.mutate()}
+          disabled={upgrade.isPending}
+          className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-50"
+        >
+          {upgrade.isPending ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+          Update proxy now
+        </button>
+      )}
+    </div>
+  );
+}
+
 /**
  * Deployments on this server: where they live, whether its bastionctl is the
  * one this BastionSSH ships, and Set up / Reinstall (spec §7). A set-up
@@ -107,6 +175,7 @@ export default function SetupPanel({
   state,
   proxy: proxyState,
   canManage,
+  canOperate = canManage,
   compact,
 }: {
   serverId: string;
@@ -114,6 +183,8 @@ export default function SetupPanel({
   /** The proxy mode and nginx state; null while unknown (or from a server that cannot say). */
   proxy: DeployProxyState | null;
   canManage: boolean;
+  /** Update proxy now. */
+  canOperate?: boolean;
   /** A set-up server: one line, with Reinstall. */
   compact?: boolean;
 }) {
@@ -160,6 +231,14 @@ export default function SetupPanel({
           </span>
           <span className="text-muted-foreground">
             Proxy <span className="text-foreground">{proxy === 'nginx' ? 'nginx on the host' : (proxy ?? 'caddy')}</span>
+            {state.proxy?.state === 'ok' && (
+              <span className="ml-1.5 text-xs" title={`The proxy was last brought up to date by bastionctl ${state.proxy.build ?? state.proxy.target}`}>
+                · up to date
+              </span>
+            )}
+            {state.proxyOutdated && (
+              <span className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600 dark:text-amber-400">outdated</span>
+            )}
           </span>
           <span className="text-muted-foreground">
             bastionctl <BastionctlVersion state={state} />
@@ -175,6 +254,7 @@ export default function SetupPanel({
           <span>{button}</span>
         </div>
         {state.pinned && <PinNotice state={state} />}
+        {state.proxy && (state.proxy.state !== 'ok' || state.proxyOutdated) && <ProxyStatus serverId={serverId} status={state.proxy} canOperate={canOperate} />}
         {proxyState?.mode === 'nginx' && <NginxSteps proxy={proxyState} />}
       </div>
     );

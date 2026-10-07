@@ -159,7 +159,8 @@ export default function AppDetail({
           {levels.operate && (
             <>
               <button
-                onClick={() => setDialog('deploy')}
+                // An image is pulled by the server: nothing to pick
+                onClick={() => (s.config?.build.type === 'image' && s.config.build.image ? void run.pull(s.config.build.image) : setDialog('deploy'))}
                 disabled={run.busy || !!s.configError || !canDeploy}
                 title={s.configError ? 'Fix bastion.yml first' : !canDeploy ? 'Deploying this app needs manage access (bastion.yml permissions.deploy)' : undefined}
                 className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50"

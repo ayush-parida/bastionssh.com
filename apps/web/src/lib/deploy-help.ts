@@ -41,6 +41,13 @@ export const BUILD_TYPE_GUIDES: Record<DeployBuildType, BuildTypeGuide> = {
     yaml: 'build:\n  type: dockerfile\nrun:\n  port: 3000',
     docs: DEPLOY_DOCS.dockerfile,
   },
+  image: {
+    title: 'A ready-made image (pulled, not built)',
+    upload: 'Nothing to upload: the server pulls build.image from its registry (pin it with @sha256:… for the same bytes every time) and records the digest it resolved to.',
+    hint: 'Image app: nothing to upload — Deploy pulls build.image on the server.',
+    yaml: 'build:\n  type: image\n  image: postgres:16\nrun:\n  port: 5432\n  strategy: recreate',
+    docs: `${DEPLOY_DOCS.config}#buildimage`,
+  },
 };
 
 export interface LogHint {

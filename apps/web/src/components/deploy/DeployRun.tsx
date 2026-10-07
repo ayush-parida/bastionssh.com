@@ -110,6 +110,23 @@ export function useDeployRun(serverId: string, app: string) {
     [serverId, app, onEvent, finish],
   );
 
+  /** Deploy an app with `build.type: image`: no upload, the server pulls the image. */
+  const pull = useCallback(
+    async (image: string) => {
+      abort.current?.abort();
+      const controller = new AbortController();
+      abort.current = controller;
+      setState({ ...IDLE, kind: 'deploy', phase: 'running', label: image });
+      try {
+        await followDeployStream(appPath(serverId, app, '/deploy'), {}, controller.signal, onEvent);
+        finish(controller);
+      } catch (err) {
+        finish(controller, err);
+      }
+    },
+    [serverId, app, onEvent, finish],
+  );
+
   const rollback = useCallback(
     async (release: string) => {
       abort.current?.abort();
@@ -132,7 +149,7 @@ export function useDeployRun(serverId: string, app: string) {
   }, []);
 
   const busy = state.phase === 'packing' || state.phase === 'uploading' || state.phase === 'running';
-  return { state, busy, deploy, rollback, dismiss };
+  return { state, busy, deploy, pull, rollback, dismiss };
 }
 
 /** A failure the docs know: a link to its troubleshooting section. */

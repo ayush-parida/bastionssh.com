@@ -47,7 +47,7 @@ function zip(files: Record<string, string>): File {
   return new File([Buffer.concat([...parts, cdBuf, eocd])], 'site.zip');
 }
 
-const build = (b: Partial<DeployAppConfig['build']>): DeployAppConfig['build'] => ({ type: 'static', node: null, dir: '.', output: 'out', ...b });
+const build = (b: Partial<DeployAppConfig['build']>): DeployAppConfig['build'] => ({ type: 'static', node: null, dir: '.', output: 'out', image: null, ...b });
 
 describe('checking a deploy source before uploading', () => {
   it("refuses Next's .next folder picked for a static app", async () => {

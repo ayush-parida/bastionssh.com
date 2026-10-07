@@ -173,6 +173,11 @@ async function stubDeploy(
         socket: 'writable',
       });
     }
+    if (path === '/proxy/upgrade' && method === 'POST') {
+      const status = { state: 'ok', build: '0.1.0', target: '0.1.0', outdated: [], pinned: false };
+      state.server = { ...state.server, proxy: status, proxyOutdated: false };
+      return json({ proxyUpgrade: { from: '0.1.0+1111111', to: '0.1.0', trigger: 'manual', result: 'success', replaced: ['caddy'] }, status });
+    }
     if (path === '/proxy') {
       return json({
         mode: state.setUp ? 'caddy' : null,
@@ -387,6 +392,28 @@ test.describe('Deployments', () => {
     await expect(setup.getByRole('button', { name: 'Reinstall bastionctl' })).toBeVisible();
     await expect(page.getByRole('region', { name: 'Apps' })).toHaveCount(0);
     expect(sent).toEqual([]);
+  });
+
+  test('shows a proxy from an older bastionctl and updates it now', async ({ page }) => {
+    const sent: Sent[] = [];
+    const state: Parameters<typeof stubDeploy>[3] = {
+      setUp: true,
+      server: { proxyOutdated: true, proxy: { state: 'outdated', build: '0.1.0+1111111', target: '0.1.0', outdated: ['caddy'], pinned: false } },
+    };
+    await stubDeploy(page, serverId, sent, state);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments`);
+    const notice = page.getByLabel('Proxy status');
+    await expect(notice).toContainText('The proxy is from an older bastionctl (0.1.0+1111111: Caddy)');
+    await expect(notice).toContainText('It is updated at the next deploy, rollback, restart or Reinstall.');
+    await expect(notice).toContainText('without dropping a connection');
+    await expect(page.getByText('outdated', { exact: true })).toBeVisible();
+    await notice.getByRole('button', { name: 'Update proxy now' }).click();
+    await expect(page.getByText('Proxy updated: Caddy replaced')).toBeVisible();
+    expect(sent.map((s) => `${s.method} ${s.path}`)).toEqual(['POST /proxy/upgrade']);
+    // Up to date now: the notice goes, the setup line says so
+    await expect(page.getByLabel('Proxy status')).toHaveCount(0);
+    await expect(page.getByText('· up to date')).toBeVisible();
   });
 
   test('deploys a folder without node_modules, .next and .git, and shows the log as it streams', async ({ page }) => {

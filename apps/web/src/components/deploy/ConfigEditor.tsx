@@ -202,7 +202,32 @@ export default function ConfigEditor({
   const tlsMode = isObject(tls) ? 'files' : typeof tls === 'string' && tls.startsWith('dns:') ? 'dns' : typeof tls === 'string' ? tls : 'auto';
   const buildType = str(['build', 'type']) || 'nextjs';
   // Issues the form has no field for (syntax, unknown keys) are listed above it
-  const shown = ['name', 'domains', 'redirect_www', 'tls', 'build.type', 'build.node', 'build.dir', 'build.output', 'run.port', 'run.env_file', 'run.volumes', 'run.memory', 'run.cpus', 'healthcheck.path', 'healthcheck.timeout', 'keep_releases', 'proxy', 'permissions'];
+  const shown = [
+    'name',
+    'domains',
+    'redirect_www',
+    'tls',
+    'build.type',
+    'build.node',
+    'build.dir',
+    'build.output',
+    'build.image',
+    'run.port',
+    'run.env_file',
+    'run.memory',
+    'run.cpus',
+    'run.strategy',
+    'run.publish',
+    'healthcheck.path',
+    'healthcheck.timeout',
+    'keep_releases',
+    'proxy',
+    'permissions',
+  ];
+  // The long volume form ({ name, path, exclusive }) and command health checks are edited as YAML
+  const volumes = get(data, ['run', 'volumes']);
+  const simpleVolumes = volumes === undefined || (Array.isArray(volumes) && volumes.every((v) => typeof v === 'string'));
+  if (simpleVolumes) shown.push('run.volumes');
   const unplaced = (issues ?? []).filter((i) => mode === 'yaml' || !shown.some((p) => i.path === p || i.path.startsWith(`${p}.`)));
 
   return (
@@ -339,16 +364,24 @@ export default function ConfigEditor({
               <option value="nextjs">nextjs — Next.js with output: standalone</option>
               <option value="dockerfile">dockerfile — the project’s own Dockerfile</option>
               <option value="static">static — build, then serve a folder</option>
+              <option value="image">image — pull a ready-made image (a database, a cache)</option>
             </select>
           </Field>
-          {buildType !== 'dockerfile' && (
+          {buildType === 'image' && (
+            <Field label="Image" issues={at('build.image')} hint="A registry reference with a tag, ideally pinned: postgres:16.4@sha256:…">
+              {textField(['build', 'image'], 'postgres:16')}
+            </Field>
+          )}
+          {buildType !== 'dockerfile' && buildType !== 'image' && (
             <Field label="Node.js version" issues={at('build.node')} hint="Default: .nvmrc, engines.node, or 20">
               {textField(['build', 'node'], '20')}
             </Field>
           )}
-          <Field label="Project folder" issues={at('build.dir')} hint="Inside the upload; . is its root">
-            {textField(['build', 'dir'], '.')}
-          </Field>
+          {buildType !== 'image' && (
+            <Field label="Project folder" issues={at('build.dir')} hint="Inside the upload; . is its root">
+              {textField(['build', 'dir'], '.')}
+            </Field>
+          )}
           {buildType === 'static' && (
             <Field label="Output folder" issues={at('build.output')} hint="What the build writes, served as the site">
               {textField(['build', 'output'], 'out')}
@@ -365,8 +398,19 @@ export default function ConfigEditor({
           <Field label="CPUs" issues={at('run.cpus')} hint="Like 1 or 0.5; empty for no limit">
             {numberField(['run', 'cpus'], '1')}
           </Field>
-          <Field label="Volumes" issues={at('run.volumes')} hint="Named volumes, one per line: uploads:/app/public/uploads">
-            {listField(['run', 'volumes'], 'uploads:/app/public/uploads')}
+          {simpleVolumes && (
+            <Field label="Volumes" issues={at('run.volumes')} hint="Named volumes, one per line: uploads:/app/public/uploads">
+              {listField(['run', 'volumes'], 'uploads:/app/public/uploads')}
+            </Field>
+          )}
+          <Field label="Strategy" issues={at('run.strategy')} hint="recreate stops the old container first (required with an exclusive volume or a published port)">
+            <select className={input} disabled={readOnly} value={str(['run', 'strategy']) || 'rolling'} onChange={(e) => update(['run', 'strategy'], e.target.value === 'rolling' ? undefined : e.target.value)}>
+              <option value="rolling">rolling — no downtime (default)</option>
+              <option value="recreate">recreate — old container stops first</option>
+            </select>
+          </Field>
+          <Field label="Publish on the host" issues={at('run.publish')} hint="none, localhost:<port> (SSH tunnels) or public:<port> (firewall it)">
+            {textField(['run', 'publish'], 'none')}
           </Field>
           <Field label="Health check path" issues={at('healthcheck.path')}>
             {textField(['healthcheck', 'path'], '/')}
