@@ -22,6 +22,6 @@ if [ -d "$NGINX_STATE" ]; then NGINX_MOUNT="-v $NGINX_STATE:$NGINX_STATE:ro"; fi
 exec $DOCKER run --rm -i --init --network none \
   --user "$(id -u):$(id -g)" --group-add "$SOCKET_GID" \
   -v "$ROOT:$ROOT" -v "$SOCKET:/var/run/docker.sock" $NGINX_MOUNT \
-  -e BASTION_ROOT="$ROOT" -e BASTION_ACTOR="${BASTION_ACTOR:-$(id -un)}" -e HOME=/tmp \
+  -e BASTION_ROOT="$ROOT" -e BASTION_ACTOR="${BASTION_ACTOR:-$(id -un)}" -e BASTION_HOST_SOCKET="$SOCKET" -e HOME=/tmp \
   -w "$ROOT" --label bastion.managed=bastionctl \
   --entrypoint node "$IMAGE" "$ROOT/bin/bastionctl.mjs" "$@"

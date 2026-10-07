@@ -279,6 +279,21 @@ describe('run.publish', () => {
     await expect(ops.init(ctx(), 'other', { config: 'tmp/other.yml' })).rejects.toThrow('Invalid config: run.publish: Host port 15432 is already published by app db');
     expect(ops.validate(ctx(), 'db', 'tmp/other.yml').errors).toEqual([{ path: 'name', message: "Must be the app's name (db)" }]);
   });
+
+  it('publishes another container port than run.port when it names one, and passes command and entrypoint', async () => {
+    await app(
+      'files',
+      'name: files\ndomains: []\nbuild: { type: image, image: "pgsty/minio:RELEASE.2026-08-04T00-00-00Z" }\nrun: { port: 9001, publish: "localhost:19000:9000", command: [server, /data, --console-address, ":9001"] }\nhealthcheck: { type: tcp }\n',
+    );
+    const { release } = await ops.deploy(ctx(), 'files');
+    const c = fake.containers.get(`bastion-files-${release}`)!;
+    expect(c.HostConfig.PortBindings).toEqual({ '9000/tcp': [{ HostIp: '127.0.0.1', HostPort: '19000' }] });
+    expect(c.Spec).toMatchObject({ Cmd: ['server', '/data', '--console-address', ':9001'], ExposedPorts: { '9000/tcp': {} } });
+    expect(c.Spec.Entrypoint).toBeUndefined();
+    await app('mail', 'name: mail\ndomains: []\nbuild: { type: image, image: "axllent/mailpit:v1" }\nrun: { port: 8025, entrypoint: [/bin/sh, -c], command: ["exec /mailpit"] }\n');
+    const mail = await ops.deploy(ctx(), 'mail');
+    expect(fake.containers.get(`bastion-mail-${mail.release}`)!.Spec).toMatchObject({ Entrypoint: ['/bin/sh', '-c'], Cmd: ['exec /mailpit'] });
+  });
 });
 
 describe('env generate', () => {

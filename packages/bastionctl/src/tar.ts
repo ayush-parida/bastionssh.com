@@ -436,3 +436,25 @@ export function tarBuffer(entries: Array<{ name: string; type?: '0' | '5' | '2' 
   parts.push(Buffer.alloc(BLOCK * 2));
   return Buffer.concat(parts);
 }
+
+/**
+ * A tar stream of one regular file named `name`, its bytes read from `file`
+ * (a backup copied into a container for a restore): no size limit, nothing
+ * held in memory.
+ */
+export function tarOneFile(name: string, file: string, mode = 0o644): Readable {
+  const size = fs.statSync(file).size;
+  async function* generate(): AsyncGenerator<Buffer> {
+    yield* entryBlocks(name, { size, mode, type: '0', mtime: Math.floor(Date.now() / 1000) });
+    let written = 0;
+    for await (const chunk of fs.createReadStream(file) as AsyncIterable<Buffer>) {
+      written += chunk.length;
+      yield chunk;
+    }
+    if (written !== size) throw new BastionError(`${name} changed while it was being copied`);
+    const rest = written % BLOCK;
+    if (rest) yield Buffer.alloc(BLOCK - rest);
+    yield Buffer.alloc(BLOCK * 2);
+  }
+  return Readable.from(generate());
+}

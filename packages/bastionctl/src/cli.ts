@@ -4,7 +4,9 @@ import type { Ctx } from './context.js';
 import { DEFAULT_SOCKET, DockerApi } from './docker.js';
 import { MAX_VALUE_BYTES } from './env.js';
 import { appName, BastionError, envKey, Layout, releaseId } from './names.js';
+import * as backups from './backups.js';
 import * as ops from './ops.js';
+import { setBackupSchedule, setImage } from './service-config.js';
 
 /**
  * Command-line parsing (deployments spec §5). Everything is strict: unknown
@@ -31,7 +33,15 @@ export const USAGE = `Usage: bastionctl <command> [options] [--json]
   env generate <app> <KEY> [--bytes N] [--if-missing]
                                           A random URL-safe value into .env (never printed)
   exec <app> -- <program> [args…]         Run a program in the app's live container
-  delete <app> [--purge]                  Remove an app (--purge: also config, .env, volumes)
+  delete <app> [--purge]                  Remove an app (--purge: also config, .env, volumes, backups)
+  set-image <app> <image>                 build.image of an image app (deploy to switch)
+  backup <app> [--keep N]                 Back up a quick service now (its dump command, run in it)
+  backups list|prune <app> [--keep N]     Its backups (newest first) / remove all but the newest N
+  backups delete <app> <file>             Remove one backup
+  backups schedule <app> off|hourly|daily [--keep N]
+                                          Scheduled backups (run by the bastion-cron container)
+  backups run-due                         Run the scheduled backups that are due (bastion-cron)
+  restore <app> <file>                    Restore a backup into the running service (backs up first)
   proxy apply                             Regenerate and reload the proxy config
   proxy status                            The proxy against this bastionctl (read-only)
   proxy upgrade                           Replace an outdated proxy now (even when pinned)
@@ -47,7 +57,7 @@ interface Parsed {
   flags: Map<string, string | true>;
 }
 
-const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy', 'bytes']);
+const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy', 'bytes', 'keep']);
 const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help', 'if-missing']);
 
 export function parseArgs(argv: string[]): Parsed {
@@ -136,6 +146,7 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       drainMs: (drain !== undefined ? Number(drain) : 10) * 1000,
       healthIntervalMs: 1000,
       report,
+      hostSocket: io.env.BASTION_HOST_SOCKET || DEFAULT_SOCKET,
       ...io.ctx,
     };
     if (passed !== null && command !== 'exec') throw new BastionError(`Only exec takes arguments after --`, 2);
@@ -252,6 +263,50 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       const r = await ops.execInApp(ctx, appName(args[0]), passed, { stdout: json ? toStderr : toStdout, stderr: toStderr });
       return { value: r, exitCode: r.exitCode === 0 ? 0 : r.exitCode > 0 && r.exitCode < 256 ? r.exitCode : 1 };
     }
+    case 'set-image': {
+      expect(args, 2, 'set-image <app> <image>');
+      const r = await setImage(ctx, appName(args[0]), args[1]!);
+      return { value: r, text: r.changed ? `${r.app}: ${r.to}\n` : `${r.app} uses ${r.to} already\n` };
+    }
+    case 'backup': {
+      expect(args, 1, 'backup <app> [--keep N]');
+      const r = await backups.backup(ctx, appName(args[0]), { keep: keepFlag(parsed) });
+      return { value: r, text: `${r.backup.file}\t${r.backup.bytes}\n` };
+    }
+    case 'restore': {
+      expect(args, 2, 'restore <app> <file>');
+      const r = await backups.restore(ctx, appName(args[0]), backups.backupFileName(args[1]));
+      return { value: r, text: `Restored ${r.app} from ${r.file} (the data before is in ${r.safety?.file ?? '-'})\n` };
+    }
+    case 'backups': {
+      const [sub, app, extra] = args;
+      if (sub === 'list') {
+        expect(args, 2, 'backups list <app>');
+        const r = await backups.backupsList(ctx, appName(app));
+        return { value: r, text: lines(r.backups.map((b) => `${b.file}\t${b.bytes}\t${b.kind}`)) };
+      }
+      if (sub === 'prune') {
+        expect(args, 2, 'backups prune <app> [--keep N]');
+        const r = backups.prune(ctx, appName(app), keepFlag(parsed));
+        return { value: r, text: lines(r.pruned) };
+      }
+      if (sub === 'delete') {
+        expect(args, 3, 'backups delete <app> <file>');
+        return { value: backups.deleteBackup(ctx, appName(app), backups.backupFileName(extra)) };
+      }
+      if (sub === 'schedule') {
+        expect(args, 3, 'backups schedule <app> off|hourly|daily [--keep N]');
+        if (extra !== 'off' && extra !== 'hourly' && extra !== 'daily') throw new BastionError('The schedule is off, hourly or daily', 2);
+        const r = await setBackupSchedule(ctx, appName(app), extra, keepFlag(parsed));
+        return { value: r };
+      }
+      if (sub === 'run-due') {
+        expect(args, 1, 'backups run-due');
+        const r = await backups.runDue(ctx);
+        return { value: r, text: lines(r.ran.map((x) => `${x.app}\t${x.file ?? `failed: ${x.error}`}`)) };
+      }
+      throw new BastionError('Usage: bastionctl backups list|prune|delete|schedule|run-due <app> …', 2);
+    }
     case 'env': {
       const [sub, app, key] = args;
       if (sub === 'keys') {
@@ -284,6 +339,13 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
     default:
       throw new BastionError(`Unknown command ${command}\n\n${USAGE}`, 2);
   }
+}
+
+function keepFlag(parsed: Parsed): number | undefined {
+  const keep = flag(parsed, 'keep');
+  if (keep === undefined) return undefined;
+  if (!/^\d{1,3}$/.test(keep) || Number(keep) < 1 || Number(keep) > 100) throw new BastionError('--keep takes a whole number from 1 to 100', 2);
+  return Number(keep);
 }
 
 /** Read stdin up to `max` bytes (a value for `env set`). */

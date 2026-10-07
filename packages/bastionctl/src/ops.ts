@@ -35,6 +35,7 @@ import {
 } from './config.js';
 import { sleep, type Ctx } from './context.js';
 import { appCertificates } from './certs.js';
+import { ensureCron } from './cron.js';
 import { DockerApiError, usageFrom } from './docker.js';
 import { containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
 import { pinnedRef } from './images.js';
@@ -155,12 +156,16 @@ async function sha256File(file: string): Promise<string> {
  */
 export function appContainerSpec(ctx: Ctx, config: DeployAppConfig, release: string, image: string): Record<string, unknown> {
   const mounts = config.run.volumes.map((v) => ({ Type: 'volume', Source: volumeName(config.name, v.name), Target: v.path, ReadOnly: v.readonly }));
-  const { publish, port } = config.run;
+  const { publish } = config.run;
+  // The container port published: run.port, or the one run.publish names (MinIO's S3 port beside its console)
+  const port = publish.target ?? config.run.port;
   const binding = publish.scope === 'none' || publish.port === null ? null : { HostIp: publish.scope === 'localhost' ? '127.0.0.1' : '0.0.0.0', HostPort: String(publish.port) };
   return {
     Image: image,
     Env: containerEnv(envFilePath(ctx.layout, config.name, config)),
     Labels: { [LABEL_APP]: config.name, [LABEL_RELEASE]: release, [LABEL_MANAGED]: 'app' },
+    ...(config.run.command && { Cmd: config.run.command }),
+    ...(config.run.entrypoint && { Entrypoint: config.run.entrypoint }),
     ...(binding && { ExposedPorts: { [`${port}/tcp`]: {} } }),
     HostConfig: {
       NetworkMode: NETWORK,
@@ -198,7 +203,7 @@ function healthDescription(config: DeployAppConfig, container: string, port: num
  * the new container itself (exit code 0: healthy). A container that stops
  * meanwhile fails at once, with its last log lines.
  */
-async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string, port: number): Promise<void> {
+export async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string, port: number): Promise<void> {
   const deadline = ctx.now().getTime() + durationMs(config.healthcheck.timeout);
   const { type } = config.healthcheck;
   ctx.log(`Health check: ${healthDescription(config, container, port)} (up to ${config.healthcheck.timeout})`);
@@ -488,6 +493,8 @@ async function setupLocked(ctx: Ctx, opts: { proxy?: DeployProxyMode }): Promise
     if (await joinLive(ctx, containerName(app, record.id), liveAlias(app, record.port))) ctx.log(`Put ${app} on ${LIVE_NETWORK}`);
   }
   await pruneProxyImages(ctx);
+  // Scheduled backups: bastion-cron when a service has a schedule (and in step with this bastionctl's Node.js image)
+  await ensureCron(ctx);
   // Bring the live config up to date with the apps on disk
   if (appNames(layout).some((a) => currentRelease(layout, a))) await applyProxy(ctx);
   return { root: layout.root, proxy: mode, network: NETWORK, proxyContainer: await proxyContainer(ctx), version: BASTIONCTL_VERSION };
@@ -827,7 +834,7 @@ export async function rollback(baseCtx: Ctx, app: string, id: string): Promise<D
   }
 }
 
-async function liveContainer(ctx: Ctx, app: string): Promise<string> {
+export async function liveContainer(ctx: Ctx, app: string): Promise<string> {
   requireApp(ctx, app);
   const current = currentRelease(ctx.layout, app);
   if (!current) throw new BastionError(`${app} has no current release`);
@@ -910,6 +917,8 @@ export async function remove(ctx: Ctx, app: string, opts: { purge?: boolean } = 
     if (opts.purge) {
       for (const v of config?.run.volumes ?? []) await ctx.docker.removeVolume(volumeName(app, v.name)).catch((err: Error) => ctx.log(`warning: ${err.message}`));
       fs.rmSync(ctx.layout.app(app), { recursive: true, force: true });
+      // Its schedule went with its config: bastion-cron goes when it was the last one
+      await ensureCron(ctx).catch((err: Error) => ctx.log(`warning: ${err.message}`));
     }
     ctx.log(opts.purge ? `Deleted ${app} and its data` : `Deleted ${app}'s releases; its config, .env and volumes are kept`);
     return { app, purged: !!opts.purge };

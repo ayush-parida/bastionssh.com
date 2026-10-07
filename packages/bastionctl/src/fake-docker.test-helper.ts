@@ -20,6 +20,8 @@ export interface FakeContainer {
   Env: string[];
   HostConfig: Record<string, unknown>;
   Cmd: string[] | null;
+  /** The create request as sent. */
+  Spec: Record<string, unknown>;
   State: { Status: string; Running: boolean; Restarting: boolean; ExitCode: number; StartedAt: string };
   RestartCount: number;
   /** Networks joined after create (network connect), with their aliases. */
@@ -61,6 +63,8 @@ export interface FakeDocker {
   archive: (container: FakeContainer, file: string) => Buffer | null;
   /** Every container state change, in order (`start <name>`, `stop <name>`, `remove <name>`). */
   events: string[];
+  /** Tar archives unpacked into containers (`PUT /containers/<id>/archive`), with the container's state then. */
+  archives: Array<{ container: string; path: string; tar: Buffer; running: boolean }>;
   /** Called after every container start, stop or removal (a test checks an invariant at each step). */
   afterChange: (() => void) | null;
   close: () => Promise<void>;
@@ -110,6 +114,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
     pullError: null,
     archive: (_c, file) => (file === '/usr/bin/caddy' ? Buffer.from('#!/bin/sh\n# caddy\n') : null),
     events: [],
+    archives: [],
     afterChange: null,
     buildOutput: [],
     close: async () => {},
@@ -175,6 +180,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           Env: spec.Env ?? [],
           HostConfig: spec.HostConfig ?? {},
           Cmd: spec.Cmd ?? null,
+          Spec: spec as unknown as Record<string, unknown>,
           State: { Status: 'created', Running: false, Restarting: false, ExitCode: 0, StartedAt: '' },
           RestartCount: 0,
           Networks: {},
@@ -245,6 +251,12 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         if (!data) return json(404, { message: `Could not find the file ${file} in container ${c.Name}` });
         res.writeHead(200, { 'Content-Type': 'application/x-tar' });
         return void res.end(tarBuffer([{ name: path.basename(file), content: data.toString('latin1') }]));
+      }
+      if ((m = /^\/containers\/([^/]+)\/archive$/.exec(p)) && req.method === 'PUT') {
+        const c = find(m[1]!);
+        if (!c) return notFound('container');
+        fake.archives.push({ container: c.Name, path: q.get('path') ?? '', tar: body, running: c.State.Running });
+        return json(200, undefined);
       }
       if ((m = /^\/containers\/([^/]+)$/.exec(p)) && req.method === 'DELETE') {
         const c = find(m[1]!);

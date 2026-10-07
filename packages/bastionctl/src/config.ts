@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseDocument } from 'yaml';
-import type { DeployAppConfig, DeployBuildType, DeployHealthcheckType, DeployValidation, DeployValidationIssue, DeployVolume } from '@smt/shared';
+import { serviceTemplate, type DeployAppConfig, type DeployBackupSettings, type DeployBuildType, type DeployHealthcheckType, type DeployValidation, type DeployValidationIssue, type DeployVolume } from '@smt/shared';
 import { NODE_BUILD_VERSIONS } from './images.js';
 import { BastionError, Layout, NAME_PATTERN } from './names.js';
 import { NGINX_TLS, NGINX_UPSTREAM_PORT, proxyMode } from './nginx.js';
@@ -26,10 +26,12 @@ const HEALTH_TYPES: readonly DeployHealthcheckType[] = ['http', 'tcp', 'command'
  */
 const IMAGE_REF =
   /^(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(?::\d{1,5})?)\/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
-const PUBLISH = /^(localhost|public):(\d{1,5})$/;
+/** `scope:hostPort`, or `scope:hostPort:containerPort` (another port of the container than run.port). */
+const PUBLISH = /^(localhost|public):(\d{1,5})(?::(\d{1,5}))?$/;
 /** Host ports the proxy owns: never published by an app. */
 const RESERVED_PORTS = [80, 443, NGINX_UPSTREAM_PORT];
 const MAX_COMMAND_ARGS = 64;
+const BACKUP_SCHEDULES = ['off', 'hourly', 'daily'] as const;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DNS_PROVIDER = /^dns:[a-z0-9_]{1,40}$/;
 const VOLUME = /^([a-z0-9][a-z0-9_-]{0,40}):(\/[^:\0]*)(:ro)?$/;
@@ -48,16 +50,18 @@ export const DEFAULTS = {
   proxy: 'caddy',
   deployPermission: 'operate',
   strategy: 'rolling',
+  backupKeep: 7,
 } as const;
 
 const KEYS = {
-  root: ['name', 'service', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy', 'permissions'],
+  root: ['name', 'service', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy', 'permissions', 'backups'],
   build: ['type', 'node', 'dir', 'output', 'image'],
-  run: ['port', 'env_file', 'volumes', 'memory', 'cpus', 'strategy', 'publish'],
+  run: ['port', 'env_file', 'volumes', 'memory', 'cpus', 'strategy', 'publish', 'command', 'entrypoint'],
   volume: ['name', 'path', 'readonly', 'exclusive'],
   healthcheck: ['type', 'path', 'command', 'timeout'],
   tls: ['cert', 'key'],
   permissions: ['deploy'],
+  backups: ['schedule', 'keep'],
 };
 
 /** A domain Caddy can serve: lower-case labels, at least two, `*.` only as the first label. */
@@ -303,7 +307,9 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
     memory: null,
     cpus: null,
     strategy: DEFAULTS.strategy,
-    publish: { scope: 'none', port: null },
+    publish: { scope: 'none', port: null, target: null },
+    command: null,
+    entrypoint: null,
   };
   let strategyAsked: unknown;
   if (data.run !== undefined) {
@@ -311,7 +317,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       issues.add('run', 'Must be a mapping');
     } else {
       issues.unknownKeys(data.run, KEYS.run, 'run');
-      const { port, env_file, volumes, memory, cpus, strategy, publish } = data.run;
+      const { port, env_file, volumes, memory, cpus, strategy, publish, command, entrypoint } = data.run;
       if (port !== undefined) {
         if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) issues.add('run.port', 'A port from 1 to 65535');
         else run.port = port;
@@ -353,13 +359,22 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
         if (publish === 'none') {
           // the default
         } else if (!m) {
-          issues.add('run.publish', 'Must be none, localhost:<port> or public:<port>');
+          issues.add('run.publish', 'Must be none, localhost:<port> or public:<port> (or <scope>:<host port>:<container port>)');
         } else {
           const hostPort = Number(m[2]);
+          const target = m[3] === undefined ? null : Number(m[3]);
           if (hostPort < 1 || hostPort > 65535) issues.add('run.publish', 'A host port from 1 to 65535');
+          else if (target !== null && (target < 1 || target > 65535)) issues.add('run.publish', 'A container port from 1 to 65535');
           else if (RESERVED_PORTS.includes(hostPort)) issues.add('run.publish', `Port ${hostPort} belongs to the proxy; pick another host port`);
-          else run.publish = { scope: m[1] as 'localhost' | 'public', port: hostPort };
+          else run.publish = { scope: m[1] as 'localhost' | 'public', port: hostPort, target };
         }
+      }
+      // The image's CMD and ENTRYPOINT, replaced (a quick service's server flags); argv as given, no shell unless named
+      for (const [key, value] of [['command', command], ['entrypoint', entrypoint]] as const) {
+        if (value === undefined || value === null) continue;
+        if (!Array.isArray(value) || value.length === 0 || value.length > MAX_COMMAND_ARGS || !value.every((a) => typeof a === 'string' && a.length <= 4096 && !a.includes('\0'))) {
+          issues.add(`run.${key}`, `A list of 1 to ${MAX_COMMAND_ARGS} arguments, like ["server", "/data"]`);
+        } else run[key] = value as string[];
       }
     }
   }
@@ -447,6 +462,28 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
     }
   }
 
+  // A quick service's backups (services spec §3.4): what bastion-cron runs, and how many are kept
+  const backups: DeployBackupSettings = { schedule: 'off', keep: DEFAULTS.backupKeep };
+  if (data.backups !== undefined) {
+    if (!isObject(data.backups)) {
+      issues.add('backups', 'Must be a mapping like { schedule: daily, keep: 7 }');
+    } else {
+      issues.unknownKeys(data.backups, KEYS.backups, 'backups');
+      const { schedule, keep: kept } = data.backups;
+      if (schedule !== undefined) {
+        if (typeof schedule !== 'string' || !(BACKUP_SCHEDULES as readonly string[]).includes(schedule)) issues.add('backups.schedule', 'Must be off, hourly or daily');
+        else backups.schedule = schedule as DeployBackupSettings['schedule'];
+      }
+      if (kept !== undefined) {
+        if (typeof kept !== 'number' || !Number.isInteger(kept) || kept < 1 || kept > 100) issues.add('backups.keep', 'A whole number from 1 to 100');
+        else backups.keep = kept;
+      }
+      if (backups.schedule !== 'off' && !serviceTemplate(service)?.backup) {
+        issues.add('backups.schedule', service ? `The ${service} template has no backup command` : 'Backups are for quick services (service: postgres, mysql, mariadb, mongodb, redis, valkey)');
+      }
+    }
+  }
+
   // certbot's webroot challenge on the host: no wildcards, no DNS providers, no internal CA
   if (proxy === 'nginx' && (typeof tls !== 'string' || !(NGINX_TLS as readonly string[]).includes(tls))) {
     issues.add('tls', 'With proxy: nginx, tls must be auto or staging (certificates come from certbot on the host)');
@@ -466,6 +503,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       keep_releases: keep,
       proxy,
       permissions,
+      backups,
     },
     issues: [],
   };

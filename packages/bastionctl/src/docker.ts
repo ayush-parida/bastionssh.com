@@ -282,6 +282,78 @@ export class DockerApi {
     return info.ExitCode ?? -1;
   }
 
+  /**
+   * `docker exec` with stdout streamed into `file` (a backup), mode 0600,
+   * honouring the disk's pace (the response is paused while the file
+   * catches up). Returns the exit code, the bytes written and the end of
+   * stderr. The caller removes the file on failure.
+   */
+  async execToFile(container: string, cmd: string[], file: string, timeoutMs = 2 * 60 * 60_000): Promise<{ exitCode: number; bytes: number; stderr: string }> {
+    const { Id } = await this.json<{ Id: string }>('POST', `/containers/${encodeURIComponent(container)}/exec`, {
+      body: { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false },
+    });
+    const res = await this.stream('POST', `/exec/${Id}/start`, { body: { Detach: false, Tty: false }, timeoutMs });
+    if ((res.statusCode ?? 0) >= 400) {
+      const chunks: Buffer[] = [];
+      for await (const c of res as AsyncIterable<Buffer>) chunks.push(c);
+      throw new DockerApiError(Buffer.concat(chunks).toString('utf8').trim() || `exec failed (${res.statusCode})`, res.statusCode ?? 500);
+    }
+    const out = fs.createWriteStream(file, { mode: 0o600 });
+    let bytes = 0;
+    let stderr = '';
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let pending: Buffer = Buffer.alloc(0);
+        const timer = setTimeout(() => {
+          res.destroy();
+          reject(new DockerApiError(`${cmd[0]} in ${container} did not finish in time`, 504));
+        }, timeoutMs);
+        const fail = (err: Error) => {
+          clearTimeout(timer);
+          res.destroy();
+          reject(err);
+        };
+        out.on('error', fail);
+        res.on('data', (c: Buffer) => {
+          pending = pending.length ? Buffer.concat([pending, c]) : c;
+          while (pending.length >= 8) {
+            const size = pending.readUInt32BE(4);
+            if (pending.length < 8 + size) break;
+            const frame = pending.subarray(8, 8 + size);
+            if (pending[0] === 2) stderr = (stderr + frame.toString('utf8')).slice(-16 * 1024);
+            else {
+              bytes += frame.length;
+              if (!out.write(frame)) {
+                res.pause();
+                out.once('drain', () => res.resume());
+              }
+            }
+            pending = pending.subarray(8 + size);
+          }
+        });
+        res.on('end', () => {
+          clearTimeout(timer);
+          out.end(() => resolve());
+        });
+        res.on('error', fail);
+      });
+    } finally {
+      out.destroy();
+    }
+    const info = await this.json<{ ExitCode: number | null }>('GET', `/exec/${Id}/json`);
+    return { exitCode: info.ExitCode ?? -1, bytes, stderr };
+  }
+
+  /** Unpack a tar stream into `dir` of a container (running or stopped; volumes included). */
+  async putArchive(container: string, dir: string, tar: Readable): Promise<void> {
+    await this.request('PUT', `/containers/${encodeURIComponent(container)}/archive`, {
+      query: { path: dir },
+      stream: tar,
+      headers: { 'Content-Type': 'application/x-tar' },
+      timeoutMs: 60 * 60_000,
+    });
+  }
+
   /** A file or folder of a container (running or not) as a tar archive, written to `file`. */
   async copyFrom(container: string, containerPath: string, file: string): Promise<void> {
     const res = await this.stream('GET', `/containers/${encodeURIComponent(container)}/archive`, { query: { path: containerPath }, timeoutMs: 120_000 });

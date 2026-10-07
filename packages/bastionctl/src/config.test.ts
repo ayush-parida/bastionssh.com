@@ -45,12 +45,15 @@ describe('bastion.yml validation', () => {
         memory: '512m',
         cpus: 1,
         strategy: 'rolling',
-        publish: { scope: 'none', port: null },
+        publish: { scope: 'none', port: null, target: null },
+        command: null,
+        entrypoint: null,
       },
       healthcheck: { type: 'http', path: '/', command: null, timeout: '30s' },
       keep_releases: 5,
       proxy: 'caddy',
       permissions: { deploy: 'operate' },
+      backups: { schedule: 'off', keep: 7 },
     });
   });
 
@@ -257,12 +260,38 @@ describe('services: build.type image, health check types, strategy, publish', ()
 
   it('takes run.publish: none, localhost:<port> or public:<port>, never the proxy’s ports', () => {
     const pub = (v: string) => checkConfigText(valid.replace('  cpus: 1', `  cpus: 1\n  publish: ${v}`), 'site1');
-    expect(pub('none').config?.run.publish).toEqual({ scope: 'none', port: null });
-    expect(pub('localhost:15432').config?.run.publish).toEqual({ scope: 'localhost', port: 15432 });
-    expect(pub('public:9000').config?.run.publish).toEqual({ scope: 'public', port: 9000 });
-    for (const bad of ['yes', '9000', 'everywhere:9000', 'public:0', 'public:70000', 'public:80', 'localhost:443', 'public:9000:9000']) {
+    expect(pub('none').config?.run.publish).toEqual({ scope: 'none', port: null, target: null });
+    expect(pub('localhost:15432').config?.run.publish).toEqual({ scope: 'localhost', port: 15432, target: null });
+    expect(pub('public:9000').config?.run.publish).toEqual({ scope: 'public', port: 9000, target: null });
+    // Another port of the container than run.port (MinIO's S3 API beside the console the domain serves)
+    expect(pub('public:19000:9000').config?.run.publish).toEqual({ scope: 'public', port: 19000, target: 9000 });
+    for (const bad of ['yes', '9000', 'everywhere:9000', 'public:0', 'public:70000', 'public:80', 'localhost:443', 'public:9000:0', 'public:9000:70000', 'public:1:2:3']) {
       expect(pub(bad).issues.map((i) => i.path), bad).toEqual(['run.publish']);
     }
+  });
+
+  it('takes run.command and run.entrypoint as argument lists', () => {
+    const run = (extra: string) => checkConfigText(valid.replace('  cpus: 1', `  cpus: 1\n${extra}`), 'site1');
+    expect(run('  command: [server, /data, --console-address, ":9001"]').config?.run.command).toEqual(['server', '/data', '--console-address', ':9001']);
+    expect(run('  entrypoint: [/bin/sh, -c]\n  command: ["exec /mailpit"]').config?.run).toMatchObject({ entrypoint: ['/bin/sh', '-c'], command: ['exec /mailpit'] });
+    for (const bad of ['[]', '"server /data"', '[1, 2]', `[${Array(65).fill('x').join(', ')}]`]) {
+      expect(run(`  command: ${bad}`).issues.map((i) => i.path), bad).toEqual(['run.command']);
+      expect(run(`  entrypoint: ${bad}`).issues.map((i) => i.path), bad).toEqual(['run.entrypoint']);
+    }
+  });
+
+  it('takes backups for quick services with a backup command', () => {
+    const b = (text: string) => checkConfigText(`${SERVICE}${text}\n`, 'orders-db');
+    expect(b('backups: { schedule: daily, keep: 14 }').config?.backups).toEqual({ schedule: 'daily', keep: 14 });
+    expect(b('backups: { schedule: hourly }').config?.backups).toEqual({ schedule: 'hourly', keep: 7 });
+    expect(b('backups: { schedule: weekly }').issues.map((i) => i.path)).toEqual(['backups.schedule']);
+    expect(b('backups: { keep: 0 }').issues.map((i) => i.path)).toEqual(['backups.keep']);
+    expect(b('backups: { at: "03:00" }').issues.map((i) => i.path)).toEqual(['backups.at']);
+    // An app, or a template with nothing to dump, has no schedule to run
+    expect(checkConfigText(`${valid}backups: { schedule: daily }\n`, 'site1').issues.map((i) => i.path)).toEqual(['backups.schedule']);
+    expect(paths(`${SERVICE.replace('service: postgres', 'service: memcached')}backups: { schedule: daily }\n`, 'orders-db')).toEqual(['backups.schedule']);
+    // Off, any app may say so
+    expect(checkConfigText(`${valid}backups: { schedule: "off" }\n`, 'site1').issues).toEqual([]);
   });
 });
 

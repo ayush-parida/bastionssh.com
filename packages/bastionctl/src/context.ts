@@ -24,6 +24,8 @@ export interface Ctx {
    * (or to `{ error }`): a proxy upgrade it ran first (BastionSSH audits it).
    */
   report?: { proxyUpgrade?: DeployProxyUpgrade };
+  /** The Docker socket's path on the host (the wrapper passes it): what bastion-cron mounts. */
+  hostSocket?: string;
   /** Where the nginx helper's state is mounted (default /var/lib/bastion-nginx; tests use a temp folder). */
   nginxStateDir?: string;
 }
