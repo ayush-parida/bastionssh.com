@@ -403,13 +403,13 @@ export default function ConfigEditor({
               {listField(['run', 'volumes'], 'uploads:/app/public/uploads')}
             </Field>
           )}
-          <Field label="Strategy" issues={at('run.strategy')} hint="recreate stops the old container first (required with an exclusive volume or a published port)">
+          <Field label="Strategy" issues={at('run.strategy')} hint="recreate stops the old container first (needed with an exclusive volume or run.publish)">
             <select className={input} disabled={readOnly} value={str(['run', 'strategy']) || 'rolling'} onChange={(e) => update(['run', 'strategy'], e.target.value === 'rolling' ? undefined : e.target.value)}>
               <option value="rolling">rolling — no downtime (default)</option>
               <option value="recreate">recreate — old container stops first</option>
             </select>
           </Field>
-          <Field label="Publish on the host" issues={at('run.publish')} hint="none, localhost:<port> (SSH tunnels) or public:<port> (firewall it)">
+          <Field label="Publish on the host" issues={at('run.publish')} hint="none, localhost:15432 (for SSH tunnels) or public:9000 (firewall it)">
             {textField(['run', 'publish'], 'none')}
           </Field>
           <Field label="Health check path" issues={at('healthcheck.path')}>
