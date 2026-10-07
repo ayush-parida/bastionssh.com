@@ -40,6 +40,7 @@ import { ensureCurrent, forgetUpgradeFailures, upgradeAudit, withUpgradeLock } f
 import { openDeploySse, TOO_MANY_STREAMS, type DeploySse } from '../../deploy/sse.js';
 import { detectNginx, existingProxyMode, uploadHelper } from '../../deploy/nginx.js';
 import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
+import { deployServiceRoutes } from './deploy-services.js';
 
 /**
  * Server-side deployments (deployments spec §7), under
@@ -581,6 +582,8 @@ export async function deployRoutes(app: FastifyInstance) {
 
   // Domains, TLS and the nginx helper (spec §6)
   await app.register(deployDomainRoutes, { gate });
+  // Quick services: create from the catalog, connection, Update version, backups (services spec §3)
+  await app.register(deployServiceRoutes, { gate, sseRoute, streamCommand, auditError });
 }
 
 /**

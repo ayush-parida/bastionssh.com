@@ -45,6 +45,7 @@ function remote(answer: (command: string) => Scripted, files: Record<string, Buf
     writeFile: async () => {},
     upload: async () => 0,
     remove: async () => {},
+    download: async () => null,
     release: () => {},
   };
   return { r, commands };

@@ -18,11 +18,17 @@ export const DEPLOY_TIMEOUT_MS = 30 * 60_000;
 export const SETUP_TIMEOUT_MS = 10 * 60_000;
 export const COMMAND_TIMEOUT_MS = 2 * 60_000;
 
-const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy', '--bytes', '--if-missing']);
+const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy', '--bytes', '--if-missing', '--keep']);
 const WORD = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
+/**
+ * An image reference (set-image: a catalog image, or the one a failed
+ * Update version puts back): starts with a lower-case letter or digit, so it
+ * is never an option; bastionctl checks it is a reference.
+ */
+const IMAGE = /^[a-z0-9][a-z0-9._/:-]{0,255}(?:@sha256:[a-f0-9]{64})?$/;
 
 function checkedArg(arg: string, root: string): string {
-  if (FLAGS.has(arg) || WORD.test(arg)) return arg;
+  if (FLAGS.has(arg) || WORD.test(arg) || IMAGE.test(arg)) return arg;
   // Paths are only ever ones we built under the root
   const rest = arg.startsWith(`${root}/`) ? arg.slice(root.length + 1) : null;
   if (rest && /^[A-Za-z0-9/_.-]+$/.test(rest) && !rest.split('/').includes('..')) return arg;

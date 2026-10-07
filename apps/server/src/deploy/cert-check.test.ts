@@ -104,6 +104,7 @@ function fakeRemote(server: ServerRow, fake: FakeServer): Remote {
     },
     upload: () => Promise.reject(new Error('read only')),
     remove: () => Promise.reject(new Error('read only')),
+    download: async () => null,
     release() {
       released++;
       open--;

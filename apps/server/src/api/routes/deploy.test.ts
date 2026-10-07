@@ -142,6 +142,9 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
       async remove(path) {
         fake.files.delete(path);
       },
+      async download() {
+        return null;
+      },
       release() {
         if (released) throw new Error('released twice');
         released = true;

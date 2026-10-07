@@ -26,6 +26,7 @@ function remote(answer: (command: string, stdin?: string) => Partial<RunResult>,
     writeFile: async () => {},
     upload: async () => 0,
     remove: async () => {},
+    download: async () => null,
     release: () => {},
   };
 }

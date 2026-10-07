@@ -57,6 +57,8 @@ export interface Remote {
   upload(path: string, source: Readable, maxBytes: number): Promise<number>;
   /** Remove a file; missing is fine. */
   remove(path: string): Promise<void>;
+  /** A regular file (never through a link) as a stream, with its size; null when missing. */
+  download(path: string): Promise<{ size: number; stream: Readable } | null>;
   /** Give the pooled connections back (exactly once). */
   release(): void;
 }
@@ -187,6 +189,18 @@ async function writeAtomic(c: SFTPWrapper, path: string, data: Buffer | string, 
 /** What a background connection may write: bastionctl's own files in a root's bin/ (deploy/upgrade.ts). */
 const BUNDLE_FILE = /^\/.*\/bin\/(?:bastionctl|bastionctl\.mjs|bastion-nginx)$/;
 
+async function downloadRemoteFile(c: SFTPWrapper, path: string): Promise<{ size: number; stream: Readable } | null> {
+  let stat;
+  try {
+    stat = await sftp.lstat(c, path);
+  } catch (err) {
+    if ((err as { statusCode?: number }).statusCode === 404) return null;
+    throw err;
+  }
+  if (!stat.isFile()) return null;
+  return { size: stat.size, stream: sftp.createReadStream(c, path) };
+}
+
 async function readRemoteFile(c: SFTPWrapper, path: string, maxBytes: number): Promise<Buffer | null> {
   if (!(await lstatFile(c, path))) return null;
   return sftp.readFile(c, path, maxBytes);
@@ -234,6 +248,7 @@ export async function openRemote(req: Pick<FastifyRequest, 'orgId' | 'user'>, se
       const c = await conn();
       await sftp.unlink(c, path).catch(() => {});
     },
+    download: async (path) => downloadRemoteFile(await conn(), path),
     release() {
       if (released) return;
       released = true;
@@ -305,6 +320,7 @@ export async function openSystemRemote(server: ServerRow): Promise<Remote> {
     },
     upload: readOnly,
     remove: readOnly,
+    download: async (path) => downloadRemoteFile(await conn(), path),
     release() {
       if (released) return;
       released = true;

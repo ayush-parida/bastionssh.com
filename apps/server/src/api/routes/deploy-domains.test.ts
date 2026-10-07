@@ -114,6 +114,9 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
     async remove(path) {
       fake.files.delete(path);
     },
+    async download() {
+      return null;
+    },
     release() {},
   });
   return { ...actual, openRemote };
