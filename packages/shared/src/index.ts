@@ -28,3 +28,4 @@ export * from './types/deploy-source.js';
 export * from './types/kube.js';
 export * from './types/kube-pods.js';
 export * from './types/pagination.js';
+export * from './services/catalog.js';

@@ -14,7 +14,8 @@
     "dev": "tsc --project tsconfig.json --watch",
     "clean": "rm -rf dist *.tsbuildinfo",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "update-service-images": "node scripts/update-service-images.mjs"
   },
   "devDependencies": {
     "typescript": "^5.5.0"

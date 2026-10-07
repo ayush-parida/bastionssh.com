@@ -60,14 +60,122 @@ export interface DeployAppConfig {
     cpus: number | null;
     /** The effective strategy: `recreate` when asked for, or forced by an exclusive volume or a published port. */
     strategy: DeployRunStrategy;
-    /** `run.publish`: the host port bound to `run.port`, and on which addresses. */
-    publish: { scope: DeployPublishScope; port: number | null };
+    /**
+     * `run.publish`: the host port bound, on which addresses, and the
+     * container port it reaches (`target`: `run.port` unless the config
+     * names another, like MinIO's S3 port beside its console).
+     */
+    publish: { scope: DeployPublishScope; port: number | null; target?: number | null };
+    /** `run.command`: replaces the image's CMD (argv, no shell unless it names one); null keeps the image's. Absent from older versions. */
+    command?: string[] | null;
+    /** `run.entrypoint`: replaces the image's ENTRYPOINT; null keeps the image's. Absent from older versions. */
+    entrypoint?: string[] | null;
   };
   /** `path` is used by `http`, `command` (argv run inside the container) by `command`; `tcp` connects from the proxy network. */
   healthcheck: { type: DeployHealthcheckType; path: string; command: string[] | null; timeout: string };
   keep_releases: number;
   proxy: DeployProxyMode;
   permissions: DeployAppPermissions;
+  /** `backups`: the schedule and retention of a quick service's backups (default off, 7 kept). Absent from older versions. */
+  backups?: DeployBackupSettings;
+}
+
+/** How often bastion-cron backs a service up (services spec §3.4). */
+export type DeployBackupSchedule = 'off' | 'hourly' | 'daily';
+
+export interface DeployBackupSettings {
+  schedule: DeployBackupSchedule;
+  /** Backups kept after each new one (oldest removed first), 1 to 100. */
+  keep: number;
+}
+
+/** Backups made by hand, by the schedule, and before a restore (of the data the restore replaced). */
+export type DeployBackupKind = 'manual' | 'scheduled' | 'pre-restore';
+
+/** A file in `<root>/apps/<name>/backups/`: `<UTC timestamp>[-<kind>].<ext>`. */
+export interface DeployBackup {
+  file: string;
+  bytes: number;
+  createdAt: string;
+  kind: DeployBackupKind;
+}
+
+/** The last run of the schedule, as bastion-cron recorded it. */
+export interface DeployBackupRun {
+  at: string;
+  result: 'success' | 'failed';
+  file: string | null;
+  error: string | null;
+}
+
+/** `bastionctl backups list <app>`. */
+export interface DeployBackupList {
+  app: string;
+  /** bastion.yml's `service`; backups need a template that has a dump command. */
+  service: string | null;
+  supported: boolean;
+  /** Newest first. */
+  backups: DeployBackup[];
+  settings: DeployBackupSettings;
+  lastScheduled: DeployBackupRun | null;
+  /** The bastion-cron container that runs schedules, when one is needed (null: no schedule on the server). */
+  cron: DeployContainer | null;
+}
+
+/** `bastionctl backup <app>`. */
+export interface DeployBackupResult {
+  app: string;
+  backup: DeployBackup;
+  /** Files removed beyond `keep`. */
+  pruned: string[];
+}
+
+/** `bastionctl restore <app> <file>`. */
+export interface DeployRestoreResult {
+  app: string;
+  file: string;
+  /** The backup of the data that was replaced, taken first. */
+  safety: DeployBackup | null;
+  /** `exec`: the template's restore command ran in the live container; `replace-file`: the container was stopped, its data file replaced and started again. */
+  method: 'exec' | 'replace-file';
+}
+
+/** One way to connect, as `GET …/apps/:app/connection` gives it: `{KEY}` placeholders stand for secret `.env` values (revealed with a passkey). */
+export interface DeployConnectionString {
+  label: string;
+  /** For apps on the same server (`<name>` on bastion-apps). */
+  internal: string;
+  /** Through the published port, when there is one. */
+  published: string | null;
+}
+
+export interface DeployConnectionField {
+  label: string;
+  /** Known without a secret (host, port, user names from the template). */
+  value: string | null;
+  /** The `.env` variable holding it, when it is a secret. */
+  secret: string | null;
+}
+
+/** `GET /api/deploy/servers/:id/apps/:app/connection`: how to reach a quick service, secrets masked. */
+export interface DeployServiceConnection {
+  app: string;
+  service: string;
+  /** The template's name (PostgreSQL); null for a template this BastionSSH does not know. */
+  name: string | null;
+  /** On bastion-apps: the app's name. */
+  host: string;
+  port: number;
+  ports: Array<{ port: number; label: string }>;
+  /** `run.publish` resolved to an address: 127.0.0.1 (SSH tunnel) or the server's host. */
+  published: { scope: 'localhost' | 'public'; host: string; port: number; target: number } | null;
+  fields: DeployConnectionField[];
+  strings: DeployConnectionString[];
+  /** The secrets the strings and fields refer to, in order. */
+  secrets: string[];
+  /** The web UI, when the service has one and a domain. */
+  ui: { label: string; urls: string[] } | null;
+  docs: string;
 }
 
 export interface DeployValidationIssue {
