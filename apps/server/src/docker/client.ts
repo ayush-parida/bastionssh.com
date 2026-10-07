@@ -217,10 +217,12 @@ export class DockerClient {
    * response once its headers arrive, whatever the status. The body is piped
    * with backpressure, so nothing is buffered here. Until the body has been
    * sent whole, the body failing (an upload over its limit, the browser gone)
-   * or `signal` aborting destroys the request, so the daemon sees a cut-off
-   * body and loads nothing; before the headers the promise rejects with that
-   * error, after them the response errors. Once the body is sent nothing here
-   * cancels the call: the caller owns the response.
+   * destroys the request, so the daemon sees a cut-off body and loads
+   * nothing. `signal` aborting destroys the request until the response
+   * headers arrive — also after the body was sent, so a caller's deadline for
+   * the daemon's answer holds; the caller decides when aborting is still
+   * wanted. The promise then rejects with that error. Once the headers are in
+   * nothing here cancels the call: the caller owns the response.
    */
   send(req: Omit<DaemonRequest, 'body'> & { body: Readable; contentType: string }): Promise<IncomingMessage> {
     return new Promise((resolve, reject) => {
@@ -242,7 +244,7 @@ export class DockerClient {
         reject(fromTransportError(err));
       };
       const onAbort = () => {
-        if (!sent) cut(req.signal?.reason instanceof Error ? req.signal.reason : new DockerError('Request cancelled', 499));
+        if (!settled) cut(req.signal?.reason instanceof Error ? req.signal.reason : new DockerError('Request cancelled', 499));
       };
       if (req.signal?.aborted) return onAbort();
       req.signal?.addEventListener('abort', onAbort, { once: true });
@@ -253,6 +255,7 @@ export class DockerClient {
           return;
         }
         settled = true;
+        req.signal?.removeEventListener('abort', onAbort);
         resolve(res);
       });
       request.on('error', (err) => {
@@ -263,7 +266,6 @@ export class DockerClient {
       });
       req.body.on('end', () => {
         sent = true;
-        req.signal?.removeEventListener('abort', onAbort);
       });
       req.body.pipe(request);
     });

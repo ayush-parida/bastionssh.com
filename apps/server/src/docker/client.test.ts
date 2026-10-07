@@ -1,3 +1,6 @@
+import http from 'node:http';
+import net from 'node:net';
+import { Readable } from 'node:stream';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Client } from 'ssh2';
 import { DockerClient, MAX_API_VERSION, compareApiVersions, negotiateApiVersion } from './client.js';
@@ -130,5 +133,45 @@ describe('Docker API over SSH channels (fake daemon)', () => {
   it('times out a request the daemon never answers', async () => {
     const hang = new DockerClient(() => new Promise(() => {}));
     await expect(hang.json({ path: '/info', timeoutMs: 50 })).rejects.toMatchObject({ statusCode: 504 });
+  });
+});
+
+describe('streamed request bodies (send)', () => {
+  it('still honours an abort after the body was sent, until the daemon answers', async () => {
+    // A daemon that reads the whole body and then never answers (a stuck import)
+    let received = 0;
+    let bodyDone = false;
+    const server = http.createServer((req) => {
+      req.on('data', (c: Buffer) => (received += c.length));
+      req.on('end', () => (bodyDone = true));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as net.AddressInfo).port;
+    let socket: net.Socket | undefined;
+    const docker = new DockerClient(
+      () =>
+        new Promise((resolve) => {
+          socket = net.connect(port, '127.0.0.1', () => resolve(socket!));
+        }),
+      '1.43',
+    );
+    try {
+      const abort = new AbortController();
+      const sending = docker.send({
+        method: 'POST',
+        path: '/images/load',
+        body: Readable.from([Buffer.alloc(4096, 1), Buffer.alloc(4096, 2)]),
+        contentType: 'application/x-tar',
+        signal: abort.signal,
+      });
+      await until(() => bodyDone);
+      expect(received).toBe(8192);
+      abort.abort(new DockerError('Docker did not finish loading the image in time', 504));
+      await expect(sending).rejects.toMatchObject({ statusCode: 504 });
+      await until(() => socket!.destroyed);
+    } finally {
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });

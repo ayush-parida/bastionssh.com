@@ -112,9 +112,13 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
       if (!req.raw.complete) upload.abort(new DockerError('The upload was interrupted', 499));
     };
     req.raw.on('close', interrupted);
+    // Once the engine has the whole archive the load runs to its end; only its deadline still cuts it
+    let bodySent = false;
     slot.signal.addEventListener(
       'abort',
-      () => upload.abort(new DockerError('Your access has changed. The upload was stopped.', 403)),
+      () => {
+        if (!bodySent) upload.abort(new DockerError('Your access has changed. The upload was stopped.', 403));
+      },
       { once: true },
     );
 
@@ -157,6 +161,7 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
         meter.on('error', (e) => (run.cut ??= e));
         // The engine imports after the last byte; give that a deadline of its own
         meter.once('end', () => {
+          bodySent = true;
           timer = setTimeout(() => upload.abort(new DockerError('Docker did not finish loading the image in time', 504)), LOAD_TIMEOUT_MS);
         });
         body.pipe(meter);
