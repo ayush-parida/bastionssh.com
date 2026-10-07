@@ -31,8 +31,8 @@ describe('ArchiveMeter', () => {
     const meter = new ArchiveMeter(limit, (f) => (f === 'zstd' ? Object.assign(new Error('no zstd'), { statusCode: 400 }) : null) as never);
     const out: Buffer[] = [];
     const parts = Array.from({ length: Math.ceil(data.length / chunk) }, (_, i) => data.subarray(i * chunk, (i + 1) * chunk));
-    await pipeline(Readable.from(parts), meter, async function* (source) {
-      for await (const c of source) out.push(c as Buffer);
+    await pipeline(Readable.from(parts), meter, async (source: AsyncIterable<Buffer>) => {
+      for await (const c of source) out.push(c);
     });
     return { meter, out: Buffer.concat(out) };
   };
