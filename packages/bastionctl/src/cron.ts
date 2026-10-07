@@ -60,6 +60,11 @@ export function cronSpec(ctx: Pick<Ctx, 'layout' | 'docker' | 'hostSocket'>): Re
       Binds: [`${root}:${root}`, `${ctx.hostSocket ?? '/var/run/docker.sock'}:/var/run/docker.sock`],
       ...(socketGid !== null && socketGid !== gid && { GroupAdd: [String(socketGid)] }),
       NetworkMode: 'none',
+      // Nothing it runs needs more: no capabilities, no privilege gain, an immutable image filesystem (HOME is a tmpfs)
+      CapDrop: ['ALL'],
+      SecurityOpt: ['no-new-privileges:true'],
+      ReadonlyRootfs: true,
+      Tmpfs: { '/tmp': 'rw,nosuid,nodev,size=64m' },
       Init: true,
       RestartPolicy: { Name: 'unless-stopped' },
       Memory: 256 * 1024 ** 2,

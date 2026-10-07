@@ -122,6 +122,15 @@ describe('backup', () => {
     expect(() => backups.prune(ctx(), 'orders-db', 0)).toThrow('--keep takes a whole number from 1 to 100');
   });
 
+  it('never prunes a pre-restore backup (the only copy of the data a restore replaced)', async () => {
+    await service('orders-db', 'postgres');
+    const first = (await backups.backup(ctx(), 'orders-db')).backup.file;
+    const { safety } = await backups.restore(ctx(), 'orders-db', first);
+    const later: string[] = [];
+    for (let i = 0; i < 3; i++) later.push((await backups.backup(ctx(), 'orders-db', { keep: 1, kind: 'scheduled' })).backup.file);
+    expect(backups.listBackups(ctx(), 'orders-db').map((b) => b.file)).toEqual([later[2], safety!.file]);
+  });
+
   it('refuses apps without a backup command, and runs only while no deploy holds the app', async () => {
     await service('cache', 'memcached');
     await expect(backups.backup(ctx(), 'cache')).rejects.toThrow('Memcached has no backup command');
@@ -220,12 +229,26 @@ describe('schedules and bastion-cron', () => {
       HostConfig: expect.objectContaining({ Binds: [`${root}:${root}`, '/var/run/docker.sock:/var/run/docker.sock'], NetworkMode: 'none', RestartPolicy: { Name: 'unless-stopped' } }),
     });
     expect(cron.Spec.Env).toContain(`BASTION_ROOT=${root}`);
+    // Hardened: no capabilities, no privilege gain, read-only image filesystem with a tmpfs HOME
+    expect(cron.Spec.HostConfig).toMatchObject({ CapDrop: ['ALL'], SecurityOpt: ['no-new-privileges:true'], ReadonlyRootfs: true, Tmpfs: { '/tmp': expect.stringContaining('rw') } });
     // Again: the same container, left as it is
     const id = cron.Id;
     await setBackupSchedule(ctx(), 'orders-db', 'hourly');
     expect(fake.containers.get(CRON_CONTAINER)!.Id).toBe(id);
     expect((await backups.backupsList(ctx(), 'orders-db')).cron).toMatchObject({ name: CRON_CONTAINER, state: 'running' });
     await setBackupSchedule(ctx(), 'orders-db', 'off');
+    expect(fake.containers.has(CRON_CONTAINER)).toBe(false);
+  });
+
+  it('runs bastion-cron for a schedule written in the config editor (init --force) too', async () => {
+    await service('orders-db', 'postgres');
+    expect(fake.containers.has(CRON_CONTAINER)).toBe(false);
+    const edited = fs.readFileSync(layout.config('orders-db'), 'utf8').replace('backups: { schedule: "off", keep: 7 }', 'backups: { schedule: "daily", keep: 7 }');
+    fs.writeFileSync(path.join(layout.tmp, 'edit.yml'), edited);
+    await ops.init(ctx(), 'orders-db', { config: 'tmp/edit.yml', force: true });
+    expect(fake.containers.get(CRON_CONTAINER)?.State.Running).toBe(true);
+    fs.writeFileSync(path.join(layout.tmp, 'edit.yml'), edited.replace('schedule: "daily"', 'schedule: "off"'));
+    await ops.init(ctx(), 'orders-db', { config: 'tmp/edit.yml', force: true });
     expect(fake.containers.has(CRON_CONTAINER)).toBe(false);
   });
 

@@ -551,6 +551,8 @@ export async function init(ctx: Ctx, app: string, opts: { config?: string; force
     }
   });
   ctx.log(existed ? `Updated the config of ${app}` : `Created app ${app}`);
+  // A schedule written in the config editor (backups.schedule) needs bastion-cron as much as one set from the Backups tab
+  await ensureCron(ctx).catch((err: Error) => ctx.log(`warning: scheduled backups: ${err.message}`));
   return { app, created: !existed };
 }
 

@@ -169,10 +169,16 @@ async function dump(ctx: Ctx, config: DeployAppConfig, kind: DeployBackupKind): 
   }
 }
 
-/** Remove the oldest backups beyond `keep` (every kind counts); returns the names removed. */
+/**
+ * Remove the oldest backups beyond `keep` (manual and scheduled count);
+ * returns the names removed. Pre-restore backups — the data a restore
+ * replaced — are never pruned: an hourly schedule would otherwise remove the
+ * only copy of it within hours. They are deleted by hand.
+ */
 export function pruneBackups(ctx: Pick<Ctx, 'layout' | 'log'>, app: string, keep: number): string[] {
   if (!Number.isInteger(keep) || keep < 1 || keep > 100) throw new BastionError('--keep takes a whole number from 1 to 100', 2);
   const removed = listBackups(ctx, app)
+    .filter((b) => b.kind !== 'pre-restore')
     .slice(keep)
     .map((b) => b.file);
   for (const file of removed) fs.rmSync(path.join(backupDir(ctx, app), file), { force: true });

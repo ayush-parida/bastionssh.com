@@ -115,7 +115,7 @@ A service with a web UI is better given a **domain**: the proxy serves it with H
 PostgreSQL, MySQL, MariaDB, MongoDB, Redis and Valkey have a **Backups** tab:
 
 - **Back up now** runs the template's dump command **inside the service's container** (`pg_dump -Fc`, `mysqldump --single-transaction`, `mongodump --archive --gzip`, a Redis RDB snapshot) and streams it straight into a file on the server: `apps/<name>/backups/<UTC time>.<ext>`, readable only by the deployments user. Nothing passes through BastionSSH.
-- **Keep** (default 7) — after each backup the oldest files beyond it are removed.
+- **Keep** (default 7) — after each backup the oldest manual and scheduled files beyond it are removed (pre-restore backups are kept).
 - **Schedule** — every hour or every day. Schedules run on the server, in a small container named `bastion-cron` that bastionctl creates while at least one service has a schedule: every minute it runs `bastionctl backups run-due`, which backs up each service whose newest backup is an hour (or a day) old. It needs nothing on the server but Docker — no cron daemon, no crontab — survives reboots, and always runs the bastionctl BastionSSH last installed. A scheduled backup that fails is shown on the Backups tab and tried again a quarter of an hour later.
 - **Download** a backup (manage; asks for your passkey, like a reveal; recorded as `deploy.backup_download`).
 
@@ -127,7 +127,7 @@ A backup and a deploy of the same service never run at once: each takes the serv
 
 **Restore** (manage) asks you to type the service's name. Then, on the server:
 
-1. The data as it is now is backed up first, to `<time>-pre-restore.<ext>` — undoing a restore is restoring that file.
+1. The data as it is now is backed up first, to `<time>-pre-restore.<ext>` — undoing a restore is restoring that file. Retention (`keep`) never removes these; delete them by hand once you no longer need them.
 2. The backup is put back **into the running service**: copied into the container and read by `pg_restore --clean --single-transaction`, `mysql`, or `mongorestore --drop`. For Redis and Valkey the container is stopped, its `dump.rdb` replaced, and started again (a few seconds without the cache).
 
 Apps using the service are **not stopped**: they keep their connections and may see errors, missing rows or a short outage while it restores. If they must not write in the meantime, stop them first (their **Stop** button) and restart them afterwards. Restores are recorded as `deploy.backup_restore`.
