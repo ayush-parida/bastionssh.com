@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { Client } from 'ssh2';
 import { DeployError } from './errors.js';
 import { DISCOVER_SCRIPT, discoverRoot, integrity, parseKeyValues, PREPARE_SCRIPT, prepareRoot } from './install.js';
-import type { BastionctlBundle } from './bundle.js';
+import { bastionctlBundle, bastionctlVersionOf, type BastionctlBundle } from './bundle.js';
 import type { Remote, RunResult } from './remote.js';
 import { runOnClient } from './remote.js';
 import { bastionctl, bastionctlCommand, parseResult } from './runner.js';
@@ -152,5 +152,21 @@ describe('running a command over SSH', () => {
     expect(channel.signals).toEqual(['TERM']);
     expect(channel.wasClosed).toBe(true);
     expect(result).toMatchObject({ exitCode: null, timedOut: true });
+  });
+});
+
+describe('bastionctl versions', () => {
+  it('reads the build from the banner, the plain version from an older program, and nothing from anything else', () => {
+    expect(bastionctlVersionOf(Buffer.from("#!/usr/bin/env node\n// bastionctl 0.1.0+e53ab47\nimport x from 'y';\n"))).toBe('0.1.0+e53ab47');
+    expect(bastionctlVersionOf(Buffer.from('#!/usr/bin/env node\nimport x;\nvar BASTIONCTL_VERSION = "0.1.0";\n'))).toBe('0.1.0');
+    expect(bastionctlVersionOf(Buffer.from('var BASTIONCTL_VERSION = true ? "0.2.0+abcdef0" : "0.2.0";'))).toBe('0.2.0+abcdef0');
+    expect(bastionctlVersionOf(Buffer.from('console.log("not ours")\n'))).toBeNull();
+    expect(bastionctlVersionOf(Buffer.from('// bastionctl 0.1.0; rm -rf /\n'))).toBeNull();
+  });
+
+  it('gives the built bundle a build-aware version: 0.1.0+<first 7 hex of the bundle hash>', () => {
+    const bundle = bastionctlBundle();
+    // packages/bastionctl is built before the server's tests run
+    expect(bundle?.version).toMatch(/^0\.1\.0\+[0-9a-f]{7}$/);
   });
 });
