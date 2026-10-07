@@ -304,5 +304,8 @@ export function planBuild(extracted: string, config: Pick<DeployAppConfig, 'buil
         exclude: ['.git', 'node_modules'],
         notes: ['Building a static site served by Caddy', ...(exists(context, 'package.json') ? [nodeNote(context, config.build.node)] : [])],
       };
+    case 'image':
+      // checkSource refused it already: an image is pulled, not built from an upload
+      throw new BastionError('build.type is image: nothing is built from an upload');
   }
 }

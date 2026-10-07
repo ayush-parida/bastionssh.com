@@ -6,5 +6,7 @@ const code = await run(process.argv.slice(2), {
   stdout: (text) => process.stdout.write(text),
   stderr: (text) => process.stderr.write(text),
   readStdin: readProcessStdin,
+  writeStdout: (chunk) => process.stdout.write(chunk),
+  writeStderr: (chunk) => process.stderr.write(chunk),
 });
 process.exitCode = code;

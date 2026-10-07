@@ -48,8 +48,8 @@ describe('pinned images', () => {
     try {
       const write = (name: string, content = '') => fs.writeFileSync(path.join(dir, name), content);
       const config = (build: Partial<DeployAppConfig['build']>): Pick<DeployAppConfig, 'build' | 'run'> => ({
-        build: { type: 'nextjs', node: null, dir: '.', output: null, ...build },
-        run: { port: 3000, env_file: '.env', volumes: [], memory: null, cpus: null },
+        build: { type: 'nextjs', node: null, dir: '.', output: null, image: null, ...build },
+        run: { port: 3000, env_file: '.env', volumes: [], memory: null, cpus: null, strategy: 'rolling', publish: { scope: 'none', port: null } },
       });
       fs.mkdirSync(path.join(dir, 'out'));
       write('out/index.html', 'hi');

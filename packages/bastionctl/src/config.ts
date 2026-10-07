@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseDocument } from 'yaml';
-import type { DeployAppConfig, DeployBuildType, DeployValidation, DeployValidationIssue } from '@smt/shared';
+import type { DeployAppConfig, DeployBuildType, DeployHealthcheckType, DeployValidation, DeployValidationIssue, DeployVolume } from '@smt/shared';
 import { NODE_BUILD_VERSIONS } from './images.js';
 import { BastionError, Layout, NAME_PATTERN } from './names.js';
-import { NGINX_TLS, proxyMode } from './nginx.js';
+import { NGINX_TLS, NGINX_UPSTREAM_PORT, proxyMode } from './nginx.js';
 
 /**
  * `bastion.yml` (deployments spec §4), strictly validated: unknown keys are
@@ -18,7 +18,18 @@ import { NGINX_TLS, proxyMode } from './nginx.js';
 /** Larger configs are refused before parsing. */
 export const MAX_CONFIG_BYTES = 64 * 1024;
 
-const BUILD_TYPES: readonly DeployBuildType[] = ['nextjs', 'dockerfile', 'static'];
+const BUILD_TYPES: readonly DeployBuildType[] = ['nextjs', 'dockerfile', 'static', 'image'];
+const HEALTH_TYPES: readonly DeployHealthcheckType[] = ['http', 'tcp', 'command'];
+/**
+ * A registry reference: `[registry[:port]/]repo[/more][:tag][@sha256:<64 hex>]`,
+ * lower-case repository path, with a tag or a digest (never an implied latest).
+ */
+const IMAGE_REF =
+  /^(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(?::\d{1,5})?)\/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
+const PUBLISH = /^(localhost|public):(\d{1,5})$/;
+/** Host ports the proxy owns: never published by an app. */
+const RESERVED_PORTS = [80, 443, NGINX_UPSTREAM_PORT];
+const MAX_COMMAND_ARGS = 64;
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DNS_PROVIDER = /^dns:[a-z0-9_]{1,40}$/;
 const VOLUME = /^([a-z0-9][a-z0-9_-]{0,40}):(\/[^:\0]*)(:ro)?$/;
@@ -36,13 +47,15 @@ export const DEFAULTS = {
   keep_releases: 5,
   proxy: 'caddy',
   deployPermission: 'operate',
+  strategy: 'rolling',
 } as const;
 
 const KEYS = {
-  root: ['name', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy', 'permissions'],
-  build: ['type', 'node', 'dir', 'output'],
-  run: ['port', 'env_file', 'volumes', 'memory', 'cpus'],
-  healthcheck: ['path', 'timeout'],
+  root: ['name', 'service', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy', 'permissions'],
+  build: ['type', 'node', 'dir', 'output', 'image'],
+  run: ['port', 'env_file', 'volumes', 'memory', 'cpus', 'strategy', 'publish'],
+  volume: ['name', 'path', 'readonly', 'exclusive'],
+  healthcheck: ['type', 'path', 'command', 'timeout'],
   tls: ['cert', 'key'],
   permissions: ['deploy'],
 };
@@ -72,6 +85,17 @@ export function memoryBytes(value: string): number {
   if (!m) throw new BastionError(`Invalid memory ${value}`);
   const unit = { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[m[2] as '' | 'k' | 'm' | 'g'];
   return Number(m[1]) * unit;
+}
+
+/** Whether an image reference names a digest (`…@sha256:…`): the same bytes on every pull. */
+export function isDigestPinned(ref: string): boolean {
+  return /@sha256:[a-f0-9]{64}$/.test(ref);
+}
+
+export function isImageRef(value: string): boolean {
+  if (value.length > 512 || !IMAGE_REF.test(value)) return false;
+  // A tag or a digest: the last path segment has a `:` (a registry port is before a `/`) or there is an `@`
+  return value.includes('@') || value.slice(value.lastIndexOf('/') + 1).includes(':');
 }
 
 /** `30s` → milliseconds. */
@@ -115,6 +139,47 @@ export function parseYaml(text: string): { value: unknown; issues: DeployValidat
   }
 }
 
+/** One entry of `run.volumes`: `name:/path[:ro]`, or `{ name, path, readonly?, exclusive? }`. */
+function parseVolume(v: unknown, at: string, issues: Issues): DeployVolume | null {
+  let volume: DeployVolume;
+  if (typeof v === 'string') {
+    const m = VOLUME.exec(v);
+    if (!m) {
+      issues.add(at, 'Use <name>:/absolute/path[:ro] or { name, path, exclusive } — named volumes only, never host paths');
+      return null;
+    }
+    volume = { name: m[1]!, path: m[2]!, readonly: m[3] === ':ro', exclusive: false };
+  } else if (isObject(v)) {
+    issues.unknownKeys(v, KEYS.volume, at);
+    const { name, path: target, readonly, exclusive } = v;
+    let ok = true;
+    if (typeof name !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,40}$/.test(name)) {
+      issues.add(`${at}.name`, 'Required: a-z, 0-9, _ and -, starting with a letter or digit');
+      ok = false;
+    }
+    if (typeof target !== 'string' || !target.startsWith('/') || target.length > 255 || /[:\0]/.test(target)) {
+      issues.add(`${at}.path`, 'Required: an absolute path in the container');
+      ok = false;
+    }
+    for (const [key, flag] of [['readonly', readonly], ['exclusive', exclusive]] as const) {
+      if (flag !== undefined && typeof flag !== 'boolean') {
+        issues.add(`${at}.${key}`, 'true or false');
+        ok = false;
+      }
+    }
+    if (!ok) return null;
+    volume = { name: name as string, path: target as string, readonly: readonly === true, exclusive: exclusive === true };
+  } else {
+    issues.add(at, 'Use <name>:/absolute/path[:ro] or { name, path, exclusive }');
+    return null;
+  }
+  if (volume.path === '/' || volume.path.split('/').some((seg) => seg === '..' || seg === '.')) {
+    issues.add(at, 'The container path must be absolute, not /, and without . or ..');
+    return null;
+  }
+  return volume;
+}
+
 /**
  * Validate parsed `bastion.yml` data for app `app` (null: any valid name).
  * Returns the normalized config, or the issues found — all of them, not just
@@ -134,6 +199,13 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
     issues.add('name', 'Required: a-z, 0-9 and -, starting with a letter or digit (at most 41)');
   } else if (app !== null && name !== app) {
     issues.add('name', `Must be the app's name (${app})`);
+  }
+
+  // service: the quick-service template id (informational)
+  let service: string | null = null;
+  if (data.service !== undefined && data.service !== null) {
+    if (typeof data.service !== 'string' || !NAME_PATTERN.test(data.service)) issues.add('service', 'A template id: a-z, 0-9 and - (like postgres)');
+    else service = data.service;
   }
 
   // tls (read first: wildcard domains depend on it)
@@ -157,8 +229,9 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
 
   // domains
   const domains: string[] = [];
-  if (!Array.isArray(data.domains) || data.domains.length === 0) {
-    issues.add('domains', 'Required: a list of at least one domain');
+  if (!Array.isArray(data.domains)) {
+    // [] is a service reached only by other apps on bastion-apps (a database, a cache): no proxy entry
+    issues.add('domains', 'Required: a list of domains, like [example.com], or [] for a service only other apps reach');
   } else if (data.domains.length > 50) {
     issues.add('domains', 'At most 50 domains');
   } else {
@@ -177,19 +250,31 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
   }
 
   // build
-  let build: DeployAppConfig['build'] = { type: 'dockerfile', node: null, dir: '.', output: null };
+  let build: DeployAppConfig['build'] = { type: 'dockerfile', node: null, dir: '.', output: null, image: null };
   if (!isObject(data.build)) {
-    issues.add('build', 'Required: { type: nextjs | dockerfile | static }');
+    issues.add('build', 'Required: { type: nextjs | dockerfile | static | image }');
   } else {
     issues.unknownKeys(data.build, KEYS.build, 'build');
-    const { type, node, dir, output } = data.build;
+    const { type, node, dir, output, image } = data.build;
     if (typeof type !== 'string' || !(BUILD_TYPES as readonly string[]).includes(type)) {
-      issues.add('build.type', 'Must be nextjs, dockerfile or static');
+      issues.add('build.type', 'Must be nextjs, dockerfile, static or image');
     }
     const known = (BUILD_TYPES as readonly unknown[]).includes(type);
     const buildType = known ? (type as DeployBuildType) : 'dockerfile';
+    let imageRef: string | null = null;
+    if (buildType === 'image') {
+      if (image === undefined) issues.add('build.image', 'Required with type image: a registry reference like postgres:16.4@sha256:… (a digest is strongly recommended)');
+      else if (typeof image !== 'string' || !isImageRef(image)) {
+        issues.add('build.image', 'A registry reference with a tag or digest, like postgres:16.4 or postgres@sha256:<64 hex digits>');
+      } else imageRef = image;
+      for (const key of ['node', 'dir', 'output'] as const) {
+        if (data.build[key] !== undefined) issues.add(`build.${key}`, 'Not used with type image: nothing is built');
+      }
+    } else if (image !== undefined && known) {
+      issues.add('build.image', 'Only with type image');
+    }
     let nodeVersion: string | null = null;
-    if (node !== undefined) {
+    if (node !== undefined && buildType !== 'image') {
       const v = typeof node === 'number' ? String(node) : node;
       if (known && buildType === 'dockerfile') issues.add('build.node', 'Only for nextjs and static builds (a Dockerfile picks its own base image)');
       else if (typeof v !== 'string' || !NODE_VERSION.test(v)) issues.add('build.node', 'A Node.js version like "20" or "22.11"');
@@ -197,27 +282,36 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       else nodeVersion = v;
     }
     let buildDir = '.';
-    if (dir !== undefined) {
+    if (dir !== undefined && buildType !== 'image') {
       if (typeof dir !== 'string' || !isSafeRelative(dir)) issues.add('build.dir', 'A relative path inside the upload, without ..');
       else buildDir = dir;
     }
     let buildOutput: string | null = buildType === 'static' ? 'out' : null;
-    if (output !== undefined) {
+    if (output !== undefined && buildType !== 'image') {
       if (known && buildType !== 'static') issues.add('build.output', 'Only for static builds');
       else if (typeof output !== 'string' || !isSafeRelative(output)) issues.add('build.output', 'A relative path inside build.dir, without ..');
       else buildOutput = output;
     }
-    build = { type: buildType, node: nodeVersion, dir: buildDir, output: buildOutput };
+    build = { type: buildType, node: nodeVersion, dir: buildDir, output: buildOutput, image: imageRef };
   }
 
   // run
-  const run: DeployAppConfig['run'] = { port: DEFAULTS.port, env_file: DEFAULTS.env_file, volumes: [], memory: null, cpus: null };
+  const run: DeployAppConfig['run'] = {
+    port: DEFAULTS.port,
+    env_file: DEFAULTS.env_file,
+    volumes: [],
+    memory: null,
+    cpus: null,
+    strategy: DEFAULTS.strategy,
+    publish: { scope: 'none', port: null },
+  };
+  let strategyAsked: unknown;
   if (data.run !== undefined) {
     if (!isObject(data.run)) {
       issues.add('run', 'Must be a mapping');
     } else {
       issues.unknownKeys(data.run, KEYS.run, 'run');
-      const { port, env_file, volumes, memory, cpus } = data.run;
+      const { port, env_file, volumes, memory, cpus, strategy, publish } = data.run;
       if (port !== undefined) {
         if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) issues.add('run.port', 'A port from 1 to 65535');
         else run.port = port;
@@ -228,19 +322,15 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       }
       if (volumes !== undefined) {
         if (!Array.isArray(volumes)) {
-          issues.add('run.volumes', 'A list like ["uploads:/app/uploads"]');
+          issues.add('run.volumes', 'A list like ["uploads:/app/uploads"] or [{ name: data, path: /data, exclusive: true }]');
         } else {
           const names = new Set<string>();
           volumes.forEach((v, i) => {
-            const m = typeof v === 'string' ? VOLUME.exec(v) : null;
-            if (!m) return issues.add(`run.volumes.${i}`, 'Use <name>:/absolute/path[:ro] — named volumes only, never host paths');
-            const target = m[2]!;
-            if (target === '/' || target.split('/').some((seg) => seg === '..' || seg === '.')) {
-              return issues.add(`run.volumes.${i}`, 'The container path must be absolute, not /, and without . or ..');
-            }
-            if (names.has(m[1]!)) return issues.add(`run.volumes.${i}`, `Volume ${m[1]} is listed twice`);
-            names.add(m[1]!);
-            run.volumes.push(v as string);
+            const volume = parseVolume(v, `run.volumes.${i}`, issues);
+            if (!volume) return;
+            if (names.has(volume.name)) return issues.add(`run.volumes.${i}`, `Volume ${volume.name} is listed twice`);
+            names.add(volume.name);
+            run.volumes.push(volume);
           });
         }
       }
@@ -254,23 +344,73 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
         if (typeof cpus !== 'number' || !(cpus >= 0.01 && cpus <= 256)) issues.add('run.cpus', 'A number of CPUs from 0.01 to 256');
         else run.cpus = cpus;
       }
+      if (strategy !== undefined) {
+        if (strategy !== 'rolling' && strategy !== 'recreate') issues.add('run.strategy', 'Must be rolling or recreate');
+        else strategyAsked = strategy;
+      }
+      if (publish !== undefined) {
+        const m = typeof publish === 'string' ? PUBLISH.exec(publish) : null;
+        if (publish === 'none') {
+          // the default
+        } else if (!m) {
+          issues.add('run.publish', 'Must be none, localhost:<port> or public:<port>');
+        } else {
+          const hostPort = Number(m[2]);
+          if (hostPort < 1 || hostPort > 65535) issues.add('run.publish', 'A host port from 1 to 65535');
+          else if (RESERVED_PORTS.includes(hostPort)) issues.add('run.publish', `Port ${hostPort} belongs to the proxy; pick another host port`);
+          else run.publish = { scope: m[1] as 'localhost' | 'public', port: hostPort };
+        }
+      }
     }
   }
+  // Two containers cannot share an exclusive volume or a host port: the old one stops first
+  const exclusive = run.volumes.find((v) => v.exclusive);
+  const forced = exclusive ? `volume ${exclusive.name} is exclusive` : run.publish.scope !== 'none' ? 'run.publish binds a host port' : null;
+  if (forced && strategyAsked === 'rolling') issues.add('run.strategy', `Must be recreate: ${forced} (two containers cannot use it at once)`);
+  run.strategy = forced ? 'recreate' : ((strategyAsked as DeployAppConfig['run']['strategy'] | undefined) ?? DEFAULTS.strategy);
   if (build.type === 'static') run.port = 80;
 
-  // healthcheck
-  const healthcheck = { path: DEFAULTS.healthPath as string, timeout: DEFAULTS.healthTimeout as string };
+  // healthcheck: HTTP for apps with domains, a TCP connect for services without (unless the config says)
+  const healthcheck: DeployAppConfig['healthcheck'] = {
+    type: domains.length > 0 ? 'http' : 'tcp',
+    path: DEFAULTS.healthPath as string,
+    command: null,
+    timeout: DEFAULTS.healthTimeout as string,
+  };
   if (data.healthcheck !== undefined) {
     if (!isObject(data.healthcheck)) {
       issues.add('healthcheck', 'Must be a mapping');
     } else {
       issues.unknownKeys(data.healthcheck, KEYS.healthcheck, 'healthcheck');
-      const { path: hPath, timeout } = data.healthcheck;
+      const { type, path: hPath, command, timeout } = data.healthcheck;
+      if (type !== undefined) {
+        if (typeof type !== 'string' || !(HEALTH_TYPES as readonly string[]).includes(type)) issues.add('healthcheck.type', 'Must be http, tcp or command');
+        else healthcheck.type = type as DeployHealthcheckType;
+      } else if (hPath !== undefined) {
+        healthcheck.type = 'http';
+      } else if (command !== undefined) {
+        healthcheck.type = 'command';
+      }
       if (hPath !== undefined) {
         // eslint-disable-next-line no-control-regex
         if (typeof hPath !== 'string' || !hPath.startsWith('/') || hPath.length > 200 || /[\s\0-\x1f'"`\\]/.test(hPath)) {
           issues.add('healthcheck.path', 'A URL path starting with /, without spaces or quotes');
+        } else if (healthcheck.type !== 'http') {
+          issues.add('healthcheck.path', 'Only with type http');
         } else healthcheck.path = hPath;
+      }
+      if (command !== undefined) {
+        if (healthcheck.type !== 'command') issues.add('healthcheck.command', 'Only with type command');
+        else if (
+          !Array.isArray(command) ||
+          command.length === 0 ||
+          command.length > MAX_COMMAND_ARGS ||
+          !command.every((a) => typeof a === 'string' && a.length > 0 && a.length <= 1024 && !/[\0\n\r]/.test(a))
+        ) {
+          issues.add('healthcheck.command', `A list of 1 to ${MAX_COMMAND_ARGS} arguments, like ["pg_isready", "-U", "app"] (run inside the container, no shell)`);
+        } else healthcheck.command = command as string[];
+      } else if (healthcheck.type === 'command') {
+        issues.add('healthcheck.command', 'Required with type command: a list like ["pg_isready", "-U", "app"]');
       }
       if (timeout !== undefined) {
         if (typeof timeout !== 'string' || !DURATION.test(timeout)) issues.add('healthcheck.timeout', 'Like 30s or 2m');
@@ -316,6 +456,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
   return {
     config: {
       name: name as string,
+      service,
       domains,
       redirect_www: redirect,
       tls,
@@ -387,13 +528,27 @@ export function domainConflicts(layout: Layout, app: string, domains: readonly s
   return issues;
 }
 
-/** Full validation of config text for `app` on this server: syntax, schema, the server's proxy mode, then domains across apps. */
+/** A host port `app` would publish that another app on the server publishes already (refused: only one can bind it). */
+export function publishConflicts(layout: Layout, app: string, publish: DeployAppConfig['run']['publish']): DeployValidationIssue[] {
+  if (publish.scope === 'none' || publish.port === null) return [];
+  for (const other of appNames(layout)) {
+    if (other === app) continue;
+    const { config } = tryLoadConfig(layout, other);
+    if (config && config.run.publish.port === publish.port) {
+      return [{ path: 'run.publish', message: `Host port ${publish.port} is already published by app ${other}` }];
+    }
+  }
+  return [];
+}
+
+/** Full validation of config text for `app` on this server: syntax, schema, the server's proxy mode, then domains and published ports across apps. */
 export function validateForServer(layout: Layout, app: string, text: string): DeployValidation & { config: DeployAppConfig | null } {
   const { config, issues } = checkConfigText(text, app);
   if (!config) return { ok: false, errors: issues, config: null };
   const mode = proxyMode(layout);
-  const conflicts = domainConflicts(layout, app, config.domains);
-  if (config.proxy !== mode) conflicts.unshift({ path: 'proxy', message: `This server's proxy is set up for ${mode}; use proxy: ${mode}` });
+  const conflicts = [...domainConflicts(layout, app, config.domains), ...publishConflicts(layout, app, config.run.publish)];
+  // Without domains the app never reaches the proxy, whichever mode it names
+  if (config.proxy !== mode && config.domains.length > 0) conflicts.unshift({ path: 'proxy', message: `This server's proxy is set up for ${mode}; use proxy: ${mode}` });
   return { ok: conflicts.length === 0, errors: conflicts, config: conflicts.length === 0 ? config : null };
 }
 

@@ -9,7 +9,12 @@ export const DEPLOY_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/;
 /** `.env` variable names. */
 export const DEPLOY_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
-export type DeployBuildType = 'nextjs' | 'dockerfile' | 'static';
+export type DeployBuildType = 'nextjs' | 'dockerfile' | 'static' | 'image';
+/** How a release replaces the one serving: side by side (`rolling`), or the old one stopped first (`recreate`). */
+export type DeployRunStrategy = 'rolling' | 'recreate';
+export type DeployHealthcheckType = 'http' | 'tcp' | 'command';
+/** `none`: only other apps on bastion-apps reach it; `localhost`: 127.0.0.1:<port> on the host; `public`: every address. */
+export type DeployPublishScope = 'none' | 'localhost' | 'public';
 export type DeployProxyMode = 'caddy' | 'nginx';
 export type DeployRedirectWww = 'apex' | 'www' | 'none';
 /** `auto` | `staging` | `internal` | `dns:<provider>`, or certificate files in the app folder. */
@@ -26,21 +31,40 @@ export interface DeployAppPermissions {
   deploy: DeployPermissionLevel;
 }
 
-/** `bastion.yml` after validation, defaults filled in (spec §4). */
-export interface DeployAppConfig {
+/** A named volume of `run.volumes`, short (`data:/path[:ro]`) or long form. */
+export interface DeployVolume {
   name: string;
+  /** Absolute path in the container. */
+  path: string;
+  readonly: boolean;
+  /** Only one container may use it at a time (a database's data): forces `run.strategy: recreate`. */
+  exclusive: boolean;
+}
+
+/** `bastion.yml` after validation, defaults filled in (spec §4; services spec §3.2). */
+export interface DeployAppConfig {
+  /** The quick-service template the app was created from (informational); null for an app. */
+  service: string | null;
+  /** Empty for a service without a web UI: no proxy entry. */
   domains: string[];
+  name: string;
   redirect_www: DeployRedirectWww;
   tls: DeployTls;
-  build: { type: DeployBuildType; node: string | null; dir: string; output: string | null };
+  /** `image`: a registry reference pulled instead of built (`dir`/`node`/`output` unused). */
+  build: { type: DeployBuildType; node: string | null; dir: string; output: string | null; image: string | null };
   run: {
     port: number;
     env_file: string;
-    volumes: string[];
+    volumes: DeployVolume[];
     memory: string | null;
     cpus: number | null;
+    /** The effective strategy: `recreate` when asked for, or forced by an exclusive volume or a published port. */
+    strategy: DeployRunStrategy;
+    /** `run.publish`: the host port bound to `run.port`, and on which addresses. */
+    publish: { scope: DeployPublishScope; port: number | null };
   };
-  healthcheck: { path: string; timeout: string };
+  /** `path` is used by `http`, `command` (argv run inside the container) by `command`; `tcp` connects from the proxy network. */
+  healthcheck: { type: DeployHealthcheckType; path: string; command: string[] | null; timeout: string };
   keep_releases: number;
   proxy: DeployProxyMode;
   permissions: DeployAppPermissions;
@@ -91,6 +115,8 @@ export interface DeployAppSummary {
   certificate?: DeployAppCertificate | null;
   /** The live container's CPU and memory, from one Docker stats read; null when it is not running. */
   usage?: DeployAppUsage | null;
+  /** bastion.yml's `service` (the quick-service template id); null for an app. Absent from older versions. */
+  service?: string | null;
 }
 
 export interface DeployAppCertificate {
@@ -125,7 +151,7 @@ export interface DeployRelease {
   finishedAt: string | null;
   /** Who deployed it — passed in by BastionSSH, or the SSH user for a plain CLI run. */
   actor: string;
-  /** SHA-256 of the uploaded source. */
+  /** SHA-256 of the uploaded source (`build.type: image`: of the image reference). */
   checksum: string;
   image: string;
   container: string;
@@ -134,6 +160,8 @@ export interface DeployRelease {
   result: DeployReleaseResult;
   error: string | null;
   previous: string | null;
+  /** `build.type: image`: the digest the pulled image resolved to (`sha256:…`); null for builds. Absent from older releases. */
+  digest?: string | null;
   current: boolean;
   imagePresent: boolean;
 }
@@ -145,6 +173,23 @@ export interface DeployOutcome {
   previous: string | null;
   result: 'success' | 'failed';
   error: string | null;
+  /** The proxy was upgraded (or the attempt failed) before the command ran. */
+  proxyUpgrade?: DeployProxyUpgrade;
+}
+
+/** `restart <app>`. */
+export interface DeployRestartResult {
+  app: string;
+  container: string;
+  /** The proxy was upgraded (or the attempt failed) before the restart. */
+  proxyUpgrade?: DeployProxyUpgrade;
+}
+
+/** `env generate <app> KEY`: the value is written to `.env`, never returned. */
+export interface DeployEnvGenerated {
+  key: string;
+  /** False with `--if-missing` when the variable was set already (left as it was). */
+  generated: boolean;
 }
 
 export interface DeploySetupResult {
@@ -153,6 +198,43 @@ export interface DeploySetupResult {
   network: string;
   proxyContainer: DeployContainer | null;
   version: string;
+  proxyUpgrade?: DeployProxyUpgrade;
+}
+
+/** What made bastionctl upgrade the proxy. */
+export type DeployProxyUpgradeTrigger = 'deploy' | 'rollback' | 'restart' | 'proxy_apply' | 'setup' | 'manual';
+
+/**
+ * An automatic (or requested) proxy upgrade (services spec §2), as bastionctl
+ * reports it in the command's JSON; BastionSSH audits it as
+ * `deploy.proxy_upgrade`. `caddy`: only Caddy was replaced, behind the front,
+ * with no connection dropped; `front`: the proxy container itself was
+ * replaced (in-flight connections may drop for about a second).
+ */
+export interface DeployProxyUpgrade {
+  /** The proxy build before: `0.1.0+<build>` from the container's label, `unknown` for a proxy from before labels. */
+  from: string;
+  to: string;
+  trigger: DeployProxyUpgradeTrigger;
+  result: 'success' | 'failed';
+  replaced: Array<'caddy' | 'front'>;
+  /** Failed: why; the previous proxy was restored and serves. */
+  error?: string;
+}
+
+/**
+ * `bastionctl proxy status`: the proxy against what this bastionctl would run.
+ * `outdated` lists what an upgrade would replace.
+ */
+export interface DeployProxyStatus {
+  state: 'ok' | 'outdated' | 'missing' | 'stopped';
+  /** The build that last brought the proxy up to date; `unknown` before labels, null when missing. */
+  build: string | null;
+  /** This bastionctl's build. */
+  target: string;
+  outdated: Array<'caddy' | 'front'>;
+  /** `<root>/bin/.pinned`: not upgraded automatically. */
+  pinned: boolean;
 }
 
 export interface DeployVersion {
@@ -185,6 +267,10 @@ export interface DeployServerState {
   upgraded?: { from: string | null; to: string };
   /** Why the automatic upgrade failed. */
   upgradeError?: string;
+  /** The proxy is from an older bastionctl (it is upgraded at the next deploy, rollback, restart or setup, or with Update proxy now). Absent when unknown. */
+  proxyOutdated?: boolean;
+  /** `bastionctl proxy status`, when it could be read. */
+  proxy?: DeployProxyStatus;
 }
 
 export interface BastionctlInfo {

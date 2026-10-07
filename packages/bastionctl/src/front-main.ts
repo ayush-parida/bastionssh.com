@@ -2,21 +2,29 @@ import { FRONT_CONTROL, requestReload, serveControl, startFront, type ListenKind
 
 // The proxy container's entry point (bundled into the bastion-proxy image, see proxy-image.ts):
 //   run                                own the public ports and serve through Caddy (the default)
-//   reload [--sha256 <hex>] [names…]   switch to a new Caddy with the config file (bastionctl runs it with docker exec)
+//   reload [--sha256 <hex>] [--caddy <path>] [names…]
+//                                      switch to a new Caddy with the config file (bastionctl runs it with docker exec)
 const [command = 'run', ...args] = process.argv.slice(2);
 const env = process.env;
 const control = env.BASTION_PROXY_CONTROL || FRONT_CONTROL;
 
 if (command === 'reload') {
-  const sha = args[0] === '--sha256' ? args[1] : undefined;
+  // [--sha256 <hex>] [--caddy <path>] in any order, then the names to check
+  const flags = new Map<string, string>();
+  let rest = args;
+  while ((rest[0] === '--sha256' || rest[0] === '--caddy') && rest[1] !== undefined) {
+    flags.set(rest[0], rest[1]);
+    rest = rest.slice(2);
+  }
   process.exitCode = await requestReload(
     control,
-    sha ? args.slice(2) : args,
+    rest,
     {
       log: (line) => process.stderr.write(`${line}\n`),
       error: (line) => process.stderr.write(`${line}\n`),
     },
-    sha,
+    flags.get('--sha256'),
+    flags.get('--caddy'),
   );
 } else if (command === 'run') {
   // `80:http,443:https`

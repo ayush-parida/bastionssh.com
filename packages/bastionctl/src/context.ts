@@ -1,3 +1,4 @@
+import type { DeployProxyUpgrade } from '@smt/shared';
 import type { DockerApi } from './docker.js';
 import type { Layout } from './names.js';
 
@@ -16,6 +17,13 @@ export interface Ctx {
   healthIntervalMs: number;
   /** Cap on an upload's unpacked size. */
   maxSourceBytes?: number;
+  /** How long a replaced proxy container may take to accept connections (default 30s). */
+  proxyReadyMs?: number;
+  /**
+   * What the command did besides its own result, for `--json` to add to it
+   * (or to `{ error }`): a proxy upgrade it ran first (BastionSSH audits it).
+   */
+  report?: { proxyUpgrade?: DeployProxyUpgrade };
   /** Where the nginx helper's state is mounted (default /var/lib/bastion-nginx; tests use a temp folder). */
   nginxStateDir?: string;
 }

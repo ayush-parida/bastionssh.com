@@ -30,7 +30,8 @@ export type DeploySourceProblemCode =
   | 'bad_package_json'
   | 'output_missing'
   | 'no_package_json'
-  | 'no_dockerfile';
+  | 'no_dockerfile'
+  | 'image_takes_no_source';
 
 export interface DeploySourceProblem {
   code: DeploySourceProblemCode;
@@ -106,6 +107,14 @@ export function checkDeploySource(view: DeploySourceView, build: Pick<DeployAppC
     };
   }
   const packageJson = joinSourcePath(dir, 'package.json');
+
+  if (build.type === 'image') {
+    return {
+      code: 'image_takes_no_source',
+      message: 'build.type is image: the server pulls build.image from its registry, so there is nothing to upload. Deploy it without a source.',
+      docs: `${DEPLOY_DOCS.config}#buildimage`,
+    };
+  }
 
   if (build.type === 'dockerfile') {
     if (view.isFile(joinSourcePath(dir, 'Dockerfile'))) return null;

@@ -10,8 +10,9 @@ import { CADDY_IMAGE } from './images.js';
 import { waitForLock } from './lock.js';
 import { BastionError, containerName, isInside, LABEL_MANAGED, LIVE_NETWORK, liveAlias, NETWORK, PROXY_CONTAINER } from './names.js';
 import { NGINX_HELPER_PATH, NGINX_UPSTREAM_PORT, proxyMode, syncSiteFiles } from './nginx.js';
-import { FRONT_PATH, PROXY_IMAGE } from './proxy-image.js';
+import { CADDY_ID, caddyBinary, FRONT_PATH, linkedCaddy, PROXY_IMAGE } from './proxy-image.js';
 import { currentRelease, readRelease } from './releases.js';
+import { BASTIONCTL_VERSION } from './version.js';
 
 /**
  * The Caddy proxy (deployments spec §2.5, §5 step 6): one `bastion-caddy`
@@ -40,6 +41,11 @@ export function siteFor(config: DeployAppConfig, release: string, port: number):
   return { app: config.name, release, domains: config.domains, redirect_www: config.redirect_www, tls: config.tls, upstream: `${liveAlias(config.name, port)}:${port}` };
 }
 
+/** The app's site, or null for an app without domains (no proxy entry). */
+export function siteOrNone(config: DeployAppConfig, release: string, port: number): ProxySite | null {
+  return config.domains.length > 0 ? siteFor(config, release, port) : null;
+}
+
 /** The sites of every app with a current release, apps in `overrides` replaced. Apps asking for the other proxy mode are left out. */
 export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyOverride = new Map()): ProxySite[] {
   const sites: ProxySite[] = [];
@@ -57,6 +63,8 @@ export function collectSites(ctx: Pick<Ctx, 'layout' | 'log'>, overrides: ProxyO
       ctx.log(`warning: ${app} is left out of the proxy: ${error}`);
       continue;
     }
+    // A service reached on bastion-apps only
+    if (config.domains.length === 0) continue;
     if (config.proxy !== mode) {
       ctx.log(`warning: ${app} is left out of the proxy: it asks for proxy: ${config.proxy}, but this server is set up for ${mode}`);
       continue;
@@ -134,8 +142,28 @@ export async function requireProxy(ctx: Pick<Ctx, 'docker'>) {
   if (proxy.state !== 'running') throw new BastionError(`The proxy container ${PROXY_CONTAINER} is ${proxy.state} (run bastionctl setup)`);
 }
 
-async function caddy(ctx: Pick<Ctx, 'docker'>, args: string[]) {
-  return ctx.docker.exec(PROXY_CONTAINER, ['caddy', ...args, '--adapter', 'caddyfile'], 60_000);
+/** Labels on the proxy container: the bastionctl build that created it, and a hash of its create spec. */
+export const LABEL_BUILD = 'bastion.build';
+export const LABEL_PROXY_SPEC = 'bastion.proxy-spec';
+
+/**
+ * The Caddy program the running proxy starts generations with: the linked
+ * binary for a container from this generation (it has the build label), else
+ * the one in its image (a container from before Caddy came out of the image,
+ * on a pinned server). Null for the latter: its front takes no `--caddy`.
+ */
+export function caddyProgram(ctx: Pick<Ctx, 'layout'>, info: { Config: { Labels: Record<string, string> | null } } | null): string | null {
+  return info?.Config.Labels?.[LABEL_BUILD] ? caddyBinary(linkedCaddy(ctx) ?? CADDY_ID) : null;
+}
+
+/** Validate `file` (a path in the proxy container) with Caddy `program`. */
+export async function validateCaddyfile(ctx: Pick<Ctx, 'docker'>, file: string, program: string | null) {
+  return ctx.docker.exec(PROXY_CONTAINER, [program ?? 'caddy', 'validate', '--config', file, '--adapter', 'caddyfile'], 60_000);
+}
+
+/** The front's `reload`: a new Caddy generation with the config whose text hashes to `sha256`, running `program` when given. */
+export async function frontReload(ctx: Pick<Ctx, 'docker'>, sha256: string, program: string | null, probe: string[]) {
+  return ctx.docker.exec(PROXY_CONTAINER, ['node', FRONT_PATH, 'reload', '--sha256', sha256, ...(program ? ['--caddy', program] : []), ...probe], 120_000);
 }
 
 /** The names whose certificates a new Caddy must serve before it takes traffic (those the running one has). */
@@ -221,7 +249,7 @@ export async function nginxTrustedProxies(ctx: Pick<Ctx, 'docker' | 'log'>): Pro
 }
 
 /** The Caddyfile for `sites` in the server's mode. */
-async function caddyfileFor(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, sites: ProxySite[]): Promise<string> {
+export async function caddyfileFor(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, sites: ProxySite[]): Promise<string> {
   const mode = proxyMode(ctx.layout);
   return generateCaddyfile(sites, mode, mode === 'nginx' ? await nginxTrustedProxies(ctx) : undefined);
 }
@@ -238,14 +266,19 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
     return;
   }
   const info = await ctx.docker.inspectContainer(PROXY_CONTAINER);
-  if (info && info.Config.Image !== PROXY_IMAGE) {
-    throw new BastionError(`${PROXY_CONTAINER} runs a proxy from an older bastionctl; run bastionctl setup (Reinstall in BastionSSH) to replace it, then try again`);
+  // Only a proxy from before the front cannot switch configs (an unpinned server's is replaced before any command gets here)
+  if (info && !info.Config.Image.startsWith('bastion-proxy:')) {
+    throw new BastionError(
+      `${PROXY_CONTAINER} runs a proxy from before bastionctl's proxy front, and this server is pinned (${ctx.layout.bin}/.pinned), so it is not upgraded automatically; ` +
+        'run bastionctl proxy upgrade (Update proxy now in BastionSSH) or setup, then try again',
+    );
   }
   const next = `${file}.next`;
   const prev = `${file}.prev`;
   fs.writeFileSync(next, text, { mode: 0o644 });
 
-  const validated = await caddy(ctx, ['validate', '--config', `${PROXY_MOUNT}/Caddyfile.next`]);
+  const program = caddyProgram(ctx, info);
+  const validated = await validateCaddyfile(ctx, `${PROXY_MOUNT}/Caddyfile.next`, program);
   if (validated.exitCode !== 0) {
     fs.rmSync(next, { force: true });
     throw new BastionError(`The new proxy config was refused; nothing changed:\n${lastLines(validated.stderr || validated.stdout)}`);
@@ -256,7 +289,7 @@ export async function switchProxy(ctx: Pick<Ctx, 'layout' | 'docker' | 'log'>, o
   fs.renameSync(next, file);
   // A new Caddy reads the file (and any renewed certificate files); the running one serves until it is ready
   const sha256 = createHash('sha256').update(text).digest('hex');
-  const reloaded = await ctx.docker.exec(PROXY_CONTAINER, ['node', FRONT_PATH, 'reload', '--sha256', sha256, ...(mode === 'caddy' ? probeNames(sites) : [])], 120_000);
+  const reloaded = await frontReload(ctx, sha256, program, mode === 'caddy' ? probeNames(sites) : []);
   if (reloaded.exitCode === 0) {
     ctx.log(`Proxy switched to the new config (${sites.length} app${sites.length === 1 ? '' : 's'}); open connections finish on the previous one`);
     if (mode === 'nginx') {
@@ -308,9 +341,16 @@ export const LABEL_PROXY_MODE = 'bastion.proxy-mode';
 /**
  * The proxy container's create spec (spec §2.5): ports 80 and 443 on every
  * address, or in nginx mode plain HTTP on the loopback port the host's nginx
- * forwards to.
+ * forwards to. Labelled with this bastionctl's build and a hash of the spec
+ * itself (without DNS provider tokens), so a proxy created by another build
+ * with another spec is known to be outdated.
  */
 export function proxySpec(ctx: Pick<Ctx, 'layout'>, env: string[], mode: DeployProxyMode = 'caddy'): Record<string, unknown> {
+  const base = baseSpec(ctx, mode);
+  return { ...base, Env: [...env, ...base.Env], Labels: { [LABEL_MANAGED]: 'proxy', [LABEL_PROXY_MODE]: mode, [LABEL_BUILD]: BASTIONCTL_VERSION, [LABEL_PROXY_SPEC]: proxySpecHash(ctx, mode) } };
+}
+
+function baseSpec(ctx: Pick<Ctx, 'layout'>, mode: DeployProxyMode) {
   const proxy = ctx.layout.proxy;
   const ports =
     mode === 'nginx'
@@ -321,8 +361,7 @@ export function proxySpec(ctx: Pick<Ctx, 'layout'>, env: string[], mode: DeployP
         };
   return {
     Image: PROXY_IMAGE,
-    Env: [...env, `BASTION_PROXY_LISTEN=${mode === 'nginx' ? '80:http' : '80:http,443:https'}`, `BASTION_PROXY_CONFIG=${PROXY_MOUNT}/Caddyfile`],
-    Labels: { [LABEL_MANAGED]: 'proxy', [LABEL_PROXY_MODE]: mode },
+    Env: [`BASTION_PROXY_LISTEN=${mode === 'nginx' ? '80:http' : '80:http,443:https'}`, `BASTION_PROXY_CONFIG=${PROXY_MOUNT}/Caddyfile`],
     ExposedPorts: mode === 'nginx' ? { '80/tcp': {} } : { '80/tcp': {}, '443/tcp': {} },
     HostConfig: {
       Binds: [`${proxy}:${PROXY_MOUNT}`, `${path.join(proxy, 'data')}:/data`, `${path.join(proxy, 'config')}:/config`],
@@ -331,4 +370,9 @@ export function proxySpec(ctx: Pick<Ctx, 'layout'>, env: string[], mode: DeployP
       NetworkMode: NETWORK,
     },
   };
+}
+
+/** What {@link LABEL_PROXY_SPEC} holds: the spec for `mode` without labels and provider tokens, hashed. */
+export function proxySpecHash(ctx: Pick<Ctx, 'layout'>, mode: DeployProxyMode): string {
+  return createHash('sha256').update(JSON.stringify(baseSpec(ctx, mode))).digest('hex').slice(0, 16);
 }

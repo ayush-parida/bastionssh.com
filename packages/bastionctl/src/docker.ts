@@ -1,5 +1,7 @@
+import fs from 'node:fs';
 import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
+import { pipeline } from 'node:stream/promises';
 import type { Readable } from 'node:stream';
 import { BastionError } from './names.js';
 
@@ -229,6 +231,78 @@ export class DockerApi {
     return { exitCode: info.ExitCode ?? -1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8') };
   }
 
+  /**
+   * `docker exec` with the output as it comes: stdout and stderr chunks to
+   * `onStdout` / `onStderr` (raw bytes, demultiplexed frame by frame). Resolves
+   * with the exit code; a timeout rejects (the command keeps running in the
+   * container until it ends by itself).
+   */
+  async execStream(
+    container: string,
+    cmd: string[],
+    out: { onStdout: (chunk: Buffer) => void; onStderr: (chunk: Buffer) => void },
+    timeoutMs = 60 * 60_000,
+  ): Promise<number> {
+    const { Id } = await this.json<{ Id: string }>('POST', `/containers/${encodeURIComponent(container)}/exec`, {
+      body: { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false },
+    });
+    const res = await this.stream('POST', `/exec/${Id}/start`, { body: { Detach: false, Tty: false }, timeoutMs });
+    if ((res.statusCode ?? 0) >= 400) {
+      const chunks: Buffer[] = [];
+      for await (const c of res as AsyncIterable<Buffer>) chunks.push(c);
+      throw new DockerApiError(Buffer.concat(chunks).toString('utf8').trim() || `exec failed (${res.statusCode})`, res.statusCode ?? 500);
+    }
+    await new Promise<void>((resolve, reject) => {
+      let pending: Buffer = Buffer.alloc(0);
+      const timer = setTimeout(() => {
+        res.destroy();
+        reject(new DockerApiError(`${cmd[0]} in ${container} did not finish in time`, 504));
+      }, timeoutMs);
+      res.on('data', (c: Buffer) => {
+        pending = pending.length ? Buffer.concat([pending, c]) : c;
+        while (pending.length >= 8) {
+          const size = pending.readUInt32BE(4);
+          if (pending.length < 8 + size) break;
+          const frame = pending.subarray(8, 8 + size);
+          if (pending[0] === 2) out.onStderr(frame);
+          else out.onStdout(frame);
+          pending = pending.subarray(8 + size);
+        }
+      });
+      res.on('end', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      res.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+    const info = await this.json<{ ExitCode: number | null }>('GET', `/exec/${Id}/json`);
+    return info.ExitCode ?? -1;
+  }
+
+  /** A file or folder of a container (running or not) as a tar archive, written to `file`. */
+  async copyFrom(container: string, containerPath: string, file: string): Promise<void> {
+    const res = await this.stream('GET', `/containers/${encodeURIComponent(container)}/archive`, { query: { path: containerPath }, timeoutMs: 120_000 });
+    if ((res.statusCode ?? 0) >= 400) {
+      const chunks: Buffer[] = [];
+      for await (const c of res as AsyncIterable<Buffer>) chunks.push(c);
+      throw new DockerApiError(`Could not read ${containerPath} from ${container}: ${Buffer.concat(chunks).toString('utf8').trim()}`, res.statusCode ?? 500);
+    }
+    await pipeline(res, fs.createWriteStream(file, { mode: 0o600 }));
+  }
+
+  /** An image's id and the registry digests it is known by (`repo@sha256:…`); null when absent. */
+  inspectImage(ref: string) {
+    return this.inspect<{ Id: string; RepoDigests?: string[] | null; RepoTags?: string[] | null }>(`/images/${encodeURIComponent(ref)}/json`);
+  }
+
+  /** Tag image `ref` as `repo:tag` (a pulled image under the release's own name). */
+  async tagImage(ref: string, repo: string, tag: string): Promise<void> {
+    await this.request('POST', `/images/${encodeURIComponent(ref)}/tag`, { query: { repo, tag } });
+  }
+
   async imageExists(ref: string): Promise<boolean> {
     return (await this.inspect(`/images/${encodeURIComponent(ref)}/json`)) !== null;
   }
@@ -398,7 +472,7 @@ export interface ContainerSummary {
 export interface ContainerInspect {
   Id: string;
   Name: string;
-  Config: { Image: string; Labels: Record<string, string> | null };
+  Config: { Image: string; Labels: Record<string, string> | null; Env?: string[] | null };
   State: { Status: string; Running: boolean; Restarting?: boolean; StartedAt?: string; ExitCode?: number; Health?: { Status: string } };
   RestartCount?: number;
   NetworkSettings?: { Networks?: Record<string, { Aliases?: string[] | null; IPAddress?: string } | null> | null };

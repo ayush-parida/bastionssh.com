@@ -10,8 +10,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { generateCaddyfile, PROXY_MOUNT, type ProxySite } from './caddy.js';
 import { DockerApi } from './docker.js';
 import { CADDY_IMAGE, NODE_IMAGE } from './images.js';
+import { Layout } from './names.js';
 import { probeNames } from './proxy.js';
-import { FRONT_PATH, frontSource, proxyDockerfile } from './proxy-image.js';
+import { CADDY_ID, caddyBinary, ensureCaddyBinary, FRONT_PATH, frontSource, linkCaddy, proxyDockerfile } from './proxy-image.js';
 import { tarBuffer } from './tar.js';
 
 /**
@@ -21,7 +22,9 @@ import { tarBuffer } from './tar.js';
  * Caddyfile bastionctl generates switched — new domains, another upstream
  * port, another TLS setting — the way switchProxy does it (caddy validate,
  * then the front's reload with the names to check), while requests keep
- * coming on new and kept-alive connections. Not one may fail. Everything it
+ * coming on new and kept-alive connections — and once with another Caddy
+ * binary linked, as a proxy upgrade replaces Caddy behind the front (services
+ * spec §2). Not one may fail. Everything it
  * creates (containers with their anonymous volumes, network, image) is
  * removed afterwards.
  *
@@ -40,7 +43,10 @@ const HTTP_PORT = 28980;
 describe.skipIf(!live)('the proxy, live: config switches under load', () => {
   const docker = new DockerApi(SOCKET);
   let dir: string;
+  let layout: Layout;
   let log = '';
+  /** The Caddy new generations run, as switchProxy names it. */
+  let program = caddyBinary(CADDY_ID);
 
   const site = (over: Partial<ProxySite>): ProxySite => ({
     app: 'web',
@@ -57,11 +63,11 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     const file = path.join(dir, 'Caddyfile');
     const text = generateCaddyfile(sites, 'caddy');
     fs.writeFileSync(`${file}.next`, text);
-    const validated = await docker.exec(NAME, ['caddy', 'validate', '--config', `${PROXY_MOUNT}/Caddyfile.next`, '--adapter', 'caddyfile'], 60_000);
+    const validated = await docker.exec(NAME, [program, 'validate', '--config', `${PROXY_MOUNT}/Caddyfile.next`, '--adapter', 'caddyfile'], 60_000);
     expect(validated.exitCode, validated.stderr).toBe(0);
     fs.renameSync(`${file}.next`, file);
     const sha256 = createHash('sha256').update(text).digest('hex');
-    const reloaded = await docker.exec(NAME, ['node', FRONT_PATH, 'reload', '--sha256', sha256, ...probeNames(sites)], 120_000);
+    const reloaded = await docker.exec(NAME, ['node', FRONT_PATH, 'reload', '--sha256', sha256, '--caddy', program, ...probeNames(sites)], 120_000);
     log += reloaded.stderr;
     expect(reloaded.exitCode, reloaded.stderr).toBe(0);
   }
@@ -101,7 +107,8 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
   }
 
   beforeAll(async () => {
-    dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'bastion-proxytest-'));
+    layout = new Layout(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'bastion-proxytest-')));
+    dir = layout.proxy;
     for (const sub of ['data', 'config', 'certs/web']) fs.mkdirSync(path.join(dir, sub), { recursive: true });
     execFileSync('openssl', [
       'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '30', '-subj', '/CN=web.test',
@@ -110,6 +117,12 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     for (const ref of [NODE_IMAGE, CADDY_IMAGE, 'busybox:1.36']) {
       if (!(await docker.imageExists(ref))) await docker.pull(ref, () => {});
     }
+    // Caddy out of its pinned image, as setup does, and a copy under another id to switch to as an upgrade would
+    await ensureCaddyBinary({ layout, docker, log: () => {} });
+    linkCaddy({ layout }, CADDY_ID);
+    fs.mkdirSync(path.join(dir, 'caddy', 'fedcba9876543210'));
+    fs.copyFileSync(path.join(dir, 'caddy', CADDY_ID, 'caddy'), path.join(dir, 'caddy', 'fedcba9876543210', 'caddy'));
+    fs.chmodSync(path.join(dir, 'caddy', 'fedcba9876543210', 'caddy'), 0o755);
     await docker.build(Readable.from([tarBuffer([{ name: 'Dockerfile', content: proxyDockerfile() }, { name: 'bastion-proxy.mjs', content: frontSource() }])]), { t: IMAGE, rm: true, forcerm: true }, () => {});
     await docker.json('POST', '/networks/create', { body: { Name: NAME, Driver: 'bridge' } });
     // Two upstreams, as two releases on two ports
@@ -148,7 +161,7 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     }
     await docker.request('DELETE', `/networks/${NAME}`).catch(() => {});
     await docker.removeImage(IMAGE).catch(() => {});
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(layout.root, { recursive: true, force: true });
   });
 
   it('switches domains, upstream port and TLS without failing one request', async () => {
@@ -191,6 +204,11 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     await pause();
     await apply([site({ domains: ['web.test', 'alt.test'], upstream: 'bastion-web-live-4000:4000' })]); // another port
     await pause();
+    // Another Caddy binary: a new generation runs it, the old one drains (a proxy upgrade of Caddy only)
+    linkCaddy({ layout }, 'fedcba9876543210');
+    program = caddyBinary('fedcba9876543210');
+    await apply([site({ domains: ['web.test', 'alt.test'], upstream: 'bastion-web-live-4000:4000' })]);
+    await pause();
     await apply([site({ domains: ['web.test', 'alt.test'], upstream: 'bastion-web-live-4000:4000', tls: { cert: 'cert.pem', key: 'key.pem' } })]); // certificate files
     await pause();
     await apply([site({ upstream: 'bastion-web-live-4000:4000', tls: 'internal' })]); // back to Caddy's CA, a domain removed
@@ -202,11 +220,13 @@ describe.skipIf(!live)('the proxy, live: config switches under load', () => {
     expect(failures, `${failures.length} of ${count} requests failed (${retried} retried)\n${log}`).toEqual([]);
     // Only an idle kept-alive connection the old Caddy closes as its drain ends is retried: at most
     // one per pooled socket (the agent keeps 2) per switch, never a request on a new connection
-    expect(retried, `${retried} retries over 4 switches`).toBeLessThanOrEqual(2 * 4);
+    expect(retried, `${retried} retries over 5 switches`).toBeLessThanOrEqual(2 * 5);
     // Requests through every switch (how many depends on the machine)
     expect(count).toBeGreaterThan(50);
     expect([...bodies].sort()).toEqual(['up3000', 'up4000']);
-    expect(await docker.logsTail(NAME, 400)).toContain('generation 5 serves');
+    expect(await docker.logsTail(NAME, 400)).toContain('generation 6 serves');
+    // The newest generation runs the other binary
+    expect((await docker.exec(NAME, ['sh', '-c', 'ls -l /proc/$(pgrep -n caddy)/exe'], 10_000)).stdout).toContain('fedcba9876543210/caddy');
     expect(await get('alt.test', false).then(() => 'served', () => 'refused')).toBe('refused');
   }, 300_000);
 

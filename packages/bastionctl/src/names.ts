@@ -28,6 +28,8 @@ export class BastionError extends Error {
     message: string,
     /** Process exit code: 1 failure, 2 usage, 3 invalid config, 4 busy (locked). */
     readonly exitCode = 1,
+    /** More for `--json` to print beside `{ error, code }` (a failed proxy upgrade, for the audit). */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'BastionError';

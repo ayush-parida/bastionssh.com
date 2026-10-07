@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type {
@@ -8,20 +8,36 @@ import type {
   DeployAppSummary,
   DeployAppUsage,
   DeployContainer,
+  DeployEnvGenerated,
   DeployOutcome,
   DeployProxyMode,
+  DeployProxyStatus,
   DeployRelease,
+  DeployRestartResult,
   DeploySetupResult,
   DeployValidation,
   DeployVersion,
 } from '@smt/shared';
 import images from './images.json' with { type: 'json' };
 import { planBuild, GENERATED_DOCKERFILE } from './build.js';
-import { appNames, durationMs, envFilePath, formatIssues, loadConfig, memoryBytes, MAX_CONFIG_BYTES, templateConfig, tryLoadConfig, validateForServer } from './config.js';
+import {
+  appNames,
+  durationMs,
+  envFilePath,
+  formatIssues,
+  isDigestPinned,
+  loadConfig,
+  memoryBytes,
+  MAX_CONFIG_BYTES,
+  templateConfig,
+  tryLoadConfig,
+  validateForServer,
+} from './config.js';
 import { sleep, type Ctx } from './context.js';
 import { appCertificates } from './certs.js';
 import { DockerApiError, usageFrom } from './docker.js';
-import { containerEnv, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
+import { containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
+import { pinnedRef } from './images.js';
 import { acquireLock, lockView, readLock, waitForLock } from './lock.js';
 import { envFileMasker } from './mask.js';
 import {
@@ -43,20 +59,9 @@ import {
   volumeName,
 } from './names.js';
 import { NGINX_UPSTREAM_PORT, proxyMode, readProxyMode, writeProxyMode } from './nginx.js';
-import { ensureProxyImage, PROXY_IMAGE, pruneProxyImages } from './proxy-image.js';
-import {
-  applyProxy,
-  joinLive,
-  LABEL_PROXY_MODE,
-  proxyContainer,
-  proxyEnv,
-  proxySpec,
-  requireProxy,
-  siteFor,
-  switchProxy,
-  withProxyLock,
-  writeInitialCaddyfile,
-} from './proxy.js';
+import { CADDY_ID, ensureCaddyBinary, ensureProxyImage, linkCaddy, linkedCaddy, pruneProxyImages } from './proxy-image.js';
+import { applyProxy, joinLive, proxyContainer, proxyEnv, proxySpec, requireProxy, siteOrNone, switchProxy, withProxyLock, writeInitialCaddyfile } from './proxy.js';
+import { ensureProxyCurrent, proxyStatus, readProxyState, recoverPreviousProxy, startProxy, upgradeProxy, upgradeProxyNow, writeProxyState } from './proxy-upgrade.js';
 import {
   clearCurrent,
   currentRelease,
@@ -142,37 +147,61 @@ async function sha256File(file: string): Promise<string> {
   return hash.digest('hex');
 }
 
-/** The container spec of a release (spec §5 step 4). */
+/**
+ * The container spec of a release (spec §5 step 4; services spec §3.2): on
+ * bastion-apps under the app's name, so other apps reach it as
+ * `<name>:<port>`; `run.publish` binds the port on the host's loopback
+ * address or on every address.
+ */
 export function appContainerSpec(ctx: Ctx, config: DeployAppConfig, release: string, image: string): Record<string, unknown> {
-  const mounts = config.run.volumes.map((v) => {
-    const [name, target, ro] = v.split(':') as [string, string, string | undefined];
-    return { Type: 'volume', Source: volumeName(config.name, name), Target: target, ReadOnly: ro === 'ro' };
-  });
+  const mounts = config.run.volumes.map((v) => ({ Type: 'volume', Source: volumeName(config.name, v.name), Target: v.path, ReadOnly: v.readonly }));
+  const { publish, port } = config.run;
+  const binding = publish.scope === 'none' || publish.port === null ? null : { HostIp: publish.scope === 'localhost' ? '127.0.0.1' : '0.0.0.0', HostPort: String(publish.port) };
   return {
     Image: image,
     Env: containerEnv(envFilePath(ctx.layout, config.name, config)),
     Labels: { [LABEL_APP]: config.name, [LABEL_RELEASE]: release, [LABEL_MANAGED]: 'app' },
+    ...(binding && { ExposedPorts: { [`${port}/tcp`]: {} } }),
     HostConfig: {
       NetworkMode: NETWORK,
       RestartPolicy: { Name: 'unless-stopped' },
       Mounts: mounts,
+      ...(binding && { PortBindings: { [`${port}/tcp`]: [binding] } }),
       ...(config.run.memory && { Memory: memoryBytes(config.run.memory) }),
       ...(config.run.cpus && { NanoCpus: Math.round(config.run.cpus * 1e9) }),
       LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } },
     },
+    NetworkingConfig: { EndpointsConfig: { [NETWORK]: { Aliases: [config.name] } } },
   };
 }
 
+/** A TCP connect from the proxy container (Node.js is its runtime): 0 when something accepts. */
+const tcpProbe = (host: string, port: number) =>
+  `const s=require('net').connect(${port},${JSON.stringify(host)});s.on('connect',()=>process.exit(0));s.on('error',(e)=>{console.error(e.message);process.exit(1)});setTimeout(()=>{console.error('timed out');process.exit(1)},5000)`;
+
+/** What the health check of `config` does, for the log. */
+function healthDescription(config: DeployAppConfig, container: string, port: number): string {
+  switch (config.healthcheck.type) {
+    case 'tcp':
+      return `TCP connect to ${container}:${port}`;
+    case 'command':
+      return `${(config.healthcheck.command ?? []).join(' ')} in ${container}`;
+    default:
+      return `http://${container}:${port}${config.healthcheck.path}`;
+  }
+}
+
 /**
- * Wait until the app answers over HTTP from inside the network (spec §5 step
- * 5): `wget` in the proxy container, until it succeeds or the configured
- * timeout passes. A container that stops meanwhile fails at once, with its
- * last log lines.
+ * Wait until the app is healthy (spec §5 step 5; services spec §3.2), until
+ * the configured timeout passes: `http` fetches the path with `wget` from
+ * the proxy container, `tcp` connects from there, `command` runs the argv in
+ * the new container itself (exit code 0: healthy). A container that stops
+ * meanwhile fails at once, with its last log lines.
  */
 async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string, port: number): Promise<void> {
   const deadline = ctx.now().getTime() + durationMs(config.healthcheck.timeout);
-  const url = `http://${container}:${port}${config.healthcheck.path}`;
-  ctx.log(`Health check: ${url} (up to ${config.healthcheck.timeout})`);
+  const { type } = config.healthcheck;
+  ctx.log(`Health check: ${healthDescription(config, container, port)} (up to ${config.healthcheck.timeout})`);
   let last = '';
   for (;;) {
     const info = await ctx.docker.inspectContainer(container);
@@ -181,18 +210,25 @@ async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string,
       const logs = await ctx.docker.logsTail(container);
       throw new BastionError(`The new container stopped (exit ${info?.State.ExitCode ?? '?'})${logs ? `:\n${logs}` : ''}`);
     }
-    // By its address on bastion-apps, not its name: a name over 63 characters
-    // (an app name over 30) is no valid DNS label, and the proxy's resolver
-    // would never find it
-    const ip = info.NetworkSettings?.Networks?.[NETWORK]?.IPAddress;
-    if (!ip || !/^[0-9.]+$|^[0-9a-f:]+$/i.test(ip)) throw new BastionError(`The new container has no address on ${NETWORK}`);
-    const target = `http://${ip.includes(':') ? `[${ip}]` : ip}:${port}${config.healthcheck.path}`;
-    const probe = await ctx.docker.exec(PROXY_CONTAINER, ['wget', '-q', '-O', '/dev/null', '-T', '5', target], 15_000);
+    let probe: { exitCode: number; stdout: string; stderr: string };
+    if (type === 'command') {
+      probe = await ctx.docker.exec(container, config.healthcheck.command!, 15_000).catch((err: Error) => ({ exitCode: 1, stdout: '', stderr: err.message }));
+    } else {
+      // By its address on bastion-apps, not its name: a name over 63 characters
+      // (an app name over 30) is no valid DNS label, and the proxy's resolver
+      // would never find it
+      const ip = info.NetworkSettings?.Networks?.[NETWORK]?.IPAddress;
+      if (!ip || !/^[0-9.]+$|^[0-9a-f:]+$/i.test(ip)) throw new BastionError(`The new container has no address on ${NETWORK}`);
+      probe =
+        type === 'tcp'
+          ? await ctx.docker.exec(PROXY_CONTAINER, ['node', '-e', tcpProbe(ip, port)], 15_000)
+          : await ctx.docker.exec(PROXY_CONTAINER, ['wget', '-q', '-O', '/dev/null', '-T', '5', `http://${ip.includes(':') ? `[${ip}]` : ip}:${port}${config.healthcheck.path}`], 15_000);
+    }
     if (probe.exitCode === 0) {
       ctx.log('Health check passed');
       return;
     }
-    last = (probe.stderr || probe.stdout).trim();
+    last = (probe.stderr || probe.stdout).trim().split('\n').slice(-3).join('\n') || (type === 'command' ? `exit code ${probe.exitCode}` : '');
     if (ctx.now().getTime() >= deadline) {
       const logs = await ctx.docker.logsTail(container);
       throw new BastionError(`Health check failed after ${config.healthcheck.timeout}: ${last || 'no answer'}${logs ? `\nContainer log:\n${logs}` : ''}`);
@@ -201,16 +237,39 @@ async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string,
   }
 }
 
+/** Stop timeout for an old container in recreate mode: a database gets time to shut down cleanly. */
+const RECREATE_STOP_S = 30;
+
 /**
- * Start `record`'s image as the app's live container (spec §5 steps 4–7),
- * with no request lost:
+ * The new container is healthy: on bastion-live under the app's live alias,
+ * the proxy config regenerated and reloaded only if it changed (first
+ * deploy, another port or domains), and `current` moved — while the proxy
+ * lock is held, so another app's switch builds on it.
+ */
+async function goLive(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord, name: string): Promise<void> {
+  await requireProxy(ctx);
+  await withProxyLock(ctx, async () => {
+    // bastion.yml as it is now, read under the lock config changes take: one saved during
+    // the build must not have the proxy serve the domains or TLS it had when the deploy began
+    const fresh = loadConfig(ctx.layout, config.name);
+    await joinLive(ctx, name, liveAlias(config.name, record.port));
+    ctx.log(`${name} is live`);
+    // An app without domains (a database) has no proxy entry; one that dropped its domains loses it
+    await switchProxy(ctx, new Map([[config.name, siteOrNone(fresh, record.id, record.port)]]), { onlyIfChanged: true });
+    // Release dirs may be gone for a CLI user who deleted them; the link still moves
+    fs.mkdirSync(ctx.layout.release(config.name, record.id), { recursive: true });
+    setCurrent(ctx.layout, config.name, record.id);
+  });
+}
+
+/**
+ * Start `record`'s image as the app's live container (spec §5 steps 4–7).
+ *
+ * `run.strategy: rolling` (the default), with no request lost:
  *
  * 1. a new container next to the old one, on bastion-apps only — out of
  *    the proxy's rotation — and its health check;
- * 2. the new container joins bastion-live under the app's live alias, so it
- *    serves next to the old one; the proxy config is regenerated and
- *    reloaded only if it changed (first deploy, another port), and
- *    `current` moves;
+ * 2. it goes live ({@link goLive});
  * 3. after the drain delay the app's other containers are stopped (each gets
  *    SIGTERM and time to finish) and removed; a GET one of them drops is
  *    retried by Caddy on the new one.
@@ -218,53 +277,98 @@ async function waitHealthy(ctx: Ctx, config: DeployAppConfig, container: string,
  * Any failure before step 3 removes the new container (and with it its
  * alias) and leaves the old one serving.
  *
- * With `recreate` (restart) the new container is the same release as the
+ * `run.strategy: recreate` (services spec §3.2; forced by an exclusive volume
+ * or a published port) never runs two containers at once: the app's
+ * containers are stopped first (kept, not running), then the new one starts
+ * and is health-checked; once it is live the old ones are removed. If the new
+ * one fails it is removed and the containers that were running are started
+ * again — the previous release serves as before, after a short outage — and
+ * the error says so.
+ *
+ * With `sameRelease` (restart) the new container is the same release as the
  * live one, so it starts under a temporary name and takes the release's
  * name once the old container is gone; Caddy follows the live alias, which
  * a rename keeps.
  */
-async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord, opts: { recreate?: boolean } = {}): Promise<void> {
+async function activate(ctx: Ctx, config: DeployAppConfig, record: ReleaseRecord, opts: { sameRelease?: boolean } = {}): Promise<void> {
   const releaseName = containerName(config.name, record.id);
-  const name = opts.recreate ? `${releaseName}${NEXT_SUFFIX}` : releaseName;
+  const name = opts.sameRelease ? `${releaseName}${NEXT_SUFFIX}` : releaseName;
   // A container of this release left from an earlier activation (rollback to it), or a restart cut off
   await ctx.docker.remove(name);
-  ctx.log(`Starting ${name}`);
-  await ctx.docker.createContainer(name, appContainerSpec(ctx, config, record.id, record.image));
-  try {
-    await ctx.docker.start(name);
-    await waitHealthy(ctx, config, name, record.port);
-    await requireProxy(ctx);
-    // `current` moves while the proxy lock is still held, so another app's switch builds on it
-    await withProxyLock(ctx, async () => {
-      // bastion.yml as it is now, read under the lock config changes take: one saved during
-      // the build must not have the proxy serve the domains or TLS it had when the deploy began
-      const fresh = loadConfig(ctx.layout, config.name);
-      await joinLive(ctx, name, liveAlias(config.name, record.port));
-      ctx.log(`${name} is live`);
-      await switchProxy(ctx, new Map([[config.name, siteFor(fresh, record.id, record.port)]]), { onlyIfChanged: true });
-      // Release dirs may be gone for a CLI user who deleted them; the link still moves
-      fs.mkdirSync(ctx.layout.release(config.name, record.id), { recursive: true });
-      setCurrent(ctx.layout, config.name, record.id);
-    });
-  } catch (err) {
-    ctx.log(`Removing ${name}; the previous release keeps serving`);
-    await ctx.docker.remove(name).catch(() => {});
-    throw err;
-  }
+  const listOthers = async () => (await ctx.docker.listContainers([`${LABEL_APP}=${config.name}`])).filter((c) => !c.Names.includes(`/${name}`));
+  const label = (c: { Names: string[]; Id: string }) => c.Names[0]?.slice(1) ?? c.Id.slice(0, 12);
 
-  const others = (await ctx.docker.listContainers([`${LABEL_APP}=${config.name}`])).filter((c) => !c.Names.includes(`/${name}`));
-  if (others.length > 0) {
-    if (ctx.drainMs > 0) {
-      ctx.log(`Both releases serve for ${Math.round(ctx.drainMs / 1000)}s, then the previous container stops`);
-      await sleep(ctx.drainMs);
+  if (config.run.strategy === 'recreate') {
+    const running = (await listOthers()).filter((c) => c.State === 'running' || c.State === 'restarting');
+    const why = config.run.volumes.find((v) => v.exclusive)
+      ? `volume ${config.run.volumes.find((v) => v.exclusive)!.name} is exclusive`
+      : config.run.publish.scope !== 'none'
+        ? `host port ${config.run.publish.port} is published`
+        : 'run.strategy is recreate';
+    for (const c of running) {
+      ctx.log(`Stopping ${label(c)} before the new container starts (${why}); the app is unavailable until the new one is healthy`);
+      await ctx.docker.stop(c.Id, RECREATE_STOP_S);
     }
-    for (const c of others) {
-      ctx.log(`Stopping ${c.Names[0]?.slice(1) ?? c.Id.slice(0, 12)}`);
-      await ctx.docker.stop(c.Id).catch((err: Error) => ctx.log(`warning: ${err.message}`));
+    ctx.log(`Starting ${name}`);
+    try {
+      await ctx.docker.createContainer(name, appContainerSpec(ctx, config, record.id, record.image));
+      await ctx.docker.start(name);
+      await waitHealthy(ctx, config, name, record.port);
+      await goLive(ctx, config, record, name);
+    } catch (err) {
+      ctx.log(`Removing ${name}`);
+      await ctx.docker.remove(name).catch(() => {});
+      const restored: string[] = [];
+      const failed: string[] = [];
+      for (const c of running) {
+        try {
+          await ctx.docker.start(c.Id);
+          restored.push(label(c));
+        } catch (startErr) {
+          failed.push(`${label(c)}: ${(startErr as Error).message}`);
+        }
+      }
+      if (running.length > 0) {
+        const note =
+          failed.length === 0
+            ? `The previous container (${restored.join(', ')}) was started again and serves.`
+            : `Starting the previous container again failed (${failed.join('; ')}); the app is down until a deploy, rollback or restart succeeds.`;
+        ctx.log(note);
+        (err as Error).message = `${(err as Error).message}\n${note}`;
+      }
+      throw err;
+    }
+    for (const c of await listOthers()) {
+      ctx.log(`Removing ${label(c)}`);
       await ctx.docker.remove(c.Id).catch((err: Error) => ctx.log(`warning: ${err.message}`));
     }
+  } else {
+    ctx.log(`Starting ${name}`);
+    await ctx.docker.createContainer(name, appContainerSpec(ctx, config, record.id, record.image));
+    try {
+      await ctx.docker.start(name);
+      await waitHealthy(ctx, config, name, record.port);
+      await goLive(ctx, config, record, name);
+    } catch (err) {
+      ctx.log(`Removing ${name}; the previous release keeps serving`);
+      await ctx.docker.remove(name).catch(() => {});
+      throw err;
+    }
+
+    const others = await listOthers();
+    if (others.length > 0) {
+      if (ctx.drainMs > 0) {
+        ctx.log(`Both releases serve for ${Math.round(ctx.drainMs / 1000)}s, then the previous container stops`);
+        await sleep(ctx.drainMs);
+      }
+      for (const c of others) {
+        ctx.log(`Stopping ${label(c)}`);
+        await ctx.docker.stop(c.Id).catch((err: Error) => ctx.log(`warning: ${err.message}`));
+        await ctx.docker.remove(c.Id).catch((err: Error) => ctx.log(`warning: ${err.message}`));
+      }
+    }
   }
-  if (opts.recreate) {
+  if (opts.sameRelease) {
     // It serves already; a failed rename only leaves the temporary name, which liveContainer finds too
     await ctx.docker.rename(name, releaseName).catch((err: Error) => ctx.log(`warning: could not rename ${name}: ${err.message}`));
   }
@@ -346,42 +450,36 @@ async function setupLocked(ctx: Ctx, opts: { proxy?: DeployProxyMode }): Promise
   // Internal: apps reach the outside over bastion-apps; this one only carries the proxy's traffic to them
   if (await docker.ensureNetwork(LIVE_NETWORK, { [LABEL_MANAGED]: 'network' }, { internal: true })) ctx.log(`Created network ${LIVE_NETWORK}`);
   await ensureProxyImage(ctx);
+  // The Caddy the front starts (proxy-image.ts); a first setup links it, an upgrade below moves the link
+  await ensureCaddyBinary(ctx);
+  if (!linkedCaddy(ctx)) linkCaddy(ctx, CADDY_ID);
   await writeInitialCaddyfile(ctx);
 
-  let info = await docker.inspectContainer(PROXY_CONTAINER);
-  if (info && info.Config.Image !== PROXY_IMAGE) {
-    ctx.log(`Replacing ${PROXY_CONTAINER} (its image changed: the proxy now runs Caddy behind the bastionctl front)`);
-    await docker.remove(PROXY_CONTAINER);
-    info = null;
-  }
-  // Created before modes existed (no label): a Caddy-mode container
-  if (info && (info.Config.Labels?.[LABEL_PROXY_MODE] ?? 'caddy') !== mode) {
-    ctx.log(`Replacing ${PROXY_CONTAINER} (proxy mode is now ${mode})`);
-    await docker.remove(PROXY_CONTAINER);
-    info = null;
-  }
-  if (!info) {
-    // From this version's generator: a Caddyfile written before the front would have Caddy take the front's ports
-    await writeInitialCaddyfile(ctx, true);
-    ctx.log(`Creating ${PROXY_CONTAINER}${mode === 'nginx' ? ` behind the host's nginx (127.0.0.1:${NGINX_UPSTREAM_PORT})` : ''}`);
-    await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv), mode));
-  }
-  await joinLive(ctx, PROXY_CONTAINER);
-  if (!info?.State.Running) {
-    try {
-      await docker.start(PROXY_CONTAINER);
-    } catch (err) {
-      const message = (err as Error).message;
-      if (/address already in use|port is already allocated/i.test(message)) {
-        throw new BastionError(
-          mode === 'nginx'
-            ? `Port ${NGINX_UPSTREAM_PORT} on 127.0.0.1 is taken by something else on this server (${message}).`
-            : `Ports 80/443 are taken by something else on this server (${message}). Stop it, or set up in nginx mode (setup --proxy nginx) when it is the host's nginx.`,
-        );
-      }
-      throw err;
+  await withProxyLock(ctx, async () => {
+    await recoverPreviousProxy(ctx);
+    const info = await docker.inspectContainer(PROXY_CONTAINER);
+    if (!info) {
+      linkCaddy(ctx, CADDY_ID);
+      // From this version's generator: a Caddyfile written before the front would have Caddy take the front's ports
+      await writeInitialCaddyfile(ctx, true);
+      ctx.log(`Creating ${PROXY_CONTAINER}${mode === 'nginx' ? ` behind the host's nginx (127.0.0.1:${NGINX_UPSTREAM_PORT})` : ''}`);
+      await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv), mode));
+      await joinLive(ctx, PROXY_CONTAINER);
+      await startProxy(ctx, mode);
+      writeProxyState(ctx);
+      return;
     }
-  }
+    await joinLive(ctx, PROXY_CONTAINER);
+    if (!info.State.Running) await startProxy(ctx, mode);
+    // An older bastionctl's proxy, or another mode: replaced the safe way (kept until the new one answers)
+    const upgrade = await upgradeProxy(ctx, 'setup');
+    if (upgrade) {
+      if (ctx.report) ctx.report.proxyUpgrade = upgrade;
+      if (upgrade.result === 'failed') {
+        throw new BastionError(`The proxy could not be brought up to date; the previous one keeps serving: ${upgrade.error}`, 1, { proxyUpgrade: upgrade });
+      }
+    } else if (!readProxyState(ctx)) writeProxyState(ctx);
+  });
   // Every app's current container answers to its live alias (containers from before bastion-live too)
   for (const app of appNames(layout)) {
     const id = currentRelease(layout, app);
@@ -455,6 +553,7 @@ function summary(ctx: Ctx, app: string, container: DeployContainer | null): Depl
     name: app,
     domains: config?.domains ?? [],
     buildType: config?.build.type ?? null,
+    service: config?.service ?? null,
     currentRelease: currentRelease(ctx.layout, app),
     container,
     configError: error,
@@ -532,30 +631,65 @@ export async function releases(ctx: Ctx, app: string): Promise<DeployRelease[]> 
 }
 
 /**
+ * Pull `build.type: image`'s image (services spec §3.2) and tag it as the
+ * release's image; returns the digest it resolved to. A digest-pinned image
+ * already on the server is not pulled again; a tag is pulled every time, so
+ * a redeploy picks up what the tag points at now.
+ */
+async function pullImage(ctx: Ctx, app: string, ref: string, id: string): Promise<string | null> {
+  const local = pinnedRef(ref);
+  if (isDigestPinned(ref) && (await ctx.docker.imageExists(local))) {
+    ctx.log(`${ref} is on the server already`);
+  } else {
+    ctx.log(`Pulling ${ref}`);
+    await ctx.docker.pull(ref, (line) => ctx.log(line));
+  }
+  const info = await ctx.docker.inspectImage(local);
+  if (!info) throw new BastionError(`${ref} is not on the server after pulling it`);
+  const repo = ref.replace(/@.*$/, '').replace(/:[^/:]*$/, '');
+  const short = (r: string) => r.replace(/^docker\.io\//, '').replace(/^library\//, '');
+  const digests = (info.RepoDigests ?? []).filter((d) => /@sha256:[a-f0-9]{64}$/.test(d));
+  const match = digests.find((d) => short(d.slice(0, d.indexOf('@'))) === short(repo)) ?? digests[0];
+  const digest = isDigestPinned(ref) ? ref.slice(ref.indexOf('@') + 1) : (match?.slice(match.indexOf('@') + 1) ?? null);
+  await ctx.docker.tagImage(local, `bastion-${app}`, id);
+  ctx.log(`Image ${ref}${digest && !isDigestPinned(ref) ? ` (${digest})` : ''} tagged as bastion-${app}:${id}`);
+  return digest;
+}
+
+/**
  * `deploy <app> --source <file>` (spec §5): lock, new release from the
  * upload, build, start, health check, proxy switch, `current`, prune. A
  * failure after the release folder exists is recorded in its release.json
  * and returned as a failed outcome; the previous release keeps serving.
+ *
+ * `build.type: image` takes no upload (`deploy <app>`): the image is pulled
+ * instead of built, and the release records the digest it resolved to.
+ *
+ * An outdated proxy is upgraded first (proxy-upgrade.ts).
  */
-export async function deploy(baseCtx: Ctx, app: string, source: string): Promise<DeployOutcome> {
+export async function deploy(baseCtx: Ctx, app: string, source?: string): Promise<DeployOutcome> {
   const config = loadConfig(baseCtx.layout, app);
   const conflicts = validateForServer(baseCtx.layout, app, fs.readFileSync(baseCtx.layout.config(app), 'utf8'));
   if (!conflicts.ok) throw new BastionError(`Invalid config: ${formatIssues(conflicts.errors)}`, 3);
-  const sourceFile = fileInRoot(baseCtx, source);
+  const imageRef = config.build.type === 'image' ? config.build.image! : null;
+  if (imageRef && source !== undefined) throw new BastionError(`build.type of ${app} is image: ${imageRef} is pulled from its registry, so deploy takes no --source`, 2);
+  if (!imageRef && source === undefined) throw new BastionError('Usage: bastionctl deploy <app> --source <file>', 2);
+  const sourceFile = source === undefined ? null : fileInRoot(baseCtx, source);
+  await ensureProxyCurrent(baseCtx, 'deploy');
   const proxy = await proxyContainer(baseCtx);
   if (proxy?.state !== 'running') throw new BastionError('The proxy is not running on this server (run bastionctl setup)');
 
   const releaseLock = await acquireLock(baseCtx.layout.lock(app), { holder: baseCtx.actor, docker: baseCtx.docker, now: baseCtx.now, what: `deploy of ${app}` });
   try {
     cleanTmp(baseCtx);
-    const checksum = await sha256File(sourceFile);
+    const checksum = sourceFile ? await sha256File(sourceFile) : createHash('sha256').update(imageRef!).digest('hex');
     const id = newReleaseId(baseCtx.now(), checksum);
     const dir = baseCtx.layout.release(app, id);
     fs.mkdirSync(baseCtx.layout.releases(app), { recursive: true });
     try {
       fs.mkdirSync(dir);
     } catch {
-      throw new BastionError(`Release ${id} already exists (the same source deployed within the same second)`);
+      throw new BastionError(`Release ${id} already exists (the same ${sourceFile ? 'source' : 'image'} deployed within the same second)`);
     }
     const logFd = fs.openSync(path.join(dir, 'build.log'), 'a', 0o644);
     // The app's .env values never reach the deploy log, build.log or release.json
@@ -569,7 +703,7 @@ export async function deploy(baseCtx: Ctx, app: string, source: string): Promise
       },
     };
     const previous = currentRelease(ctx.layout, app);
-    const record: ReleaseRecord = {
+    let record: ReleaseRecord = {
       id,
       app,
       createdAt: ctx.now().toISOString(),
@@ -583,49 +717,59 @@ export async function deploy(baseCtx: Ctx, app: string, source: string): Promise
       result: 'building',
       error: null,
       previous,
+      ...(imageRef && { digest: null }),
     };
     writeRelease(ctx.layout, record);
     ctx.log(`Release ${id} of ${app} by ${ctx.actor}`);
 
-    const gz = Buffer.alloc(2);
-    const fd = fs.openSync(sourceFile, 'r');
-    fs.readSync(fd, gz, 0, 2, 0);
-    fs.closeSync(fd);
-    const kept = path.join(dir, gz[0] === 0x1f && gz[1] === 0x8b ? 'source.tar.gz' : 'source.tar');
-    if (isInside(fs.realpathSync(ctx.layout.tmp), sourceFile)) fs.renameSync(sourceFile, kept);
-    else fs.copyFileSync(sourceFile, kept);
-
-    const work = path.join(ctx.layout.tmp, `build-${app}-${id}`);
     let built = false;
     try {
-      ctx.log('Unpacking the upload');
-      const extracted = await extractTar(kept, work, { maxBytes: ctx.maxSourceBytes });
-      ctx.log(`Unpacked ${extracted.files} entries (${Math.round(extracted.bytes / 1024)} KiB)`);
-      const plan = planBuild(work, config);
-      for (const note of plan.notes) ctx.log(note);
-      // One build per server at a time: a second deploy waits its turn rather than failing
-      const buildOpts = { holder: `${ctx.actor} (${app})`, docker: ctx.docker, now: ctx.now, what: 'image build on this server' };
-      const buildLock = await acquireLock(ctx.layout.buildLock, buildOpts).catch(async (err: unknown) => {
-        if (!(err instanceof BastionError) || err.exitCode !== 4) throw err;
-        ctx.log(`Waiting for another image build to finish (${err.message})`);
-        return waitForLock(ctx.layout.buildLock, { ...buildOpts, waitMs: BUILD_LOCK_WAIT_MS, intervalMs: 1000 });
-      });
-      try {
-        await ctx.docker.build(
-          packDirectory(plan.context, plan.generated ? [{ name: GENERATED_DOCKERFILE, content: plan.generated }] : [], plan.exclude),
-          {
-            t: record.image,
-            dockerfile: plan.dockerfile,
-            labels: JSON.stringify({ [LABEL_APP]: app, [LABEL_RELEASE]: id, [LABEL_MANAGED]: 'app' }),
-            rm: true,
-            forcerm: true,
-          },
-          (line) => ctx.log(line),
-        );
+      if (imageRef) {
+        record = { ...record, digest: await pullImage(ctx, app, imageRef, id) };
         built = true;
-      } finally {
-        buildLock();
-        fs.rmSync(work, { recursive: true, force: true });
+        writeRelease(ctx.layout, record);
+      } else {
+        const gz = Buffer.alloc(2);
+        const fd = fs.openSync(sourceFile!, 'r');
+        fs.readSync(fd, gz, 0, 2, 0);
+        fs.closeSync(fd);
+        const kept = path.join(dir, gz[0] === 0x1f && gz[1] === 0x8b ? 'source.tar.gz' : 'source.tar');
+        if (isInside(fs.realpathSync(ctx.layout.tmp), sourceFile!)) fs.renameSync(sourceFile!, kept);
+        else fs.copyFileSync(sourceFile!, kept);
+
+        const work = path.join(ctx.layout.tmp, `build-${app}-${id}`);
+        try {
+          ctx.log('Unpacking the upload');
+          const extracted = await extractTar(kept, work, { maxBytes: ctx.maxSourceBytes });
+          ctx.log(`Unpacked ${extracted.files} entries (${Math.round(extracted.bytes / 1024)} KiB)`);
+          const plan = planBuild(work, config);
+          for (const note of plan.notes) ctx.log(note);
+          // One build per server at a time: a second deploy waits its turn rather than failing
+          const buildOpts = { holder: `${ctx.actor} (${app})`, docker: ctx.docker, now: ctx.now, what: 'image build on this server' };
+          const buildLock = await acquireLock(ctx.layout.buildLock, buildOpts).catch(async (err: unknown) => {
+            if (!(err instanceof BastionError) || err.exitCode !== 4) throw err;
+            ctx.log(`Waiting for another image build to finish (${err.message})`);
+            return waitForLock(ctx.layout.buildLock, { ...buildOpts, waitMs: BUILD_LOCK_WAIT_MS, intervalMs: 1000 });
+          });
+          try {
+            await ctx.docker.build(
+              packDirectory(plan.context, plan.generated ? [{ name: GENERATED_DOCKERFILE, content: plan.generated }] : [], plan.exclude),
+              {
+                t: record.image,
+                dockerfile: plan.dockerfile,
+                labels: JSON.stringify({ [LABEL_APP]: app, [LABEL_RELEASE]: id, [LABEL_MANAGED]: 'app' }),
+                rm: true,
+                forcerm: true,
+              },
+              (line) => ctx.log(line),
+            );
+            built = true;
+          } finally {
+            buildLock();
+          }
+        } finally {
+          fs.rmSync(work, { recursive: true, force: true });
+        }
       }
       await activate(ctx, config, record);
       writeRelease(ctx.layout, { ...record, result: 'success', finishedAt: ctx.now().toISOString() });
@@ -656,6 +800,7 @@ export async function rollback(baseCtx: Ctx, app: string, id: string): Promise<D
   const config = loadConfig(baseCtx.layout, app);
   const mask = envFileMasker(envFilePath(baseCtx.layout, app, config));
   const ctx: Ctx = { ...baseCtx, log: (line) => baseCtx.log(mask(line)) };
+  await ensureProxyCurrent(ctx, 'rollback');
   const releaseLock = await acquireLock(ctx.layout.lock(app), { holder: ctx.actor, docker: ctx.docker, now: ctx.now, what: `deploy of ${app}` });
   try {
     const current = currentRelease(ctx.layout, app);
@@ -699,11 +844,12 @@ async function liveContainer(ctx: Ctx, app: string): Promise<string> {
  * any of them applies without a new build. Same zero-downtime switch as a
  * deploy: the old container serves until the new one is healthy.
  */
-export async function restart(baseCtx: Ctx, app: string): Promise<{ app: string; container: string }> {
+export async function restart(baseCtx: Ctx, app: string): Promise<DeployRestartResult> {
   requireApp(baseCtx, app);
   const config = loadConfig(baseCtx.layout, app);
   const mask = envFileMasker(envFilePath(baseCtx.layout, app, config));
   const ctx: Ctx = { ...baseCtx, log: (line) => baseCtx.log(mask(line)) };
+  await ensureProxyCurrent(ctx, 'restart');
   const releaseLock = await acquireLock(ctx.layout.lock(app), { holder: ctx.actor, docker: ctx.docker, now: ctx.now, what: `deploy of ${app}` });
   try {
     const current = currentRelease(ctx.layout, app);
@@ -713,7 +859,7 @@ export async function restart(baseCtx: Ctx, app: string): Promise<{ app: string;
     if (!(await ctx.docker.imageExists(record.image))) throw new BastionError(`The image of release ${current} is gone; deploy it again instead`);
     ctx.log(`Restarting ${app} (release ${current}) with its current settings, by ${ctx.actor}`);
     try {
-      await activate(ctx, config, record, { recreate: true });
+      await activate(ctx, config, record, { sameRelease: true });
     } catch (err) {
       (err as Error).message = mask((err as Error).message);
       throw err;
@@ -751,11 +897,18 @@ export async function remove(ctx: Ctx, app: string, opts: { purge?: boolean } = 
     for (const image of await ctx.docker.listImages([`${LABEL_APP}=${app}`])) {
       await ctx.docker.removeImage(image.Id).catch((err: Error) => ctx.log(`warning: could not remove image: ${err.message}`));
     }
+    // Pulled images (build.type: image) carry no labels: their release tags go by name (the pulled image itself stays)
+    for (const id of releaseIds(ctx.layout, app)) {
+      const record = readRelease(ctx.layout, app, id);
+      if (record?.buildType === 'image' && record.image === imageName(app, id)) {
+        await ctx.docker.removeImage(record.image).catch((err: Error) => ctx.log(`warning: could not remove image ${record.image}: ${err.message}`));
+      }
+    }
     const { config } = tryLoadConfig(ctx.layout, app);
     clearCurrent(ctx.layout, app);
     fs.rmSync(ctx.layout.releases(app), { recursive: true, force: true });
     if (opts.purge) {
-      for (const v of config?.run.volumes ?? []) await ctx.docker.removeVolume(volumeName(app, v.split(':')[0]!)).catch((err: Error) => ctx.log(`warning: ${err.message}`));
+      for (const v of config?.run.volumes ?? []) await ctx.docker.removeVolume(volumeName(app, v.name)).catch((err: Error) => ctx.log(`warning: ${err.message}`));
       fs.rmSync(ctx.layout.app(app), { recursive: true, force: true });
     }
     ctx.log(opts.purge ? `Deleted ${app} and its data` : `Deleted ${app}'s releases; its config, .env and volumes are kept`);
@@ -766,8 +919,19 @@ export async function remove(ctx: Ctx, app: string, opts: { purge?: boolean } = 
 }
 
 export async function proxyApply(ctx: Ctx): Promise<{ ok: true }> {
+  await ensureProxyCurrent(ctx, 'proxy_apply');
   await applyProxy(ctx);
   return { ok: true };
+}
+
+/** `proxy status`: the proxy against what this bastionctl runs. Read-only: never upgrades. */
+export function proxyStatusCommand(ctx: Ctx): Promise<DeployProxyStatus> {
+  return proxyStatus(ctx);
+}
+
+/** `proxy upgrade`: replace an outdated proxy now (pinned or not). */
+export function proxyUpgrade(ctx: Ctx) {
+  return upgradeProxyNow(ctx);
 }
 
 // ── .env ──────────────────────────────────────────────────────────────────────
@@ -799,10 +963,65 @@ export function envUnset(ctx: Ctx, app: string, key: string): { key: string; cha
   return { key, changed: next !== null };
 }
 
+/** Bytes of randomness `env generate` takes by default, and the range it accepts. */
+export const GENERATE_BYTES = { default: 32, min: 16, max: 512 } as const;
+
+/**
+ * `env generate <app> KEY [--bytes N] [--if-missing]`: a crypto-random
+ * URL-safe value (base64url of N random bytes) written to `.env` — a
+ * database password, a secret key. It is never printed or returned: reveal
+ * it with `env get` (BastionSSH's step-up). `ifMissing` leaves a variable
+ * that is set already as it is.
+ */
+export function envGenerate(ctx: Ctx, app: string, key: string, opts: { bytes?: number; ifMissing?: boolean } = {}): DeployEnvGenerated {
+  envKey(key);
+  const bytes = opts.bytes ?? GENERATE_BYTES.default;
+  if (!Number.isInteger(bytes) || bytes < GENERATE_BYTES.min || bytes > GENERATE_BYTES.max) {
+    throw new BastionError(`--bytes takes a whole number from ${GENERATE_BYTES.min} to ${GENERATE_BYTES.max}`, 2);
+  }
+  const file = envFile(ctx, app);
+  const text = readEnvFile(file);
+  if (opts.ifMissing && parseEnv(text).has(key)) return { key, generated: false };
+  const value = randomBytes(bytes).toString('base64url');
+  if (Buffer.byteLength(value) > MAX_VALUE_BYTES) throw new BastionError('Value too large');
+  writeEnvFile(file, setEnv(text, key, value));
+  ctx.log(`Generated a new value for ${key} (${bytes} random bytes)`);
+  return { key, generated: true };
+}
+
 /** The one command that prints a value (BastionSSH's step-up reveal). */
 export function envGet(ctx: Ctx, app: string, key: string): { key: string; value: string } {
   envKey(key);
   const value = parseEnv(readEnvFile(envFile(ctx, app))).get(key);
   if (value === undefined) throw new BastionError(`${key} is not set for ${app}`);
   return { key, value };
+}
+
+// ── exec ──────────────────────────────────────────────────────────────────────
+
+/** Most arguments, and bytes across them, `exec` passes on. */
+export const EXEC_LIMITS = { args: 256, bytes: 128 * 1024 } as const;
+
+/**
+ * `exec <app> -- <argv…>`: run a program in the app's live container (no
+ * shell unless the argv names one), its output streamed as it comes. The
+ * argv is passed to Docker as is; it must not be empty, and no argument may
+ * hold a NUL byte. Resolves with the program's exit code.
+ */
+export async function execInApp(
+  ctx: Ctx,
+  app: string,
+  argv: string[],
+  out: { stdout: (chunk: Buffer) => void; stderr: (chunk: Buffer) => void },
+  timeoutMs?: number,
+): Promise<{ app: string; container: string; exitCode: number }> {
+  if (argv.length === 0 || argv[0] === '') throw new BastionError('Usage: bastionctl exec <app> -- <program> [args…]', 2);
+  if (argv.length > EXEC_LIMITS.args) throw new BastionError(`At most ${EXEC_LIMITS.args} arguments`, 2);
+  if (argv.some((a) => a.includes('\0'))) throw new BastionError('Arguments cannot contain NUL bytes', 2);
+  if (argv.reduce((n, a) => n + Buffer.byteLength(a), 0) > EXEC_LIMITS.bytes) throw new BastionError(`The arguments are larger than ${EXEC_LIMITS.bytes / 1024} KiB`, 2);
+  const name = await liveContainer(ctx, app);
+  const info = await ctx.docker.inspectContainer(name);
+  if (!info?.State.Running) throw new BastionError(`${name} is not running (start it with restart)`);
+  const exitCode = await ctx.docker.execStream(name, argv, { onStdout: out.stdout, onStderr: out.stderr }, timeoutMs);
+  return { app, container: name, exitCode };
 }

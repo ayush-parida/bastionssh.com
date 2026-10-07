@@ -18,8 +18,8 @@ const write = (name: string, content = '') => {
 };
 
 const config = (build: Partial<DeployAppConfig['build']> = {}, port = 3000): Pick<DeployAppConfig, 'build' | 'run'> => ({
-  build: { type: 'nextjs', node: null, dir: '.', output: null, ...build },
-  run: { port, env_file: '.env', volumes: [], memory: null, cpus: null },
+  build: { type: 'nextjs', node: null, dir: '.', output: null, image: null, ...build },
+  run: { port, env_file: '.env', volumes: [], memory: null, cpus: null, strategy: 'rolling', publish: { scope: 'none', port: null } },
 });
 
 const NEXT_CONFIG = "/** @type {import('next').NextConfig} */\nmodule.exports = { output: 'standalone' };\n";

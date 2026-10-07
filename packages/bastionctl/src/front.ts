@@ -26,7 +26,10 @@ import tls from 'node:tls';
  *
  * `reload` on the command line asks the running front over its control
  * socket and prints its progress; it fails, leaving the old config serving,
- * when the new Caddy does not start or misses a certificate.
+ * when the new Caddy does not start or misses a certificate. With `caddy`
+ * the new generation runs that Caddy program (a proxy upgrade of Caddy only,
+ * services spec §2), and later ones too: the old one keeps its connections
+ * as for any switch, so nothing is dropped.
  */
 
 export type ListenKind = 'http' | 'https';
@@ -180,9 +183,10 @@ function handshake(port: number, name: string, timeoutMs: number): Promise<boole
 export interface Front {
   /**
    * Start a new Caddy from the config file and switch to it; rejects (old one
-   * serving) when it fails. With `sha256`, only that exact text is started.
+   * serving) when it fails. With `sha256`, only that exact text is started;
+   * with `caddy`, that program (from then on) instead of the one it runs.
    */
-  reload(probe: string[], progress?: (line: string) => void, sha256?: string): Promise<void>;
+  reload(probe: string[], progress?: (line: string) => void, sha256?: string, caddy?: string): Promise<void>;
   /** Open connections per running Caddy generation. */
   generations(): Array<{ generation: number; conns: number; serving: boolean }>;
   stop(): Promise<void>;
@@ -197,6 +201,8 @@ export async function startFront(opts: FrontOptions): Promise<Front> {
   const instances = new Set<Instance>();
   let current: Instance | null = null;
   let generation = 0;
+  /** The Caddy program new generations run: opts.caddy, until a reload names another. */
+  let program = opts.caddy;
   let stopping = false;
 
   async function stopInstance(inst: Instance, waitMs: number): Promise<void> {
@@ -238,7 +244,7 @@ export async function startFront(opts: FrontOptions): Promise<Front> {
     }
   }
 
-  async function launch(sha256?: string): Promise<Instance> {
+  async function launch(sha256?: string, caddy = program): Promise<Instance> {
     const used = new Set([...instances].map((i) => i.slot));
     let slot = [...Array(SLOTS).keys()].find((s) => !used.has(s));
     if (slot === undefined) {
@@ -250,7 +256,7 @@ export async function startFront(opts: FrontOptions): Promise<Front> {
     }
     const ports = slotPorts(slot);
     const config = await snapshot(generation + 1, sha256);
-    const child = spawn(opts.caddy, caddyArgs(config), {
+    const child = spawn(caddy, caddyArgs(config), {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, BASTION_HTTP_PORT: String(ports.http), BASTION_HTTPS_PORT: String(ports.https), BASTION_ADMIN_PORT: String(ports.admin) },
     });
@@ -350,10 +356,10 @@ export async function startFront(opts: FrontOptions): Promise<Front> {
 
   let queue: Promise<unknown> = Promise.resolve();
   const front: Front = {
-    reload(probe, progress = () => {}, sha256) {
+    reload(probe, progress = () => {}, sha256, caddy) {
       const run = async () => {
         if (stopping) throw new Error('The proxy is stopping');
-        const next = await launch(sha256);
+        const next = await launch(sha256, caddy ?? program);
         progress(`Started Caddy generation ${next.generation}`);
         const running = current;
         if (running && opts.listen.some((l) => l.kind === 'https')) {
@@ -371,7 +377,8 @@ export async function startFront(opts: FrontOptions): Promise<Front> {
           }
         }
         current = next;
-        log(`generation ${next.generation} serves`);
+        if (caddy) program = caddy;
+        log(`generation ${next.generation} serves${caddy ? ` (${caddy})` : ''}`);
         if (running) {
           progress(`Caddy generation ${next.generation} serves; generation ${running.generation} finishes its open connections`);
           void stopInstance(running, drainMs).then(() => log(`generation ${running.generation} stopped`));
@@ -400,9 +407,9 @@ export function serveControl(front: Front, socketPath: string): net.Server {
       buffer += chunk.toString('utf8');
       const nl = buffer.indexOf('\n');
       if (nl === -1 || buffer.length > 64 * 1024) return;
-      let request: { probe?: unknown; sha256?: unknown };
+      let request: { probe?: unknown; sha256?: unknown; caddy?: unknown };
       try {
-        request = JSON.parse(buffer.slice(0, nl)) as { probe?: unknown; sha256?: unknown };
+        request = JSON.parse(buffer.slice(0, nl)) as { probe?: unknown; sha256?: unknown; caddy?: unknown };
       } catch {
         conn.end(JSON.stringify({ ok: false, error: 'bad request' }) + '\n');
         return;
@@ -410,7 +417,12 @@ export function serveControl(front: Front, socketPath: string): net.Server {
       buffer = '';
       const probe = Array.isArray(request.probe) ? request.probe.filter((p): p is string => typeof p === 'string' && /^[a-z0-9.-]{1,253}$/.test(p)) : [];
       const sha256 = typeof request.sha256 === 'string' && /^[0-9a-f]{64}$/.test(request.sha256) ? request.sha256 : undefined;
-      front.reload(probe, (line) => conn.write(JSON.stringify({ log: line }) + '\n'), sha256).then(
+      const caddy = typeof request.caddy === 'string' && isProgramPath(request.caddy) ? request.caddy : undefined;
+      if (request.caddy !== undefined && !caddy) {
+        conn.end(JSON.stringify({ ok: false, error: 'bad Caddy path' }) + '\n');
+        return;
+      }
+      front.reload(probe, (line) => conn.write(JSON.stringify({ log: line }) + '\n'), sha256, caddy).then(
         () => conn.end(JSON.stringify({ ok: true }) + '\n'),
         (err: Error) => conn.end(JSON.stringify({ ok: false, error: err.message }) + '\n'),
       );
@@ -421,15 +433,21 @@ export function serveControl(front: Front, socketPath: string): net.Server {
   return server;
 }
 
-/** `reload [--sha256 <hex>] [names…]`: ask the front to switch to the config file; 0 on success. */
+/** An absolute path without `.` or `..` segments (a Caddy program to run). */
+export function isProgramPath(value: string): boolean {
+  return /^\/[A-Za-z0-9/_.-]{1,500}$/.test(value) && !value.split('/').some((seg) => seg === '.' || seg === '..');
+}
+
+/** `reload [--sha256 <hex>] [--caddy <path>] [names…]`: ask the front to switch to the config file; 0 on success. */
 export function requestReload(
   socketPath: string,
   probe: string[],
   out: { log: (line: string) => void; error: (line: string) => void },
   sha256?: string,
+  caddy?: string,
 ): Promise<number> {
   return new Promise((resolve) => {
-    const conn = net.connect(socketPath, () => conn.write(JSON.stringify({ probe, sha256 }) + '\n'));
+    const conn = net.connect(socketPath, () => conn.write(JSON.stringify({ probe, sha256, ...(caddy && { caddy }) }) + '\n'));
     let buffer = '';
     let result: { ok?: boolean; error?: string } | null = null;
     conn.on('data', (chunk: Buffer) => {

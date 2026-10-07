@@ -11,7 +11,7 @@ import { Layout, NAME_PATTERN } from './names.js';
 
 export type ReleaseRecord = Omit<DeployRelease, 'current' | 'imagePresent'>;
 
-const BUILD_TYPES: readonly DeployBuildType[] = ['nextjs', 'dockerfile', 'static'];
+const BUILD_TYPES: readonly DeployBuildType[] = ['nextjs', 'dockerfile', 'static', 'image'];
 
 /** Release ids of an app, oldest first. */
 export function releaseIds(layout: Layout, app: string): string[] {
@@ -49,6 +49,7 @@ export function readRelease(layout: Layout, app: string, id: string): ReleaseRec
     result,
     error: typeof raw.error === 'string' ? raw.error : null,
     previous: typeof raw.previous === 'string' ? raw.previous : null,
+    ...('digest' in raw && { digest: typeof raw.digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(raw.digest) ? raw.digest : null }),
   };
 }
 

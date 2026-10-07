@@ -24,12 +24,21 @@ export const USAGE = `Usage: bastionctl <command> [options] [--json]
   releases <app>                          An app's releases, newest first
   certs <app>                             Certificates of the app's domains (issuer, expiry, last error)
   deploy <app> --source <file>            Build and serve an upload (.tar or .tar.gz)
+  deploy <app>                            Pull and serve build.image (build.type: image)
   rollback <app> <release>                Serve a kept release again (no rebuild)
   restart <app> | stop <app>              The app's live container
   env keys|set|unset|get <app> [KEY]      .env: names only; set reads the value from stdin
+  env generate <app> <KEY> [--bytes N] [--if-missing]
+                                          A random URL-safe value into .env (never printed)
+  exec <app> -- <program> [args…]         Run a program in the app's live container
   delete <app> [--purge]                  Remove an app (--purge: also config, .env, volumes)
   proxy apply                             Regenerate and reload the proxy config
+  proxy status                            The proxy against this bastionctl (read-only)
+  proxy upgrade                           Replace an outdated proxy now (even when pinned)
   version
+
+Commands that change traffic (deploy, rollback, restart, proxy apply, setup)
+first upgrade a proxy left by an older bastionctl, unless bin/.pinned exists.
 
 Files must be inside the root directory (${'$'}BASTION_ROOT).`;
 
@@ -38,8 +47,8 @@ interface Parsed {
   flags: Map<string, string | true>;
 }
 
-const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy']);
-const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help']);
+const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy', 'bytes']);
+const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help', 'if-missing']);
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -91,15 +100,23 @@ export interface CliIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
   readStdin: (max: number) => Promise<string>;
+  /** Raw output of `exec` (binary-safe); `stdout`/`stderr` with the text decoded when absent. */
+  writeStdout?: (chunk: Buffer) => void;
+  writeStderr?: (chunk: Buffer) => void;
   /** Tests pass their own (fake Docker API, temp root, no drain). */
   ctx?: Partial<Ctx>;
 }
 
 /** Run one command; returns the exit code. */
 export async function run(argv: string[], io: CliIo): Promise<number> {
-  let json = argv.includes('--json');
+  // Everything after `--` is exec's argv, never bastionctl's options
+  const dashes = argv.indexOf('--');
+  const own = dashes === -1 ? argv : argv.slice(0, dashes);
+  const passed = dashes === -1 ? null : argv.slice(dashes + 1);
+  let json = own.includes('--json');
+  const report: NonNullable<Ctx['report']> = {};
   try {
-    const parsed = parseArgs(argv);
+    const parsed = parseArgs(own);
     json = parsed.flags.has('json');
     const [command, ...rest] = parsed.positional;
     if (!command || parsed.flags.has('help') || command === 'help') {
@@ -118,19 +135,28 @@ export async function run(argv: string[], io: CliIo): Promise<number> {
       now: () => new Date(),
       drainMs: (drain !== undefined ? Number(drain) : 10) * 1000,
       healthIntervalMs: 1000,
+      report,
       ...io.ctx,
     };
-    const result = await dispatch(ctx, command, rest, parsed, io);
-    if (json) io.stdout(JSON.stringify(result.value) + '\n');
+    if (passed !== null && command !== 'exec') throw new BastionError(`Only exec takes arguments after --`, 2);
+    const result = await dispatch(ctx, command, rest, parsed, io, passed);
+    if (json) io.stdout(JSON.stringify(withReport(result.value, ctx.report ?? report)) + '\n');
     else if (result.text !== undefined) io.stdout(result.text);
     return result.exitCode ?? 0;
   } catch (err) {
     const exitCode = err instanceof BastionError ? err.exitCode : 1;
     const message = err instanceof Error ? err.message : String(err);
-    if (json) io.stdout(JSON.stringify({ error: message, code: exitCode }) + '\n');
+    const details = err instanceof BastionError && err.details ? err.details : {};
+    if (json) io.stdout(JSON.stringify({ ...(report.proxyUpgrade && { proxyUpgrade: report.proxyUpgrade }), ...details, error: message, code: exitCode }) + '\n');
     io.stderr(`bastionctl: ${message}\n`);
     return exitCode;
   }
+}
+
+/** A result object with what the command did besides (a proxy upgrade), for BastionSSH's audit. */
+function withReport(value: unknown, report: NonNullable<Ctx['report']>): unknown {
+  if (!report.proxyUpgrade || typeof value !== 'object' || value === null || Array.isArray(value)) return value;
+  return { ...value, proxyUpgrade: report.proxyUpgrade };
 }
 
 interface Result {
@@ -141,7 +167,7 @@ interface Result {
 
 const lines = (rows: string[]) => (rows.length ? rows.join('\n') + '\n' : '');
 
-async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parsed, io: CliIo): Promise<Result> {
+async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parsed, io: CliIo, passed: string[] | null): Promise<Result> {
   switch (command) {
     case 'version': {
       const v = ops.version();
@@ -185,10 +211,8 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       return { value: r, text: lines(r.map((c) => `${c.domain}\t${c.issuer ?? 'no certificate'}\t${c.notAfter ?? '-'}${c.lastError ? `\t${c.lastError.message}` : ''}`)) };
     }
     case 'deploy': {
-      expect(args, 1, 'deploy <app> --source <file>');
-      const source = flag(parsed, 'source');
-      if (!source) throw new BastionError('Usage: bastionctl deploy <app> --source <file>', 2);
-      const r = await ops.deploy(ctx, appName(args[0]), source);
+      expect(args, 1, 'deploy <app> [--source <file>]');
+      const r = await ops.deploy(ctx, appName(args[0]), flag(parsed, 'source'));
       return { value: r, exitCode: r.result === 'success' ? 0 : 1 };
     }
     case 'rollback': {
@@ -207,8 +231,26 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       return { value: await ops.remove(ctx, appName(args[0]), { purge: parsed.flags.has('purge') }) };
     }
     case 'proxy': {
-      if (args.length !== 1 || args[0] !== 'apply') throw new BastionError('Usage: bastionctl proxy apply', 2);
+      if (args.length !== 1 || !['apply', 'status', 'upgrade'].includes(args[0]!)) throw new BastionError('Usage: bastionctl proxy apply|status|upgrade', 2);
+      if (args[0] === 'status') {
+        const r = await ops.proxyStatusCommand(ctx);
+        return { value: r, text: `${r.state}${r.outdated.length ? ` (${r.outdated.join(', ')})` : ''}: proxy from bastionctl ${r.build ?? '-'}, this is ${r.target}${r.pinned ? ' (pinned)' : ''}\n` };
+      }
+      if (args[0] === 'upgrade') {
+        const r = await ops.proxyUpgrade(ctx);
+        return { value: r, text: r.proxyUpgrade ? `Upgraded (${r.proxyUpgrade.replaced.join(', ')}) from ${r.proxyUpgrade.from} to ${r.proxyUpgrade.to}\n` : 'Up to date\n' };
+      }
       return { value: await ops.proxyApply(ctx) };
+    }
+    case 'exec': {
+      expect(args, 1, 'exec <app> -- <program> [args…]');
+      if (!passed) throw new BastionError('Usage: bastionctl exec <app> -- <program> [args…]', 2);
+      const json = parsed.flags.has('json');
+      const toStdout = io.writeStdout ?? ((c: Buffer) => io.stdout(c.toString('utf8')));
+      const toStderr = io.writeStderr ?? ((c: Buffer) => io.stderr(c.toString('utf8')));
+      // With --json stdout carries only the result line: the program's output goes to stderr
+      const r = await ops.execInApp(ctx, appName(args[0]), passed, { stdout: json ? toStderr : toStdout, stderr: toStderr });
+      return { value: r, exitCode: r.exitCode === 0 ? 0 : r.exitCode > 0 && r.exitCode < 256 ? r.exitCode : 1 };
     }
     case 'env': {
       const [sub, app, key] = args;
@@ -230,7 +272,14 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
         const value = await io.readStdin(MAX_VALUE_BYTES + 1);
         return { value: ops.envSet(ctx, a, k, value) };
       }
-      throw new BastionError('Usage: bastionctl env keys|set|unset|get <app> [KEY]', 2);
+      if (sub === 'generate') {
+        expect(args, 3, 'env generate <app> <KEY> [--bytes N] [--if-missing]');
+        const bytes = flag(parsed, 'bytes');
+        if (bytes !== undefined && !/^\d{1,4}$/.test(bytes)) throw new BastionError('--bytes takes a whole number', 2);
+        const r = ops.envGenerate(ctx, appName(app), envKey(key), { bytes: bytes === undefined ? undefined : Number(bytes), ifMissing: parsed.flags.has('if-missing') });
+        return { value: r, text: r.generated ? `Generated ${r.key}\n` : `${r.key} is set already; left as it is\n` };
+      }
+      throw new BastionError('Usage: bastionctl env keys|set|unset|get|generate <app> [KEY]', 2);
     }
     default:
       throw new BastionError(`Unknown command ${command}\n\n${USAGE}`, 2);

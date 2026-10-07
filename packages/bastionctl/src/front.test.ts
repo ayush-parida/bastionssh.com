@@ -23,7 +23,7 @@ import http from 'node:http';
 import net from 'node:net';
 const config = fs.readFileSync(process.argv[2], 'utf8').trim();
 if (config.includes('fail')) { console.error('Error: adapting config: bad things'); process.exit(1); }
-const server = http.createServer((req, res) => res.end(config + ' ' + req.socket.proxied));
+const server = http.createServer((req, res) => res.end(config + ' ' + req.socket.proxied + (process.env.BASTION_TAG ? ' ' + process.env.BASTION_TAG : '')));
 const front = net.createServer((socket) => {
   let buffer = Buffer.alloc(0);
   const onData = (chunk) => {
@@ -226,6 +226,19 @@ describe('the proxy front', () => {
       lines.length = 0;
       expect(await requestReload(control, [], { log: (l) => lines.push(l), error: (l) => lines.push(`error: ${l}`) })).toBe(1);
       expect(lines.at(-1)).toMatch(/^error: Caddy did not start with the new config/);
+      // Another Caddy program (an upgrade of Caddy only): this generation and the next run it
+      const other = path.join(dir, 'caddy-b');
+      fs.writeFileSync(other, `#!/bin/sh\nBASTION_TAG=b exec "${process.execPath}" "$@"\n`, { mode: 0o755 });
+      config('gen-d');
+      expect(await requestReload(control, [], { log: () => {}, error: (l) => lines.push(`error: ${l}`) }, undefined, other)).toBe(0);
+      expect(await get(false)).toBe('gen-d 127.0.0.1 b');
+      config('gen-e');
+      expect(await requestReload(control, [], { log: () => {}, error: () => {} })).toBe(0);
+      expect(await get(false)).toBe('gen-e 127.0.0.1 b');
+      // Only an absolute path without . or ..
+      lines.length = 0;
+      expect(await requestReload(control, [], { log: () => {}, error: (l) => lines.push(l) }, undefined, `${dir}/../x`)).toBe(1);
+      expect(lines).toEqual(['bad Caddy path']);
       expect(await requestReload(path.join(dir, 'nobody.sock'), [], { log: () => {}, error: (l) => lines.push(l) })).toBe(1);
       expect(lines.at(-1)).toMatch(/The proxy front is not running \(ENOENT\)/);
     } finally {

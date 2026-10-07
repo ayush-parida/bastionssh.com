@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { tarBuffer } from './tar.js';
 
 /**
  * An in-process Docker Engine API on a unix socket, with just what bastionctl
@@ -24,6 +26,8 @@ export interface FakeContainer {
   Networks: Record<string, { Aliases: string[] }>;
   /** Address on the network it was created on. */
   IPAddress: string;
+  /** Aliases on the network it was created on (NetworkingConfig). */
+  Aliases: string[];
 }
 
 export interface ExecCall {
@@ -34,7 +38,7 @@ export interface ExecCall {
 export interface FakeDocker {
   socket: string;
   containers: Map<string, FakeContainer>;
-  images: Map<string, { Id: string; Labels: Record<string, string> }>;
+  images: Map<string, { Id: string; Labels: Record<string, string>; RepoDigests?: string[] }>;
   networks: Set<string>;
   /** Networks created internal. */
   internalNetworks: Set<string>;
@@ -51,6 +55,14 @@ export interface FakeDocker {
   buildOutput: string[];
   /** Containers whose start leaves them exited (a crashing app). */
   crashOnStart: (name: string) => boolean;
+  /** Make a pull fail with this message. */
+  pullError: string | null;
+  /** What `GET /containers/<id>/archive` answers with: the file's bytes (the Caddy binary). */
+  archive: (container: FakeContainer, file: string) => Buffer | null;
+  /** Every container state change, in order (`start <name>`, `stop <name>`, `remove <name>`). */
+  events: string[];
+  /** Called after every container start, stop or removal (a test checks an invariant at each step). */
+  afterChange: (() => void) | null;
   close: () => Promise<void>;
 }
 
@@ -95,6 +107,10 @@ export async function startFakeDocker(): Promise<FakeDocker> {
     exec: () => ({ exitCode: 0 }),
     buildError: null,
     crashOnStart: () => false,
+    pullError: null,
+    archive: (_c, file) => (file === '/usr/bin/caddy' ? Buffer.from('#!/bin/sh\n# caddy\n') : null),
+    events: [],
+    afterChange: null,
     buildOutput: [],
     close: async () => {},
   };
@@ -142,7 +158,14 @@ export async function startFakeDocker(): Promise<FakeDocker> {
       if (p === '/containers/create' && req.method === 'POST') {
         const name = q.get('name')!;
         if (fake.containers.has(name)) return json(409, { message: `Conflict. The container name "/${name}" is already in use` });
-        const spec = JSON.parse(body.toString()) as { Image: string; Labels?: Record<string, string>; Env?: string[]; HostConfig?: Record<string, unknown>; Cmd?: string[] };
+        const spec = JSON.parse(body.toString()) as {
+          Image: string;
+          Labels?: Record<string, string>;
+          Env?: string[];
+          HostConfig?: Record<string, unknown>;
+          Cmd?: string[];
+          NetworkingConfig?: { EndpointsConfig?: Record<string, { Aliases?: string[] }> };
+        };
         if (!imageKey(spec.Image)) return json(404, { message: `No such image: ${spec.Image}` });
         const c: FakeContainer = {
           Id: hexId(),
@@ -156,6 +179,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           RestartCount: 0,
           Networks: {},
           IPAddress: `172.30.0.${fake.containers.size + 2}`,
+          Aliases: spec.NetworkingConfig?.EndpointsConfig?.[String(spec.HostConfig?.NetworkMode ?? 'bridge')]?.Aliases ?? [],
         };
         fake.containers.set(name, c);
         return json(201, { Id: c.Id, Warnings: [] });
@@ -173,6 +197,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
       if ((m = /^\/containers\/([^/]+)\/(start|stop|restart)$/.exec(p)) && req.method === 'POST') {
         const c = find(m[1]!);
         if (!c) return notFound('container');
+        fake.events.push(`${m[2]} ${c.Name}`);
         if (m[2] === 'stop') {
           if (!c.State.Running) return json(304, undefined);
           c.State = { ...c.State, Status: 'exited', Running: false };
@@ -181,6 +206,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         } else {
           c.State = { ...c.State, Status: 'running', Running: true, StartedAt: new Date().toISOString() };
         }
+        fake.afterChange?.();
         return json(204, undefined);
       }
       if ((m = /^\/containers\/([^/]+)\/json$/.exec(p))) {
@@ -193,7 +219,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
           State: c.State,
           RestartCount: c.RestartCount,
           HostConfig: c.HostConfig,
-          NetworkSettings: { Networks: { [String(c.HostConfig.NetworkMode ?? 'bridge')]: { Aliases: null, IPAddress: c.IPAddress }, ...c.Networks } },
+          NetworkSettings: { Networks: { [String(c.HostConfig.NetworkMode ?? 'bridge')]: { Aliases: c.Aliases.length ? c.Aliases : null, IPAddress: c.IPAddress }, ...c.Networks } },
         });
       }
       if ((m = /^\/containers\/([^/]+)\/stats$/.exec(p))) {
@@ -211,10 +237,21 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         res.writeHead(200, { 'Content-Type': 'application/vnd.docker.multiplexed-stream' });
         return void res.end(mux(2, 'boom: app crashed\n'));
       }
+      if ((m = /^\/containers\/([^/]+)\/archive$/.exec(p)) && req.method === 'GET') {
+        const c = find(m[1]!);
+        if (!c) return notFound('container');
+        const file = q.get('path') ?? '';
+        const data = fake.archive(c, file);
+        if (!data) return json(404, { message: `Could not find the file ${file} in container ${c.Name}` });
+        res.writeHead(200, { 'Content-Type': 'application/x-tar' });
+        return void res.end(tarBuffer([{ name: path.basename(file), content: data.toString('latin1') }]));
+      }
       if ((m = /^\/containers\/([^/]+)$/.exec(p)) && req.method === 'DELETE') {
         const c = find(m[1]!);
         if (!c) return notFound('container');
+        fake.events.push(`remove ${c.Name}`);
         fake.containers.delete(c.Name);
+        fake.afterChange?.();
         return json(204, undefined);
       }
       if ((m = /^\/containers\/([^/]+)\/exec$/.exec(p)) && req.method === 'POST') {
@@ -246,15 +283,27 @@ export async function startFakeDocker(): Promise<FakeDocker> {
         );
       }
       if (p === '/images/create' && req.method === 'POST') {
-        const ref = `${q.get('fromImage')}@${q.get('tag')}`;
+        const tag = q.get('tag') ?? 'latest';
+        const ref = `${q.get('fromImage')}${tag.startsWith('sha256:') ? '@' : ':'}${tag}`;
         fake.pulls.push(ref);
-        fake.images.set(ref, { Id: `sha256:${hexId()}`, Labels: {} });
+        if (fake.pullError) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          return void res.end(`${JSON.stringify({ status: 'Pulling from library' })}\n${JSON.stringify({ error: fake.pullError })}\n`);
+        }
+        const digest = tag.startsWith('sha256:') ? tag : `sha256:${createHash('sha256').update(ref).digest('hex')}`;
+        fake.images.set(ref, { Id: `sha256:${hexId()}`, Labels: {}, RepoDigests: [`${q.get('fromImage')}@${digest}`] });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return void res.end(`${JSON.stringify({ status: 'Pulling fs layer', id: 'abc' })}\n${JSON.stringify({ status: 'Downloaded newer image' })}\n`);
       }
       if ((m = /^\/images\/(.+)\/json$/.exec(p))) {
         const key = imageKey(m[1]!);
-        return key ? json(200, { Id: fake.images.get(key)!.Id }) : notFound('image');
+        return key ? json(200, { Id: fake.images.get(key)!.Id, RepoTags: [key], RepoDigests: fake.images.get(key)!.RepoDigests ?? [] }) : notFound('image');
+      }
+      if ((m = /^\/images\/(.+)\/tag$/.exec(p)) && req.method === 'POST') {
+        const key = imageKey(m[1]!);
+        if (!key) return notFound('image');
+        fake.images.set(`${q.get('repo')}:${q.get('tag')}`, { ...fake.images.get(key)!, Labels: { ...fake.images.get(key)!.Labels } });
+        return json(201, undefined);
       }
       if ((m = /^\/images\/(.+)$/.exec(p)) && req.method === 'DELETE') {
         const key = imageKey(m[1]!);
