@@ -683,7 +683,7 @@ export function serviceFixedEnv(t: ServiceTemplate, domain: string | null): Reco
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(t.env)) {
     if (value.includes('{domain}')) {
-      if (domain) out[key] = value.replaceAll('{domain}', domain);
+      if (domain) out[key] = value.split('{domain}').join(domain);
     } else out[key] = value;
   }
   return out;
