@@ -19,6 +19,12 @@ import https from 'node:https';
  * 5. Redis runs an older 8.x release, gets data, and Update version moves it
  *    to the pinned release (recreate) with the data kept.
  * 6. MinIO's console answers through Caddy on its domain with tls internal.
+ * 7. The rest of the catalog is created (MySQL, MariaDB, Valkey, Memcached,
+ *    RabbitMQ, Meilisearch, ClickHouse, Mailpit, Adminer, Grafana, Uptime
+ *    Kuma) and each is used as an app would: a client on bastion-apps with
+ *    the revealed credentials, or its UI through Caddy (tls internal).
+ * 8. MySQL, MariaDB, Valkey, Redis and MongoDB are backed up, changed and
+ *    restored, and the backup's data is there again.
  *
  *   docker network create bastion-qs-net
  *   docker volume create bastion-qs-sock && docker volume create bastion-qs-root
@@ -58,6 +64,40 @@ function sh(command: string): string {
 
 /** Single-quote for the shell. */
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/** An HTTPS request to the throwaway daemon's port 443 (Caddy), for `host`, certificate not checked (tls internal). */
+function viaProxy(host: string, path: string, opts: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<{ status: number; body: string; headers: Record<string, unknown> }> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      { host: '127.0.0.1', port: HTTPS_PORT, path, method: opts.method ?? 'GET', servername: host, headers: { host, ...opts.headers }, rejectUnauthorized: false, timeout: 15_000 },
+      (res) => {
+        let text = '';
+        res.on('data', (c: Buffer) => (text += c.toString('utf8')));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text, headers: res.headers }));
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    if (opts.body) req.write(opts.body);
+    req.end();
+  });
+}
+
+/** Retry `viaProxy` until `ok` (the certificate is issued and the route applied a moment after the deploy). */
+async function untilProxy(host: string, path: string, ok: (r: { status: number; body: string }) => boolean, opts: Parameters<typeof viaProxy>[2] = {}, ms = 90_000) {
+  const started = Date.now();
+  let last: { status: number; body: string; headers: Record<string, unknown> } = { status: 0, body: '', headers: {} };
+  while (Date.now() - started < ms) {
+    try {
+      last = await viaProxy(host, path, opts);
+      if (ok(last)) return last;
+    } catch (err) {
+      last = { status: 0, body: (err as Error).message, headers: {} };
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  return last;
+}
 
 describe.skipIf(!port)('quick services against a live server', () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
@@ -329,4 +369,233 @@ describe.skipIf(!port)('quick services against a live server', () => {
     expect(connection.ui.urls).toEqual(['https://minio.test']);
     report.minioConsole = { status, title: /<title>([^<]*)<\/title>/.exec(body)?.[1] ?? null, login: login.body.slice(0, 120) };
   }, 120_000);
+  // ── The rest of the catalog ────────────────────────────────────────────────
+
+  /** The pinned default image of a template. */
+  const imageOf = (id: string) => serviceTemplate(id)!.versions.find((v) => v.default)!.image;
+  /** Back up `name` through the API (manage), returning the file. */
+  async function backupNow(name: string) {
+    const made = await api('POST', deployApi(`/apps/${name}/backups`));
+    expect(made.statusCode, made.body).toBe(200);
+    const b = (made.json() as { backup: { file: string; bytes: number } }).backup;
+    expect(sh(`stat -c '%a' ${ROOT}/apps/${name}/backups/${b.file}`).trim()).toBe('600');
+    return b;
+  }
+  async function restoreNow(name: string, file: string) {
+    const res = await api('POST', deployApi(`/apps/${name}/backups/${file}/restore`), { confirm: name });
+    expect(res.statusCode, res.body).toBe(200);
+    return res.json() as { method: string; safety: { file: string } };
+  }
+
+  it('creates MySQL, MariaDB, Valkey, Memcached, RabbitMQ, Meilisearch, ClickHouse, Mailpit, Adminer, Grafana and Uptime Kuma', async () => {
+    const plan: Array<Record<string, unknown>> = [
+      { name: 'shop-mysql', template: 'mysql' },
+      { name: 'shop-maria', template: 'mariadb' },
+      { name: 'kv', template: 'valkey' },
+      { name: 'memo', template: 'memcached' },
+      { name: 'mq', template: 'rabbitmq', domain: 'rabbit.test', tls: 'internal' },
+      { name: 'search', template: 'meilisearch', domain: 'search.test', tls: 'internal' },
+      { name: 'olap', template: 'clickhouse' },
+      { name: 'mail', template: 'mailpit', domain: 'mail.test', tls: 'internal' },
+      { name: 'dbadmin', template: 'adminer', domain: 'adminer.test', tls: 'internal' },
+      { name: 'dash', template: 'grafana', domain: 'grafana.test', tls: 'internal' },
+      { name: 'uptime', template: 'uptime-kuma', domain: 'kuma.test', tls: 'internal' },
+    ];
+    const ms: Record<string, number> = {};
+    for (const body of plan) ms[body.template as string] = (await create(body)).ms;
+    report.createMs2 = ms;
+    for (const body of plan) {
+      const releases = (await api('GET', deployApi(`/apps/${body.name as string}/releases`))).json() as Array<{ digest: string }>;
+      expect(imageOf(body.template as string).endsWith(releases[0]!.digest)).toBe(true);
+      // Healthy, one container
+      const ps = sh(`docker ps -a --filter label=bastion.app=${body.name as string} --format '{{.Status}}'`).trim().split('\n');
+      expect(ps, `${body.name as string}: ${ps.join(' | ')}`).toHaveLength(1);
+      expect(ps[0]).toMatch(/^Up /);
+    }
+    expect(sh(`docker ps --filter label=bastion.managed=app --format '{{.Names}} {{.Ports}}'`)).not.toMatch(/0\.0\.0\.0/);
+  }, 3_600_000);
+
+  it('connects to MySQL, backs it up, restores it', async () => {
+    const { url } = await connection('shop-mysql');
+    const u = new URL(url);
+    expect(u.hostname).toBe('shop-mysql');
+    const img = imageOf('mysql');
+    const sql = (s: string) => client(`-e MYSQL_PWD=${q(decodeURIComponent(u.password))} --entrypoint mysql ${img}`, `-h shop-mysql -u ${u.username} -N -B ${u.pathname.slice(1)} -e ${q(s)}`);
+    sql("create table orders (id int primary key, item text); insert into orders values (1, 'book')");
+    expect(sql('select item from orders')).toBe('book');
+    expect(() => client(`-e MYSQL_PWD=wrong --entrypoint mysql ${img}`, `-h shop-mysql -u app app -e 'select 1'`)).toThrow();
+    const b = await backupNow('shop-mysql');
+    expect(b.file).toMatch(/\.sql$/);
+    sql("insert into orders values (2, 'lamp'); delete from orders where id = 1");
+    expect(sql('select item from orders')).toBe('lamp');
+    const r = await restoreNow('shop-mysql', b.file);
+    expect(r.method).toBe('exec');
+    expect(sql('select item from orders order by id')).toBe('book');
+    report.mysql = { connected: true, backup: b, restored: true, safety: r.safety.file };
+  }, 600_000);
+
+  it('connects to MariaDB, backs it up, restores it', async () => {
+    const { url } = await connection('shop-maria');
+    const u = new URL(url);
+    const img = imageOf('mariadb');
+    const sql = (s: string) => client(`-e MYSQL_PWD=${q(decodeURIComponent(u.password))} --entrypoint mariadb ${img}`, `-h shop-maria -u ${u.username} -N -B ${u.pathname.slice(1)} -e ${q(s)}`);
+    sql("create table orders (id int primary key, item text); insert into orders values (1, 'book')");
+    expect(sql('select item from orders')).toBe('book');
+    const b = await backupNow('shop-maria');
+    sql("insert into orders values (2, 'lamp'); delete from orders where id = 1");
+    const r = await restoreNow('shop-maria', b.file);
+    expect(sql('select item from orders order by id')).toBe('book');
+    report.mariadb = { connected: true, backup: b, restored: true, safety: r.safety.file };
+  }, 600_000);
+
+  it('connects to Valkey, backs it up, restores it (replace-file)', async () => {
+    const { url } = await connection('kv');
+    expect(url).toMatch(/^redis:\/\/default:[A-Za-z0-9_-]{32}@kv:6379\/0$/);
+    const cli = (args: string) => client(`--entrypoint valkey-cli ${imageOf('valkey')}`, `-u ${q(url)} --no-auth-warning ${args}`);
+    expect(cli('set greeting hello')).toBe('OK');
+    const b = await backupNow('kv');
+    expect(b.file).toMatch(/\.rdb$/);
+    expect(cli('set greeting changed')).toBe('OK');
+    expect(cli('set extra 1')).toBe('OK');
+    const r = await restoreNow('kv', b.file);
+    expect(r.method).toBe('replace-file');
+    expect(cli('get greeting')).toBe('hello');
+    expect(cli('exists extra')).toBe('0');
+    report.valkey = { connected: true, backup: b, restored: true };
+  }, 600_000);
+
+  it('restores Redis and MongoDB backups', async () => {
+    const redis = await connection('cache');
+    const rcli = (args: string) => client(imageOf('redis'), `redis-cli -u ${q(redis.url)} --no-auth-warning ${args}`);
+    expect(rcli('set greeting before-backup')).toBe('OK');
+    const rb = await backupNow('cache');
+    expect(rcli('set greeting after-backup')).toBe('OK');
+    expect((await restoreNow('cache', rb.file)).method).toBe('replace-file');
+    expect(rcli('get greeting')).toBe('before-backup');
+
+    const mongo = await connection('events-db');
+    const msh = (js: string) => client(imageOf('mongodb'), `mongosh ${q(mongo.url)} --quiet --eval ${q(js)}`);
+    msh("db.getSiblingDB('shop').orders.deleteMany({}); db.getSiblingDB('shop').orders.insertOne({ item: 'book' })");
+    const mb = await backupNow('events-db');
+    expect(mb.file).toMatch(/\.archive\.gz$/);
+    msh("db.getSiblingDB('shop').orders.deleteMany({}); db.getSiblingDB('shop').orders.insertOne({ item: 'lamp' }); db.getSiblingDB('shop').extra.insertOne({ x: 1 })");
+    expect((await restoreNow('events-db', mb.file)).method).toBe('exec');
+    expect(msh("print(db.getSiblingDB('shop').orders.find().toArray().map(d => d.item).join(','))")).toBe('book');
+    report.redisRestore = { backup: rb, restored: true };
+    report.mongoRestore = { backup: mb, restored: true };
+  }, 600_000);
+
+  it('connects to Memcached, ClickHouse and Meilisearch', async () => {
+    const memo = await connection('memo', 'Server');
+    expect(memo.url).toBe('memo:11211');
+    const out = client(`--entrypoint sh ${imageOf('memcached')}`, `-c ${q("printf 'set k 0 0 5\\r\\nhello\\r\\nget k\\r\\nquit\\r\\n' | nc memo 11211")}`);
+    expect(out).toContain('STORED');
+    expect(out).toContain('hello');
+
+    const ch = await connection('olap', 'HTTP URL');
+    const chu = new URL(ch.url);
+    expect(chu.host).toBe('olap:8123');
+    const curl = (args: string) => client('curlimages/curl:8.16.0', `-sS -f ${args}`);
+    const auth = `--user ${q(`${chu.username}:${decodeURIComponent(chu.password)}`)}`;
+    curl(`${auth} --data-binary ${q('create table events (id UInt32, name String) engine = MergeTree order by id')} 'http://olap:8123/?database=app'`);
+    curl(`${auth} --data-binary ${q("insert into events values (1, 'signup')")} 'http://olap:8123/?database=app'`);
+    expect(curl(`${auth} --data-binary 'select name from events' 'http://olap:8123/?database=app'`)).toBe('signup');
+    expect(() => curl(`--user app:wrong --data-binary 'select 1' http://olap:8123/`)).toThrow();
+    const native = await connection('olap', 'Native');
+    const nu = new URL(native.url);
+    expect(nu.port).toBe('9000');
+    expect(client(`--entrypoint clickhouse-client ${imageOf('clickhouse')}`, `--host olap --port 9000 --user app --password ${q(decodeURIComponent(nu.password))} --database app --query 'select count() from events'`)).toBe('1');
+
+    const meili = await connection('search');
+    expect(meili.url).toBe('http://search:7700');
+    const key = meili.values.MEILI_MASTER_KEY!;
+    const bearer = `-H ${q(`Authorization: Bearer ${key}`)} -H 'Content-Type: application/json'`;
+    curl(`${bearer} -X POST --data ${q('[{"id":1,"title":"Carol"},{"id":2,"title":"Wonder"}]')} http://search:7700/indexes/movies/documents`);
+    let hits = '';
+    for (let i = 0; i < 30 && !hits.includes('Carol'); i++) {
+      hits = curl(`${bearer} -X POST --data '{"q":"carlo"}' http://search:7700/indexes/movies/search`);
+      if (!hits.includes('Carol')) await new Promise((r) => setTimeout(r, 1000));
+    }
+    expect(hits).toContain('Carol');
+    expect(() => curl('http://search:7700/indexes')).toThrow();
+    // Through Caddy on its domain
+    const health = await untilProxy('search.test', '/health', (r) => r.status === 200);
+    expect(health.status, health.body).toBe(200);
+    expect((await viaProxy('search.test', '/indexes')).status).toBe(401);
+    report.memcached = { connected: true };
+    report.clickhouse = { http: true, native: true };
+    report.meilisearch = { connected: true, typoSearch: true, viaProxy: health.status };
+  }, 600_000);
+
+  it('connects to RabbitMQ over AMQP and its management UI through Caddy', async () => {
+    const mq = await connection('mq', 'AMQP URL');
+    const u = new URL(mq.url);
+    expect(u.host).toBe('mq:5672');
+    const pass = decodeURIComponent(u.password);
+    // The AMQP 0-9-1 protocol header: the broker answers with Connection.Start, naming its mechanisms
+    const start = client(`--entrypoint sh ${imageOf('memcached')}`, `-c ${q("printf 'AMQP\\000\\000\\011\\001' | nc -w 3 mq 5672 | grep -ao 'PLAIN' | head -1")}`);
+    expect(start).toContain('PLAIN');
+    const curl = (args: string) => client('curlimages/curl:8.16.0', `-sS -f ${args}`);
+    expect(curl(`--user ${q(`app:${pass}`)} http://mq:15672/api/whoami`)).toContain('"name":"app"');
+    const published = curl(`--user ${q(`app:${pass}`)} -H 'content-type: application/json' -X POST --data ${q('{"properties":{},"routing_key":"nowhere","payload":"hi","payload_encoding":"string"}')} http://mq:15672/api/exchanges/%2F/amq.default/publish`);
+    expect(published).toContain('routed');
+    const ui = await untilProxy('rabbit.test', '/', (r) => r.status === 200);
+    expect(ui.status, ui.body.slice(0, 200)).toBe(200);
+    expect(ui.body).toMatch(/RabbitMQ/i);
+    const authed = await viaProxy('rabbit.test', '/api/whoami', { headers: { authorization: `Basic ${Buffer.from(`app:${pass}`).toString('base64')}` } });
+    expect(authed.status, authed.body).toBe(200);
+    expect((await viaProxy('rabbit.test', '/api/whoami', { headers: { authorization: `Basic ${Buffer.from('app:wrong').toString('base64')}` } })).status).toBe(401);
+    report.rabbitmq = { amqp: true, managementUi: ui.status, api: authed.status };
+  }, 600_000);
+
+  it('catches mail in Mailpit, its UI behind the generated password', async () => {
+    const mail = await connection('mail', 'SMTP');
+    expect(mail.url).toBe('smtp://mail:1025');
+    const pass = mail.values.MAILPIT_UI_PASSWORD!;
+    expect(pass).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    client('--entrypoint sh curlimages/curl:8.16.0', `-c ${q("printf 'Subject: bastion-it\\r\\n\\r\\nhello\\r\\n' | curl -sS -f smtp://mail:1025 --mail-from app@example.com --mail-rcpt ops@example.com -T -")}`);
+    const basic = `Basic ${Buffer.from(`admin:${pass}`).toString('base64')}`;
+    const list = await untilProxy('mail.test', '/api/v1/messages', (r) => r.status === 200 && r.body.includes('bastion-it'), { headers: { authorization: basic } });
+    expect(list.status, list.body.slice(0, 200)).toBe(200);
+    expect(list.body).toContain('bastion-it');
+    expect((await viaProxy('mail.test', '/api/v1/messages')).status).toBe(401);
+    expect((await viaProxy('mail.test', '/api/v1/messages', { headers: { authorization: `Basic ${Buffer.from('admin:wrong').toString('base64')}` } })).status).toBe(401);
+    // The password is never on the container's command line
+    expect(sh(`docker inspect -f '{{json .Config.Cmd}} {{json .Config.Entrypoint}}' $(docker ps -q --filter label=bastion.app=mail)`)).not.toContain(pass);
+    report.mailpit = { smtp: true, ui: list.status, unauthenticated: 401 };
+  }, 300_000);
+
+  it('serves Adminer, Grafana and Uptime Kuma through Caddy', async () => {
+    const adminer = await untilProxy('adminer.test', '/', (r) => r.status === 200);
+    expect(adminer.status).toBe(200);
+    expect(adminer.body).toContain('Adminer');
+    // Adminer logs in to MySQL on bastion-apps
+    const my = await connection('shop-mysql');
+    const u = new URL(my.url);
+    const login = client(
+      '--entrypoint sh curlimages/curl:8.16.0',
+      `-c ${q(`curl -sS -c /tmp/j -b /tmp/j -o /dev/null http://dbadmin:8080/ && curl -sS -c /tmp/j -b /tmp/j -L --data-urlencode 'auth[driver]=server' --data-urlencode 'auth[server]=shop-mysql' --data-urlencode 'auth[username]=app' --data-urlencode 'auth[password]=${decodeURIComponent(u.password)}' --data-urlencode 'auth[db]=app' 'http://dbadmin:8080/'`)}`,
+    );
+    expect(login).toContain('orders');
+
+    const grafana = await untilProxy('grafana.test', '/api/health', (r) => r.status === 200);
+    expect(grafana.status, grafana.body).toBe(200);
+    const g = await connection('dash');
+    const gpass = g.values.GF_SECURITY_ADMIN_PASSWORD!;
+    const user = await viaProxy('grafana.test', '/api/user', { headers: { authorization: `Basic ${Buffer.from(`admin:${gpass}`).toString('base64')}` } });
+    expect(user.status, user.body).toBe(200);
+    expect(user.body).toContain('"login":"admin"');
+    expect((await viaProxy('grafana.test', '/api/user', { headers: { authorization: `Basic ${Buffer.from('admin:admin').toString('base64')}` } })).status).toBe(401);
+    const settings = await viaProxy('grafana.test', '/api/frontend/settings', { headers: { authorization: `Basic ${Buffer.from(`admin:${gpass}`).toString('base64')}` } });
+    expect(settings.body).toContain('https://grafana.test/');
+
+    const kuma = await untilProxy('kuma.test', '/', (r) => r.status === 200 || r.status === 302);
+    expect([200, 302], kuma.body.slice(0, 200)).toContain(kuma.status);
+    const page = await untilProxy('kuma.test', '/setup', (r) => r.status === 200);
+    expect(page.status).toBe(200);
+    expect(page.body).toMatch(/Uptime Kuma/i);
+    report.adminer = { ui: adminer.status, mysqlLogin: true };
+    report.grafana = { health: grafana.status, adminLogin: user.status, rootUrl: true };
+    report.uptimeKuma = { ui: kuma.status, setup: page.status };
+  }, 600_000);
 });
