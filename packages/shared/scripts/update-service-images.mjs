@@ -17,6 +17,13 @@
 // buildx is refused (429) the digest is read from Docker Hub's tag API
 // instead and the script says so.
 //
+// Entries marked `"community": true` (MinIO: pgsty/minio, a third-party
+// rebuild — MinIO no longer publishes images) are left out unless named on
+// the command line: one publisher's account is all that stands between a
+// re-pin and every server that updates. Re-pin them on purpose, and check
+// the provenance of the new digest first (`docker buildx imagetools inspect
+// <ref> --format '{{json .Provenance}}'`: its source revision on GitHub).
+//
 //   pnpm --filter @smt/shared run update-service-images [id …]
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -73,6 +80,11 @@ let changed = 0;
 for (const [id, lines] of Object.entries(pins)) {
   if (only.size > 0 && !only.has(id)) continue;
   for (const [major, entry] of Object.entries(lines)) {
+    if (entry.community && !only.has(id)) {
+      console.log(`skipped ${id} ${major}: a community image, re-pinned only when named (update-service-images ${id})`);
+      continue;
+    }
+    if (entry.community) console.warn(`  ${id} is a community image (${entry.track}): check the new digest's provenance before committing`);
     const { path, tag } = parseRef(entry.track);
     // The track's own suffix (`-alpine`, `-management-alpine`) follows the version in the exact tag
     const suffix = tag.replace(/^v?\d+(\.\d+)*/, '');

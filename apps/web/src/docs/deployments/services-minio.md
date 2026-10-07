@@ -8,6 +8,8 @@ keywords: [minio, s3, object storage, buckets, aws sdk, boto3, presigned, consol
 
 The MinIO template runs MinIO's server with its web console. MinIO stopped publishing container images in 2025 (`minio/minio` is gone from Docker Hub); the template runs the community build of the same open-source server from Pigsty, `pgsty/minio`, pinned by digest like every other image.
 
+**It is a community-built image.** Pinning by digest means a server only ever runs the exact image BastionSSH was released with, and BastionSSH re-pins it only on purpose, after checking where the new build came from — but the image is built and published by Pigsty, not by MinIO, and MinIO itself no longer publishes builds of the open-source server. If that is not acceptable for your data, run another S3-compatible server from your own image (`build.type: image` in bastion.yml), or use a hosted object store.
+
 | | |
 | --- | --- |
 | Ports | 9000 (S3 API), 9001 (console) |

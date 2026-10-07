@@ -67,6 +67,11 @@ export default function UpdateVersionDialog({
               );
             })}
           </fieldset>
+          {template.imageNote && (
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">Community-built image.</span> {template.imageNote}
+            </p>
+          )}
           {allowed && !allowed.ok && (
             <p role="alert" className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-amber-700 dark:text-amber-400">
               {allowed.reason} <DocsLink to={serviceDocs(template.docs, 'upgrading')}>How to upgrade</DocsLink>

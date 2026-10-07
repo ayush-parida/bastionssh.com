@@ -86,6 +86,11 @@ function Catalog({ onPick }: { onPick: (t: ServiceTemplate) => void }) {
                     <ServiceIcon icon={t.icon} size={15} />
                   </span>
                   <span className="font-medium">{t.name}</span>
+                  {t.imageNote && (
+                    <span title={t.imageNote} className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
+                      Community image
+                    </span>
+                  )}
                   {t.ui?.domain && (
                     <span title={`${t.ui.label} on a domain`} className="ml-auto text-muted-foreground">
                       <Globe size={13} />
@@ -308,7 +313,14 @@ export default function ServiceCatalogDialog({
                       {template.warning}
                     </p>
                   )}
-                  {template.imageNote && <p className="text-xs text-muted-foreground">{template.imageNote}</p>}
+                  {template.imageNote && (
+                    <p className="flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                      <ShieldAlert size={14} className="mt-0.5 shrink-0" />
+                      <span>
+                        <span className="font-medium text-foreground">Community-built image.</span> {template.imageNote}
+                      </span>
+                    </p>
+                  )}
                 </div>
               )}
               <p className="text-xs text-muted-foreground md:col-span-2">
