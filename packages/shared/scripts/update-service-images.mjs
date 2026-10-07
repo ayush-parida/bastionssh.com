@@ -66,14 +66,22 @@ async function resolve(ref) {
   }
 }
 
+/** Pages of tags read at most, newest first: a repository that signs its images (SeaweedFS) has a `.sig` tag beside every one. */
+const MAX_TAG_PAGES = 10;
+
 /** The most specific tag pointing at `digest` that `match` accepts. */
 async function exactTag(ref, digest, major, match) {
   const { namespace, repo } = parseRef(ref);
   const filter = major.replace(/^v/, '');
-  const page = await hub(`https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repo}/tags?page_size=100&name=${encodeURIComponent(filter)}`);
-  const tags = (page.results ?? []).filter((t) => t.digest === digest && match.test(t.name)).map((t) => t.name);
-  tags.sort((a, b) => b.length - a.length || b.localeCompare(a));
-  return tags[0] ?? null;
+  let url = `https://hub.docker.com/v2/namespaces/${namespace}/repositories/${repo}/tags?page_size=100&ordering=last_updated&name=${encodeURIComponent(filter)}`;
+  for (let page = 0; url && page < MAX_TAG_PAGES; page++) {
+    const body = await hub(url);
+    const tags = (body.results ?? []).filter((t) => t.digest === digest && match.test(t.name)).map((t) => t.name);
+    tags.sort((a, b) => b.length - a.length || b.localeCompare(a));
+    if (tags[0]) return tags[0];
+    url = body.next ?? null;
+  }
+  return null;
 }
 
 let changed = 0;

@@ -27,7 +27,8 @@ export const USAGE = `Usage: bastionctl <command> [options] [--json]
   certs <app>                             Certificates of the app's domains (issuer, expiry, last error)
   deploy <app> --source <file>            Build and serve an upload (.tar or .tar.gz)
   deploy <app>                            Pull and serve build.image (build.type: image)
-  rollback <app> <release>                Serve a kept release again (no rebuild)
+  rollback <app> <release> [--force-line] Serve a kept release again (no rebuild); a quick service's
+                                          release on another version line is refused unless --force-line
   restart <app> | stop <app>              The app's live container
   env keys|set|unset|get <app> [KEY]      .env: names only; set reads the value from stdin
   env generate <app> <KEY> [--bytes N] [--if-missing]
@@ -58,7 +59,7 @@ interface Parsed {
 }
 
 const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy', 'bytes', 'keep']);
-const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help', 'if-missing']);
+const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help', 'if-missing', 'force-line']);
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -227,8 +228,8 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       return { value: r, exitCode: r.result === 'success' ? 0 : 1 };
     }
     case 'rollback': {
-      expect(args, 2, 'rollback <app> <release>');
-      const r = await ops.rollback(ctx, appName(args[0]), releaseId(args[1]));
+      expect(args, 2, 'rollback <app> <release> [--force-line]');
+      const r = await ops.rollback(ctx, appName(args[0]), releaseId(args[1]), { forceLine: parsed.flags.has('force-line') });
       return { value: r, exitCode: r.result === 'success' ? 0 : 1 };
     }
     case 'restart':

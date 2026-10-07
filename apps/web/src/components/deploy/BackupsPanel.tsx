@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { DeployBackup, DeployBackupList, DeployBackupResult, DeployBackupSchedule, DeployRestoreResult } from '@smt/shared';
+import { serviceTemplate, type DeployBackup, type DeployBackupList, type DeployBackupResult, type DeployBackupSchedule, type DeployRestoreResult } from '@smt/shared';
 import { ArchiveRestore, DatabaseBackup, Download, Loader2, Trash2, TriangleAlert, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { appPath, deployKeys, when } from '@/lib/deploy.js';
 import { passkeyErrorMessage, withStepUp } from '@/lib/passkeys.js';
 import { formatBytes } from '@/lib/utils.js';
-import { SERVICE_DOCS } from '@/lib/services.js';
+import { SERVICE_DOCS, serviceDocs } from '@/lib/services.js';
 import ConfirmDialog from '@/components/docker/ConfirmDialog.js';
 import DocsLink from '@/components/docs/DocsLink.js';
 
@@ -133,7 +133,13 @@ export default function BackupsPanel({ serverId, app, canOperate, canManage }: {
   if (list.error || !list.data) return <p className="text-sm text-red-600">{list.error ? (list.error as Error).message : 'No backups'}</p>;
   const b = list.data;
   if (!b.supported) {
-    return <p className="text-sm text-muted-foreground">This service has no backup command. <DocsLink to={SERVICE_DOCS.noBackups}>How to back it up</DocsLink></p>;
+    // Its own page says how (SeaweedFS, MinIO: copy the objects out); every template's page has a Backups section
+    const t = serviceTemplate(b.service);
+    return (
+      <p className="text-sm text-muted-foreground">
+        This service has no backup command. <DocsLink to={t ? serviceDocs(t.docs, 'backups') : SERVICE_DOCS.noBackups}>How to back it up</DocsLink>
+      </p>
+    );
   }
   const keepValid = /^\d{1,3}$/.test(keep) && Number(keep) >= 1 && Number(keep) <= 100;
   const dirty = !!settings && (settings.schedule !== schedule || String(settings.keep) !== keep);

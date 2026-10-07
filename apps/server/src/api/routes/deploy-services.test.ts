@@ -7,7 +7,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
  * test: create from the catalog (the bastion.yml it writes, fixed values on
  * stdin, secrets generated on the server, the streamed deploy, refusals
  * before anything is written), connection details with secrets masked,
- * Update version within a line and the refusal across one, and backups —
+ * Update version within a line and the refusal across one, rollback kept
+ * within a service's version line (409 `line_change_refused`, forceLine for
+ * managers only, audited), and backups —
  * levels, the passkey step-up for downloads, the restore confirmation, and
  * the audit rows (names and files only, never a value).
  */
@@ -134,6 +136,14 @@ const PG16 = serviceVersion(PG, '16')!;
 const OUTCOME = { app: 'orders-db', release: '20261007-120000-abcdef12', previous: null, result: 'success', error: null };
 const BACKUP = '20261007T120000Z.dump';
 
+/** Releases of a Grafana service as bastionctl lists them: 13 serving, a 13.1 one, and a 12 one a rollback may not return to. */
+const R12 = '20261007-100000-aaaaaaaa';
+const R131 = '20261007-110000-bbbbbbbb';
+const R13 = '20261007-120000-cccccccc';
+const REFUSED = `Release ${R12} runs another line: Grafana cannot be moved back from Grafana 13 to Grafana 12: its data was migrated by the newer release.`;
+const release = (id: string, line: string, extra: Record<string, unknown>) => ({ id, app: 'dash', buildType: 'image', result: 'success', service: 'grafana', line, imagePresent: true, current: false, ...extra });
+const RELEASES = [release(R13, '13', { current: true }), release(R131, '13', { rollbackRefused: null }), release(R12, '12', { rollbackRefused: REFUSED })];
+
 /** What `status` says about an app: a PostgreSQL service, a MinIO with a domain, or a plain app. */
 const apps: Record<string, unknown> = {};
 function serviceStatus(name: string, config: Record<string, unknown>) {
@@ -156,6 +166,10 @@ function defaultBastionctl(args: string[], _run?: FakeRun): Scripted {
       return { stderr: [`Pulling ${PG17.image}`, 'Health check passed'], stdout: OUTCOME };
     case 'set-image':
       return { stdout: { app: rest[0], from: null, to: rest[1], changed: true } };
+    case 'releases':
+      return { stdout: RELEASES };
+    case 'rollback':
+      return { stderr: [`Rolling ${rest[0]} back to ${rest[1]}`], stdout: { ...OUTCOME, app: rest[0], release: rest[1] } };
     case 'backups':
       if (rest[0] === 'list') return { stdout: { app: rest[1], service: 'postgres', supported: true, backups: [{ file: BACKUP, bytes: 12, createdAt: '2026-10-07T12:00:00.000Z', kind: 'manual' }], settings: { schedule: 'off', keep: 7 }, lastScheduled: null, cron: null } };
       if (rest[0] === 'delete') return { stdout: { app: rest[1], file: rest[2] } };
@@ -389,6 +403,48 @@ describe('quick-service routes', () => {
       const res = await events(admin, api('/apps/orders-db/service/version'), { version: '17' });
       expect(runsOf('set-image').map((r) => r.argv[2])).toEqual([PG17.image, older]);
       expect(logText(res.events)).toContain(`bastion.yml names ${older} again`);
+    });
+  });
+
+  describe('rollback across version lines', () => {
+    beforeEach(() => {
+      serviceStatus('dash', { service: 'grafana', build: { type: 'image', image: serviceVersion(serviceTemplate('grafana')!, '13')!.image }, run: { port: 3000, publish: { scope: 'none', port: null } } });
+    });
+
+    it('refuses a release on another line with 409 before anything runs, and audits the refusal', async () => {
+      const res = await call(operator, 'POST', api('/apps/dash/rollback'), { release: R12 });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({ error: REFUSED, code: 'line_change_refused', docs: '/docs/deployments/releases-rollback#version-lines' });
+      expect(fake.runs.map((r) => r.argv)).toEqual([['status', 'dash'], ['releases', 'dash']]);
+      expect(audits('deploy.rollback')[0]!.meta).toEqual({ app: 'dash', release: R12, service: 'grafana', result: 'refused', error: REFUSED });
+    });
+
+    it('rolls back within the line as usual', async () => {
+      const res = await events(operator, api('/apps/dash/rollback'), { release: R131 });
+      expect(res.type).toBe('text/event-stream');
+      expect(fake.runs.map((r) => r.argv)).toEqual([['status', 'dash'], ['releases', 'dash'], ['rollback', 'dash', R131]]);
+      expect(audits('deploy.rollback')[0]!.meta).toMatchObject({ app: 'dash', release: R131, result: 'success' });
+    });
+
+    it('lets only managers force a line change, passing --force-line and auditing it', async () => {
+      const denied = await call(operator, 'POST', api('/apps/dash/rollback'), { release: R12, forceLine: true });
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().code).toBe('force_line_needs_manage');
+      expect(runsOf('rollback')).toEqual([]);
+      expect((await call(viewer, 'POST', api('/apps/dash/rollback'), { release: R12, forceLine: true })).statusCode).toBe(403);
+      fake.runs.length = 0;
+
+      const res = await events(admin, api('/apps/dash/rollback'), { release: R12, forceLine: true });
+      expect(res.type).toBe('text/event-stream');
+      // No release list: bastionctl is told to roll back anyway, and logs the warning itself
+      expect(fake.runs.map((r) => r.argv)).toEqual([['status', 'dash'], ['rollback', 'dash', R12, '--force-line']]);
+      expect(audits('deploy.rollback')[0]!.meta).toMatchObject({ app: 'dash', release: R12, forceLine: true, result: 'success' });
+    });
+
+    it('leaves apps without service: alone (no release list read)', async () => {
+      serviceStatus('site1', { build: { type: 'nextjs', image: null }, run: { port: 3000, publish: { scope: 'none', port: null } } });
+      await events(operator, api('/apps/site1/rollback'), { release: R12 });
+      expect(fake.runs.map((r) => r.argv)).toEqual([['status', 'site1'], ['rollback', 'site1', R12]]);
     });
   });
 

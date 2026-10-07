@@ -90,7 +90,7 @@ Must be the app's name — the folder it lives in. It is fixed once the app exis
 | --- | --- | --- |
 | text | none | a template id: `a-z`, `0-9` and `-` (like `postgres`) |
 
-The quick-service template an app was created from (see [Quick services](services-overview.md)). It changes nothing about how the container runs; it gives the app its service page in BastionSSH — the Connection panel, Update version — and names the backup command bastionctl runs for [`backups`](#backups).
+The quick-service template an app was created from (see [Quick services](services-overview.md)). It changes nothing about how the container runs; it gives the app its service page in BastionSSH — the Connection panel, Update version — names the backup command bastionctl runs for [`backups`](#backups), and makes rollbacks keep the template's [version lines](releases-rollback.md#version-lines).
 
 ## domains
 

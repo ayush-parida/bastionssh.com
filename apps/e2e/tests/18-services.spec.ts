@@ -8,8 +8,10 @@ import { createMember, expect, ownerApi, signInWithPassword, snap, test } from '
  * (publish warning, a domain only for UI services) with the create log
  * streaming, then a PostgreSQL service's page — the Connection panel with
  * the password revealed on request, the Backups tab (back up now, download,
- * restore with the name typed, the schedule) and Update version within the
- * line, refused across it. And what each role is offered.
+ * restore with the name typed, the schedule), Update version within the
+ * line, refused across it, and Roll back kept off for a release on another
+ * line. SeaweedFS leads object storage, recommended. And what each role is
+ * offered.
  */
 
 const PINS = JSON.parse(readFileSync(new URL('../../../packages/shared/src/services/images.json', import.meta.url), 'utf8')) as Record<string, Record<string, { image: string; version: string }>>;
@@ -17,6 +19,37 @@ const PG17 = PINS.postgres!['17']!;
 const PG17_OLD = PG17.image.replace(/:[^@]+@/, ':17.1-alpine@');
 const RELEASE = '20261007-120000-abcdef12';
 const BACKUP = '20261007T030000Z.dump';
+/** Kept releases: the current one, an older one of the same line, and one of PostgreSQL 16 (refused). */
+const SAME_LINE = '20261006-120000-22222222';
+const OTHER_LINE = '20261005-120000-33333333';
+const REFUSED = `Release ${OTHER_LINE} runs another line: PostgreSQL cannot be moved from PostgreSQL 17 to PostgreSQL 16 in place.`;
+const releaseOf = (id: string, ref: string, line: string, extra: Record<string, unknown>) => ({
+  id,
+  app: 'orders-db',
+  createdAt: '2026-10-07T12:00:00.000Z',
+  finishedAt: '2026-10-07T12:00:30.000Z',
+  actor: 'ann@example.com',
+  checksum: 'a'.repeat(64),
+  image: `bastion-orders-db:${id}`,
+  container: `bastion-orders-db-${id}`,
+  port: 5432,
+  buildType: 'image',
+  result: 'success',
+  error: null,
+  previous: null,
+  digest: ref.split('@')[1],
+  ref,
+  service: 'postgres',
+  line,
+  current: false,
+  imagePresent: true,
+  ...extra,
+});
+const RELEASES = [
+  releaseOf(RELEASE, PG17_OLD, '17', { current: true }),
+  releaseOf(SAME_LINE, PG17_OLD, '17', { rollbackRefused: null }),
+  releaseOf(OTHER_LINE, PINS.postgres!['16']!.image, '16', { rollbackRefused: REFUSED }),
+];
 
 interface Sent {
   method: string;
@@ -157,7 +190,16 @@ async function stubServices(page: Page, serverId: string, sent: Sent[]) {
         { type: 'end' },
       ]);
     }
-    if (path === '/apps/orders-db/releases') return json([]);
+    if (path === '/apps/orders-db/releases') return json(RELEASES);
+    if (path === '/apps/orders-db/rollback') {
+      const release = (req.postDataJSON() as { release: string }).release;
+      return stream([
+        { type: 'log', lines: [{ stream: 'stderr', text: `Rolling orders-db back to ${release}` }, { stream: 'stderr', text: 'Health check passed' }] },
+        { type: 'result', outcome: { app: 'orders-db', release, previous: RELEASE, result: 'success', error: null } },
+        { type: 'exit', exitCode: 0, signal: null, durationMs: 9000, timedOut: false },
+        { type: 'end' },
+      ]);
+    }
     return json({ error: `not stubbed: ${method} ${path}` }, 404);
   });
 }
@@ -197,7 +239,18 @@ test.describe('Quick services', () => {
     await expect(dialog.getByRole('button', { name: 'Redis', exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'PostgreSQL', exact: true })).toHaveCount(0);
     await dialog.getByRole('tab', { name: 'All' }).click();
+    // Object storage: SeaweedFS first, recommended; MinIO after it, a community image
+    await dialog.getByRole('tab', { name: 'Object storage' }).click();
+    const storage = dialog.getByRole('listitem');
+    await expect(storage).toHaveCount(2);
+    await expect(storage.nth(0)).toContainText('SeaweedFS');
+    await expect(storage.nth(0).getByText('Recommended', { exact: true })).toBeVisible();
+    await expect(storage.nth(1)).toContainText('MinIO');
+    await expect(storage.nth(1).getByText('Community image', { exact: true })).toBeVisible();
+    await expect(storage.nth(1).getByText('Recommended', { exact: true })).toHaveCount(0);
+    await dialog.getByRole('tab', { name: 'All' }).click();
     await dialog.getByLabel('Search services').fill('s3');
+    await expect(dialog.getByRole('button', { name: 'SeaweedFS', exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'MinIO', exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Redis', exact: true })).toHaveCount(0);
     await dialog.getByLabel('Search services').fill('');
@@ -322,6 +375,32 @@ test.describe('Quick services', () => {
     await expect(log).toContainText(`to ${PG17.image}`);
     await expect(page.getByText(`Updated to PostgreSQL 17 (${PG17.version}): release 20261007-130000-11111111`)).toBeVisible();
     expect(sent).toEqual([{ method: 'POST', path: '/apps/orders-db/service/version', body: { version: '17' } }]);
+  });
+
+  test('keeps Roll back off for a release on another version line, saying why', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubServices(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/orders-db`);
+    await page.getByRole('tab', { name: 'Releases' }).click();
+    await expect(page.getByRole('row', { name: `Release ${RELEASE}` })).toContainText('line 17');
+
+    const refused = page.getByRole('row', { name: `Release ${OTHER_LINE}` });
+    await expect(refused).toContainText('line 16');
+    await expect(refused.getByRole('button', { name: `Roll back to ${OTHER_LINE}` })).toBeDisabled();
+    await expect(refused.getByTestId('rollback-refused')).toHaveAttribute('title', REFUSED);
+    await expect(refused.getByRole('link', { name: 'Another version line' })).toHaveAttribute('href', '/docs/deployments/releases-rollback#version-lines');
+    await refused.getByTestId('rollback-refused').hover();
+    await snap(page, 'services-rollback-refused');
+
+    // The same line rolls back as usual
+    const same = page.getByRole('row', { name: `Release ${SAME_LINE}` });
+    await expect(same.getByRole('button', { name: `Roll back to ${SAME_LINE}` })).toBeEnabled();
+    await expect(same.getByRole('link', { name: 'Another version line' })).toHaveCount(0);
+    await same.getByRole('button', { name: `Roll back to ${SAME_LINE}` }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Roll back' }).click();
+    await expect(page.getByTestId('deploy-log')).toContainText(`Rolling orders-db back to ${SAME_LINE}`);
+    expect(sent).toEqual([{ method: 'POST', path: '/apps/orders-db/rollback', body: { release: SAME_LINE } }]);
   });
 
   test('offers each role what it may do', async ({ page }) => {

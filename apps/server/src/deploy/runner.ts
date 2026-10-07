@@ -18,7 +18,7 @@ export const DEPLOY_TIMEOUT_MS = 30 * 60_000;
 export const SETUP_TIMEOUT_MS = 10 * 60_000;
 export const COMMAND_TIMEOUT_MS = 2 * 60_000;
 
-const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy', '--bytes', '--if-missing', '--keep']);
+const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy', '--bytes', '--if-missing', '--keep', '--force-line']);
 const WORD = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 /**
  * An image reference (set-image: a catalog image, or the one a failed

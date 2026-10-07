@@ -50,7 +50,8 @@ bastionctl releases <app>                          An app's releases, newest fir
 bastionctl certs <app>                             Certificates of the app's domains
 bastionctl deploy <app> --source <file>            Build and serve an upload (.tar or .tar.gz)
 bastionctl deploy <app>                            Pull and serve build.image (build.type: image)
-bastionctl rollback <app> <release>                Serve a kept release again (no rebuild)
+bastionctl rollback <app> <release> [--force-line] Serve a kept release again (no rebuild); a quick service's
+                                                   release on another version line is refused unless --force-line
 bastionctl restart <app> | stop <app>              The app's live container
 bastionctl env keys|set|unset|get <app> [KEY]      .env: names only; set reads the value from stdin
 bastionctl env generate <app> <KEY> [--bytes N] [--if-missing]

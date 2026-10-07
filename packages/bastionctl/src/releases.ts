@@ -9,7 +9,7 @@ import { Layout, NAME_PATTERN } from './names.js';
  * the release being served. Ids sort by time, newest last.
  */
 
-export type ReleaseRecord = Omit<DeployRelease, 'current' | 'imagePresent'>;
+export type ReleaseRecord = Omit<DeployRelease, 'current' | 'imagePresent' | 'rollbackRefused'>;
 
 const BUILD_TYPES: readonly DeployBuildType[] = ['nextjs', 'dockerfile', 'static', 'image'];
 
@@ -50,6 +50,10 @@ export function readRelease(layout: Layout, app: string, id: string): ReleaseRec
     error: typeof raw.error === 'string' ? raw.error : null,
     previous: typeof raw.previous === 'string' ? raw.previous : null,
     ...('digest' in raw && { digest: typeof raw.digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(raw.digest) ? raw.digest : null }),
+    // Quick services (from this bastionctl on): what was pulled, of which template and line
+    ...('ref' in raw && { ref: typeof raw.ref === 'string' && raw.ref.length <= 512 ? raw.ref : null }),
+    ...('service' in raw && { service: typeof raw.service === 'string' && NAME_PATTERN.test(raw.service) ? raw.service : null }),
+    ...('line' in raw && { line: typeof raw.line === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(raw.line) ? raw.line : null }),
   };
 }
 

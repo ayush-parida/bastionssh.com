@@ -86,6 +86,11 @@ function Catalog({ onPick }: { onPick: (t: ServiceTemplate) => void }) {
                     <ServiceIcon icon={t.icon} size={15} />
                   </span>
                   <span className="font-medium">{t.name}</span>
+                  {t.recommended && (
+                    <span title={t.recommended} className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-400">
+                      Recommended
+                    </span>
+                  )}
                   {t.imageNote && (
                     <span title={t.imageNote} className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
                       Community image

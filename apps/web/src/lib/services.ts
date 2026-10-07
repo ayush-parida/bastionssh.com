@@ -5,6 +5,8 @@ export const SERVICE_DOCS = {
   backups: '/docs/deployments/services-overview#backups',
   restoring: '/docs/deployments/services-overview#restoring-a-backup',
   noBackups: '/docs/deployments/services-others#backups',
+  /** Why Roll back is refused across a version line. */
+  rollbackLines: '/docs/deployments/releases-rollback#version-lines',
 } as const;
 
 /** A template's docs page, or a section of it (`upgrading`). */

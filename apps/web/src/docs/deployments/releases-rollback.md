@@ -3,7 +3,7 @@ title: Releases, rollback and server sizing
 section: deployments
 order: 80
 summary: How releases are kept, rolling back without a rebuild, zero-downtime switches, volumes for data that must survive deploys, and how big a server you need.
-keywords: [release, releases, rollback, roll back, zero downtime, downtime, keep_releases, volumes, persistent, data, backup, memory, cpu, limits, sizing, disk, swap, server size]
+keywords: [release, releases, rollback, roll back, version line, force-line, line_change_refused, zero downtime, downtime, keep_releases, volumes, persistent, data, backup, memory, cpu, limits, sizing, disk, swap, server size]
 ---
 
 ## Releases
@@ -25,6 +25,17 @@ After a successful deploy, releases beyond `keep_releases` (default 5) are delet
 - Only a release that deployed successfully, and whose image is still kept, can be rolled back to.
 - Rollback follows the same permission as deploy (see [Permissions](permissions.md)).
 - The config used is today's `bastion.yml` (domains, port, limits), not the one of that time.
+
+### Version lines
+
+A [quick service](services-overview.md) keeps **Update version**'s rules when it rolls back, so a rollback is never a way around them:
+
+- A template that stays within its line — the databases (PostgreSQL, MySQL, MariaDB, MongoDB, ClickHouse), Redis and Valkey, RabbitMQ, Meilisearch, Uptime Kuma — cannot be rolled back to a release on **another line**, older or newer: the data files of one major are not the other's. Rolling back within the line (PostgreSQL 17.11 → 17.4) works as for any app.
+- A template whose data carries over (Grafana, SeaweedFS, MinIO, Mailpit) may roll back to a **newer** line but not to an **older** one: Grafana 13 migrated its database, and Grafana 12 cannot read it.
+
+The Releases tab disables **Roll back** on such a release and says why when you point at it; the API answers `409 line_change_refused` with the reason, and bastionctl refuses the same rollback from a shell. Each release records its line in `release.json` when it is deployed (`ref`, `service`, `line`). For a release deployed before that, the line is read from the image its build log names, checked against the release's checksum; if it still cannot be told, the rollback is refused too.
+
+When you know better — a release that only *looks* like another line — a manager can roll back anyway: `bastionctl rollback <app> <release> --force-line` on the server, or `forceLine: true` in the API's rollback request (manage on Deployments and the server; recorded in the audit log). Refused attempts are recorded as `deploy.rollback` with `result: refused`. Apps without `service:` in their `bastion.yml` have no lines and are not affected.
 
 ## Restart
 

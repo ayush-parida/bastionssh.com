@@ -9,6 +9,7 @@ import {
   defaultServiceVersion,
   serviceConfigYaml,
   serviceConnectionDetails,
+  serviceLineChangeAllowed,
   serviceTemplate,
   serviceUpgradeAllowed,
   serviceVersion,
@@ -64,7 +65,7 @@ describe('the service catalog', () => {
   it('has unique ids, one default line per template, and known categories and docs pages', () => {
     const ids = SERVICE_CATALOG.map((t) => t.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(ids).toEqual(expect.arrayContaining(['postgres', 'mysql', 'mariadb', 'mongodb', 'redis', 'valkey', 'memcached', 'minio', 'rabbitmq', 'meilisearch', 'clickhouse', 'mailpit', 'adminer', 'grafana', 'uptime-kuma']));
+    expect(ids).toEqual(expect.arrayContaining(['postgres', 'mysql', 'mariadb', 'mongodb', 'redis', 'valkey', 'memcached', 'seaweedfs', 'minio', 'rabbitmq', 'meilisearch', 'clickhouse', 'mailpit', 'adminer', 'grafana', 'uptime-kuma']));
     for (const t of SERVICE_CATALOG) {
       expect(NAME_PATTERN.test(t.id), t.id).toBe(true);
       expect(SERVICE_CATEGORIES.map((c) => c.id)).toContain(t.category);
@@ -170,6 +171,44 @@ describe('the service catalog', () => {
     const ch = serviceConnectionDetails(serviceTemplate('clickhouse')!, { host: 'events', published: { host: '127.0.0.1', port: 18123 } });
     // The native port is not the one published: no outside string for it
     expect(ch.strings[1]).toMatchObject({ label: 'Native', internal: 'clickhouse://app:{CLICKHOUSE_PASSWORD}@events:9000/app', published: null });
+  });
+
+  it('lists a recommended template first in its category: SeaweedFS before MinIO', () => {
+    for (const c of SERVICE_CATEGORIES) {
+      const inCategory = SERVICE_CATALOG.filter((t) => t.category === c.id);
+      const flags = inCategory.map((t) => !!t.recommended);
+      // Every recommended one before the first that is not
+      expect(flags, c.id).toEqual([...flags].sort((a, b) => Number(b) - Number(a)));
+    }
+    expect(SERVICE_CATALOG.filter((t) => t.category === 'storage').map((t) => [t.id, !!t.recommended, !!t.imageNote])).toEqual([
+      ['seaweedfs', true, false],
+      ['minio', false, true],
+    ]);
+  });
+
+  it('runs SeaweedFS with only its S3 gateway on the network, credentials from the environment', () => {
+    const t = serviceTemplate('seaweedfs')!;
+    expect(t.versions.map((v) => v.image.split(':')[0])).toEqual(['chrislusf/seaweedfs']);
+    expect(t.command).toEqual(['server', '-ip=127.0.0.1', '-ip.bind=127.0.0.1', '-filer', '-s3', '-s3.ip.bind=0.0.0.0', '-s3.port.iceberg=0', '-s3.port.lance=0']);
+    expect(t.secrets.map((s) => s.key)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'WEED_JWT_FILER_SIGNING_KEY']);
+    expect({ backup: t.backup, port: t.port, publishPort: t.publishPort, ui: t.ui }).toEqual({ backup: null, port: 8333, publishPort: 8333, ui: { label: 'S3 API', domain: true } });
+    const c = serviceConnectionDetails(t, { host: 'files', published: null });
+    expect(c.strings).toEqual([{ label: 'S3 endpoint', internal: 'http://files:8333', published: null }]);
+    expect(c.secrets).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
+  });
+
+  it('applies Update version’s rules to a move between any two lines, ones no longer offered too', () => {
+    const pg = serviceTemplate('postgres')!;
+    expect(serviceLineChangeAllowed(pg, '17', '17')).toEqual({ ok: true });
+    expect(serviceLineChangeAllowed(pg, '17', '16').ok).toBe(false);
+    expect(serviceLineChangeAllowed(pg, '16', '17').ok).toBe(false);
+    // A line dropped from the catalog is still another line
+    const dropped = serviceLineChangeAllowed(pg, '16', '15');
+    expect(!dropped.ok && dropped.reason).toContain('from PostgreSQL 16 to PostgreSQL 15');
+    const grafana = serviceTemplate('grafana')!;
+    expect(serviceLineChangeAllowed(grafana, '12', '13')).toEqual({ ok: true });
+    expect(serviceLineChangeAllowed(grafana, '13', '12').ok).toBe(false);
+    expect(serviceLineChangeAllowed(grafana, '13', '11').ok).toBe(false);
   });
 
   it('names backup files the way bastionctl writes them', () => {

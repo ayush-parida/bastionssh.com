@@ -39,6 +39,7 @@ import { ensureCron } from './cron.js';
 import { DockerApiError, usageFrom } from './docker.js';
 import { containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
 import { pinnedRef } from './images.js';
+import { deployedLine, rollbackLineCheck } from './lines.js';
 import { acquireLock, lockView, readLock, waitForLock } from './lock.js';
 import { envFileMasker } from './mask.js';
 import {
@@ -631,10 +632,25 @@ export async function releases(ctx: Ctx, app: string): Promise<DeployRelease[]> 
   // A record kept by a bastionctl from before masking, or edited by hand, is masked as it is read
   const { config } = tryLoadConfig(ctx.layout, app);
   const mask = envFileMasker(config ? envFilePath(ctx.layout, app, config) : ctx.layout.env(app));
+  const currentRecord = current ? readRelease(ctx.layout, app, current) : null;
   for (const id of ids) {
     const record = readRelease(ctx.layout, app, id);
     if (!record) continue;
-    out.push({ ...record, error: record.error === null ? null : mask(record.error), current: id === current, imagePresent: record.image ? await ctx.docker.imageExists(record.image) : false });
+    // A quick service: whether a rollback to it keeps its line (what Roll back offers, and why not)
+    const lines =
+      config?.service && record.result === 'success' && id !== current
+        ? (() => {
+            const check = rollbackLineCheck(ctx.layout, config, currentRecord, record);
+            return { rollbackRefused: check.ok ? null : check.reason };
+          })()
+        : {};
+    out.push({
+      ...record,
+      error: record.error === null ? null : mask(record.error),
+      current: id === current,
+      imagePresent: record.image ? await ctx.docker.imageExists(record.image) : false,
+      ...lines,
+    });
   }
   return out;
 }
@@ -726,7 +742,8 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
       result: 'building',
       error: null,
       previous,
-      ...(imageRef && { digest: null }),
+      // A quick service's release says which template line it runs: a rollback keeps Update version's rules (lines.ts)
+      ...(imageRef && { digest: null, ref: imageRef, ...deployedLine(config, imageRef) }),
     };
     writeRelease(ctx.layout, record);
     ctx.log(`Release ${id} of ${app} by ${ctx.actor}`);
@@ -803,8 +820,14 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
   }
 }
 
-/** `rollback <app> <id>`: serve a kept release's image again — no rebuild. */
-export async function rollback(baseCtx: Ctx, app: string, id: string): Promise<DeployOutcome> {
+/**
+ * `rollback <app> <id> [--force-line]`: serve a kept release's image again —
+ * no rebuild. A quick service's release on another version line is refused
+ * as Update version would refuse the move (another major of a database, an
+ * older line of a forward-only template), and so is one whose line cannot be
+ * told; `forceLine` serves it anyway, with a warning in the log.
+ */
+export async function rollback(baseCtx: Ctx, app: string, id: string, opts: { forceLine?: boolean } = {}): Promise<DeployOutcome> {
   releaseId(id);
   const config = loadConfig(baseCtx.layout, app);
   const mask = envFileMasker(envFilePath(baseCtx.layout, app, config));
@@ -817,6 +840,11 @@ export async function rollback(baseCtx: Ctx, app: string, id: string): Promise<D
     const record = readRelease(ctx.layout, app, id);
     if (!record) throw new BastionError(`${app} has no release ${id}`);
     if (record.result !== 'success') throw new BastionError(`Release ${id} did not deploy successfully; it cannot be rolled back to`);
+    const line = rollbackLineCheck(ctx.layout, config, current ? readRelease(ctx.layout, app, current) : null, record);
+    if (!line.ok) {
+      if (!opts.forceLine) throw new BastionError(`${line.reason} Nothing was changed (--force-line rolls back anyway).`, 1, { refused: 'line_change' });
+      ctx.log(`warning: ${line.reason} Rolling back anyway (--force-line, by ${ctx.actor}).`);
+    }
     if (!(await ctx.docker.imageExists(record.image))) throw new BastionError(`The image of release ${id} is gone (pruned); deploy it again instead`);
     ctx.log(`Rolling ${app} back to ${id} (by ${ctx.actor})`);
     try {

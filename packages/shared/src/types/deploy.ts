@@ -270,8 +270,21 @@ export interface DeployRelease {
   previous: string | null;
   /** `build.type: image`: the digest the pulled image resolved to (`sha256:…`); null for builds. Absent from older releases. */
   digest?: string | null;
+  /** `build.type: image`: the image reference pulled (`postgres:17.6-alpine@sha256:…`). Absent from older releases. */
+  ref?: string | null;
+  /** A quick service's template id when it was deployed. Absent from older releases and apps. */
+  service?: string | null;
+  /** A quick service: the template line the release runs (`17`), recorded at deploy, or read from its image for an older release; null when it cannot be told. */
+  line?: string | null;
   current: boolean;
   imagePresent: boolean;
+  /**
+   * A quick service: why a rollback to this release is refused — another
+   * line than the one serving, against the template's rules (Update
+   * version's), or a line that cannot be told. Null when it is allowed;
+   * absent for apps.
+   */
+  rollbackRefused?: string | null;
 }
 
 /** The outcome of `deploy` / `rollback`. */

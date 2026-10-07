@@ -69,7 +69,7 @@ const envParams = appParams.extend({ key: z.string().regex(DEPLOY_ENV_KEY_PATTER
 /** A restart waits for the new container's health check (bastion.yml timeout, default 30s) and the drain. */
 const RESTART_TIMEOUT_MS = 15 * 60_000;
 
-const rollbackBody = z.object({ release: z.string().regex(DEPLOY_NAME_PATTERN, 'Invalid release id') }).strict();
+const rollbackBody = z.object({ release: z.string().regex(DEPLOY_NAME_PATTERN, 'Invalid release id'), forceLine: z.boolean().optional() }).strict();
 const configBody = z.object({ text: z.string().max(64 * 1024) }).strict();
 const envBody = z.object({ value: z.string().max(64 * 1024) }).strict();
 const generateBody = z.object({ bytes: z.number().int().min(16).max(512).optional(), ifMissing: z.boolean().optional() }).strict();
@@ -107,16 +107,24 @@ export function auditError(message: string | null | undefined): string | null {
  * status now — in the Deployments module and on the server alike, as the
  * route gates weigh both. A deploy runs the app's code with its secrets.
  */
-async function requireDeployLevel(req: FastifyRequest, ctx: DeployContext, app: string): Promise<void> {
+async function requireDeployLevel(req: FastifyRequest, ctx: DeployContext, app: string): Promise<DeployAppStatus> {
   const { value: status } = await ctx.run<DeployAppStatus>(['status', app]);
-  if (deployPermissionLevel(status) === 'operate') return;
-  if (hasModule(req, 'deployments', 'manage') && canOnServer(req, ctx.server.id, 'deploy_manage')) return;
+  if (deployPermissionLevel(status) === 'operate') return status;
+  if (canManage(req, ctx)) return status;
   throw new DeployError(
     `Deploying and rolling back ${app} needs manage access to deployments on this server: its bastion.yml sets permissions.deploy to manage`,
     403,
     'deploy_needs_manage',
   );
 }
+
+/** Manage in the Deployments module and on the server. */
+function canManage(req: FastifyRequest, ctx: Pick<DeployContext, 'server'>): boolean {
+  return hasModule(req, 'deployments', 'manage') && canOnServer(req, ctx.server.id, 'deploy_manage');
+}
+
+/** Where the docs explain the version-line rule of rollbacks. */
+const LINE_DOCS = '/docs/deployments/releases-rollback#version-lines';
 
 function auditDeploy(req: FastifyRequest, action: AuditAction, ctx: Pick<DeployContext, 'server'>, metadata: Record<string, unknown>) {
   return audit(req, action, 'server', ctx.server.id, ctx.server.name, metadata);
@@ -438,18 +446,37 @@ export async function deployRoutes(app: FastifyInstance) {
     });
   });
 
-  /** POST /servers/:id/apps/:app/rollback — `{ release }`; serve a kept release again. SSE like deploy. */
+  /**
+   * POST /servers/:id/apps/:app/rollback — `{ release, forceLine? }`; serve a
+   * kept release again. SSE like deploy. A quick service's release on another
+   * version line than the one serving is refused before anything runs (409
+   * `line_change_refused`, the reason from bastionctl's release list), as
+   * Update version refuses the move; `forceLine` (manage) rolls back anyway
+   * and is audited as such. bastionctl enforces the same rule itself.
+   */
   app.post('/servers/:id/apps/:app/rollback', { preHandler: gate('operate') }, async (req, reply) => {
     const { id, app: name } = appParams.parse(req.params);
-    const { release } = rollbackBody.parse(req.body);
+    const { release, forceLine } = rollbackBody.parse(req.body);
     return sseRoute(req, reply, id, async (ctx, open) => {
-      await requireDeployLevel(req, ctx, name);
+      const status = await requireDeployLevel(req, ctx, name);
+      if (forceLine && !canManage(req, ctx)) {
+        throw new DeployError('Rolling back to another version line (forceLine) needs manage access to deployments on this server', 403, 'force_line_needs_manage');
+      }
+      if (status.service && !forceLine) {
+        const { value: releases } = await ctx.run<DeployRelease[]>(['releases', name]);
+        const refused = releases.find((r) => r.id === release)?.rollbackRefused;
+        if (refused) {
+          await auditDeploy(req, 'deploy.rollback', ctx, { app: name, release, service: status.service, result: 'refused', error: auditError(refused) });
+          throw new DeployError(refused, 409, 'line_change_refused', { docs: LINE_DOCS });
+        }
+      }
       const sse = open();
       if (!sse) return;
-      const { outcome, error, result } = await streamCommand(req, ctx, sse, ['rollback', name, release]);
+      const { outcome, error, result } = await streamCommand(req, ctx, sse, ['rollback', name, release, ...(forceLine ? ['--force-line'] : [])]);
       await auditDeploy(req, 'deploy.rollback', ctx, {
         app: name,
         release,
+        ...(forceLine && { forceLine: true }),
         previous: outcome?.previous ?? null,
         result: outcome?.result ?? 'failed',
         error: auditError(outcome?.error ?? error),

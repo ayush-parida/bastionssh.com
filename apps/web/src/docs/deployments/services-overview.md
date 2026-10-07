@@ -2,8 +2,8 @@
 title: Quick services
 section: deployments
 order: 130
-summary: Start PostgreSQL, MySQL, MongoDB, Redis, MinIO and other services on a server in one step — how they are created, how apps connect, exposing them, backups and restore, upgrading, and permissions.
-keywords: [services, database, catalog, new service, postgres, mysql, mongodb, redis, minio, backups, restore, bastion-cron, publish, connection, update version]
+summary: Start PostgreSQL, MySQL, MongoDB, Redis, SeaweedFS and other services on a server in one step — how they are created, how apps connect, exposing them, backups and restore, upgrading, and permissions.
+keywords: [services, database, catalog, new service, postgres, mysql, mongodb, redis, seaweedfs, s3, minio, backups, restore, bastion-cron, publish, connection, update version]
 ---
 
 **Deployments → New service** starts a database, cache, object store, queue or admin tool on the server from a catalog of templates. A service is an app like any other on the Deployments tab — its config, secrets and data live on the server, in `apps/<name>/` — with a page made for it: connection details, backups and Update version.
@@ -19,6 +19,7 @@ keywords: [services, database, catalog, new service, postgres, mysql, mongodb, r
 | Redis | 8, 7.4 | cache | 6379 | — | RDB snapshot | [Redis and Valkey](services-redis.md) |
 | Valkey | 9, 8 | cache | 6379 | — | RDB snapshot | [Redis and Valkey](services-redis.md) |
 | Memcached | 1.6 | cache | 11211 | — | — | [Other services](services-others.md#memcached) |
+| SeaweedFS (recommended) | 4 | object storage | 8333 (S3) | — (S3 API on a domain) | — | [SeaweedFS](services-seaweedfs.md) |
 | MinIO | community build | object storage | 9000 (S3) | console | — | [MinIO](services-minio.md) |
 | RabbitMQ | 4 (management) | queue | 5672 | management UI | — | [RabbitMQ](services-rabbitmq.md) |
 | Meilisearch | 1.52 | search | 7700 | HTTP API | — | [Other services](services-others.md#meilisearch) |
@@ -27,6 +28,8 @@ keywords: [services, database, catalog, new service, postgres, mysql, mongodb, r
 | Adminer | 5 | admin UI | 8080 | web UI | — | [Other services](services-others.md#adminer) |
 | Grafana | 13, 12 | dashboards | 3000 | web UI | — | [Other services](services-others.md#grafana) |
 | Uptime Kuma | 2 | monitoring | 3001 | web UI | — | [Other services](services-others.md#uptime-kuma) |
+
+For object storage, pick **SeaweedFS**: it runs from the project's own image and is marked *Recommended* in the catalog. MinIO stays available with a *Community image* badge — MinIO no longer publishes images, so it runs a community build.
 
 Every image is pinned by **digest** in BastionSSH's catalog — the exact bytes the catalog was reviewed with, on every server, whatever the registry's tags say later. A new BastionSSH release brings newer pins; a service moves to one when you click **Update version**.
 
@@ -149,7 +152,9 @@ Moving a **database** to another major version is refused: the data files of Pos
 3. Copy the backup into the new service's `backups/` folder (above) and **Restore** it there.
 4. Point your apps at the new name, check them, and delete the old service.
 
-Templates whose data carries over (Grafana, MinIO, Mailpit) may change line in place; their Update version dialog says so.
+Templates whose data carries over (Grafana, SeaweedFS, MinIO, Mailpit) may change line in place, forward only; their Update version dialog says so.
+
+The same rules hold for **Roll back** on the Releases tab: a release on another major line of a database, or on an older line of a forward-only template (Grafana 13 → 12), cannot be rolled back to — its button is disabled and says why. See [Version lines](releases-rollback.md#version-lines).
 
 ## Permissions
 

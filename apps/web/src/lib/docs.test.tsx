@@ -157,7 +157,7 @@ describe('the docs', () => {
   });
 
   it('every quick-service template has its docs page with an Upgrading section, and the service pages’ links resolve', () => {
-    const hrefs = [...Object.values(SERVICE_DOCS), ...SERVICE_CATALOG.flatMap((t) => [serviceDocs(t.docs), serviceDocs(t.docs, 'upgrading')])];
+    const hrefs = [...Object.values(SERVICE_DOCS), ...SERVICE_CATALOG.flatMap((t) => [serviceDocs(t.docs), serviceDocs(t.docs, 'upgrading'), ...(t.backup ? [] : [serviceDocs(t.docs, 'backups')])]), SERVICE_DOCS.rollbackLines];
     for (const href of hrefs) {
       const [path, hash] = href.split('#') as [string, string | undefined];
       const doc = findDoc(path.split('/')[2]!, path.split('/')[3]!);

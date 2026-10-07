@@ -6,9 +6,11 @@ summary: Run S3-compatible object storage with its web console on a domain, and 
 keywords: [minio, s3, object storage, buckets, aws sdk, boto3, presigned, console, uploads]
 ---
 
+> **Tip:** For a new object store, use [SeaweedFS](services-seaweedfs.md) — the catalog's recommended one, from the project's own image. This template stays for existing MinIO services and for its web console.
+
 The MinIO template runs MinIO's server with its web console. MinIO stopped publishing container images in 2025 (`minio/minio` is gone from Docker Hub); the template runs the community build of the same open-source server from Pigsty, `pgsty/minio`, pinned by digest like every other image.
 
-**It is a community-built image.** Pinning by digest means a server only ever runs the exact image BastionSSH was released with, and BastionSSH re-pins it only on purpose, after checking where the new build came from — but the image is built and published by Pigsty, not by MinIO, and MinIO itself no longer publishes builds of the open-source server. If that is not acceptable for your data, run another S3-compatible server from your own image (`build.type: image` in bastion.yml), or use a hosted object store.
+**It is a community-built image.** Pinning by digest means a server only ever runs the exact image BastionSSH was released with, and BastionSSH re-pins it only on purpose, after checking where the new build came from — but the image is built and published by Pigsty, not by MinIO, and MinIO itself no longer publishes builds of the open-source server. If that is not acceptable for your data, use [SeaweedFS](services-seaweedfs.md), run another S3-compatible server from your own image (`build.type: image` in bastion.yml), or use a hosted object store.
 
 | | |
 | --- | --- |
@@ -79,6 +81,8 @@ mc mirror src/uploads s3backup/uploads
 ```
 
 The data volume is `bastion-<name>.data` on the server.
+
+To move to SeaweedFS, create a SeaweedFS service and copy each bucket across the same way (`mc mirror`, `aws s3 sync` or `rclone sync` between the two endpoints), then point your apps at it.
 
 ## Upgrading
 

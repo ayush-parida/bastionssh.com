@@ -5,7 +5,9 @@ import { History } from 'lucide-react';
 import { api } from '@/lib/api.js';
 import { appPath, deployKeys, when } from '@/lib/deploy.js';
 import { cn } from '@/lib/utils.js';
+import { SERVICE_DOCS } from '@/lib/services.js';
 import ConfirmDialog from '@/components/docker/ConfirmDialog.js';
+import DocsLink from '@/components/docs/DocsLink.js';
 
 const RESULT_STYLE: Record<DeployRelease['result'], string> = {
   success: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
@@ -16,7 +18,9 @@ const RESULT_STYLE: Record<DeployRelease['result'], string> = {
 /**
  * The app's kept releases, newest first (spec §5). A successful release whose
  * image is still on the server can be served again — a rollback switches the
- * proxy to it without rebuilding.
+ * proxy to it without rebuilding. A quick service's release on another
+ * version line than the one serving keeps Roll back disabled, the reason in
+ * its tooltip: Update version's rules hold for rollbacks too.
  */
 export default function ReleasesPanel({
   serverId,
@@ -66,6 +70,7 @@ export default function ReleasesPanel({
                     {r.current && <span className="ml-2 rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary">current</span>}
                     <span className="block font-mono text-[11px] text-muted-foreground" title={`SHA-256 of the upload: ${r.checksum}`}>
                       {r.buildType} · {r.checksum.slice(0, 12)}
+                      {r.line && ` · line ${r.line}`}
                     </span>
                   </td>
                   <td className="px-3 py-2 text-xs">{when(r.createdAt)}</td>
@@ -81,14 +86,23 @@ export default function ReleasesPanel({
                   </td>
                   <td className="px-3 py-2 text-right">
                     {canRollback && (
-                      <button
-                        onClick={() => setConfirm(r)}
-                        disabled={busy}
-                        aria-label={`Roll back to ${r.id}`}
-                        className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted disabled:opacity-50"
-                      >
-                        <History size={13} /> Roll back
-                      </button>
+                      // The tooltip on a wrapper: a disabled button gets no pointer events in every browser
+                      <span className="inline-block" title={r.rollbackRefused ?? undefined} data-testid={r.rollbackRefused ? 'rollback-refused' : undefined}>
+                        <button
+                          onClick={() => setConfirm(r)}
+                          disabled={busy || !!r.rollbackRefused}
+                          aria-label={`Roll back to ${r.id}`}
+                          aria-description={r.rollbackRefused ?? undefined}
+                          className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <History size={13} /> Roll back
+                        </button>
+                      </span>
+                    )}
+                    {canRollback && r.rollbackRefused && (
+                      <DocsLink to={SERVICE_DOCS.rollbackLines} icon={false} className="mt-1 text-[11px]">
+                        Another version line
+                      </DocsLink>
                     )}
                   </td>
                 </tr>

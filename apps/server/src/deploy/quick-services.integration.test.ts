@@ -25,6 +25,16 @@ import https from 'node:https';
  *    the revealed credentials, or its UI through Caddy (tls internal).
  * 8. MySQL, MariaDB, Valkey, Redis and MongoDB are backed up, changed and
  *    restored, and the backup's data is there again.
+ * 9. SeaweedFS from the catalog: an app on bastion-apps creates a bucket and
+ *    puts and gets an object with SigV4 and the revealed keys, a wrong key
+ *    and an anonymous request are refused, only the S3 port is reachable,
+ *    no key is on a command line, the S3 API answers through Caddy on its
+ *    domain, and the data survives a recreate redeploy.
+ * 10. Grafana created on 12 and updated to 13: a rollback to the 12 release
+ *    is refused (409 line_change_refused, and by bastionctl itself on the
+ *    server), a rollback within 13 is allowed.
+ *
+ * Steps 9 and 10 run on their own too: `-t 'SeaweedFS|version line'`.
  *
  *   docker network create bastion-qs-net
  *   docker volume create bastion-qs-sock && docker volume create bastion-qs-root
@@ -598,4 +608,112 @@ describe.skipIf(!port)('quick services against a live server', () => {
     report.grafana = { health: grafana.status, adminLogin: user.status, rootUrl: true };
     report.uptimeKuma = { ui: kuma.status, setup: page.status };
   }, 600_000);
+  // ── SeaweedFS, and rollbacks across version lines ─────────────────────────
+
+  it('SeaweedFS: buckets and objects with SigV4 from an app, wrong keys refused, data kept across a recreate', async () => {
+    const made = await create({ name: 'blobs', template: 'seaweedfs', domain: 's3.test', tls: 'internal' });
+    report.seaweedfsCreateMs = made.ms;
+    expect(logOf(made.events)).toContain('Generated AWS_SECRET_ACCESS_KEY on the server');
+    const releases = (await api('GET', deployApi('/apps/blobs/releases'))).json() as Array<{ digest: string; ref: string; service: string; line: string }>;
+    expect(releases[0]).toMatchObject({ ref: imageOf('seaweedfs'), service: 'seaweedfs', line: '4' });
+    expect(imageOf('seaweedfs').endsWith(releases[0]!.digest)).toBe(true);
+
+    const conn = await connection('blobs', 'S3 endpoint');
+    expect(conn.url).toBe('http://blobs:8333');
+    const access = conn.values.AWS_ACCESS_KEY_ID!;
+    const secret = conn.values.AWS_SECRET_ACCESS_KEY!;
+    expect(access).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(secret).toMatch(/^[A-Za-z0-9_-]{40}$/);
+    const curl = (args: string) => client('curlimages/curl:8.16.0', `-sS ${args}`);
+    const s3 = (args: string) => curl(`-f --aws-sigv4 aws:amz:us-east-1:s3 --user ${q(`${access}:${secret}`)} ${args}`);
+    s3('-X PUT http://blobs:8333/uploads');
+    s3('-X PUT --data-binary hello -H "Content-Type: text/plain" http://blobs:8333/uploads/hello.txt');
+    expect(s3('http://blobs:8333/uploads/hello.txt')).toBe('hello');
+    expect(s3('http://blobs:8333/uploads?list-type=2')).toContain('<Key>hello.txt</Key>');
+    // Creating it again: the SDKs' BucketAlreadyOwnedByYou (the docs tell apps to ignore it)
+    const again = curl(`-o /dev/null -w '%{http_code}' --aws-sigv4 aws:amz:us-east-1:s3 --user ${q(`${access}:${secret}`)} -X PUT http://blobs:8333/uploads`);
+    const againBody = curl(`--aws-sigv4 aws:amz:us-east-1:s3 --user ${q(`${access}:${secret}`)} -X PUT http://blobs:8333/uploads`);
+    // Refused: a wrong secret, an unknown key, no signature at all
+    const status = (args: string) => curl(`-o /dev/null -w '%{http_code}' ${args}`);
+    expect(status(`--aws-sigv4 aws:amz:us-east-1:s3 --user ${q(`${access}:wrong-secret`)} http://blobs:8333/uploads/hello.txt`)).toBe('403');
+    expect(status(`--aws-sigv4 aws:amz:us-east-1:s3 --user ${q(`nobody:${secret}`)} http://blobs:8333/uploads/hello.txt`)).toBe('403');
+    expect(status('http://blobs:8333/uploads/hello.txt')).toBe('403');
+    expect(status('http://blobs:8333/')).toBe('403');
+    // Master, volume server and filer listen on the container's loopback only
+    const closed = ['9333', '8080', '8888', '19333', '18888'].map((p) => client(`--entrypoint sh ${imageOf('memcached')}`, `-c ${q(`nc -z -w 3 blobs ${p} && echo open || echo closed`)}`));
+    expect(closed).toEqual(['closed', 'closed', 'closed', 'closed', 'closed']);
+    // No key on a command line: not in the container's Cmd or Entrypoint, not in its process list
+    const id = sh(`docker ps -q --filter label=bastion.app=blobs`).trim();
+    const argv = sh(`docker inspect -f '{{json .Config.Cmd}} {{json .Config.Entrypoint}}' ${id}`) + sh(`docker exec ${id} ps -o args`);
+    const signing = await api('POST', deployApi('/apps/blobs/env/WEED_JWT_FILER_SIGNING_KEY/reveal'), undefined, browser.headers);
+    expect(signing.statusCode, signing.body).toBe(200);
+    for (const value of [secret, access, (signing.json() as { value: string }).value]) expect(argv).not.toContain(value);
+    expect(sh(`docker exec ${id} ps -o user,args`)).toMatch(/seaweed\s+\/usr\/bin\/weed .*server/);
+
+    // Through Caddy on its domain (tls internal), signed for that host
+    const viaDomain = (args: string[]) =>
+      execFileSync('curl', ['-sS', '-k', '--resolve', `s3.test:${HTTPS_PORT}:127.0.0.1`, '--aws-sigv4', 'aws:amz:us-east-1:s3', '--user', `${access}:${secret}`, ...args], { encoding: 'utf8' });
+    let viaProxyBody = '';
+    for (let i = 0; i < 45 && viaProxyBody !== 'hello'; i++) {
+      try {
+        viaProxyBody = viaDomain(['-f', `https://s3.test:${HTTPS_PORT}/uploads/hello.txt`]);
+      } catch {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+    expect(viaProxyBody).toBe('hello');
+    viaDomain(['-f', '-X', 'PUT', '--data-binary', 'from outside', `https://s3.test:${HTTPS_PORT}/uploads/outside.txt`]);
+    expect((await viaProxy('s3.test', '/uploads/hello.txt')).status).toBe(403);
+
+    // A recreate redeploy: the old container stops, a new one starts on the same /data; the objects are there
+    const redeploy = await stream(deployApi('/apps/blobs/deploy'), {});
+    expect(outcomeOf(redeploy)?.result, logOf(redeploy)).toBe('success');
+    expect(logOf(redeploy)).toContain('before the new container starts (volume data is exclusive)');
+    expect(s3('http://blobs:8333/uploads/hello.txt')).toBe('hello');
+    expect(s3('http://blobs:8333/uploads/outside.txt')).toBe('from outside');
+    expect(sh(`docker ps -a --filter label=bastion.app=blobs --format '{{.Names}}'`).trim().split('\n')).toHaveLength(1);
+    const backups = (await api('GET', deployApi('/apps/blobs/backups'))).json() as { supported: boolean };
+    expect(backups.supported).toBe(false);
+    report.seaweedfs = { image: imageOf('seaweedfs'), bucket: true, putGet: true, bucketAgain: { status: again, body: againBody.slice(0, 160) }, refused: [403, 403, 403], loopbackOnly: true, viaCaddy: true, keptAcrossRecreate: true };
+  }, 900_000);
+
+  it('Grafana: a rollback to an older version line is refused, within the line allowed', async () => {
+    await create({ name: 'dash12', template: 'grafana', version: '12' });
+    const grafana = serviceTemplate('grafana')!;
+    const updated = await stream(deployApi('/apps/dash12/service/version'), { version: '13' });
+    expect(outcomeOf(updated)?.result, logOf(updated)).toBe('success');
+    // A second 13 release: the same image deployed again
+    const again = await stream(deployApi('/apps/dash12/deploy'), {});
+    expect(outcomeOf(again)?.result, logOf(again)).toBe('success');
+
+    type Rel = { id: string; line: string; current: boolean; rollbackRefused?: string | null; ref: string };
+    const releases = (await api('GET', deployApi('/apps/dash12/releases'))).json() as Rel[];
+    const on12 = releases.find((r) => r.line === '12')!;
+    const on13 = releases.filter((r) => r.line === '13');
+    expect(on12.ref).toBe(serviceVersion(grafana, '12')!.image);
+    expect(on13).toHaveLength(2);
+    expect(on13[0]!.current).toBe(true);
+    expect(on12.rollbackRefused).toContain('Grafana cannot be moved back from Grafana 13 to Grafana 12');
+    expect(on13[1]!.rollbackRefused).toBeNull();
+
+    const refused = await api('POST', deployApi('/apps/dash12/rollback'), { release: on12.id });
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json()).toMatchObject({ code: 'line_change_refused', docs: '/docs/deployments/releases-rollback#version-lines' });
+    expect(audits('deploy.rollback').at(-1)).toMatchObject({ app: 'dash12', release: on12.id, result: 'refused' });
+    // bastionctl refuses it on its own too (a shell on the server)
+    let cli = '';
+    try {
+      sh(`${ROOT}/bin/bastionctl rollback dash12 ${on12.id} --json`);
+    } catch (err) {
+      cli = String((err as { stdout?: string }).stdout ?? '');
+    }
+    expect(JSON.parse(cli.trim().split('\n').at(-1)!)).toMatchObject({ refused: 'line_change', error: expect.stringContaining('moved back from Grafana 13 to Grafana 12') });
+
+    const within = await stream(deployApi('/apps/dash12/rollback'), { release: on13[1]!.id });
+    expect(outcomeOf(within)?.result, logOf(within)).toBe('success');
+    const after = (await api('GET', deployApi('/apps/dash12/releases'))).json() as Rel[];
+    expect(after.find((r) => r.current)!.id).toBe(on13[1]!.id);
+    expect(sh(`docker ps --filter label=bastion.app=dash12 --format '{{.Image}}'`).trim()).toBe(`bastion-dash12:${on13[1]!.id}`);
+    report.grafanaRollback = { release12: on12.id, refused: refused.statusCode, code: refused.json().code, cliRefused: true, withinLine: 'success' };
+  }, 900_000);
 });

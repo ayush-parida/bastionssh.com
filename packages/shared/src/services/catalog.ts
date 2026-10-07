@@ -111,6 +111,8 @@ export interface ServiceTemplate {
   docs: string;
   /** Where the image comes from, when it is not the project's own. */
   imageNote?: string;
+  /** The one to pick in its category: listed first there, with a badge; why, in a sentence. */
+  recommended?: string;
   versions: ServiceVersion[];
   /** `run.port`: health-checked, and what a domain is proxied to. */
   port: number;
@@ -149,6 +151,14 @@ const sh = (script: string): string[] => ['sh', '-c', script];
 /** A mongodump/mongorestore `--config` file `$c` holding the root password (umask 077, removed when the shell exits). */
 const MONGO_AUTH = 'umask 077; c=$(mktemp) || exit 1; trap \'rm -f "$c"\' EXIT; printf \'password: "%s"\\n\' "$MONGO_INITDB_ROOT_PASSWORD" > "$c"';
 const SAME_MAJOR = 'Updates stay within the line: a new major version changes the data format, so move with a backup and restore into a new service.';
+/** SeaweedFS's server ports, all on the container's loopback (the S3 gateway alone listens on the network). */
+const SEAWEED_HEALTH = [
+  'for p in 9333/cluster/healthz 8080/healthz 8888/healthz 8333/healthz; do wget -q -T 5 -O /dev/null "http://127.0.0.1:$p" || exit 1; done',
+  // The gateway answers before the volume server has told the master about its volumes (a read would fail):
+  // healthy once the master knows at least as many volumes as /data holds
+  'n=$(ls /data | grep -c "\\.idx$")',
+  '[ "$n" -eq 0 ] || [ "$(wget -q -T 5 -O - http://127.0.0.1:9333/vol/status | grep -o \'"Id":\' | wc -l)" -ge "$n" ]',
+].join('; ');
 
 const redisLike = (id: 'redis' | 'valkey', name: string, server: string, cli: string, key: string): ServiceTemplate => ({
   id,
@@ -383,6 +393,49 @@ export const SERVICE_CATALOG: readonly ServiceTemplate[] = [
     backup: null,
     upgrade: { within: 'any', note: 'A cache holds nothing to migrate: any version can replace another.' },
     warning: 'Memcached has no authentication: anything that can reach the port can read and write the cache. Keep it unpublished.',
+  },
+  {
+    id: 'seaweedfs',
+    name: 'SeaweedFS',
+    description: 'S3-compatible object storage for uploads and backups: master, volume server, filer and S3 gateway in one container.',
+    category: 'storage',
+    icon: 'hard-drive',
+    docs: 'services-seaweedfs',
+    recommended: 'The object storage to pick for a new service: the project’s own image (Apache-2.0), pinned by digest.',
+    versions: [line('seaweedfs', '4', 'SeaweedFS 4', { default: true })],
+    port: 8333,
+    publishPort: 8333,
+    ports: [{ port: 8333, label: 'S3 API' }],
+    ui: { label: 'S3 API', domain: true },
+    entrypoint: null,
+    // Through the image's entrypoint (it gives /data to the seaweed user and drops to it). Master, volume server
+    // and filer (no authentication of their own, the filer UI among them) listen on the container's loopback only;
+    // the S3 gateway alone on bastion-apps. No Iceberg or Lance catalog ports.
+    command: ['server', '-ip=127.0.0.1', '-ip.bind=127.0.0.1', '-filer', '-s3', '-s3.ip.bind=0.0.0.0', '-s3.port.iceberg=0', '-s3.port.lance=0'],
+    env: {},
+    // The gateway makes its admin identity from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in its environment:
+    // no config file and nothing on a command line. WEED_JWT_FILER_SIGNING_KEY (security.toml's jwt.filer_signing.key)
+    // makes the gateway's gRPC port, which also listens on the network, refuse identity changes from anything but the filer.
+    secrets: [
+      { key: 'AWS_ACCESS_KEY_ID', bytes: 16, description: 'The S3 access key (written in the container log when it starts, like any access key id)' },
+      { key: 'AWS_SECRET_ACCESS_KEY', bytes: 30, description: 'The S3 secret key' },
+      { key: 'WEED_JWT_FILER_SIGNING_KEY', bytes: 32, description: 'Signs requests between SeaweedFS’s own components (nothing outside the container uses it)' },
+    ],
+    volumes: [{ name: 'data', path: '/data', exclusive: true }],
+    healthcheck: { type: 'command', command: sh(SEAWEED_HEALTH), timeout: '120s' },
+    memory: '512m',
+    minMemory: '256m',
+    connection: {
+      fields: [
+        { label: 'Access key', template: '{AWS_ACCESS_KEY_ID}' },
+        { label: 'Secret key', template: '{AWS_SECRET_ACCESS_KEY}' },
+        { label: 'Region', template: 'us-east-1' },
+        { label: 'Addressing', template: 'path-style' },
+      ],
+      strings: [{ label: 'S3 endpoint', template: 'http://{host}:{port}' }],
+    },
+    backup: null,
+    upgrade: { within: 'any', note: 'SeaweedFS reads the data of earlier releases; an older one is not guaranteed to read a newer one’s.' },
   },
   {
     id: 'minio',
@@ -695,6 +748,27 @@ export function serviceUpgradeAllowed(t: ServiceTemplate, from: ServiceVersion |
   }
   const what = from ? `${from.label} to ${to.label}` : `this image to ${to.label}`;
   return { ok: false, reason: `${t.name} cannot be moved from ${what} in place. ${t.upgrade.note}` };
+}
+
+/** The line of `t` an image reference belongs to (`17` for `postgres:17.6-alpine@sha256:…`), or null. */
+export function serviceLineOfImage(t: ServiceTemplate, ref: string): string | null {
+  return serviceVersionOfImage(t, ref)?.major ?? null;
+}
+
+/** Line `major` of `t`; a line the catalog no longer offers is compared by its name. */
+function lineOf(t: ServiceTemplate, major: string): ServiceVersion {
+  return serviceVersion(t, major) ?? { major, label: `${t.name} ${major}`, track: '', image: '', version: major };
+}
+
+/**
+ * Whether a service running line `from` may serve a release of line `to`
+ * again (rollback): the rules of Update version, so a rollback is never the
+ * way around them — another major line of a database is refused in both
+ * directions, and an older line of a forward-only template (Grafana 13 → 12)
+ * too.
+ */
+export function serviceLineChangeAllowed(t: ServiceTemplate, from: string, to: string): { ok: true } | { ok: false; reason: string } {
+  return serviceUpgradeAllowed(t, lineOf(t, from), lineOf(t, to));
 }
 
 /** Container paths of `t`'s volumes for line `v`. */

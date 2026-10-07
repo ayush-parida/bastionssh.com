@@ -789,9 +789,31 @@ Deployments section.
   that every template × line × publish × domain makes a bastion.yml `config.ts` accepts). A
   template carries ports, an optional UI and domain, fixed env and secrets (names and byte
   lengths), volumes, health check, memory, connection formats (`{host}`, `{port}`, `{KEY}`),
-  backup/restore commands and its upgrade scope (`major` for databases). Commands that need a
+  backup/restore commands, its upgrade scope (`major` for databases; `any` is forward only),
+  and optionally `recommended` (listed first in its category with a badge: SeaweedFS for
+  object storage) or `imageNote` (MinIO's community image). Commands that need a
   credential read it inside the container (`sh -c '… "$POSTGRES_PASSWORD"'`), so no secret is
   on a command line BastionSSH builds. `serviceConfigYaml` writes the service's bastion.yml.
+  SeaweedFS (`chrislusf/seaweedfs`, official, one `4` line followed through `latest` with a
+  `match`) runs `weed server -ip=127.0.0.1 -ip.bind=127.0.0.1 -filer -s3 -s3.ip.bind=0.0.0.0`
+  through the image's entrypoint: master, volume server and filer (no auth of their own) on the
+  container's loopback, only the S3 gateway (8333, and its gRPC port) on bastion-apps. Its admin
+  identity comes from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the env; a generated
+  `WEED_JWT_FILER_SIGNING_KEY` makes the gateway's IAM-cache gRPC refuse unsigned identity
+  changes. Its health check also waits until the master knows as many volumes as `/data`
+  holds (the gateway answers before that, and reads would fail). No backup command.
+- **Version lines and rollback** (`packages/bastionctl/src/lines.ts`): a deploy of a
+  `build.type: image` app records `ref` (the reference pulled) and, for a quick service,
+  `service` and `line` (`serviceLineOfImage`) in release.json. `rollbackLineCheck` applies
+  `serviceLineChangeAllowed` — Update version's `serviceUpgradeAllowed` over two line names,
+  a line the catalog dropped compared by name — from the current release's line (or
+  bastion.yml's image when none is current) to the target's. An older release's line is read
+  from the first `Pulling <ref>` / `<ref> is on the server already` line of its build.log whose
+  SHA-256 is the release's checksum (a pulled release's checksum is the hash of its reference);
+  a line that cannot be told, or an unknown template, is refused. `rollback` throws (details
+  `refused: line_change`) unless `--force-line`, which logs a warning naming the actor;
+  `releases` adds `rollbackRefused` (reason or null) to each successful non-current release of
+  a service. Apps without `service:` are never checked.
 - **Service routes** (`api/routes/deploy-services.ts`): `POST /servers/:id/services`
   (manage): body checked against the catalog (template, line, memory ≥ the template's
   minimum, publish port ≥ 1024, a domain only for a UI), then `status` (409 `exists`),
@@ -800,6 +822,11 @@ Deployments section.
   options, which secrets were generated — never values), then the deploy streamed as SSE and
   audited as any deploy. `GET …/apps/:app/connection` (view) from `status` alone: strings and
   fields with secrets as `{KEY}`; the browser fills them with the env reveal (step-up).
+  `POST …/apps/:app/rollback` (in `deploy.ts`) reads `releases` for a service before opening
+  the stream and answers 409 `line_change_refused` with the release's `rollbackRefused` and a
+  docs link (audited as `deploy.rollback`, `result: refused`); `forceLine: true` needs manage
+  on the module and the server (403 `force_line_needs_manage`), skips the check, passes
+  `--force-line` (the runner allows that flag) and is audited with `forceLine: true`.
   `POST …/service/version` (manage) checks `serviceUpgradeAllowed` (409
   `major_upgrade_refused` with a docs link, 409 `up_to_date`), runs `set-image` (the runner
   accepts an argument shaped like an image reference: it starts with `[a-z0-9]`, never an
@@ -965,7 +992,11 @@ Deployments section.
   integration tests over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`;
   `release.integration.test.ts`: dockerfile and static apps by Host header through Caddy,
   redeploy and rollback under continuous requests, a failing health check, pruning, delete,
-  and a real Next.js build with `SMT_TEST_DEPLOY_NEXTJS=1`). The nginx helper runs for real
+  and a real Next.js build with `SMT_TEST_DEPLOY_NEXTJS=1`; `quick-services.integration.test.ts`:
+  every catalog template created and used from an app, backups and restores, Update version,
+  SeaweedFS buckets and objects with SigV4 through bastion-apps and Caddy with only its S3 port
+  reachable and data kept across a recreate, and a Grafana 12 → 13 service whose rollback to
+  12 is refused by the API and by bastionctl while one within 13 succeeds). The nginx helper runs for real
   under dash in `nginx-helper.test.ts` with its paths moved into a temp tree and fake
   `nginx`/`certbot`; `deploy-domains.test.ts` covers mode detection at setup, the helper after
   deploy/config/delete, the domains report in both modes and alerts. Playwright
