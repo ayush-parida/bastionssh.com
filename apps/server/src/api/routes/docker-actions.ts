@@ -114,6 +114,12 @@ async function postAction(ctx: DockerContext, path: string, query: Record<string
   return true;
 }
 
+/** `?unused` set: the unused-only cleanup, gated like an upload. */
+function isUnusedOnly(query: unknown): boolean {
+  const value = (query as Record<string, unknown> | undefined)?.unused;
+  return value === true || value === 'true' || value === '1';
+}
+
 /** A whole image id, the only form an unused-only removal takes. */
 const FULL_IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 
@@ -271,9 +277,15 @@ export async function dockerActionRoutes(app: FastifyInstance) {
    * With `unused`, only an image nothing needs any more — given by its full
    * id, with no tags left and no container (in any state) using it — is
    * removed; anything else is a 409 and nothing changes. That is the cleanup
-   * after an upload moved a tag to a new image: it can never take a tag away.
+   * after an upload moved a tag to a new image: it can never take a tag away,
+   * so it needs only what an upload needs (`pull`); any other removal needs
+   * `remove`.
    */
-  app.delete('/servers/:id/images/:iid', { preHandler: requireDocker('remove') }, async (req, reply) => {
+  const removeGuard = requireDocker('remove');
+  const cleanupGuard = requireDocker('pull');
+  app.delete('/servers/:id/images/:iid', {
+    preHandler: (req, reply) => (isUnusedOnly(req.query) ? cleanupGuard(req, reply) : removeGuard(req, reply)),
+  }, async (req, reply) => {
     const { id, iid } = imageParams.parse(req.params);
     const { force, unused } = z.object({ force: boolQuery, unused: boolQuery }).parse(req.query);
     try {

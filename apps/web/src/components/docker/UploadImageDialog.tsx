@@ -491,7 +491,7 @@ function UpdateService({
     const ok = await action.run(project, 'up', service);
     if (!ok) return;
     toast.success(`${service} is running the new image`);
-    if (cleanup && permissions.remove && replaced.length > 0) {
+    if (cleanup && permissions.pull && replaced.length > 0) {
       const notes: string[] = [];
       for (const id of replaced) {
         try {
@@ -576,7 +576,7 @@ function UpdateService({
               )}
             </p>
           )}
-          {permissions.remove && replaced.length > 0 && (
+          {permissions.pull && replaced.length > 0 && (
             <label className="flex items-start gap-2 text-xs">
               <input type="checkbox" checked={cleanup} onChange={(e) => setCleanup(e.target.checked)} className="mt-0.5" />
               <span>

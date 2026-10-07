@@ -127,8 +127,9 @@ They ask first, stream the output like project actions, and are audited with the
 | Level on the server | Can |
 | --- | --- |
 | view | See projects, services and images |
-| operate | Also upload images, and run Up, Restart, Pull and Stop on a service — the same as pulling images |
-| manage, or operate when your org lets operators remove images | Also tick **Remove the image this replaced** |
+| operate | Also upload images, run Up, Restart, Pull and Stop on a service, and tick **Remove the image this replaced** — the same as pulling images |
+
+The cleanup only ever removes an image with no tags left that no container (running or stopped) uses, so it needs no more than an upload does. Removing any other image from the Images list still needs the remove permission (manage, or operate when your org lets operators remove images).
 
 Each upload takes one of your 8 live streams (the same count as log and stats views) from the moment it starts until Docker has loaded the image.
 

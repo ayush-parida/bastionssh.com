@@ -526,7 +526,8 @@ D2 (actions), D3 (exec), D4 (Compose) and D5 (AI tools, container alerts, fleet 
   failure — and `docker.env_reveal` with variable names only). `DELETE images/:id?unused=1`
   removes an image only by its full id, with no tags left and no container (any state)
   using it — 409 and nothing changed otherwise — so the cleanup after an upload can never
-  take a tag away (still `remove`, audited with `unusedOnly`).
+  take a tag away (gated like an upload, `pull`, since it cannot remove anything still
+  tagged or used; any other image removal needs `remove`; audited with `unusedOnly`).
 - **Image upload** (`image-load.ts`, `api/routes/docker-image-load.ts`):
   `POST …/images/load?name=` takes what `docker save` writes as the raw request body
   (`application/octet-stream`; this plugin's content parser hands the stream over unread)

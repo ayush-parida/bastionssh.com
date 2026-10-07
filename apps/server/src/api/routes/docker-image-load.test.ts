@@ -252,9 +252,13 @@ describe('docker image load route', () => {
 
     const remove = (who: Who, id: string, query = 'unused=1') =>
       app.inject({ method: 'DELETE', url: `/api/docker/servers/${serverA}/images/${encodeURIComponent(id)}?${query}`, headers: who.headers });
-    // Removing needs the remove capability (operators lack it by default)
-    expect((await remove(operator, first.id)).statusCode).toBe(403);
-    // Still tagged: kept
+    // The unused-only cleanup needs what an upload needs; any other removal still needs `remove`
+    expect((await remove(viewer, first.id)).statusCode).toBe(403);
+    expect((await remove(operator, first.id, '')).statusCode).toBe(403);
+    expect((await remove(operator, first.id, 'force=1')).statusCode).toBe(403);
+    expect((await remove(operator, 'blog:latest', '')).statusCode).toBe(403);
+    // Still tagged: kept, for operators too
+    expect((await remove(operator, second.id)).statusCode).toBe(409);
     const tagged = await remove(admin, second.id);
     expect(tagged.statusCode).toBe(409);
     expect(tagged.json().error).toMatch(/still tagged blog:latest/);
@@ -268,7 +272,8 @@ describe('docker image load route', () => {
     expect((await remove(admin, 'blog:latest')).statusCode).toBe(400);
     expect((await remove(admin, first.id, 'unused=1&force=1')).statusCode).toBe(400);
 
-    const removed = await remove(admin, first.id);
+    // An operator may clean up the image nothing uses any more
+    const removed = await remove(operator, first.id);
     expect(removed.statusCode).toBe(200);
     expect(removed.json()).toEqual({ untagged: [], deleted: [first.id] });
     expect(engine.images.some((i) => i.Id === first.id)).toBe(false);
