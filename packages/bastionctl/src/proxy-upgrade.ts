@@ -56,6 +56,8 @@ import { BASTIONCTL_VERSION } from './version.js';
 /** The previous proxy container while a new one starts. */
 export const PROXY_PREVIOUS = `${PROXY_CONTAINER}-previous`;
 const DEFAULT_READY_MS = 30_000;
+/** How long the replaced proxy container may take to stop before Docker kills it. */
+const PREVIOUS_STOP_S = 1;
 
 interface ProxyStateFile {
   build: string;
@@ -251,7 +253,9 @@ async function replaceFront(ctx: Ctx, mode: DeployProxyMode, wasRunning: boolean
   await docker.remove(PROXY_PREVIOUS);
   await docker.rename(PROXY_CONTAINER, PROXY_PREVIOUS);
   try {
-    await docker.stop(PROXY_PREVIOUS, 5);
+    // The ports stay with the old container until it has stopped (Docker publishes them per
+    // container), so it gets a second for requests in flight, not Caddy's whole grace period
+    await docker.stop(PROXY_PREVIOUS, PREVIOUS_STOP_S);
     await docker.createContainer(PROXY_CONTAINER, proxySpec(ctx, proxyEnv(ctx, parseEnv), mode));
     await joinLive(ctx, PROXY_CONTAINER);
     await startProxy(ctx, mode);
