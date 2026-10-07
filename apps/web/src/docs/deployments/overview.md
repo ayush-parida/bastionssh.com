@@ -2,8 +2,8 @@
 title: How deployments work
 section: deployments
 order: 10
-summary: Deploy web apps to your own servers with Docker — what lives where, what the server needs, how Setup and Reinstall work, and how bastionctl keeps itself up to date.
-keywords: [deploy, bastionctl, caddy, setup, reinstall, upgrade, pinned, version, prerequisites, docker, opt/bastion, overview]
+summary: Deploy web apps to your own servers with Docker — what lives where, what the server needs, how Setup and Reinstall work, and how bastionctl and the proxy keep themselves up to date.
+keywords: [deploy, bastionctl, caddy, setup, reinstall, upgrade, pinned, version, prerequisites, docker, opt/bastion, overview, proxy upgrade, update proxy now]
 ---
 
 Deployments put web apps — static sites, Next.js apps, or anything with a Dockerfile — on a server you manage, behind an automatic-HTTPS proxy, with zero-downtime switches and one-click rollback. There is no Git integration and no build service: you upload the source (or a build), the server builds it and serves it.
@@ -23,8 +23,8 @@ That means:
 | Piece | What it is |
 | --- | --- |
 | `bastionctl` | A single-file program BastionSSH installs. It runs inside a pinned `node:22-alpine` container with the deployments folder and the Docker socket mounted, so the server needs nothing but Docker. |
-| `bastion-caddy` | The proxy container. It owns ports 80 and 443, obtains and renews certificates, and routes each request to the right app by domain. |
-| `bastion-<app>-<release>` | One container per app (two for a few seconds during a deploy). Apps are on a private Docker network, `bastion-apps`; nothing but the proxy publishes a port. |
+| `bastion-caddy` | The proxy container. A small front (part of `bastionctl`) owns ports 80 and 443 and hands each connection to Caddy, which obtains and renews certificates and routes each request to the right app by domain. |
+| `bastion-<app>-<release>` | One container per app (two for a few seconds during a deploy). Apps are on a private Docker network, `bastion-apps`, where other apps reach each one by its name; nothing but the proxy publishes a port unless an app asks for it with [`run.publish`](bastion-yml.md#runpublish). |
 
 The deployments folder is `/opt/bastion` when the SSH user can write it (Setup creates it with passwordless `sudo` when allowed), otherwise `~/bastion` in the SSH user's home:
 
@@ -34,6 +34,8 @@ The deployments folder is `/opt/bastion` when the SSH user can write it (Setup c
   bin/.pinned                     # optional: never upgrade bastionctl automatically
   proxy/Caddyfile                 # generated from every app; never edit
   proxy/data/ proxy/config/       # Caddy's certificates and state
+  proxy/caddy/<id>/caddy          # the Caddy binary the proxy runs (copied from the pinned image)
+  proxy/state.json                # the bastionctl build that last brought the proxy up to date
   proxy/mode                      # caddy or nginx, chosen at setup
   tmp/                            # uploads waiting to be deployed
   apps/<app>/
@@ -74,6 +76,18 @@ Before every command, BastionSSH checks that the `bastionctl` on the server is b
 
 The version shown on the tab is `0.1.0+<build>`: the build is the first 7 characters of the hash of the shipped files, so two BastionSSH versions that ship the same `bastionctl` show the same build. A server installed before builds were numbered shows plain `0.1.0` until it is upgraded. `bastionctl version` on the server prints the same.
 
+## Proxy upgrades
+
+A BastionSSH update can also ship a newer proxy: another Caddy, or a changed proxy front. The proxy is brought up to date **automatically**, at the start of the next command that changes traffic anyway — a deploy, rollback, restart, `bastionctl proxy apply`, or Setup/Reinstall. Reading anything (opening the tab, the app list, logs) never touches it. The Setup line on the Deployments tab shows **Proxy … up to date**, or **outdated** with what an update would replace and an **Update proxy now** button (members with **operate** access) that does it right away.
+
+- **Only Caddy changed** (the common case): the new Caddy is started *behind* the running proxy front, which keeps the ports. It takes new connections once it serves every certificate the old one does; the old one finishes the connections it has. **No connection is dropped**, and the `bastion-caddy` container is not replaced.
+- **The front itself changed** (or the proxy was created by a `bastionctl` from before proxy upgrades): the container is replaced. The old one is moved aside and stopped, the new one started, and the old one is removed only once the new one accepts connections. While the ports move between them, connections in flight **can drop for about a second**; the deploy log says so. Browsers and most clients retry.
+- **If the new proxy does not come up**, the previous one is put back and started, and the command goes on with it (the log says *the proxy upgrade failed*). The next command tries again.
+- Every attempt is in the audit log as **deploy.proxy_upgrade**: the `bastionctl` build it went from and to, the command that triggered it (`deploy`, `rollback`, `restart`, `proxy_apply`, `setup` or `manual` for Update proxy now), the result, and what was replaced (`caddy`, `front`).
+- A [pinned](#pinning) server's proxy is not upgraded automatically; Update proxy now and Reinstall still do it.
+
+From a shell: `bastionctl proxy status` (read-only) and `bastionctl proxy upgrade`.
+
 ## Pinning
 
 To keep a server on the `bastionctl` it has — while you test a BastionSSH update on another server first, say — pin it by creating an empty file named `.pinned` in its `bin/` folder:
@@ -82,7 +96,7 @@ To keep a server on the `bastionctl` it has — while you test a BastionSSH upda
 touch /opt/bastion/bin/.pinned        # or ~/bastion/bin/.pinned
 ```
 
-A pinned server is never upgraded automatically. While its `bastionctl` matches the shipped one nothing changes (the tab shows **pinned** next to the version); once BastionSSH ships a different one, commands on that server are refused and the tab says **bastionctl is pinned**, as before automatic upgrades. To unpin, remove the file and reload the tab — the next request upgrades it:
+A pinned server is never upgraded automatically — neither `bastionctl` nor [the proxy](#proxy-upgrades). While its `bastionctl` matches the shipped one nothing changes (the tab shows **pinned** next to the version); once BastionSSH ships a different one, commands on that server are refused and the tab says **bastionctl is pinned**, as before automatic upgrades. To unpin, remove the file and reload the tab — the next request upgrades it:
 
 ```sh
 rm /opt/bastion/bin/.pinned
@@ -92,13 +106,13 @@ rm /opt/bastion/bin/.pinned
 
 ## Reinstall
 
-**Reinstall** on the Deployments tab is Setup again: it installs the shipped `bastionctl` (whether or not the server is pinned), then re-creates the network and the proxy with the images this BastionSSH pins. It keeps the server's proxy mode and every app, config, secret and release.
+**Reinstall** on the Deployments tab is Setup again: it installs the shipped `bastionctl` (whether or not the server is pinned), then makes sure of the network and the proxy, [upgrading the proxy](#proxy-upgrades) the same careful way a deploy does (pinned or not). It keeps the server's proxy mode and every app, config, secret and release.
 
-Automatic upgrades replace only `bastionctl` itself, so you still reinstall:
+Since `bastionctl` and the proxy both upgrade themselves, you rarely need it:
 
-- **When a BastionSSH update moves the proxy image.** Pinned base images (Node.js, Caddy) move with BastionSSH; builds use the new ones right after the upgrade, but `bastion-caddy` is only recreated by Reinstall. Until then a deploy stops with *bastion-caddy runs a proxy from an older bastionctl; run bastionctl setup (Reinstall in BastionSSH)*. Sites are unreachable for a moment during the Reinstall; plan it outside busy hours.
 - **When an automatic upgrade cannot run**: the server is pinned, or the SSH user cannot write `bin/`.
 - **If the network or the proxy container was removed or changed by hand.**
+- **To switch the proxy mode** (Caddy or nginx), which replaces the proxy container.
 
 ## Creating an app and deploying
 

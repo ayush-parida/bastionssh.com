@@ -3,7 +3,7 @@ title: Troubleshooting deployments
 section: deployments
 order: 120
 summary: What the common deploy failures mean and how to fix them — wrong folder uploaded, missing build script, standalone output, health checks, DNS, ports, Reinstall, memory and certificates.
-keywords: [error, failed, troubleshooting, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, certificate, next build folder]
+keywords: [error, failed, troubleshooting, proxy upgrade, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, certificate, next build folder]
 ---
 
 When a deploy fails, the previous release keeps serving. The deploy log ends with the reason, and failures this page knows about link here.
@@ -88,6 +88,14 @@ The previous release kept serving throughout.
 **Why.** Another web server (nginx, Apache, another Caddy or Traefik, a container publishing 80/443) owns the ports the proxy needs.
 
 **Fix.** Find it with `sudo ss -ltnp 'sport = :80 or sport = :443'`. If it is nginx serving other sites, use [nginx mode](nginx.md) (`setup --proxy nginx`, or choose **nginx on the host** as the proxy before **Set up deployments**). Otherwise stop and disable it, then run setup again.
+
+## Proxy upgrade failed
+
+**You see** in a deploy, rollback or restart log: *warning: the proxy upgrade failed; the previous proxy serves and deploy goes on with it (…)*, or **Update proxy now** answers with *The proxy could not be upgraded … the previous one keeps serving*.
+
+**Why.** A newer `bastionctl` tried to bring the proxy up to date ([Proxy upgrades](overview.md#proxy-upgrades)) and the new proxy did not come up: the new Caddy refused the current config, or the new `bastion-caddy` container stopped or did not accept connections within 30 seconds. The previous proxy was put back and serves; nothing else changed.
+
+**Fix.** The log line after *The proxy upgrade failed:* says what went wrong — for a container that stopped, its last log lines follow. Common causes are a port taken by something else since setup (see [Ports 80 or 443 already in use](#ports-80-or-443-already-in-use)) and a host too short of memory to start a second Caddy. Fix that, then click **Update proxy now** (or deploy again). The audit log has each attempt as **deploy.proxy_upgrade** with the error.
 
 ## Integrity check failed: Reinstall
 

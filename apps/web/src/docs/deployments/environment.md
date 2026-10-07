@@ -3,7 +3,7 @@ title: Environment variables and secrets
 section: deployments
 order: 60
 summary: Runtime secrets in the app's .env on the server, build-time NEXT_PUBLIC_* values, editing and revealing them, and how they are kept out of logs.
-keywords: [env, .env, environment, secrets, variables, NEXT_PUBLIC, build time, runtime, reveal, passkey, mask, masking, database_url, api key]
+keywords: [env, .env, environment, secrets, variables, NEXT_PUBLIC, build time, runtime, reveal, passkey, mask, masking, database_url, api key, generate, random, password]
 ---
 
 ## Runtime variables: the app's .env
@@ -46,6 +46,10 @@ The app's **Environment** tab (members with **manage** access to Deployments on 
 
 Values are sent to the server's `bastionctl` on standard input, never on a command line, and the audit log records changes by variable name, never value.
 
+## Generated secrets
+
+A password nobody has to invent or see — a database's, a session key — can be generated **on the server**: `bastionctl env generate <app> <KEY>` writes a crypto-random, URL-safe value (32 random bytes by default, base64url: 43 characters of `A-Z a-z 0-9 - _`) to the app's `.env`. The value is never printed, sent to BastionSSH or written to a log; reveal it like any other value when you need it. `--bytes N` takes 16 to 512 bytes; `--if-missing` leaves a variable that is set already as it is (safe to run again). BastionSSH's API does the same (`POST …/apps/<app>/env/<KEY>/generate`, manage access), recorded in the audit log as **deploy.env_generate** with the variable's name.
+
 ## Masking in logs
 
 A deploy's log, `build.log` and the release's record never show a `.env` value of 6 characters or more: each occurrence is replaced by `••••`. This covers the value as written, each line of a multi-line value, and its JSON-escaped form — enough for a crash or health-check log that prints it.
@@ -62,6 +66,7 @@ A deploy starts the uploaded code with every value in the app's `.env` and acces
 bastionctl env keys site1                                 # names only
 printf %s 'postgres://…' | bastionctl env set site1 DATABASE_URL   # value from stdin
 bastionctl env unset site1 OLD_KEY
+bastionctl env generate db POSTGRES_PASSWORD --if-missing # a random value, never printed
 ```
 
 See [Deploying without BastionSSH](without-bastionssh.md).

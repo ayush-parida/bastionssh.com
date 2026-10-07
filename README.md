@@ -361,7 +361,9 @@ Deploy web apps — Next.js, anything with a Dockerfile, or a static site — to
     current -> releases/<id>
 ```
 
-**bastionctl upgrades itself.** When a BastionSSH update ships a different `bastionctl` (or the installed files were changed), the next request to that server — opening the Deployments tab, a deploy, the background certificate check — installs the shipped program and wrapper over the old ones (written beside them and renamed into place, so a running deploy is unaffected), checks their SHA-256, audits it as `deploy.bastionctl_upgrade` (from/to versions; the requesting member, or *system*), and carries on. Only the files are replaced: a server that was never set up stays that way, and moving `bastion-caddy` to a newly pinned proxy image still takes **Reinstall** (Setup again). The version shown is `0.1.0+<build>` — the first 7 hex digits of the shipped files' hash; older installs show `0.1.0`. To opt a server out, `touch /opt/bastion/bin/.pinned` (or `~/bastion/bin/.pinned`): it is never upgraded automatically, and once it differs its commands are refused (409 `bastionctl_mismatch`, `pinned: true`) and the tab shows a *pinned* banner until you `rm` the pin or click Reinstall. If the upgrade cannot write `bin/`, commands are refused the same way with the reason, and it is retried after five minutes or a Reinstall.
+**bastionctl upgrades itself.** When a BastionSSH update ships a different `bastionctl` (or the installed files were changed), the next request to that server — opening the Deployments tab, a deploy, the background certificate check — installs the shipped program and wrapper over the old ones (written beside them and renamed into place, so a running deploy is unaffected), checks their SHA-256, audits it as `deploy.bastionctl_upgrade` (from/to versions; the requesting member, or *system*), and carries on. Only the files are replaced: a server that was never set up stays that way. The version shown is `0.1.0+<build>` — the first 7 hex digits of the shipped files' hash; older installs show `0.1.0`. To opt a server out, `touch /opt/bastion/bin/.pinned` (or `~/bastion/bin/.pinned`): it is never upgraded automatically, and once it differs its commands are refused (409 `bastionctl_mismatch`, `pinned: true`) and the tab shows a *pinned* banner until you `rm` the pin or click Reinstall. If the upgrade cannot write `bin/`, commands are refused the same way with the reason, and it is retried after five minutes or a Reinstall.
+
+**The proxy upgrades itself too.** When a newer `bastionctl` ships another Caddy or proxy front, the proxy is brought up to date at the start of the next deploy, rollback, restart, `proxy apply` or Setup/Reinstall (never by just reading), or at once with **Update proxy now** (operate) on the Setup line, which shows *up to date* or *outdated*. A new Caddy is started behind the running proxy front, which keeps the ports: no connection is dropped and the container stays. A changed front replaces the `bastion-caddy` container — the old one is kept aside until the new one accepts connections and put back if it does not — and connections in flight can drop for about a second (the log says so). Each attempt is audited as `deploy.proxy_upgrade` (from/to build, trigger, result, what was replaced). A pinned server's proxy is left alone except by Update proxy now and Reinstall. From a shell: `bastionctl proxy status`, `bastionctl proxy upgrade`.
 
 **Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>`, starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. Before building — and in the browser before uploading a folder or zip — the upload is checked against the build type: Next's `.next` build folder given to a static app, a `package.json` with no `build` script, or an output folder that is not there is refused with what to upload instead. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
 
@@ -375,7 +377,7 @@ domains: [site1.com, www.site1.com] # at most 50; no two apps on a server may sh
 redirect_www: apex                  # apex: www → apex · www: apex → www · none
 tls: auto                           # see TLS below
 build:
-  type: nextjs                      # nextjs | dockerfile | static
+  type: nextjs                      # nextjs | dockerfile | static | image
   node: "20"                        # nextjs and static: Node.js 18, 20, 22 or 24 (default: .nvmrc, engines, else 20)
   dir: .                            # project folder inside the upload
   output: out                       # static only: the folder to serve after the build
@@ -390,6 +392,23 @@ keep_releases: 5                    # 2–50; the current and previous release a
 proxy: caddy                        # caddy | nginx — must match how the server was set up
 permissions: { deploy: operate }    # who may deploy and roll back: operate (default) or manage
 ```
+
+Services — a database, a cache — use the same file with a pulled image instead of a build:
+
+```yaml
+name: orders-db
+service: postgres                   # informational: the template it came from
+domains: []                         # no web UI: no proxy entry; other apps reach it as orders-db:5432
+build: { type: image, image: "postgres:16.4@sha256:…" }   # pulled, never built; the digest is recorded per release
+run:
+  port: 5432
+  volumes: [{ name: data, path: /var/lib/postgresql/data, exclusive: true }]
+  strategy: recreate                # stop the old container first (forced by an exclusive volume or a published port)
+  publish: none                     # none | localhost:<port> | public:<port>
+healthcheck: { type: command, command: [pg_isready, -h, 127.0.0.1, -U, app], timeout: 60s }   # http | tcp | command
+```
+
+`bastionctl env generate orders-db POSTGRES_PASSWORD` writes a random password to the app's `.env` without printing it (also `POST …/env/<KEY>/generate`), and `bastionctl exec orders-db -- psql -U app` runs a program in the live container. A recreate deploy that fails starts the previous container again.
 
 Unknown keys are refused, and the editor shows every problem at once. Builds use Node.js images pinned by digest (one per supported major version; `22.11` builds on the pinned 22), so a build never changes under you between BastionSSH updates. A config saved while a deploy runs is the one the deploy goes live with: the domains and TLS are read again when traffic switches. Next.js apps need `output: 'standalone'` in `next.config.js`; the build explains how if it is missing.
 
@@ -416,7 +435,7 @@ The helper runs `nginx -t`, `nginx -s reload`, `certbot certonly --webroot` (and
 
 ### Several sites on one server
 
-Each app is its own folder, container and image, all behind the one proxy, which routes by domain. A domain belongs to one app (a second app claiming it is refused), each app has its own `.env` and volumes (`bastion-<app>.<name>`), and a deploy or rollback of one app never touches the others. Nothing but the proxy publishes a port.
+Each app is its own folder, container and image, all behind the one proxy, which routes by domain. A domain belongs to one app (a second app claiming it is refused), each app has its own `.env` and volumes (`bastion-<app>.<name>`), and a deploy or rollback of one app never touches the others. Nothing but the proxy publishes a port, unless an app asks for one with `run.publish` (a host port two apps cannot share).
 
 A deploy or rollback moves traffic without touching the proxy's config. When the config does change (domains, TLS, another port, an app added or removed), the proxy starts a second Caddy with the new config, moves new connections over once it serves every certificate the old one did, and lets the old one finish the connections it has: no request is dropped (a browser's idle kept-alive connection may be closed after 10 seconds, which browsers retry on their own). The proxy speaks HTTP/1.1 and HTTP/2; HTTP/3 is not offered.
 
