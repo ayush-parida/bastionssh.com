@@ -41,6 +41,14 @@ const fake = vi.hoisted(() => ({
   uploadsStarted: 0,
   /** Called once an upload has read all of its source. */
   afterUpload: null as null | (() => void),
+  /** Every writeFile path, in order. */
+  writes: [] as string[],
+  /** writeFile fails with this. */
+  writeError: null as string | null,
+  /** writeFile stores other bytes than it was given (a bad disk, a filter in the way). */
+  corruptWrites: false,
+  /** writeFile waits for this first. */
+  writeHold: null as Promise<void> | null,
 }));
 
 /** Split a command line made of single-quoted words (shellCommand's output) back into argv; anything else throws. */
@@ -115,7 +123,10 @@ vi.mock('../../deploy/remote.js', async (importOriginal) => {
         return fake.files.get(path) ?? null;
       },
       async writeFile(path, data, mode) {
-        fake.files.set(path, Buffer.from(data));
+        fake.writes.push(path);
+        await fake.writeHold;
+        if (fake.writeError) throw new Error(fake.writeError);
+        fake.files.set(path, fake.corruptWrites ? Buffer.from('garbled') : Buffer.from(data));
         fake.modes.set(path, mode);
       },
       async upload(path, source) {
@@ -151,6 +162,7 @@ import { getDb, getRawDb } from '../../db/index.js';
 import { auditLog, passkeys, resourceGrants, roleMembers, roles, sessions } from '../../db/schema.js';
 import { revokeLiveAccess } from '../../auth/revoke.js';
 import { setBastionctlBundleForTests, type BastionctlBundle } from '../../deploy/bundle.js';
+import { resetBastionctlUpgradesForTests } from '../../deploy/upgrade.js';
 import { activeDeployStreamCount } from '../../deploy/sse.js';
 import { MAX_STREAMS_PER_USER } from '../sse.js';
 import { shellCommand } from '../../docker/shell.js';
@@ -329,7 +341,13 @@ describe('deployment routes', () => {
     fake.uploadHold = null;
     fake.uploadsStarted = 0;
     fake.afterUpload = null;
+    fake.writes.length = 0;
+    fake.writeError = null;
+    fake.corruptWrites = false;
+    fake.writeHold = null;
     fake.bastionctl = defaultBastionctl;
+    resetBastionctlUpgradesForTests();
+    getDb().delete(auditLog).where(eq(auditLog.action, 'deploy.bastionctl_upgrade')).run();
     installed();
   });
 
@@ -386,24 +404,143 @@ describe('deployment routes', () => {
   });
 
   describe('install and integrity', () => {
-    it('refuses to run a bastionctl that is not the shipped one, and says how to fix it', async () => {
-      fake.files.set('/opt/bastion/bin/bastionctl.mjs', Buffer.from('// tampered'));
-      const res = await call(admin, 'GET', api('/apps'));
-      expect(res.statusCode).toBe(409);
-      expect(res.json()).toMatchObject({ code: 'bastionctl_mismatch', error: expect.stringMatching(/Reinstall/) });
-      fake.files.set('/opt/bastion/bin/bastionctl.mjs', SCRIPT);
-      fake.files.set('/opt/bastion/bin/bastionctl', Buffer.from('#!/bin/sh\nexec evil\n'));
-      expect((await call(admin, 'POST', api('/apps/site1/restart'))).json().code).toBe('bastionctl_mismatch');
-      expect(fake.runs).toEqual([]);
-      expect((await call(admin, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'mismatch', version: '9.9.9' });
+    /** An older bastionctl, from before build ids: it says it is 0.1.0. */
+    const OLD_SCRIPT = Buffer.from('#!/usr/bin/env node\nvar BASTIONCTL_VERSION = "0.1.0";\n');
+    const BIN = '/opt/bastion/bin';
+
+    it('upgrades a bastionctl that is not the shipped one, then runs the command, and audits it under the caller', async () => {
+      fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+      const res = await call(viewer, 'GET', api('/apps'));
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual([expect.objectContaining({ name: 'site1' })]);
+      expect(fake.files.get(`${BIN}/bastionctl.mjs`)).toEqual(SCRIPT);
+      expect(fake.files.get(`${BIN}/bastionctl`)).toEqual(WRAPPER);
+      expect(fake.modes.get(`${BIN}/bastionctl.mjs`)).toBe(0o755);
+      expect(fake.runs.map((r) => r.argv)).toEqual([['list']]);
+      const [row, ...rest] = audits('deploy.bastionctl_upgrade');
+      expect(rest).toEqual([]);
+      expect(row).toMatchObject({ actorId: viewer.userId, resourceType: 'server', resourceId: serverA });
+      expect(row!.meta).toEqual({ root: '/opt/bastion', from: '0.1.0', to: '9.9.9', result: 'success', trigger: 'request' });
+      // Current now: nothing more is written or audited
+      expect((await call(operator, 'POST', api('/apps/site1/restart'))).statusCode).toBe(200);
+      expect(fake.writes).toEqual([`${BIN}/bastionctl.mjs`, `${BIN}/bastionctl`]);
+      expect(audits('deploy.bastionctl_upgrade')).toHaveLength(1);
     });
 
-    it('reports a server that is not set up', async () => {
+    it('upgrades a modified wrapper too, and says so when the state is read', async () => {
+      fake.files.set(`${BIN}/bastionctl`, Buffer.from('#!/bin/sh\nexec evil\n'));
+      expect((await call(viewer, 'GET', api())).json()).toEqual({
+        root: '/opt/bastion',
+        integrity: 'ok',
+        version: '9.9.9',
+        installedVersion: '9.9.9',
+        pinned: false,
+        // The program itself was the shipped one; its version is what it says (none, in this fake bundle)
+        upgraded: { from: null, to: '9.9.9' },
+      });
+      expect(fake.files.get(`${BIN}/bastionctl`)).toEqual(WRAPPER);
+      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'ok', version: '9.9.9', installedVersion: '9.9.9', pinned: false });
+    });
+
+    it('refreshes the nginx helper copy left in bin/ when it is there and differs, and never creates one', async () => {
+      const HELPER = Buffer.from('#!/bin/sh\n# helper as shipped\n');
+      setBastionctlBundleForTests({ ...BUNDLE, nginxHelper: HELPER, nginxHelperSha256: sha(HELPER) });
+      try {
+        fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+        expect((await call(viewer, 'GET', api('/apps'))).statusCode).toBe(200);
+        expect(fake.files.has(`${BIN}/bastion-nginx`)).toBe(false);
+        resetBastionctlUpgradesForTests();
+        fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+        fake.files.set(`${BIN}/bastion-nginx`, Buffer.from('#!/bin/sh\n# older helper\n'));
+        expect((await call(viewer, 'GET', api('/apps'))).statusCode).toBe(200);
+        expect(fake.files.get(`${BIN}/bastion-nginx`)).toEqual(HELPER);
+      } finally {
+        setBastionctlBundleForTests(BUNDLE);
+      }
+    });
+
+    it('leaves a pinned server alone: refuses with the pin named, and the state says pinned', async () => {
+      fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+      fake.files.set(`${BIN}/.pinned`, Buffer.from(''));
+      const res = await call(admin, 'GET', api('/apps'));
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ code: 'bastionctl_mismatch', pinned: true, error: expect.stringMatching(/pinned \(\/opt\/bastion\/bin\/\.pinned\).*installed 0\.1\.0, this BastionSSH ships 9\.9\.9.*Remove the pin/) });
+      expect((await call(admin, 'POST', api('/apps/site1/restart'))).json().code).toBe('bastionctl_mismatch');
+      expect(fake.runs).toEqual([]);
+      expect(fake.writes).toEqual([]);
+      expect(audits('deploy.bastionctl_upgrade')).toEqual([]);
+      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'mismatch', version: '9.9.9', installedVersion: '0.1.0', pinned: true });
+      // Reinstall installs regardless; the pin stays (and is reported)
+      expect((await call(admin, 'POST', api('/setup'))).statusCode).toBe(200);
+      expect(fake.files.get(`${BIN}/bastionctl.mjs`)).toEqual(SCRIPT);
+      expect((await call(viewer, 'GET', api())).json()).toMatchObject({ integrity: 'ok', pinned: true });
+      expect((await call(viewer, 'GET', api('/apps'))).statusCode).toBe(200);
+    });
+
+    it('refuses with a clear message when the files cannot be written, audits the attempt, and does not retry at once', async () => {
+      fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+      fake.writeError = 'Permission denied';
+      const res = await call(admin, 'GET', api('/apps'));
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({
+        code: 'bastionctl_mismatch',
+        error: expect.stringMatching(/not the version this BastionSSH ships \(installed 0\.1\.0, this BastionSSH ships 9\.9\.9\), and upgrading it automatically failed: Permission denied\. Reinstall/),
+      });
+      expect(res.json().pinned).toBeUndefined();
+      expect(fake.runs).toEqual([]);
+      expect(audits('deploy.bastionctl_upgrade').map((r) => r.meta)).toEqual([
+        { root: '/opt/bastion', from: '0.1.0', to: '9.9.9', result: 'failed', error: 'Permission denied', trigger: 'request' },
+      ]);
+      const writes = fake.writes.length;
+      const state = (await call(viewer, 'GET', api())).json();
+      expect(state).toMatchObject({ integrity: 'mismatch', pinned: false, upgradeError: 'Permission denied' });
+      expect(fake.writes).toHaveLength(writes);
+      expect(audits('deploy.bastionctl_upgrade')).toHaveLength(1);
+      // Reinstall (once writing works) installs and clears the wait
+      fake.writeError = null;
+      expect((await call(admin, 'POST', api('/setup'))).statusCode).toBe(200);
+      expect((await call(viewer, 'GET', api('/apps'))).statusCode).toBe(200);
+    });
+
+    it('checks the hashes of what landed, and refuses when they do not match', async () => {
+      fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+      fake.corruptWrites = true;
+      const res = await call(admin, 'GET', api('/apps'));
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/upgrading it automatically failed: The files written to \/opt\/bastion\/bin do not match the shipped bastionctl/);
+      expect(fake.runs).toEqual([]);
+      expect(audits('deploy.bastionctl_upgrade')[0]!.meta).toMatchObject({ result: 'failed' });
+    });
+
+    it('upgrades once when requests arrive together, and each runs its command after it', async () => {
+      fake.files.set(`${BIN}/bastionctl.mjs`, OLD_SCRIPT);
+      const hold = deferred();
+      fake.writeHold = hold.promise;
+      const pending = [call(viewer, 'GET', api('/apps')), call(admin, 'GET', api('/apps/site1')), call(operator, 'POST', api('/apps/site1/restart')), call(viewer, 'GET', api())];
+      await until(() => fake.writes.length > 0);
+      // Nothing ran on the old bastionctl while the upgrade was under way
+      expect(fake.runs).toEqual([]);
+      hold.resolve();
+      const answers = await Promise.all(pending);
+      expect(answers.map((r) => r.statusCode)).toEqual([200, 200, 200, 200]);
+      expect(fake.writes).toEqual([`${BIN}/bastionctl.mjs`, `${BIN}/bastionctl`]);
+      expect(audits('deploy.bastionctl_upgrade')).toHaveLength(1);
+      expect(fake.runs.map((r) => r.argv[0]).sort()).toEqual(['list', 'restart', 'status']);
+    });
+
+    it('reports a server that is not set up, and never sets one up on its own', async () => {
       fake.root = null;
       const res = await call(viewer, 'GET', api('/apps'));
       expect(res.statusCode).toBe(409);
       expect(res.json().code).toBe('not_set_up');
-      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: null, integrity: 'missing', version: '9.9.9' });
+      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: null, integrity: 'missing', version: '9.9.9', installedVersion: null, pinned: false });
+      // A root whose program is gone: still not set up, and nothing is written
+      fake.root = '/opt/bastion';
+      fake.files.delete(`${BIN}/bastionctl.mjs`);
+      expect((await call(viewer, 'GET', api('/apps'))).json().code).toBe('not_set_up');
+      expect((await call(viewer, 'GET', api())).json()).toMatchObject({ integrity: 'missing' });
+      expect(fake.writes).toEqual([]);
+      expect(audits('deploy.bastionctl_upgrade')).toEqual([]);
     });
 
     it('sets up: installs both files 0755, verifies them, runs setup, audits', async () => {

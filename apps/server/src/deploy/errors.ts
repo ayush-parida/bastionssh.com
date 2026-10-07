@@ -1,7 +1,8 @@
 /**
  * A deployment failure with the HTTP status to answer and, for the cases the
  * web acts on, a code: `not_set_up` (offer Set up), `bastionctl_mismatch`
- * (offer Reinstall), `bastionctl_missing_bundle` (this BastionSSH was built
+ * (the server is pinned — `pinned: true` — or the automatic upgrade failed:
+ * offer Reinstall), `bastionctl_missing_bundle` (this BastionSSH was built
  * without bastionctl), `locked` (another deploy of the app is running),
  * `invalid_config`.
  */

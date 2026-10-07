@@ -37,6 +37,11 @@ const password = process.env.SMT_TEST_DEPLOY_SSH_PASSWORD ?? 'bastion-it-pass';
 const { buildApp } = await import('../api/app.js');
 const { runMigrations } = await import('../db/migrate.js');
 const { seedOrg, seedUser } = await import('../api/routes/test-utils.js');
+const { bastionctlBundle } = await import('./bundle.js');
+const { getDb } = await import('../db/index.js');
+const { auditLog } = await import('../db/schema.js');
+const { createHash } = await import('node:crypto');
+const { eq } = await import('drizzle-orm');
 
 /** A .tar.gz of a one-file Dockerfile app answering `body` on port 3000. */
 function source(body: string): Buffer {
@@ -138,20 +143,67 @@ describe.skipIf(!host)('deployments against a live server over SSH', () => {
     expect((await api('GET', deployApi('/apps/site1/env'))).json()).toEqual({ keys: ['API_KEY'] });
   }, 120_000);
 
-  it('refuses a modified bastionctl until it is reinstalled', async () => {
-    const upload = await app.inject({
+  const BIN = '/config/bastion/bin';
+  const putFile = (file: string, data: Buffer) =>
+    app.inject({
       method: 'PUT',
-      url: `/api/sftp/${serverId}/file?path=/config/bastion/bin/bastionctl.mjs`,
+      url: `/api/sftp/${serverId}/file?path=${encodeURIComponent(file)}`,
       headers: { ...admin.headers, 'content-type': 'application/octet-stream' },
-      payload: Buffer.from('console.log("not ours")\n'),
+      payload: data,
     });
-    expect(upload.statusCode).toBe(201);
+  const upgrades = () =>
+    getDb()
+      .select()
+      .from(auditLog)
+      .where(eq(auditLog.action, 'deploy.bastionctl_upgrade'))
+      .all()
+      .map((r) => JSON.parse(r.metadata ?? '{}') as Record<string, unknown>);
+  async function installedSha(): Promise<string> {
+    const res = await app.inject({ method: 'GET', url: `/api/sftp/${serverId}/download?path=${encodeURIComponent(`${BIN}/bastionctl.mjs`)}`, headers: admin.headers });
+    expect(res.statusCode).toBe(200);
+    return createHash('sha256').update(res.rawPayload).digest('hex');
+  }
+
+  it('upgrades an older bastionctl on the next request and runs it; leaves a pinned one alone until unpinned', async () => {
+    const bundle = bastionctlBundle()!;
+    expect(bundle.version).toMatch(/^0\.1\.0\+[0-9a-f]{7}$/);
+    // An older bastionctl: this one as built before build ids (it says plain 0.1.0), a working program all the same
+    const older = Buffer.from(bundle.script.toString('utf8').replace(/^\/\/ bastionctl .*\n/m, '').replaceAll(`"${bundle.version}"`, '"0.1.0"'));
+    expect(older.equals(bundle.script)).toBe(false);
+
+    // Pinned: refused, and the state says why
+    expect((await putFile(`${BIN}/.pinned`, Buffer.from('testing an update on another server first\n'))).statusCode).toBe(201);
+    expect((await putFile(`${BIN}/bastionctl.mjs`, older)).statusCode).toBe(201);
+    expect((await api('GET', deployApi())).json()).toMatchObject({ integrity: 'mismatch', pinned: true, installedVersion: '0.1.0', version: bundle.version });
     const refused = await api('GET', deployApi('/apps'));
     expect(refused.statusCode).toBe(409);
-    expect(refused.json().code).toBe('bastionctl_mismatch');
-    expect((await api('POST', deployApi('/setup'))).statusCode).toBe(200);
-    expect((await api('GET', deployApi('/apps'))).statusCode).toBe(200);
-  }, 300_000);
+    expect(refused.json()).toMatchObject({ code: 'bastionctl_mismatch', pinned: true });
+    expect(upgrades()).toEqual([]);
+
+    // Unpinned: the next request upgrades it, checks it, and runs the command
+    const unpin = await app.inject({ method: 'DELETE', url: `/api/sftp/${serverId}/file?path=${encodeURIComponent(`${BIN}/.pinned`)}`, headers: admin.headers });
+    expect(unpin.statusCode, unpin.body).toBeLessThan(300);
+    const apps = await api('GET', deployApi('/apps'));
+    expect(apps.statusCode, apps.body).toBe(200);
+    expect(apps.json()).toEqual([expect.objectContaining({ name: 'site1' })]);
+    expect(await installedSha()).toBe(bundle.scriptSha256);
+    expect(upgrades()).toEqual([{ root: '/config/bastion', from: '0.1.0', to: bundle.version, result: 'success', trigger: 'request' }]);
+    expect((await api('GET', deployApi())).json()).toEqual({ root: '/config/bastion', integrity: 'ok', version: bundle.version, installedVersion: bundle.version, pinned: false });
+
+    // Requests arriving together after another replacement: one upgrade, every command runs
+    expect((await putFile(`${BIN}/bastionctl.mjs`, older)).statusCode).toBe(201);
+    const together = await Promise.all([api('GET', deployApi('/apps')), api('GET', deployApi('/apps/site1')), api('GET', deployApi('/apps/site1/releases'))]);
+    expect(together.map((r) => r.statusCode)).toEqual([200, 200, 200]);
+    expect(upgrades()).toHaveLength(2);
+    expect(await installedSha()).toBe(bundle.scriptSha256);
+
+    // A modified program is replaced the same way, and deploying works on the upgraded one
+    expect((await putFile(`${BIN}/bastionctl.mjs`, Buffer.from('console.log("not ours")\n'))).statusCode).toBe(201);
+    const third = (await deploy('v3')).find((e) => e.type === 'result') as { outcome: { result: string } } | undefined;
+    expect(third?.outcome.result).toBe('success');
+    expect(upgrades().map((u) => u.from)).toEqual(expect.arrayContaining([null]));
+    expect(await installedSha()).toBe(bundle.scriptSha256);
+  }, 600_000);
 
   it('deletes the app', async () => {
     const res = await api('DELETE', deployApi('/apps/site1?purge=true'));

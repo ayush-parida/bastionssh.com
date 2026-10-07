@@ -10,13 +10,14 @@ import { createHash } from 'node:crypto';
 import { and, eq, isNull } from 'drizzle-orm';
 import { runMigrations } from '../db/migrate.js';
 import { getDb } from '../db/index.js';
-import { serverAlerts, servers } from '../db/schema.js';
+import { auditLog, serverAlerts, servers } from '../db/schema.js';
 import { seedOrg, seedServer, seedUser } from '../api/routes/test-utils.js';
 import type { BastionctlBundle } from './bundle.js';
 import { resetCertificateAlertsForTests } from './cert-alerts.js';
 import { certCheckLimits, runCertificateCheck, type CertCheckDeps } from './cert-check.js';
 import { DISCOVER_SCRIPT } from './install.js';
 import { NGINX_HELPER_PATH } from './nginx.js';
+import { resetBastionctlUpgradesForTests } from './upgrade.js';
 import type { Remote, RunResult, ServerRow } from './remote.js';
 
 /**
@@ -51,6 +52,8 @@ interface FakeServer {
   /** bastionctl answers by subcommand. */
   answers: Record<string, (args: string[]) => unknown>;
   unreachable?: boolean;
+  /** Writing fails (bin/ not writable). */
+  readOnly?: boolean;
   /** Every argv run, bastionctl's without wrapper and --json. */
   runs: string[][];
 }
@@ -95,7 +98,10 @@ function fakeRemote(server: ServerRow, fake: FakeServer): Remote {
     async readFile(path) {
       return fake.files.get(path) ?? null;
     },
-    writeFile: () => Promise.reject(new Error('read only')),
+    async writeFile(path, data) {
+      if (fake.readOnly) throw new Error('Permission denied');
+      fake.files.set(path, Buffer.from(data));
+    },
     upload: () => Promise.reject(new Error('read only')),
     remove: () => Promise.reject(new Error('read only')),
     release() {
@@ -165,6 +171,8 @@ beforeEach(() => {
   getDb().delete(servers).run();
   fakes.clear();
   resetCertificateAlertsForTests();
+  resetBastionctlUpgradesForTests();
+  getDb().delete(auditLog).where(eq(auditLog.action, 'deploy.bastionctl_upgrade')).run();
   sent.events.length = 0;
   open = 0;
   maxOpen = 0;
@@ -204,13 +212,43 @@ describe('background certificate check', () => {
     expect(alertsOf(withApps)).toEqual([]);
   });
 
-  it('never runs a bastionctl that is not the shipped one', async () => {
-    const id = seedServer(orgId, admin, 'tampered');
+  it('upgrades a bastionctl that is not the shipped one (audited as the system), then reads with it', async () => {
+    const id = seedServer(orgId, admin, 'older');
     const fake = setUp();
-    fake.files.set('/opt/bastion/bin/bastionctl.mjs', Buffer.from('// modified'));
+    fake.files.set('/opt/bastion/bin/bastionctl.mjs', Buffer.from('#!/usr/bin/env node\nvar BASTIONCTL_VERSION = "0.1.0";\n'));
     fakes.set(id, fake);
-    expect(await runCertificateCheck(deps)).toEqual([{ serverId: id, result: 'mismatch' }]);
-    expect(fake.runs).toEqual([]);
+    expect(await runCertificateCheck(deps)).toEqual([{ serverId: id, result: 'checked', apps: 1, skipped: 0, upgraded: true }]);
+    expect(fake.files.get('/opt/bastion/bin/bastionctl.mjs')).toEqual(SCRIPT);
+    expect(fake.runs).toEqual([['list'], ['status', 'site1'], ['certs', 'site1']]);
+    const rows = getDb().select().from(auditLog).where(eq(auditLog.action, 'deploy.bastionctl_upgrade')).all();
+    expect(rows).toMatchObject([{ orgId, actorId: 'system', resourceId: id, resourceName: 'older' }]);
+    expect(JSON.parse(rows[0]!.metadata!)).toEqual({ root: '/opt/bastion', from: '0.1.0', to: '9.9.9', result: 'success', trigger: 'certificate_check' });
+    // Current from now on
+    expect(await runCertificateCheck(deps)).toEqual([{ serverId: id, result: 'checked', apps: 1, skipped: 0 }]);
+  });
+
+  it('never runs a bastionctl that is pinned, or that it could not upgrade', async () => {
+    const pinned = seedServer(orgId, admin, 'pinned');
+    const locked = seedServer(orgId, admin, 'locked');
+    const tampered = (extra: Partial<FakeServer> = {}) => {
+      const fake = { ...setUp(), ...extra };
+      fake.files.set('/opt/bastion/bin/bastionctl.mjs', Buffer.from('// modified'));
+      return fake;
+    };
+    fakes.set(pinned, tampered());
+    fakes.get(pinned)!.files.set('/opt/bastion/bin/.pinned', Buffer.from(''));
+    fakes.set(locked, tampered({ readOnly: true }));
+    expect(await runCertificateCheck(deps)).toEqual(
+      expect.arrayContaining([
+        { serverId: pinned, result: 'mismatch' },
+        { serverId: locked, result: 'mismatch' },
+      ]),
+    );
+    expect(fakes.get(pinned)!.files.get('/opt/bastion/bin/bastionctl.mjs')!.toString()).toBe('// modified');
+    expect(fakes.get(pinned)!.runs).toEqual([]);
+    expect(fakes.get(locked)!.runs).toEqual([]);
+    const rows = getDb().select().from(auditLog).where(eq(auditLog.action, 'deploy.bastionctl_upgrade')).all();
+    expect(rows.map((r) => [r.resourceId, JSON.parse(r.metadata!).result])).toEqual([[locked, 'failed']]);
   });
 
   it('keeps alerts of a server it cannot reach or an app it cannot read; resolves them once deployments are gone', async () => {

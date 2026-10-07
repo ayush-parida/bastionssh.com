@@ -1,6 +1,6 @@
 import type { DeployServerState } from '@smt/shared';
 import { shellCommand } from '../docker/shell.js';
-import { bastionctlBundle, type BastionctlBundle } from './bundle.js';
+import { bastionctlBundle, bastionctlVersionOf, type BastionctlBundle } from './bundle.js';
 import { DeployError } from './errors.js';
 import type { Remote } from './remote.js';
 
@@ -10,8 +10,9 @@ import type { Remote } from './remote.js';
  * the SSH user can write it (created with passwordless `sudo` at setup when
  * allowed), otherwise `$HOME/bastion` — discovered on every use, never
  * stored. Before any bastionctl run, the installed program and wrapper must
- * hash to exactly what this BastionSSH ships; otherwise the command is
- * refused and the server offers Reinstall (setup).
+ * hash to exactly what this BastionSSH ships; otherwise BastionSSH installs
+ * its own copy over them (deploy/upgrade.ts) unless `bin/.pinned` exists, and
+ * refuses the command when it cannot.
  *
  * Both scripts are constant: nothing from a request is spliced into them.
  */
@@ -101,6 +102,13 @@ export function requireBundle(): BastionctlBundle {
 
 export const scriptPath = (root: string) => `${root}/bin/bastionctl.mjs`;
 export const wrapperPath = (root: string) => `${root}/bin/bastionctl`;
+/** The copy of the nginx helper setup leaves for an administrator to install (deploy/nginx.ts). */
+export const helperCopyPath = (root: string) => `${root}/bin/bastion-nginx`;
+/** Present (a regular file, any content): never upgrade this server's bastionctl automatically. */
+export const pinPath = (root: string) => `${root}/bin/.pinned`;
+
+/** The installed program is at most this large (the bundle is about 0.5 MiB). */
+const MAX_SCRIPT_BYTES = 16 * 1024 * 1024;
 
 /** Compare the installed files with the shipped ones. */
 export async function integrity(remote: Remote, root: string, bundle = requireBundle()): Promise<DeployServerState['integrity']> {
@@ -109,22 +117,39 @@ export async function integrity(remote: Remote, root: string, bundle = requireBu
   return script === bundle.scriptSha256 && wrapper === bundle.wrapperSha256 ? 'ok' : 'mismatch';
 }
 
-/** Throws unless the installed bastionctl is exactly the shipped one. */
-export async function verifyInstalled(remote: Remote, root: string, bundle = requireBundle()): Promise<void> {
-  const state = await integrity(remote, root, bundle);
-  if (state === 'missing') throw new DeployError('bastionctl is missing on this server; set it up again', 409, 'not_set_up');
-  if (state === 'mismatch') {
-    throw new DeployError(
-      'The bastionctl on this server is not the version this BastionSSH ships (or it was modified). Reinstall it with Set up.',
-      409,
-      'bastionctl_mismatch',
-    );
+/** Whether the server's bastionctl is pinned (`<root>/bin/.pinned`): never upgraded automatically. */
+export async function isPinned(remote: Remote, root: string): Promise<boolean> {
+  return (await remote.hashFile(pinPath(root))) !== null;
+}
+
+/** The version the installed program says it is (`0.1.0+<build>`, or `0.1.0` before build ids); null when unreadable. */
+export async function installedVersion(remote: Remote, root: string): Promise<string | null> {
+  try {
+    const script = await remote.readFile(scriptPath(root), MAX_SCRIPT_BYTES);
+    return script ? bastionctlVersionOf(script) : null;
+  } catch {
+    return null;
   }
 }
 
-/** Upload both files (0755, owned by the SSH user) and check what landed. */
-export async function installBastionctl(remote: Remote, root: string, bundle = requireBundle()): Promise<void> {
+/**
+ * Put the shipped files in place (0755, owned by the SSH user): the program,
+ * then the wrapper, each written beside its target and renamed over it, so a
+ * bastionctl already running keeps the file it opened and a new run sees a
+ * whole file. A copy of the nginx helper left in `bin/` for an administrator
+ * is refreshed too when it is there and differs. Throws unless the program
+ * and wrapper then hash to exactly the shipped ones.
+ */
+export async function installBundleFiles(remote: Remote, root: string, bundle = requireBundle()): Promise<void> {
   await remote.writeFile(scriptPath(root), bundle.script, 0o755);
   await remote.writeFile(wrapperPath(root), bundle.wrapper, 0o755);
-  await verifyInstalled(remote, root, bundle);
+  if (bundle.nginxHelper && bundle.nginxHelperSha256) {
+    const copy = await remote.hashFile(helperCopyPath(root));
+    if (copy !== null && copy !== bundle.nginxHelperSha256) await remote.writeFile(helperCopyPath(root), bundle.nginxHelper, 0o755);
+  }
+  const state = await integrity(remote, root, bundle);
+  if (state !== 'ok') throw new DeployError(`The files written to ${root}/bin do not match the shipped bastionctl (${state} after writing)`, 502);
 }
+
+/** Setup (Reinstall): the same files, whether or not the server is pinned. */
+export const installBastionctl = installBundleFiles;

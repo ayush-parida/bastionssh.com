@@ -166,6 +166,27 @@ async function hashRemoteFile(c: SFTPWrapper, path: string): Promise<string | nu
   return hash.digest('hex');
 }
 
+/** Write beside `path`, then rename over it: a reader never sees half a file, and one that opened the old file keeps it. */
+async function writeAtomic(c: SFTPWrapper, path: string, data: Buffer | string, mode: number): Promise<void> {
+  const tmp = posix.join(posix.dirname(path), `.${posix.basename(path)}.${randomBytes(6).toString('hex')}`);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const stream = sftp.createWriteStream(c, tmp);
+      stream.on('error', reject);
+      stream.on('close', resolve);
+      stream.end(data);
+    });
+    await chmod(c, tmp, mode);
+    await renameOver(c, tmp, path);
+  } catch (err) {
+    await sftp.unlink(c, tmp).catch(() => {});
+    throw new DeployError(`Could not write ${path} on the server: ${(err as Error).message}`, 502);
+  }
+}
+
+/** What a background connection may write: bastionctl's own files in a root's bin/ (deploy/upgrade.ts). */
+const BUNDLE_FILE = /^\/.*\/bin\/(?:bastionctl|bastionctl\.mjs|bastion-nginx)$/;
+
 async function readRemoteFile(c: SFTPWrapper, path: string, maxBytes: number): Promise<Buffer | null> {
   if (!(await lstatFile(c, path))) return null;
   return sftp.readFile(c, path, maxBytes);
@@ -192,23 +213,7 @@ export async function openRemote(req: Pick<FastifyRequest, 'orgId' | 'user'>, se
     run: (command, opts) => runOnClient(ssh.client, command, opts),
     hashFile: async (path) => hashRemoteFile(await conn(), path),
     readFile: async (path, maxBytes) => readRemoteFile(await conn(), path, maxBytes),
-    async writeFile(path, data, mode) {
-      const c = await conn();
-      const tmp = posix.join(posix.dirname(path), `.${posix.basename(path)}.${randomBytes(6).toString('hex')}`);
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const stream = sftp.createWriteStream(c, tmp);
-          stream.on('error', reject);
-          stream.on('close', resolve);
-          stream.end(data);
-        });
-        await chmod(c, tmp, mode);
-        await renameOver(c, tmp, path);
-      } catch (err) {
-        await sftp.unlink(c, tmp).catch(() => {});
-        throw new DeployError(`Could not write ${path} on the server: ${(err as Error).message}`, 502);
-      }
-    },
+    writeFile: async (path, data, mode) => writeAtomic(await conn(), path, data, mode),
     async upload(path, source, maxBytes) {
       const c = await conn();
       let bytes = 0;
@@ -244,8 +249,10 @@ const SYSTEM_CONNECT_TIMEOUT_MS = 20_000;
  * A short-lived, unpooled connection for background checks nobody is asking
  * for (deploy/cert-check.ts), with the server's own credentials like the
  * health probe — through `sshConnectConfig` + `connectSsh`, so pinned host
- * keys, jump hosts and agents apply. It reads only: commands and files;
- * writing, uploading and removing refuse. `release()` closes it.
+ * keys, jump hosts and agents apply. It reads commands and files, and writes
+ * only BastionSSH's own bastionctl files in a `bin/` folder (the automatic
+ * upgrade, deploy/upgrade.ts); any other write, uploading and removing
+ * refuse. `release()` closes it.
  */
 export async function openSystemRemote(server: ServerRow): Promise<Remote> {
   const { auth } = await resolveServerAuth(server.orgId, server.id);
@@ -284,7 +291,7 @@ export async function openSystemRemote(server: ServerRow): Promise<Remote> {
   let files: Promise<SFTPWrapper> | null = null;
   const conn = () => (files ??= new Promise<SFTPWrapper>((resolve, reject) => client.sftp((err, s) => (err ? reject(err) : resolve(s)))));
   const readOnly = async (): Promise<never> => {
-    throw new DeployError('This connection only reads from the server', 500);
+    throw new DeployError('This connection only reads from the server (and upgrades bastionctl)', 500);
   };
   let released = false;
   return {
@@ -292,7 +299,10 @@ export async function openSystemRemote(server: ServerRow): Promise<Remote> {
     run: (command, opts) => runOnClient(client, command, opts),
     hashFile: async (path) => hashRemoteFile(await conn(), path),
     readFile: async (path, maxBytes) => readRemoteFile(await conn(), path, maxBytes),
-    writeFile: readOnly,
+    writeFile: async (path, data, mode) => {
+      if (!BUNDLE_FILE.test(path) || path.split('/').includes('..')) return readOnly();
+      return writeAtomic(await conn(), path, data, mode);
+    },
     upload: readOnly,
     remove: readOnly,
     release() {

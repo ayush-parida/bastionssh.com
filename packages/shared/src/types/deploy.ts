@@ -164,13 +164,27 @@ export interface DeployVersion {
 /**
  * The state of `bastionctl` on a server, from BastionSSH's side: where it
  * lives (spec §2.4, discovered on every use), and whether the installed file
- * is the one this BastionSSH ships.
+ * is the one this BastionSSH ships. Reading it upgrades a set-up server's
+ * bastionctl to the shipped one first, unless the server is pinned.
  */
 export interface DeployServerState {
   root: string | null;
-  /** `missing`: not set up; `mismatch`: a different or modified bastionctl — reinstall with setup. */
+  /**
+   * `missing`: not set up; `mismatch`: a different or modified bastionctl
+   * that was not upgraded — the server is `pinned`, or the upgrade failed
+   * (`upgradeError`); Reinstall with setup.
+   */
   integrity: 'ok' | 'missing' | 'mismatch';
+  /** The bastionctl this BastionSSH ships: `0.1.0+<build>` (first 7 hex of the bundle hash). */
   version: string;
+  /** The version the server's bastionctl says it is (`0.1.0` from before build ids); null when missing or unreadable. Absent from older servers' answers. */
+  installedVersion?: string | null;
+  /** `<root>/bin/.pinned` exists: never upgraded automatically. */
+  pinned?: boolean;
+  /** This request upgraded the server's bastionctl. */
+  upgraded?: { from: string | null; to: string };
+  /** Why the automatic upgrade failed. */
+  upgradeError?: string;
 }
 
 export interface BastionctlInfo {

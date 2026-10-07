@@ -8,10 +8,11 @@ import { isMonitored } from '../monitoring/scheduler.js';
 import { bastionctlBundle, type BastionctlBundle } from './bundle.js';
 import { reconcileAppCertificates, resolveCertificateAlerts } from './cert-alerts.js';
 import { withState } from './domains.js';
-import { discoverRoot, integrity } from './install.js';
+import { discoverRoot } from './install.js';
 import { nginxCertificates, readProxyMode } from './nginx.js';
 import { openSystemRemote, type Remote, type ServerRow } from './remote.js';
 import { bastionctl } from './runner.js';
+import { ensureCurrent, upgradeAudit } from './upgrade.js';
 
 /**
  * The background certificate check (deployments spec §6): every
@@ -19,7 +20,9 @@ import { bastionctl } from './runner.js';
  * short-lived SSH connection with its own credentials, a few servers at a
  * time — whether it has deployments: the same cheap root discovery a request
  * makes, so nothing records which servers have any. Where bastionctl is
- * installed and is exactly the one this BastionSSH ships, each deployed app's
+ * installed it is upgraded to the one this BastionSSH ships when it differs
+ * (deploy/upgrade.ts, audited as the system) unless the server is pinned;
+ * once it is exactly the shipped one, each deployed app's
  * certificates are read (bastionctl certs, or the nginx helper in nginx
  * mode) and its alerts reconciled (deploy/cert-alerts.ts): expiring, renewal
  * errors and expiry go out through the org's notification channels with
@@ -30,7 +33,8 @@ import { bastionctl } from './runner.js';
  * (the health check reports an unreachable server); a server without
  * deployments any more, or an app that is gone, has its alerts resolved; a
  * server whose monitoring is off has them resolved quietly, as host alerts
- * are when monitoring pauses. A bastionctl that is not ours is never run.
+ * are when monitoring pauses. A bastionctl that is not ours (pinned, or the
+ * upgrade failed) is never run.
  */
 
 export const CERT_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -47,7 +51,7 @@ export const certCheckLimits = {
 };
 
 export type CertCheckOutcome =
-  | { serverId: string; result: 'checked'; apps: number; skipped: number }
+  | { serverId: string; result: 'checked'; apps: number; skipped: number; upgraded?: true }
   | { serverId: string; result: 'no_deployments' | 'mismatch' | 'unreachable' | 'paused' };
 
 export interface CertCheckDeps {
@@ -82,13 +86,13 @@ export async function checkCertificatesOn(
     resolveCertificateAlerts(server.orgId, server.id, [], { now });
     return { serverId: server.id, result: 'no_deployments' };
   }
-  const installed = await integrity(remote, root, bundle);
-  if (installed === 'missing') {
+  const installed = await ensureCurrent(remote, root, bundle, upgradeAudit(null, server, 'certificate_check'));
+  if (installed.integrity === 'missing') {
     resolveCertificateAlerts(server.orgId, server.id, [], { now });
     return { serverId: server.id, result: 'no_deployments' };
   }
-  // Not ours (another version, or modified): never run it; Set up on the tab reinstalls
-  if (installed !== 'ok') return { serverId: server.id, result: 'mismatch' };
+  // Still not ours (pinned, or the upgrade failed): never run it; Reinstall on the tab fixes it
+  if (installed.integrity !== 'ok') return { serverId: server.id, result: 'mismatch' };
 
   const run = async <T>(args: string[]) => (await bastionctl<T>(remote, root, args, { actor: ACTOR })).value;
   const proxy = (await readProxyMode(remote, root)) ?? 'caddy';
@@ -131,7 +135,7 @@ export async function checkCertificatesOn(
     apps.map((a) => a.name),
     { now },
   );
-  return { serverId: server.id, result: 'checked', apps: checked, skipped };
+  return { serverId: server.id, result: 'checked', apps: checked, skipped, ...(installed.upgraded && { upgraded: true as const }) };
 }
 
 async function checkServer(server: ServerRow, bundle: BastionctlBundle, deps: CertCheckDeps): Promise<CertCheckOutcome> {

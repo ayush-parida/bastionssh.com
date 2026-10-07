@@ -28,10 +28,11 @@ import { boolQuery } from '../query.js';
 import { reserveStream, type StreamReservation } from '../sse.js';
 import { bastionctlInfo } from '../../deploy/bundle.js';
 import { DeployError } from '../../deploy/errors.js';
-import { discoverRoot, installBastionctl, integrity, prepareRoot, requireBundle } from '../../deploy/install.js';
+import { discoverRoot, installBastionctl, isPinned, prepareRoot, requireBundle } from '../../deploy/install.js';
 import type { RunResult } from '../../deploy/remote.js';
 import { actorLabel, bastionctlCommand, DEPLOY_TIMEOUT_MS, parseResult, SETUP_TIMEOUT_MS } from '../../deploy/runner.js';
 import { contextFor, sendDeployError, withDeploy, withRemote, type DeployContext } from '../../deploy/service.js';
+import { ensureCurrent, forgetUpgradeFailures, upgradeAudit, withUpgradeLock } from '../../deploy/upgrade.js';
 import { openDeploySse, TOO_MANY_STREAMS, type DeploySse } from '../../deploy/sse.js';
 import { detectNginx, existingProxyMode, uploadHelper } from '../../deploy/nginx.js';
 import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
@@ -180,14 +181,28 @@ export async function deployRoutes(app: FastifyInstance) {
     }
   });
 
-  /** GET /servers/:id — where deployments live on the server and whether its bastionctl is ours. */
+  /**
+   * GET /servers/:id — where deployments live on the server and whether its
+   * bastionctl is ours; a set-up server's bastionctl is upgraded to the
+   * shipped one first unless it is pinned (`upgraded` says so).
+   */
   app.get('/servers/:id', { preHandler: gate('view') }, async (req, reply) => {
     const { id } = serverParams.parse(req.params);
     try {
       const bundle = requireBundle();
       return await withRemote(req, id, async (remote): Promise<DeployServerState> => {
         const root = await discoverRoot(remote);
-        return { root, integrity: root ? await integrity(remote, root, bundle) : 'missing', version: bundle.version };
+        if (!root) return { root, integrity: 'missing', version: bundle.version, installedVersion: null, pinned: false };
+        const installed = await ensureCurrent(remote, root, bundle, upgradeAudit(req, remote.server, 'request'));
+        return {
+          root,
+          integrity: installed.integrity,
+          version: bundle.version,
+          installedVersion: installed.installedVersion,
+          pinned: installed.pinned || (installed.integrity === 'ok' && (await isPinned(remote, root))),
+          ...(installed.upgraded && { upgraded: installed.upgraded }),
+          ...(installed.upgradeError && { upgradeError: installed.upgradeError }),
+        };
       });
     } catch (err) {
       return sendDeployError(reply, err);
@@ -219,7 +234,8 @@ export async function deployRoutes(app: FastifyInstance) {
               'docker_denied',
             );
           }
-          await installBastionctl(remote, prepared.root, bundle);
+          await withUpgradeLock(remote, prepared.root, () => installBastionctl(remote, prepared.root, bundle));
+          forgetUpgradeFailures(remote.server.id);
           const ctx = contextFor(req, remote, prepared.root);
           const proxy = requested ?? (await existingProxyMode(remote, prepared.root)) ?? ((await detectNginx(remote, bundle)).detected ? 'nginx' : 'caddy');
           if (proxy === 'nginx') await uploadHelper(remote, prepared.root, bundle);

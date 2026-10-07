@@ -177,6 +177,7 @@ export type AuditAction =
   | 'docker.compose_restart'
   | 'docker.compose_stop'
   | 'deploy.setup'
+  | 'deploy.bastionctl_upgrade'
   | 'deploy.start'
   | 'deploy.finish'
   | 'deploy.rollback'
