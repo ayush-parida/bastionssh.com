@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { DeployLogLine, DeployOutcome, DeployStreamEvent } from '@smt/shared';
+import type { DeployLogLine, DeployOutcome, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
 import { CheckCircle2, Loader2, TriangleAlert, X, XCircle } from 'lucide-react';
-import { appPath, deployKeys, followDeployStream, uploadDeploy } from '@/lib/deploy.js';
+import { appPath, deployKeys, followDeployStream, uploadDeploy, validationIssues } from '@/lib/deploy.js';
 import { deployFailureHint } from '@/lib/deploy-help.js';
 import { cn, formatBytes } from '@/lib/utils.js';
 import DocsLink from '@/components/docs/DocsLink.js';
@@ -11,8 +11,11 @@ const MAX_LINES = 5_000;
 
 type Phase = 'idle' | 'packing' | 'uploading' | 'running' | 'success' | 'failed';
 
+/** A deploy or rollback of an app, or a quick service created or moved to another version (a deploy follows both). */
+export type DeployRunKind = 'deploy' | 'rollback' | 'create' | 'update';
+
 export interface DeployRunState {
-  kind: 'deploy' | 'rollback';
+  kind: DeployRunKind;
   phase: Phase;
   /** What is being sent, for the header: a file name or `release <id>`. */
   label: string;
@@ -20,10 +23,12 @@ export interface DeployRunState {
   lines: DeployLogLine[];
   outcome: DeployOutcome | null;
   error: string | null;
+  /** bastionctl's problems with a config, when the request was refused for one (422). */
+  issues: DeployValidationIssue[] | null;
   exit: Extract<DeployStreamEvent, { type: 'exit' }> | null;
 }
 
-const IDLE: DeployRunState = { kind: 'deploy', phase: 'idle', label: '', progress: null, lines: [], outcome: null, error: null, exit: null };
+const IDLE: DeployRunState = { kind: 'deploy', phase: 'idle', label: '', progress: null, lines: [], outcome: null, error: null, issues: null, exit: null };
 
 /**
  * One deploy or rollback of an app at a time, from this page: packing and
@@ -68,7 +73,7 @@ export function useDeployRun(serverId: string, app: string) {
     (controller: AbortController, err?: unknown) => {
       if (controller.signal.aborted) return;
       setState((s) => {
-        if (err) return { ...s, phase: 'failed', error: err instanceof Error ? err.message : String(err) };
+        if (err) return { ...s, phase: 'failed', error: err instanceof Error ? err.message : String(err), issues: validationIssues(err) };
         // The stream ended without an `end` (connection lost)
         if (s.phase === 'running' || s.phase === 'uploading') {
           return { ...s, phase: 'failed', error: s.error ?? 'The connection ended before the deploy finished. It may still be running on the server.' };
@@ -127,21 +132,24 @@ export function useDeployRun(serverId: string, app: string) {
     [serverId, app, onEvent, finish],
   );
 
-  const rollback = useCallback(
-    async (release: string) => {
+  /** POST `body` to `path` and follow the stream it answers with: a rollback, a quick service created or updated. */
+  const follow = useCallback(
+    async (kind: DeployRunKind, label: string, path: string, body: unknown) => {
       abort.current?.abort();
       const controller = new AbortController();
       abort.current = controller;
-      setState({ ...IDLE, kind: 'rollback', phase: 'running', label: `release ${release}` });
+      setState({ ...IDLE, kind, phase: 'running', label });
       try {
-        await followDeployStream(appPath(serverId, app, '/rollback'), { release }, controller.signal, onEvent);
+        await followDeployStream(path, body, controller.signal, onEvent);
         finish(controller);
       } catch (err) {
         finish(controller, err);
       }
     },
-    [serverId, app, onEvent, finish],
+    [onEvent, finish],
   );
+
+  const rollback = useCallback((release: string) => follow('rollback', `release ${release}`, appPath(serverId, app, '/rollback'), { release }), [serverId, app, follow]);
 
   const dismiss = useCallback(() => {
     abort.current?.abort();
@@ -149,7 +157,7 @@ export function useDeployRun(serverId: string, app: string) {
   }, []);
 
   const busy = state.phase === 'packing' || state.phase === 'uploading' || state.phase === 'running';
-  return { state, busy, deploy, pull, rollback, dismiss };
+  return { state, busy, deploy, pull, rollback, follow, dismiss };
 }
 
 /** A failure the docs know: a link to its troubleshooting section. */
@@ -172,7 +180,7 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
   }, [state.lines]);
   if (state.phase === 'idle') return null;
 
-  const verb = state.kind === 'deploy' ? 'Deploy' : 'Rollback';
+  const verb = { deploy: 'Deploy', rollback: 'Rollback', create: 'Create', update: 'Update' }[state.kind];
   const percent = state.progress && state.progress.total > 0 ? Math.min(100, Math.round((state.progress.loaded / state.progress.total) * 100)) : 0;
   return (
     <section aria-label={`${verb} log`} className="mb-4 rounded-lg border border-border bg-card">
@@ -187,9 +195,15 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
         <span className="font-medium">
           {state.phase === 'packing' && 'Packing files…'}
           {state.phase === 'uploading' && `Uploading ${state.label}… ${percent}%`}
-          {state.phase === 'running' && (state.kind === 'deploy' ? 'Deploying…' : `Rolling back to ${state.label}…`)}
+          {state.phase === 'running' &&
+            { deploy: 'Deploying…', rollback: `Rolling back to ${state.label}…`, create: `Creating ${state.label}…`, update: `Updating to ${state.label}…` }[state.kind]}
           {state.phase === 'success' &&
-            (state.kind === 'deploy' ? `Deployed release ${state.outcome?.release ?? ''}` : `Rolled back to release ${state.outcome?.release ?? ''}`)}
+            {
+              deploy: `Deployed release ${state.outcome?.release ?? ''}`,
+              rollback: `Rolled back to release ${state.outcome?.release ?? ''}`,
+              create: `Created ${state.label}: release ${state.outcome?.release ?? ''} is running`,
+              update: `Updated to ${state.label}: release ${state.outcome?.release ?? ''}`,
+            }[state.kind]}
           {state.phase === 'failed' && `${verb} failed`}
         </span>
         {state.exit && state.phase !== 'running' && (
@@ -222,6 +236,16 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
       )}
       {state.error && state.phase === 'failed' && (
         <p className="mx-4 mt-3 whitespace-pre-wrap break-words rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{state.error}</p>
+      )}
+      {state.phase === 'failed' && state.issues && state.issues.length > 0 && (
+        <ul className="mx-4 mt-2 list-disc space-y-0.5 pl-5 text-sm text-red-600">
+          {state.issues.map((i, n) => (
+            <li key={n}>
+              {i.path && <span className="font-mono">{i.path}: </span>}
+              {i.message}
+            </li>
+          ))}
+        </ul>
       )}
       {state.phase === 'failed' && <FailureHint error={state.error} lines={state.lines} />}
       {state.outcome?.previous && state.phase === 'success' && (

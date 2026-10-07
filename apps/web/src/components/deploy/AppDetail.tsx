@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { deployPermissionLevel, type DeployAppStatus, type DeployNginxApplyResult, type DeployProxyMode, type DockerServerStatus } from '@smt/shared';
-import { ArrowLeft, Lock, Power, RefreshCw, RotateCw, ShieldAlert, Trash2, TriangleAlert, Upload } from 'lucide-react';
+import { deployPermissionLevel, serviceTemplate, serviceVersionOfImage, type DeployAppStatus, type DeployNginxApplyResult, type DeployProxyMode, type DockerServerStatus } from '@smt/shared';
+import { ArrowLeft, ArrowUpCircle, Lock, Power, RefreshCw, RotateCw, ShieldAlert, Trash2, TriangleAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { appPath, deployKeys, nginxSyncMessage, when } from '@/lib/deploy.js';
@@ -11,14 +11,18 @@ import ConfirmDialog from '@/components/docker/ConfirmDialog.js';
 import ContainerLogs from '@/components/docker/ContainerLogs.js';
 import ContainerStats from '@/components/docker/ContainerStats.js';
 import { HealthBadge } from './AppList.js';
+import BackupsPanel from './BackupsPanel.js';
 import ConfigEditor from './ConfigEditor.js';
+import ConnectionPanel from './ConnectionPanel.js';
 import { DeployRunPanel, useDeployRun } from './DeployRun.js';
 import DeploySourceDialog from './DeploySourceDialog.js';
 import DomainsPanel from './DomainsPanel.js';
 import EnvEditor from './EnvEditor.js';
 import ReleasesPanel from './ReleasesPanel.js';
+import ServiceIcon from './ServiceIcon.js';
+import UpdateVersionDialog from './UpdateVersionDialog.js';
 
-type Tab = 'overview' | 'releases' | 'config' | 'env' | 'domains';
+type Tab = 'overview' | 'backups' | 'releases' | 'config' | 'env' | 'domains';
 
 export interface DeployLevels {
   operate: boolean;
@@ -78,6 +82,11 @@ function Runtime({ serverId, containerId, running }: { serverId: string; contain
  * One app (spec §7): its status, Deploy with a live log, Releases with
  * Rollback, Restart and Stop, bastion.yml, .env, Domains and Delete. Each
  * part reads the server when it opens; actions refetch what they change.
+ *
+ * A quick service (bastion.yml's `service:`, services spec §3.3) gets its
+ * template's icon and version, the Connection panel on its overview, a
+ * Backups tab when the template has a dump command, and Update version;
+ * Domains only when it has a web UI.
  */
 export default function AppDetail({
   serverId,
@@ -95,7 +104,7 @@ export default function AppDetail({
 }) {
   const qc = useQueryClient();
   const [tab, setTab] = useState<Tab>('overview');
-  const [dialog, setDialog] = useState<'deploy' | 'restart' | 'stop' | 'delete' | null>(null);
+  const [dialog, setDialog] = useState<'deploy' | 'restart' | 'stop' | 'delete' | 'update' | null>(null);
   const run = useDeployRun(serverId, app);
 
   const status = useQuery<DeployAppStatus>({
@@ -124,12 +133,16 @@ export default function AppDetail({
   // bastion.yml's permissions.deploy: deploy and rollback may need manage rather than operate (the server enforces it)
   const deployLevel = deployPermissionLevel(s);
   const canDeploy = levels.operate && (deployLevel === 'operate' || levels.manage);
+  const template = serviceTemplate(s.config?.service ?? s.service);
+  const image = s.config?.build.type === 'image' ? s.config.build.image : null;
+  const line = template && image ? serviceVersionOfImage(template, image) : undefined;
   const tabs: { id: Tab; label: string }[] = [
     { id: 'overview', label: 'Overview' },
+    ...(template?.backup ? [{ id: 'backups' as Tab, label: 'Backups' }] : []),
     { id: 'releases', label: 'Releases' },
     { id: 'config', label: 'Config' },
     ...(levels.manage ? [{ id: 'env' as Tab, label: 'Environment' }] : []),
-    { id: 'domains', label: 'Domains' },
+    ...(!template || template.ui?.domain || s.domains.length > 0 ? [{ id: 'domains' as Tab, label: 'Domains' }] : []),
   ];
   const action = async (verb: 'restart' | 'stop') => {
     await api.post(appPath(serverId, app, `/${verb}`));
@@ -141,7 +154,13 @@ export default function AppDetail({
     <div>
       {back}
       <div className="mb-4 flex flex-wrap items-center gap-3">
+        {template && <ServiceIcon icon={template.icon} size={20} className="text-primary" />}
         <h2 className="font-mono text-xl font-bold">{app}</h2>
+        {template && (
+          <span className="rounded bg-primary/10 px-1.5 py-0.5 text-xs text-primary" title={image ?? undefined}>
+            {template.name} {line ? line.version : (image?.split('@')[0]?.split(':').pop() ?? '')}
+          </span>
+        )}
         <HealthBadge app={s} />
         {s.locked && (
           <span className="flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600" title={s.lock ? `${s.lock.holder} since ${when(s.lock.since)}` : undefined}>
@@ -182,6 +201,16 @@ export default function AppDetail({
                 </>
               )}
             </>
+          )}
+          {levels.manage && template && image && (
+            <button
+              onClick={() => setDialog('update')}
+              disabled={run.busy || !!s.configError}
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
+            >
+              <ArrowUpCircle size={14} /> Update version
+              {line && line.image !== image && <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-primary" title="A newer release of this line is available" />}
+            </button>
           )}
           {levels.manage && (
             <button
@@ -231,6 +260,7 @@ export default function AppDetail({
 
       {tab === 'overview' && (
         <div className="space-y-5">
+          {template && <ConnectionPanel serverId={serverId} app={app} canReveal={levels.manage} />}
           <dl className="grid gap-x-6 gap-y-3 sm:grid-cols-3">
             <Fact label="Current release">
               <span className="font-mono">{s.currentRelease ?? '—'}</span>
@@ -258,6 +288,7 @@ export default function AppDetail({
           {s.container && <Runtime serverId={serverId} containerId={s.container.id} running={s.container.state === 'running'} />}
         </div>
       )}
+      {tab === 'backups' && template?.backup && <BackupsPanel serverId={serverId} app={app} canOperate={levels.operate} canManage={levels.manage} />}
       {tab === 'releases' && (
         <ReleasesPanel serverId={serverId} app={app} canOperate={canDeploy} busy={run.busy} onRollback={(release) => void run.rollback(release)} />
       )}
@@ -269,6 +300,18 @@ export default function AppDetail({
 
       {dialog === 'deploy' && (
         <DeploySourceDialog app={app} build={s.config?.build ?? null} onDeploy={(label, pack) => void run.deploy(label, pack)} onClose={() => setDialog(null)} />
+      )}
+      {dialog === 'update' && template && image && (
+        <UpdateVersionDialog
+          app={app}
+          template={template}
+          image={image}
+          onUpdate={(major, label) => {
+            setDialog(null);
+            void run.follow('update', label, appPath(serverId, app, '/service/version'), { version: major });
+          }}
+          onClose={() => setDialog(null)}
+        />
       )}
       {(dialog === 'restart' || dialog === 'stop') && (
         <ConfirmDialog
@@ -291,7 +334,13 @@ export default function AppDetail({
           title={`Delete ${app}`}
           subject={app}
           confirmLabel="Delete app"
-          options={[{ key: 'purge', label: 'Also delete its bastion.yml, .env and volumes', hint: 'Without this they stay on the server, and deploying again restores the app.' }]}
+          options={[
+            {
+              key: 'purge',
+              label: template ? 'Also delete its bastion.yml, .env, volumes (its data) and backups' : 'Also delete its bastion.yml, .env and volumes',
+              hint: 'Without this they stay on the server, and deploying again restores the app.',
+            },
+          ]}
           onConfirm={async (opts) => {
             const res = await api.delete<{ proxy?: DeployNginxApplyResult }>(appPath(serverId, app, opts.purge ? '?purge=1' : ''));
             toast.success(`${app} deleted`);

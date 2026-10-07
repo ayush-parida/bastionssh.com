@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { DEPLOY_DOCS, DEPLOY_TROUBLESHOOTING_ANCHORS } from '@smt/shared';
+import { DEPLOY_DOCS, DEPLOY_TROUBLESHOOTING_ANCHORS, SERVICE_CATALOG } from '@smt/shared';
+import { SERVICE_DOCS, serviceDocs } from './services.js';
 import { DOCKER_DOCS } from './docker-upload.js';
 import DocMarkdown from '@/components/docs/DocMarkdown.js';
 import { DOC_SECTIONS } from '@/docs/sections.js';
@@ -153,6 +154,19 @@ describe('the docs', () => {
     for (const anchor of Object.values(DEPLOY_TROUBLESHOOTING_ANCHORS)) {
       expect(trouble.headings.map((h) => h.id), anchor).toContain(anchor);
     }
+  });
+
+  it('every quick-service template has its docs page with an Upgrading section, and the service pages’ links resolve', () => {
+    const hrefs = [...Object.values(SERVICE_DOCS), ...SERVICE_CATALOG.flatMap((t) => [serviceDocs(t.docs), serviceDocs(t.docs, 'upgrading')])];
+    for (const href of hrefs) {
+      const [path, hash] = href.split('#') as [string, string | undefined];
+      const doc = findDoc(path.split('/')[2]!, path.split('/')[3]!);
+      expect(doc, href).toBeTruthy();
+      if (hash) expect(doc!.headings.map((h) => h.id), href).toContain(hash);
+    }
+    // The catalog page names every template
+    const overview = findDoc('deployments', 'services-overview')!;
+    for (const t of SERVICE_CATALOG) expect(overview.text, t.name).toContain(t.name);
   });
 
   it('the links the app makes into the Docker docs resolve, anchors included', () => {

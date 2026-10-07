@@ -24,6 +24,8 @@ export const deployKeys = {
   config: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'config'] as const,
   env: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'env'] as const,
   domains: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'domains'] as const,
+  connection: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'connection'] as const,
+  backups: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'backups'] as const,
 };
 
 /**

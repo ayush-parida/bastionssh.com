@@ -12,6 +12,7 @@ import SetupPanel from '@/components/deploy/SetupPanel.js';
 import AppList from '@/components/deploy/AppList.js';
 import AppDetail from '@/components/deploy/AppDetail.js';
 import NewAppDialog from '@/components/deploy/NewAppDialog.js';
+import ServiceCatalogDialog from '@/components/deploy/ServiceCatalogDialog.js';
 import DocsLink from '@/components/docs/DocsLink.js';
 import { DEPLOY_DOCS } from '@smt/shared';
 
@@ -27,6 +28,7 @@ export default function ServerDeploymentsPage() {
   const { id: serverId = '', app } = useParams<{ id: string; app?: string }>();
   const navigate = useNavigate();
   const [creating, setCreating] = useState(false);
+  const [catalog, setCatalog] = useState(false);
   const access = useAccessLevels('server');
   const moduleOperate = useModule('deployments', 'operate');
   const moduleManage = useModule('deployments', 'manage');
@@ -114,11 +116,28 @@ export default function ServerDeploymentsPage() {
                 )}
               </p>
             ) : (
-              <AppList apps={apps.data ?? []} onOpen={openApp} onNew={levels.manage ? () => setCreating(true) : undefined} />
+              <AppList
+                apps={apps.data ?? []}
+                onOpen={openApp}
+                onNew={levels.manage ? () => setCreating(true) : undefined}
+                onNewService={levels.manage ? () => setCatalog(true) : undefined}
+              />
             ))}
         </>
       )}
 
+      {catalog && (
+        <ServiceCatalogDialog
+          serverId={serverId}
+          existing={(apps.data ?? []).map((a) => a.name)}
+          proxyMode={proxyMode}
+          onOpen={(name) => {
+            setCatalog(false);
+            openApp(name);
+          }}
+          onClose={() => setCatalog(false)}
+        />
+      )}
       {creating && (
         <NewAppDialog
           serverId={serverId}

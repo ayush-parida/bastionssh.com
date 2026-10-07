@@ -1,8 +1,9 @@
-import { DEPLOY_CERT_EXPIRING_DAYS, type DeployAppSummary, type DeployContainer } from '@smt/shared';
-import { Lock, Plus, Rocket, TriangleAlert } from 'lucide-react';
+import { DEPLOY_CERT_EXPIRING_DAYS, serviceTemplate, type DeployAppSummary, type DeployContainer } from '@smt/shared';
+import { Boxes, Lock, Plus, Rocket, TriangleAlert } from 'lucide-react';
 import { HEALTH_STYLE, STATE_STYLE } from '@/lib/docker.js';
 import type { DeployAppRow } from '@/lib/deploy.js';
 import { cn, formatBytes } from '@/lib/utils.js';
+import ServiceIcon from './ServiceIcon.js';
 
 /** The live container's state, with its health check when the image has one. */
 export function HealthBadge({ app }: { app: Pick<DeployAppSummary, 'container' | 'currentRelease' | 'configError'> }) {
@@ -55,11 +56,14 @@ export default function AppList({
   apps,
   onOpen,
   onNew,
+  onNewService,
 }: {
   apps: DeployAppRow[];
   onOpen: (app: string) => void;
   /** Shown to members who manage deployments on this server. */
   onNew?: () => void;
+  /** The quick-services catalog; for managers too. */
+  onNewService?: () => void;
 }) {
   const showCert = apps.some((a) => a.certificate !== undefined);
   const showUsage = apps.some((a) => a.usage !== undefined);
@@ -69,15 +73,24 @@ export default function AppList({
         <Rocket size={16} className="text-primary" />
         <h2 className="font-semibold">Apps</h2>
         <span className="text-xs text-muted-foreground">{apps.length}</span>
-        {onNew && (
-          <button onClick={onNew} className="ml-auto flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted">
-            <Plus size={14} /> New app
-          </button>
+        {(onNew || onNewService) && (
+          <span className="ml-auto flex gap-2">
+            {onNewService && (
+              <button onClick={onNewService} className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted">
+                <Boxes size={14} /> New service
+              </button>
+            )}
+            {onNew && (
+              <button onClick={onNew} className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted">
+                <Plus size={14} /> New app
+              </button>
+            )}
+          </span>
         )}
       </div>
       {apps.length === 0 ? (
         <p className="px-4 py-6 text-sm text-muted-foreground">
-          No apps yet.{onNew ? ' Create one with its bastion.yml, then deploy a build to it.' : ''}
+          No apps yet.{onNew ? ' Create one with its bastion.yml, then deploy a build to it — or start a database, cache or other service from the catalog.' : ''}
         </p>
       ) : (
         <div className="overflow-x-auto">
@@ -95,6 +108,7 @@ export default function AppList({
             <tbody>
               {apps.map((app) => {
                 const cert = certBadge(app.certificate);
+                const template = serviceTemplate(app.service);
                 return (
                   <tr
                     key={app.name}
@@ -108,6 +122,7 @@ export default function AppList({
                           onOpen(app.name);
                         }}
                         className="flex items-center gap-1.5 font-mono font-medium hover:underline">
+                        {template && <ServiceIcon icon={template.icon} size={14} className="text-primary" />}
                         {app.name}
                         {app.locked && (
                           <span title="A deploy is running" className="text-amber-500">
@@ -115,7 +130,11 @@ export default function AppList({
                           </span>
                         )}
                       </button>
-                      {app.buildType && <span className="text-xs text-muted-foreground">{app.buildType}</span>}
+                      {template ? (
+                        <span className="text-xs text-muted-foreground">{template.name} · service</span>
+                      ) : (
+                        app.buildType && <span className="text-xs text-muted-foreground">{app.service ? `${app.service} · service` : app.buildType}</span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
                       {app.configError ? (
