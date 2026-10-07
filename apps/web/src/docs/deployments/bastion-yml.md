@@ -90,7 +90,7 @@ Must be the app's name — the folder it lives in. It is fixed once the app exis
 | --- | --- | --- |
 | text | none | a template id: `a-z`, `0-9` and `-` (like `postgres`) |
 
-Informational: the quick-service template an app was created from. It changes nothing about how the app runs.
+The quick-service template an app was created from (see [Quick services](services-overview.md)). It changes nothing about how the container runs; it gives the app its service page in BastionSSH — the Connection panel, Update version — and names the backup command bastionctl runs for [`backups`](#backups).
 
 ## domains
 
@@ -265,15 +265,37 @@ How a new release (or a restart) replaces the container that serves:
 
 | Type | Default | Accepted |
 | --- | --- | --- |
-| text | `none` | `none`, `localhost:<port>`, `public:<port>` |
+| text | `none` | `none`, `localhost:<port>`, `public:<port>`, or either with `:<container port>` |
 
-Exposes `run.port` on the server itself:
+Exposes `run.port` on the server itself (or another port of the container, when a third part names it — `public:19000:9000` publishes MinIO's S3 port 9000 while its domain serves the console on `run.port` 9001):
 
 - `none` — not published. The proxy and other apps on the server reach it as `<name>:<run.port>` on the private `bastion-apps` network. Use this whenever you can.
 - `localhost:<port>` — bound on the server's `127.0.0.1:<port>`: reachable through an SSH tunnel (`ssh -L 5432:127.0.0.1:15432 …`), not from the network.
 - `public:<port>` — bound on every address (`0.0.0.0:<port>`): reachable from anywhere the server's firewall allows. **Firewall it** to the addresses that need it; a database open to the internet is attacked within minutes.
 
 The host port is 1 to 65535, not 80, 443 or the nginx-mode proxy port, and not one another app on the server publishes. Publishing forces `run.strategy: recreate` (one container can bind the port at a time).
+
+### run.command
+
+| Type | Default | Accepted |
+| --- | --- | --- |
+| list of text | the image's `CMD` | 1 to 64 arguments |
+
+Replaces the image's command, as `command:` does in Compose — no shell unless you name one. Quick services use it for server flags; a value from `.env` is read inside the container with a shell:
+
+```yaml
+run:
+  command: ["server", "/data", "--console-address", ":9001"]
+  command: ["sh", "-c", "exec docker-entrypoint.sh redis-server --requirepass \"$REDIS_PASSWORD\""]
+```
+
+### run.entrypoint
+
+| Type | Default | Accepted |
+| --- | --- | --- |
+| list of text | the image's `ENTRYPOINT` | 1 to 64 arguments |
+
+Replaces the image's entrypoint; `run.command` is then its arguments. Rarely needed: the Mailpit template uses `["/bin/sh", "-c"]` to build its UI login from a generated password.
 
 ## healthcheck
 
@@ -314,6 +336,19 @@ How many releases (and their images) to keep for rollback. The current and previ
 | text | `caddy` | `caddy`, `nginx` |
 
 Must match the server's proxy mode, chosen at setup. A new app's template already has the right one. See [Using nginx instead of Caddy](nginx.md).
+
+## backups
+
+| Field | Type | Default | Accepted |
+| --- | --- | --- | --- |
+| `schedule` | text | `off` | `off`, `hourly`, `daily` |
+| `keep` | number | `7` | a whole number from 1 to 100 |
+
+Backups of a quick service with a backup command (`service:` PostgreSQL, MySQL, MariaDB, MongoDB, Redis or Valkey). `keep` is how many backup files stay after each new one; `schedule` other than `off` has the server's `bastion-cron` container make one every hour or day. The service page's Backups tab edits this for you. See [Backups](services-overview.md#backups).
+
+```yaml
+backups: { schedule: daily, keep: 14 }
+```
 
 ## permissions
 

@@ -135,6 +135,8 @@ What a deploy does, in order:
 
 If the build or the health check fails, the previous release keeps serving and the failure is in the log and in the release's record.
 
+Databases, caches and other ready-made services start from a catalog instead: **New service** — see [Quick services](services-overview.md).
+
 Which page next:
 
 - [Deploy a static site](static-site.md) — Next.js static export, Vite, plain HTML.
