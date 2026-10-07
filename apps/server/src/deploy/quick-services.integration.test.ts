@@ -199,7 +199,8 @@ describe.skipIf(!port)('quick services against a live server', () => {
     }
     await app?.close();
     console.log(`quick services live report: ${JSON.stringify(report, null, 2)}`);
-  });
+    // Seventeen services deleted with their data, one SSH command each: well past the 10 s default
+  }, 300_000);
 
   it('creates PostgreSQL, Redis, MongoDB and MinIO from the catalog, with secrets generated on the server', async () => {
     const pg = await create({ name: 'orders-db', template: 'postgres', version: '17' });
