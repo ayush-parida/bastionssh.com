@@ -83,3 +83,11 @@ export function isValidSocketPath(value: string): boolean {
 export function apiPath(...segments: string[]): string {
   return `/${segments.map(encodeURIComponent).join('/')}`;
 }
+
+/**
+ * An image API path: `/images/<ref>` plus `suffix` segments. References may
+ * hold `/` (registry, namespace), so each part is encoded and the slashes kept.
+ */
+export function imageApiPath(ref: string, ...suffix: string[]): string {
+  return `/images/${[...ref.split('/'), ...suffix].map(encodeURIComponent).join('/')}`;
+}

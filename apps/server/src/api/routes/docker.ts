@@ -21,6 +21,7 @@ import { requireAuth } from '../../auth/middleware.js';
 import { requireModule } from '../../auth/access/modules.js';
 import { canAccessServer } from '../../auth/server-access.js';
 import { audit } from '../../audit/index.js';
+import { config } from '../../config/index.js';
 import { getDb } from '../../db/index.js';
 import { servers } from '../../db/schema.js';
 import { CredentialError } from '../../ssh/credentials.js';
@@ -232,6 +233,7 @@ function statusOf(req: FastifyRequest, row: typeof servers.$inferSelect): Docker
       apiVersion: row.dockerApiVersion,
     },
     permissions: permissionsFor(req, row.id),
+    imageUploadMaxBytes: config.dockerImageUploadMaxBytes,
   };
 }
 

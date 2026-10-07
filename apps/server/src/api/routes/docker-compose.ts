@@ -1,7 +1,16 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import { z } from 'zod';
-import { DOCKER_COMPOSE_VERBS, type DockerComposeProject, type DockerComposeVerb, type DockerLogLine } from '@smt/shared';
+import {
+  DOCKER_COMPOSE_SERVICE_VERBS,
+  DOCKER_COMPOSE_VERBS,
+  type AuditAction,
+  type DockerComposeProject,
+  type DockerComposeServiceImage,
+  type DockerComposeServiceVerb,
+  type DockerComposeVerb,
+  type DockerLogLine,
+} from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { requireModule } from '../../auth/access/modules.js';
 import { audit } from '../../audit/index.js';
@@ -30,7 +39,9 @@ import { MAX_LOG_TAIL, dockerSseRoute, logLineReader, sendDockerError, serverPar
  * Discovery reads container labels through the Engine API; actions run the
  * `docker compose` CLI over the caller's pooled SSH connection with every
  * argument quoted (docker/compose.ts). Gates follow the §6 matrix: listing is
- * `view`, logs are `inspect`, actions are `pull` (operators and up).
+ * `view`, logs are `inspect`, actions are `pull` (operators and up) — on a
+ * whole project, or on one of its services (`up --no-deps`, `restart`,
+ * `pull`, `stop`), which is how an uploaded image is put into service.
  *
  * An action keeps running when the browser leaves — a half-applied `up` is
  * worse than one nobody watched — and is audited with its exit code when it
@@ -45,6 +56,15 @@ const DEFAULT_COMPOSE_TAIL = 200;
 
 const projectParams = serverParams.extend({ project: z.string() });
 const actionParams = projectParams.extend({ verb: z.enum(DOCKER_COMPOSE_VERBS as [DockerComposeVerb, ...DockerComposeVerb[]]) });
+const serviceActionParams = projectParams.extend({
+  service: z.string(),
+  verb: z.enum(DOCKER_COMPOSE_SERVICE_VERBS as [DockerComposeServiceVerb, ...DockerComposeServiceVerb[]]),
+});
+
+/** Most services whose configured image `service-images` reads (one inspect each). */
+export const MAX_SERVICE_IMAGES = 100;
+/** Inspects in flight at once for `service-images`. */
+const INSPECT_CONCURRENCY = 8;
 
 const logsSchema = z.object({
   follow: boolQuery,
@@ -138,6 +158,78 @@ function mergeLogs(
   });
 }
 
+/**
+ * Run a compose verb on a project, or on one of its services: the CLI's
+ * output as `logs` batches, then `exit`, then `end`. Answers 404 for an
+ * unknown project or service, 409 when the project's labels are unusable or
+ * another action on it is running. Audited with the exit code when it ends.
+ */
+async function composeAction(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  id: string,
+  project: string,
+  verb: DockerComposeVerb | DockerComposeServiceVerb,
+  service?: string,
+) {
+  let name: string;
+  try {
+    name = projectName(project);
+    if (service !== undefined) serviceName(service);
+  } catch (err) {
+    return sendDockerError(reply, err);
+  }
+  const action = `docker.compose_${verb}` as AuditAction;
+  return dockerSseRoute(req, reply, id, async (ctx, open, signal) => {
+    const found = await findProject(ctx, name, signal);
+    if (found.unmanageable) throw new DockerError(`Cannot run compose for this project: ${found.unmanageable}`, 409);
+    // Only a service the project's containers carry: nothing else reaches the command line
+    if (service !== undefined && !found.services.some((s) => s.name === service)) {
+      throw new DockerError('No such service in this project', 404);
+    }
+    const command = composeCommand({ project: found, socketPath: ctx.endpoint.socketPath }, verb, service);
+    const release = claimProject(ctx.server.id, name);
+    if (!release) throw new DockerError('Another compose action is running for this project', 409);
+    try {
+      const sse = open();
+      if (!sse) return;
+      const meta = {
+        project: name,
+        ...(service !== undefined && { service }),
+        workingDir: found.workingDir,
+        configFiles: found.configFiles,
+        command: composeDisplay(found, verb, service),
+      };
+      let result;
+      try {
+        result = await runCompose(ctx.ssh, command, {
+          onLines: (stream, lines) => sse.send({ type: 'logs', lines: lines.map((text) => ({ stream, text })) }),
+        });
+      } catch (err) {
+        await audit(req, action, 'server', ctx.server.id, ctx.server.name, {
+          ...meta,
+          exitCode: null,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+      await audit(req, action, 'server', ctx.server.id, ctx.server.name, {
+        ...meta,
+        exitCode: result.exitCode,
+        ...(result.signal && { signal: result.signal }),
+        ...(result.timedOut && { timedOut: true }),
+        // The browser left before the end; the action ran to completion anyway
+        ...(sse.closed && { detached: true }),
+        durationMs: result.durationMs,
+      });
+      sse.send({ type: 'exit', ...result });
+      sse.send({ type: 'end' });
+    } finally {
+      release();
+    }
+  });
+}
+
 export async function dockerComposeRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
   // Docker on one server is the server's Docker tab: the Servers module (unified roles spec §3.1)
@@ -161,61 +253,63 @@ export async function dockerComposeRoutes(app: FastifyInstance) {
 
   /**
    * POST /servers/:id/compose/:project/:verb — `up -d`, `down`, `pull` or
-   * `restart`. SSE: the CLI's output as `logs` batches, then `exit` with the
-   * status, then `end`. Answers 404 for an unknown project, 409 when its
-   * labels are unusable or another action on it is running.
+   * `restart` on the whole project. SSE: the CLI's output as `logs` batches,
+   * then `exit` with the status, then `end`. Answers 404 for an unknown
+   * project, 409 when its labels are unusable or another action on it is running.
    */
   app.post('/servers/:id/compose/:project/:verb', { preHandler: requireDocker('pull') }, async (req, reply) => {
     const { id, project, verb } = actionParams.parse(req.params);
-    let name: string;
+    return composeAction(req, reply, id, project, verb);
+  });
+
+  /**
+   * POST /servers/:id/compose/:project/services/:service/:verb — `up -d
+   * --no-deps`, `restart`, `pull` or `stop` on one service. The service must
+   * be one the project's containers carry (404 otherwise); otherwise as for
+   * the project: same gate, stream, lock and audit (with `service` in it).
+   */
+  app.post('/servers/:id/compose/:project/services/:service/:verb', { preHandler: requireDocker('pull') }, async (req, reply) => {
+    const { id, project, service, verb } = serviceActionParams.parse(req.params);
+    return composeAction(req, reply, id, project, verb, service);
+  });
+
+  /**
+   * GET /servers/:id/compose/service-images — the image each compose service
+   * is configured with (its `image:`), read from one of its containers'
+   * `Config.Image`. The container list's `Image` is not enough: once a tag
+   * is moved to a new image (an upload), it shows the old image's id instead.
+   */
+  app.get('/servers/:id/compose/service-images', { preHandler: requireDocker('view') }, async (req, reply) => {
+    const { id } = serverParams.parse(req.params);
     try {
-      name = projectName(project);
+      return await withDockerClient(req, id, async (ctx): Promise<DockerComposeServiceImage[]> => {
+        const raw = await ctx.docker.json<RawJson[]>({
+          path: '/containers/json',
+          query: { all: true, filters: projectFilter() },
+        });
+        const targets = discoverProjects(raw)
+          .flatMap((p) => p.services.map((s) => ({ project: p.name, service: s.name, container: s.containers[0]?.id })))
+          .filter((t): t is { project: string; service: string; container: string } => !!t.container)
+          .slice(0, MAX_SERVICE_IMAGES);
+        const out: DockerComposeServiceImage[] = new Array(targets.length);
+        let next = 0;
+        const worker = async () => {
+          while (next < targets.length) {
+            const i = next++;
+            const t = targets[i]!;
+            const image = await ctx.docker
+              .json<RawJson>({ path: apiPath('containers', t.container, 'json') })
+              .then((info) => (info.Config as { Image?: unknown } | undefined)?.Image)
+              .catch(() => null);
+            out[i] = { project: t.project, service: t.service, image: typeof image === 'string' && image ? image : null };
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(INSPECT_CONCURRENCY, targets.length) }, worker));
+        return out;
+      });
     } catch (err) {
       return sendDockerError(reply, err);
     }
-    return dockerSseRoute(req, reply, id, async (ctx, open, signal) => {
-      const found = await findProject(ctx, name, signal);
-      if (found.unmanageable) throw new DockerError(`Cannot run compose for this project: ${found.unmanageable}`, 409);
-      const command = composeCommand({ project: found, socketPath: ctx.endpoint.socketPath }, verb);
-      const release = claimProject(ctx.server.id, name);
-      if (!release) throw new DockerError('Another compose action is running for this project', 409);
-      try {
-        const sse = open();
-        if (!sse) return;
-        const meta = {
-          project: name,
-          workingDir: found.workingDir,
-          configFiles: found.configFiles,
-          command: composeDisplay(found, verb),
-        };
-        let result;
-        try {
-          result = await runCompose(ctx.ssh, command, {
-            onLines: (stream, lines) => sse.send({ type: 'logs', lines: lines.map((text) => ({ stream, text })) }),
-          });
-        } catch (err) {
-          await audit(req, `docker.compose_${verb}`, 'server', ctx.server.id, ctx.server.name, {
-            ...meta,
-            exitCode: null,
-            error: err instanceof Error ? err.message : String(err),
-          });
-          throw err;
-        }
-        await audit(req, `docker.compose_${verb}`, 'server', ctx.server.id, ctx.server.name, {
-          ...meta,
-          exitCode: result.exitCode,
-          ...(result.signal && { signal: result.signal }),
-          ...(result.timedOut && { timedOut: true }),
-          // The browser left before the end; the action ran to completion anyway
-          ...(sse.closed && { detached: true }),
-          durationMs: result.durationMs,
-        });
-        sse.send({ type: 'exit', ...result });
-        sse.send({ type: 'end' });
-      } finally {
-        release();
-      }
-    });
   });
 
   /**

@@ -61,7 +61,7 @@ export const DEFAULT_DOCKER_SETTINGS: DockerSettings = {
  * - `control` — start, stop, restart, pause, kill
  * - `exec` — a shell inside a container
  * - `remove` — remove containers and images
- * - `pull` — pull images; compose up/down/pull/restart
+ * - `pull` — pull and upload images; compose actions on projects and services
  * - `prune` — reclaim unused space
  * - `revealEnv` — unredacted environment (also needs a passkey step-up)
  * - `configure` — per-server Docker settings and detection
@@ -141,6 +141,8 @@ export interface DockerServerStatus {
   serverName: string;
   docker: ServerDocker;
   permissions: DockerPermissions;
+  /** Largest image archive `POST …/images/load` takes (`SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES`). */
+  imageUploadMaxBytes: number;
 }
 
 // ── Objects ──────────────────────────────────────────────────────────────────
@@ -296,6 +298,12 @@ export type DockerStreamEvent =
   | { type: 'stats'; sample: DockerStatsSample }
   | { type: 'event'; event: DockerEngineEvent }
   | { type: 'pull'; progress: DockerPullProgress }
+  /** An image upload reached the engine whole: `bytes` were sent, in this format. */
+  | { type: 'uploaded'; bytes: number; format: DockerArchiveFormat }
+  /** One line of `docker load` output (`Loading layer`, `Loaded image: app:1`). */
+  | { type: 'load'; progress: DockerPullProgress }
+  /** The load finished: what it loaded, checked against the server's platform. */
+  | { type: 'loaded'; result: DockerImageLoadResult }
   | { type: 'end' }
   | { type: 'error'; error: string; status?: number }
   /** A compose action finished; `exitCode` is null when the command was cut off (timeout, lost connection). */
@@ -307,6 +315,25 @@ export type DockerStreamEvent =
 export type DockerComposeVerb = 'up' | 'down' | 'pull' | 'restart';
 
 export const DOCKER_COMPOSE_VERBS: readonly DockerComposeVerb[] = ['up', 'down', 'pull', 'restart'];
+
+/**
+ * Commands on one service of a project: `up --detach --no-deps <service>`
+ * (recreate just it, e.g. after its image changed), `restart`, `pull`, `stop`.
+ */
+export type DockerComposeServiceVerb = 'up' | 'restart' | 'pull' | 'stop';
+
+export const DOCKER_COMPOSE_SERVICE_VERBS: readonly DockerComposeServiceVerb[] = ['up', 'restart', 'pull', 'stop'];
+
+/**
+ * The image a compose service is configured with (its `image:`), read from
+ * one of its containers — `GET …/compose/service-images`. Null when the
+ * container could not be inspected.
+ */
+export interface DockerComposeServiceImage {
+  project: string;
+  service: string;
+  image: string | null;
+}
 
 export interface DockerComposeContainer {
   id: string;
@@ -444,6 +471,60 @@ export interface DockerPruneResult {
 /** `POST …/containers/:cid/env/reveal` — admins, after a passkey step-up; audited. */
 export interface DockerEnvReveal {
   env: string[];
+}
+
+// ── Image upload ─────────────────────────────────────────────────────────────
+
+/** What an uploaded image archive is, from its first bytes: `docker save` output, plain or compressed. */
+export type DockerArchiveFormat = 'tar' | 'gzip' | 'xz' | 'zstd' | 'bzip2';
+
+/** One image a `docker load` brought in. */
+export interface DockerLoadedImage {
+  /** The tag it was loaded under (`knexbi-website:latest`); null when the archive had it untagged. */
+  ref: string | null;
+  id: string;
+  os: string;
+  architecture: string;
+  variant: string | null;
+  size: number;
+  /** The image this tag pointed at before the load, when that changed — what a cleanup may remove. */
+  replacedId: string | null;
+  /** Built for another platform than the server's: its containers would fail with `exec format error`. */
+  platformMismatch: boolean;
+}
+
+/** `POST …/images/load`, at the end of its event stream. */
+export interface DockerImageLoadResult {
+  images: DockerLoadedImage[];
+  /** Bytes of the archive as uploaded. */
+  bytes: number;
+  format: DockerArchiveFormat;
+  /** The engine's platform, e.g. `linux/amd64`. */
+  serverPlatform: string;
+  /** Plain-words problems with what was loaded (a platform mismatch). */
+  warnings: string[];
+}
+
+const ARCH_ALIASES: Record<string, string> = {
+  x86_64: 'amd64',
+  x64: 'amd64',
+  aarch64: 'arm64',
+  armv8: 'arm64',
+  armv7l: 'arm',
+  armhf: 'arm',
+  i386: '386',
+  i686: '386',
+};
+
+/** Docker's name for a CPU architecture: `x86_64` (from `/info`, `uname -m`) → `amd64`, `aarch64` → `arm64`. */
+export function normalizeDockerArch(arch: string): string {
+  const a = arch.trim().toLowerCase();
+  return ARCH_ALIASES[a] ?? a;
+}
+
+/** `linux/amd64`, the form `docker build --platform` takes. */
+export function dockerPlatform(os: string, arch: string): string {
+  return `${(os || 'linux').toLowerCase()}/${normalizeDockerArch(arch)}`;
 }
 
 // ── Exec (D3) ────────────────────────────────────────────────────────────────

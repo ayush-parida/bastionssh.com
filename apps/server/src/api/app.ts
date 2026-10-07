@@ -41,6 +41,7 @@ import { dockerRoutes } from './routes/docker.js';
 import { dockerActionRoutes } from './routes/docker-actions.js';
 import { dockerExecRoutes } from './routes/docker-exec.js';
 import { dockerComposeRoutes } from './routes/docker-compose.js';
+import { dockerImageLoadRoutes } from './routes/docker-image-load.js';
 import { dockerFleetRoutes } from './routes/docker-fleet.js';
 import { deployRoutes } from './routes/deploy.js';
 import { kubeRoutes } from './routes/kube.js';
@@ -125,6 +126,7 @@ export async function buildApp() {
   await app.register(dockerActionRoutes, { prefix: '/api/docker' });
   await app.register(dockerExecRoutes, { prefix: '/api/docker' });
   await app.register(dockerComposeRoutes, { prefix: '/api/docker' });
+  await app.register(dockerImageLoadRoutes, { prefix: '/api/docker' });
   await app.register(dockerFleetRoutes, { prefix: '/api/docker' });
   // Server-side deployments: apps, releases and their config live on the servers
   await app.register(deployRoutes, { prefix: '/api/deploy' });

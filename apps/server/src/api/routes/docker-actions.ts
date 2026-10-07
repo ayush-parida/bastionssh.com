@@ -18,7 +18,7 @@ import { boolQuery } from '../query.js';
 import { DockerError, fromDaemonStatus } from '../../docker/errors.js';
 import { LineSplitter } from '../../docker/demux.js';
 import { requireDocker } from '../../docker/permissions.js';
-import { apiPath, containerRef, imageRef } from '../../docker/validation.js';
+import { apiPath, containerRef, imageApiPath, imageRef } from '../../docker/validation.js';
 import { containersPerNetwork } from '../../docker/objects.js';
 import {
   SIGNAL_PATTERN,
@@ -112,6 +112,24 @@ async function postAction(ctx: DockerContext, path: string, query: Record<string
   if (res.statusCode === 304) return false;
   if (!res.statusCode || res.statusCode >= 300) throw fromDaemonStatus(res.statusCode ?? 502, body);
   return true;
+}
+
+/** A whole image id, the only form an unused-only removal takes. */
+const FULL_IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
+
+/** 409 unless the image has no tags and no container uses it. */
+async function assertUnused(ctx: DockerContext, imageId: string): Promise<void> {
+  const [info, containers] = await Promise.all([
+    ctx.docker.json<RawJson>({ path: imageApiPath(imageId, 'json') }),
+    ctx.docker.json<RawJson[]>({ path: '/containers/json', query: { all: true } }),
+  ]);
+  const tags = (Array.isArray(info.RepoTags) ? info.RepoTags : []).filter((t): t is string => typeof t === 'string' && t !== '<none>:<none>');
+  if (tags.length > 0) throw new DockerError(`Kept: the image is still tagged ${tags.join(', ')}`, 409);
+  const user = containers.find((c) => c.ImageID === imageId);
+  if (user) {
+    const name = Array.isArray(user.Names) && typeof user.Names[0] === 'string' ? user.Names[0].replace(/^\//, '') : String(user.Id ?? '').slice(0, 12);
+    throw new DockerError(`Kept: container ${name} still uses the image`, 409);
+  }
 }
 
 /** Image references may hold `/` (registry, namespace): each part is encoded, the slashes kept. */
@@ -248,13 +266,22 @@ export async function dockerActionRoutes(app: FastifyInstance) {
     return sent;
   });
 
-  /** DELETE /servers/:id/images/:iid?force — untag and delete an image. */
+  /**
+   * DELETE /servers/:id/images/:iid?force&unused — untag and delete an image.
+   * With `unused`, only an image nothing needs any more — given by its full
+   * id, with no tags left and no container (in any state) using it — is
+   * removed; anything else is a 409 and nothing changes. That is the cleanup
+   * after an upload moved a tag to a new image: it can never take a tag away.
+   */
   app.delete('/servers/:id/images/:iid', { preHandler: requireDocker('remove') }, async (req, reply) => {
     const { id, iid } = imageParams.parse(req.params);
-    const { force } = z.object({ force: boolQuery }).parse(req.query);
+    const { force, unused } = z.object({ force: boolQuery, unused: boolQuery }).parse(req.query);
     try {
       const ref = imageRef(iid);
+      if (unused && !FULL_IMAGE_ID.test(ref)) throw new DockerError('Give the full image id (sha256:…) to remove an unused image', 400);
+      if (unused && force) throw new DockerError('An unused image is never removed by force', 400);
       return await withDockerClient(req, id, async (ctx): Promise<DockerImageRemoveResult> => {
+        if (unused) await assertUnused(ctx, ref);
         const raw = await ctx.docker.json<unknown>({
           method: 'DELETE',
           path: imagePath(ref),
@@ -265,6 +292,7 @@ export async function dockerActionRoutes(app: FastifyInstance) {
         await audit(req, 'docker.image_remove', 'server', ctx.server.id, ctx.server.name, {
           image: ref,
           force,
+          ...(unused && { unusedOnly: true }),
           untagged: result.untagged,
           deleted: result.deleted.length,
         });

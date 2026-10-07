@@ -1,6 +1,6 @@
 import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
-import type { Duplex } from 'node:stream';
+import type { Duplex, Readable } from 'node:stream';
 import { DockerError, fromDaemonStatus, fromTransportError } from './errors.js';
 import { asSocket } from './transport.js';
 
@@ -11,8 +11,9 @@ import { asSocket } from './transport.js';
  * nothing here knows about SSH and nothing opens a network connection of its
  * own. No keep-alive: a stream serves one request and is closed with it.
  *
- * Three kinds of call:
+ * Four kinds of call:
  * - JSON (`json`, `text`) — bounded by a timeout, body size capped;
+ * - streamed body (`send`) — an image archive piped through to `/images/load`;
  * - streaming (`stream`) — logs, stats, events: the response is handed back
  *   once headers arrive and the caller reads it until done or aborted;
  * - hijacked (`hijack`) — `Upgrade: tcp`, for exec attach: the raw duplex
@@ -208,6 +209,52 @@ export class DockerClient {
       });
       request.on('error', fail);
       request.end(body);
+    });
+  }
+
+  /**
+   * Send `body` as a chunked request body (image load) and resolve with the
+   * response once its headers arrive, whatever the status. The body is piped
+   * with backpressure, so nothing is buffered here. The body failing (an
+   * upload over its limit, the browser gone) or `signal` aborting before the
+   * headers destroys the request, so the daemon sees a cut-off body and
+   * rejects it; the promise rejects with the body's error. After the headers
+   * nothing here cancels the call: the caller owns the response.
+   */
+  send(req: Omit<DaemonRequest, 'body'> & { body: Readable; contentType: string }): Promise<IncomingMessage> {
+    return new Promise((resolve, reject) => {
+      const request = http.request({
+        agent: this.agent,
+        host: 'docker',
+        method: req.method ?? 'POST',
+        path: this.path(req.path, req.query, req.versioned ?? true),
+        headers: { 'Content-Type': req.contentType, 'Transfer-Encoding': 'chunked', ...req.headers },
+      });
+      let settled = false;
+      const fail = (err: unknown) => {
+        if (settled) return;
+        settled = true;
+        req.signal?.removeEventListener('abort', onAbort);
+        req.body.unpipe(request);
+        request.destroy();
+        reject(fromTransportError(err));
+      };
+      const onAbort = () => fail(req.signal?.reason instanceof Error ? req.signal.reason : new DockerError('Request cancelled', 499));
+      if (req.signal?.aborted) return onAbort();
+      req.signal?.addEventListener('abort', onAbort, { once: true });
+
+      request.on('response', (res) => {
+        if (settled) {
+          res.destroy();
+          return;
+        }
+        settled = true;
+        req.signal?.removeEventListener('abort', onAbort);
+        resolve(res);
+      });
+      request.on('error', fail);
+      req.body.on('error', fail);
+      req.body.pipe(request);
     });
   }
 

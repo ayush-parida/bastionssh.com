@@ -3,6 +3,7 @@ import type {
   DockerComposeContainer,
   DockerComposeProject,
   DockerComposeService,
+  DockerComposeServiceVerb,
   DockerComposeVerb,
   DockerContainerState,
 } from '@smt/shared';
@@ -25,7 +26,9 @@ import { shellCommand } from './shell.js';
  * single-quoted by {@link shellCommand}; the one shell script involved is a
  * constant. Flags are passed as `--flag=value`, so a value starting with `-`
  * stays a value, and paths must be absolute. Only the fixed verbs in
- * {@link COMPOSE_VERB_ARGS} can run.
+ * {@link COMPOSE_VERB_ARGS} (a project) and {@link COMPOSE_SERVICE_VERB_ARGS}
+ * (one of its services) can run; a service name must also be one the
+ * project's containers carry, and is passed last as its own argument.
  */
 
 export const COMPOSE_WORKING_DIR_LABEL = 'com.docker.compose.project.working_dir';
@@ -44,6 +47,18 @@ export const COMPOSE_VERB_ARGS: Record<DockerComposeVerb, readonly string[]> = {
   down: ['down'],
   pull: ['pull'],
   restart: ['restart'],
+};
+
+/**
+ * What each verb runs on one service, before the service name. `up` leaves
+ * the services it depends on alone (`--no-deps`): recreating one service
+ * after its image changed must not restart the database next to it.
+ */
+export const COMPOSE_SERVICE_VERB_ARGS: Record<DockerComposeServiceVerb, readonly string[]> = {
+  up: ['up', '--detach', '--no-deps'],
+  restart: ['restart'],
+  pull: ['pull'],
+  stop: ['stop'],
 };
 
 /** Longest a compose action may run before its channel is closed. */
@@ -203,14 +218,19 @@ export interface ComposeTarget {
 }
 
 /**
- * The argv for `verb` on a project, before quoting:
- * `sh -c <RUN_IN_DIR> sh <dir> env DOCKER_HOST=… docker compose --ansi=never
- * --project-name=… --project-directory=… --file=… <verb args>`.
- * Throws 400 when the project's labels are unusable or the verb is unknown.
+ * The argv for `verb` on a project — or on one of its services when
+ * `service` is given — before quoting: `sh -c <RUN_IN_DIR> sh <dir> env
+ * DOCKER_HOST=… docker compose --ansi=never --project-name=…
+ * --project-directory=… --file=… <verb args> [service]`. Throws 400 when the
+ * project's labels are unusable, the verb is unknown, or the service name is
+ * not one Compose allows (callers also check it is one of the project's).
  */
-export function composeArgv({ project, socketPath }: ComposeTarget, verb: DockerComposeVerb): string[] {
-  const verbArgs = Object.hasOwn(COMPOSE_VERB_ARGS, verb) ? COMPOSE_VERB_ARGS[verb] : undefined;
-  if (!verbArgs) throw new DockerError('Unknown compose action', 400);
+export function composeArgv(
+  { project, socketPath }: ComposeTarget,
+  verb: DockerComposeVerb | DockerComposeServiceVerb,
+  service?: string,
+): string[] {
+  const verbArgs = verbArgsFor(verb, service);
   if (!PROJECT_NAME_PATTERN.test(project.name)) throw new DockerError('Invalid compose project name', 400);
   const dir = project.workingDir;
   if (!dir || !isUsablePath(dir)) throw new DockerError('The project has no usable working directory', 400);
@@ -233,17 +253,35 @@ export function composeArgv({ project, socketPath }: ComposeTarget, verb: Docker
     `--project-directory=${dir}`,
     ...project.configFiles.map((f) => `--file=${f}`),
     ...verbArgs,
+    ...(service === undefined ? [] : [service]),
   ];
 }
 
+/** The fixed arguments for a project verb, or a service verb when `service` is given; 400 for anything else. */
+function verbArgsFor(verb: string, service?: string): readonly string[] {
+  if (service === undefined) {
+    if (Object.hasOwn(COMPOSE_VERB_ARGS, verb)) return COMPOSE_VERB_ARGS[verb as DockerComposeVerb];
+    throw new DockerError('Unknown compose action', 400);
+  }
+  // A name starting with `-` would read as a flag; the pattern cannot start with one
+  if (!SERVICE_NAME_PATTERN.test(service)) throw new DockerError('Invalid compose service name', 400);
+  if (Object.hasOwn(COMPOSE_SERVICE_VERB_ARGS, verb)) return COMPOSE_SERVICE_VERB_ARGS[verb as DockerComposeServiceVerb];
+  throw new DockerError('Unknown compose action for a service', 400);
+}
+
 /** The remote command line for {@link composeArgv}: every element single-quoted. */
-export function composeCommand(target: ComposeTarget, verb: DockerComposeVerb): string {
-  return shellCommand(composeArgv(target, verb));
+export function composeCommand(target: ComposeTarget, verb: DockerComposeVerb | DockerComposeServiceVerb, service?: string): string {
+  return shellCommand(composeArgv(target, verb, service));
 }
 
 /** How the command is shown to people (UI, audit): what they would type. */
-export function composeDisplay(project: Pick<DockerComposeProject, 'name'>, verb: DockerComposeVerb): string {
-  return ['docker', 'compose', '-p', project.name, ...COMPOSE_VERB_ARGS[verb]].join(' ');
+export function composeDisplay(
+  project: Pick<DockerComposeProject, 'name'>,
+  verb: DockerComposeVerb | DockerComposeServiceVerb,
+  service?: string,
+): string {
+  const args = verbArgsFor(verb, service);
+  return ['docker', 'compose', '-p', project.name, ...args, ...(service === undefined ? [] : [service])].join(' ');
 }
 
 export interface ComposeRunResult {

@@ -120,6 +120,8 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
     if (route === '/version') {
       return json(res, 200, {
         Version: '27.3.1',
+        Os: 'linux',
+        Arch: 'amd64',
         ApiVersion: opts.apiVersion ?? '1.47',
         MinAPIVersion: opts.minApiVersion ?? '1.24',
         Components: [{ Name: 'Engine', Version: '27.3.1' }],
@@ -191,7 +193,7 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
         State: { Status: c.State, ExitCode: c.ExitCode ?? 0, OOMKilled: c.OOMKilled === true },
         RestartCount: c.RestartCount ?? 0,
         HostConfig: { RestartPolicy: { Name: c.RestartPolicy ?? 'no' } },
-        Config: { Tty: c.Tty === true, Env: c.Env ?? [], Labels: { tier: 'web' } },
+        Config: { Image: c.Image, Tty: c.Tty === true, Env: c.Env ?? [], Labels: { tier: 'web' } },
       });
     }
     if ((m = route.match(/^\/containers\/([^/]+)\/logs$/))) {

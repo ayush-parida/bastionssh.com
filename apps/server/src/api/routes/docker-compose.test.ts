@@ -431,6 +431,78 @@ describe('docker compose routes', () => {
     });
   });
 
+  describe('service actions', () => {
+    const service = (server: string, project: string, name: string, verb: string) =>
+      compose(server, `/${project}/services/${encodeURIComponent(name)}/${verb}`);
+
+    it('runs up --no-deps, restart, pull and stop on one service, audited with it', async () => {
+      const project = { name: 'blog', workingDir: '/srv/blog', configFiles: ['/srv/blog/compose.yaml'] };
+      for (const verb of ['up', 'restart', 'pull', 'stop'] as const) {
+        fake.log.exec = [];
+        const res = await post(operator, service(serverA, 'blog', 'web', verb));
+        expect(res.statusCode, verb).toBe(200);
+        expect(events(res.body).find((e) => e.type === 'exit'), verb).toMatchObject({ exitCode: 0 });
+        expect(fake.log.exec).toEqual([composeCommand({ project, socketPath: '/var/run/docker.sock' }, verb, 'web')]);
+      }
+      expect(composeCommand({ project, socketPath: '/var/run/docker.sock' }, 'up', 'web')).toMatch(/ 'up' '--detach' '--no-deps' 'web'$/);
+      expect(audits('docker.compose_up', serverA)[0]!.meta).toMatchObject({
+        project: 'blog',
+        service: 'web',
+        command: 'docker compose -p blog up --detach --no-deps web',
+        exitCode: 0,
+      });
+      expect(audits('docker.compose_stop', serverA)[0]!.meta).toMatchObject({ service: 'web', command: 'docker compose -p blog stop web' });
+    });
+
+    it('refuses hostile and unknown service names, and verbs a service does not take', async () => {
+      fake.log.exec = [];
+      for (const name of ['web;id', '-p', '--file=/etc/passwd', '.hidden', "web'", 'web web', '$(id)']) {
+        const res = await post(operator, service(serverA, 'blog', name, 'up'));
+        expect(res.statusCode, name).toBe(400);
+      }
+      // A valid name the project's containers do not carry never reaches the command line
+      const ghost = await post(operator, service(serverA, 'blog', 'ghost', 'up'));
+      expect(ghost.statusCode).toBe(404);
+      expect(ghost.json().error).toBe('No such service in this project');
+      for (const verb of ['down', 'exec', 'rm', 'run']) {
+        expect((await post(operator, service(serverA, 'blog', 'web', verb))).statusCode, verb).toBe(400);
+      }
+      expect(fake.log.exec.filter((c) => c.includes("'compose'"))).toEqual([]);
+    });
+
+    it('follows the same gates as project actions', async () => {
+      expect((await post(viewer, service(serverA, 'blog', 'web', 'up'))).statusCode).toBe(403);
+      expect((await post(restricted, service(serverB, 'blog', 'web', 'up'))).statusCode).toBe(404);
+      expect((await post(restricted, service(serverA, 'blog', 'web', 'restart'))).statusCode).toBe(200);
+      expect((await post(operator, service(serverA, 'shop', 'web', 'up'))).statusCode).toBe(409);
+      expect((await post(operator, service(serverA, 'nope', 'web', 'up'))).statusCode).toBe(404);
+    });
+
+    it('shares the project lock with project actions', async () => {
+      let finish: () => void = () => {};
+      fake.compose = (_c, ch) => {
+        finish = () => {
+          ch.emit('exit', 0);
+          ch.finish();
+        };
+      };
+      const first = await openStream(operator, compose(serverA, '/blog/up'), 'POST');
+      await until(() => fake.log.exec.some((c) => c.includes("'up'")));
+      expect((await post(admin, service(serverA, 'blog', 'web', 'restart'))).statusCode).toBe(409);
+      finish();
+      let e = await first.next();
+      while (e && e.type !== 'exit') e = await first.next();
+    });
+
+    it('reads the image each service is configured with', async () => {
+      expect((await get(viewer, compose(serverA, '/service-images'))).statusCode).toBe(200);
+      const images = (await get(viewer, compose(serverA, '/service-images'))).json() as Array<Record<string, unknown>>;
+      expect(images).toContainEqual({ project: 'blog', service: 'web', image: 'nginx' });
+      expect(images).toContainEqual({ project: 'shop', service: 'web', image: 'nginx:1.27' });
+      expect((await get(restricted, compose(serverB, '/service-images'))).statusCode).toBe(404);
+    });
+  });
+
   describe('logs', () => {
     it('merges the project’s container logs, tagged by source', async () => {
       const res = await get(operator, compose(serverA, '/blog/logs?tail=10&timestamps=1'));
