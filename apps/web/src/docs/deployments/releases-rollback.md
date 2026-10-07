@@ -35,7 +35,7 @@ A [quick service](services-overview.md) keeps **Update version**'s rules when it
 
 The Releases tab disables **Roll back** on such a release and says why when you point at it; the API answers `409 line_change_refused` with the reason, and bastionctl refuses the same rollback from a shell. Each release records its line in `release.json` when it is deployed (`ref`, `service`, `line`). For a release deployed before that, the line is read from the image its build log names, checked against the release's checksum; if it still cannot be told, the rollback is refused too.
 
-When you know better — a release that only *looks* like another line — a manager can roll back anyway: `bastionctl rollback <app> <release> --force-line` on the server, or `forceLine: true` in the API's rollback request (manage on Deployments and the server; recorded in the audit log). Refused attempts are recorded as `deploy.rollback` with `result: refused`. Apps without `service:` in their `bastion.yml` have no lines and are not affected.
+When you know better — a release that only *looks* like another line — a manager can roll back anyway: `bastionctl rollback <app> <release> --force-line` on the server, or `forceLine: true` in the API's rollback request (manage on Deployments and the server; recorded in the audit log). A rollback does not change `bastion.yml`: after a forced one it still names the image of the line you left, and the next **Deploy** serves that image again without this check — set `build.image` in the Config tab first if the service should stay on the older line. Refused attempts are recorded as `deploy.rollback` with `result: refused`. Apps without `service:` in their `bastion.yml` have no lines and are not affected.
 
 ## Restart
 

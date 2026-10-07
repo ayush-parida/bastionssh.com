@@ -796,7 +796,7 @@ Deployments section.
   on a command line BastionSSH builds. `serviceConfigYaml` writes the service's bastion.yml.
   SeaweedFS (`chrislusf/seaweedfs`, official, one `4` line followed through `latest` with a
   `match`) runs `weed server -ip=127.0.0.1 -ip.bind=127.0.0.1 -filer -s3 -s3.ip.bind=0.0.0.0`
-  through the image's entrypoint: master, volume server and filer (no auth of their own) on the
+  (Iceberg and Lance ports off, `-master.telemetry=false`) through the image's entrypoint: master, volume server and filer (no auth of their own) on the
   container's loopback, only the S3 gateway (8333, and its gRPC port) on bastion-apps. Its admin
   identity comes from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` in the env; a generated
   `WEED_JWT_FILER_SIGNING_KEY` makes the gateway's IAM-cache gRPC refuse unsigned identity

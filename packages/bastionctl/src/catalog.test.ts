@@ -189,7 +189,7 @@ describe('the service catalog', () => {
   it('runs SeaweedFS with only its S3 gateway on the network, credentials from the environment', () => {
     const t = serviceTemplate('seaweedfs')!;
     expect(t.versions.map((v) => v.image.split(':')[0])).toEqual(['chrislusf/seaweedfs']);
-    expect(t.command).toEqual(['server', '-ip=127.0.0.1', '-ip.bind=127.0.0.1', '-filer', '-s3', '-s3.ip.bind=0.0.0.0', '-s3.port.iceberg=0', '-s3.port.lance=0']);
+    expect(t.command).toEqual(['server', '-ip=127.0.0.1', '-ip.bind=127.0.0.1', '-filer', '-s3', '-s3.ip.bind=0.0.0.0', '-s3.port.iceberg=0', '-s3.port.lance=0', '-master.telemetry=false']);
     expect(t.secrets.map((s) => s.key)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'WEED_JWT_FILER_SIGNING_KEY']);
     expect({ backup: t.backup, port: t.port, publishPort: t.publishPort, ui: t.ui }).toEqual({ backup: null, port: 8333, publishPort: 8333, ui: { label: 'S3 API', domain: true } });
     const c = serviceConnectionDetails(t, { host: 'files', published: null });

@@ -25,7 +25,7 @@ One process, `weed server`, runs SeaweedFS's four parts: the **master** (which v
 - Only the **S3 gateway** listens on the server's private network (`<name>:8333`). The master, the volume server and the filer have no authentication of their own, so they listen on the container's loopback address only: no other app can reach them, and **there is no web UI** to give a domain — the filer's browser UI is not offered.
 - The S3 gateway's admin identity comes from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` in the container's environment (its `.env`): no config file is written and no key is ever on a command line. A request without a valid signature is refused (`403`), anonymous ones too.
 - `WEED_JWT_FILER_SIGNING_KEY` signs the requests SeaweedFS's own parts send each other. It also makes the gateway refuse identity changes over its internal gRPC port from anything but its own filer. Nothing outside the container uses it; leave it as it is.
-- The Iceberg and Lance catalog ports are switched off.
+- The Iceberg and Lance catalog ports are switched off, and so is the master's telemetry (anonymous cluster statistics SeaweedFS otherwise sends to its project's server).
 
 > **Note:** SeaweedFS writes the access key — not the secret — in the container's log when it starts (`Added admin identity … accessKey=…`). An access key id is not a secret on its own, but treat the log accordingly.
 

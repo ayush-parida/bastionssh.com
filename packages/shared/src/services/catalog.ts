@@ -410,8 +410,9 @@ export const SERVICE_CATALOG: readonly ServiceTemplate[] = [
     entrypoint: null,
     // Through the image's entrypoint (it gives /data to the seaweed user and drops to it). Master, volume server
     // and filer (no authentication of their own, the filer UI among them) listen on the container's loopback only;
-    // the S3 gateway alone on bastion-apps. No Iceberg or Lance catalog ports.
-    command: ['server', '-ip=127.0.0.1', '-ip.bind=127.0.0.1', '-filer', '-s3', '-s3.ip.bind=0.0.0.0', '-s3.port.iceberg=0', '-s3.port.lance=0'],
+    // the S3 gateway alone on bastion-apps. No Iceberg or Lance catalog ports. No telemetry: the master reports
+    // cluster statistics to SeaweedFS's server unless told not to (as Grafana's and Meilisearch's are switched off).
+    command: ['server', '-ip=127.0.0.1', '-ip.bind=127.0.0.1', '-filer', '-s3', '-s3.ip.bind=0.0.0.0', '-s3.port.iceberg=0', '-s3.port.lance=0', '-master.telemetry=false'],
     env: {},
     // The gateway makes its admin identity from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY in its environment:
     // no config file and nothing on a command line. WEED_JWT_FILER_SIGNING_KEY (security.toml's jwt.filer_signing.key)
