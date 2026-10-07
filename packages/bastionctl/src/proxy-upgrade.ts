@@ -241,17 +241,25 @@ async function replaceFront(ctx: Ctx, mode: DeployProxyMode, wasRunning: boolean
   const { docker } = ctx;
   await ensureProxyImage(ctx);
   const beforeLink = linkedCaddy(ctx);
-  linkCaddy(ctx, CADDY_ID);
   const file = ctx.layout.caddyfile;
   const backup = `${file}.before-upgrade`;
   const hadFile = fs.existsSync(file);
   if (hadFile) fs.copyFileSync(file, backup);
-  // From this version's generator: an older proxy's file may be for Caddy owning the ports itself
-  fs.writeFileSync(file, await caddyfileFor(ctx, collectSites(ctx)), { mode: 0o644 });
-  ctx.log(`Replacing ${PROXY_CONTAINER} (${reason})`);
-  ctx.log('Connections in flight may drop for about a second while the ports move to the new container; the previous one is kept until the new one answers');
-  await docker.remove(PROXY_PREVIOUS);
-  await docker.rename(PROXY_CONTAINER, PROXY_PREVIOUS);
+  // Until the old container is renamed it keeps serving: a failure up to there puts the link and the file back,
+  // or the next reload would run the new Caddy (and its file) under the old front
+  try {
+    linkCaddy(ctx, CADDY_ID);
+    // From this version's generator: an older proxy's file may be for Caddy owning the ports itself
+    fs.writeFileSync(file, await caddyfileFor(ctx, collectSites(ctx)), { mode: 0o644 });
+    ctx.log(`Replacing ${PROXY_CONTAINER} (${reason})`);
+    ctx.log('Connections in flight may drop for about a second while the ports move to the new container; the previous one is kept until the new one answers');
+    await docker.remove(PROXY_PREVIOUS);
+    await docker.rename(PROXY_CONTAINER, PROXY_PREVIOUS);
+  } catch (err) {
+    if (hadFile) fs.renameSync(backup, file);
+    if (beforeLink) linkCaddy(ctx, beforeLink);
+    throw err;
+  }
   try {
     // The ports stay with the old container until it has stopped (Docker publishes them per
     // container), so it gets a second for requests in flight, not Caddy's whole grace period

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DeployProxyUpgrade } from '@smt/shared';
 import { run } from './cli.js';
 import type { Ctx } from './context.js';
@@ -11,7 +11,7 @@ import { startFakeDocker, type FakeDocker } from './fake-docker.test-helper.js';
 import { Layout, PROXY_CONTAINER } from './names.js';
 import * as ops from './ops.js';
 import { CADDY_ID, FRONT_PATH, PROXY_IMAGE } from './proxy-image.js';
-import { PROXY_PREVIOUS, proxyStatus } from './proxy-upgrade.js';
+import { PROXY_PREVIOUS, proxyStatus, upgradeProxy } from './proxy-upgrade.js';
 import { LABEL_BUILD, LABEL_PROXY_SPEC } from './proxy.js';
 import { tarBuffer } from './tar.js';
 import { BASTIONCTL_VERSION } from './version.js';
@@ -229,6 +229,21 @@ describe('a newer front', () => {
     expect(fake.containers.has(PROXY_PREVIOUS)).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(layout.proxy, 'state.json'), 'utf8')).build).toBe(OLD_BUILD);
     expect(logs.some((l) => l.startsWith('The new proxy did not come up; restoring the previous one'))).toBe(true);
+  });
+
+  it('puts the Caddy link and the Caddyfile back when the old container cannot be moved aside', async () => {
+    const old = olderFront();
+    olderCaddy();
+    const before = fs.readFileSync(layout.caddyfile, 'utf8') + '# as the older proxy left it\n';
+    fs.writeFileSync(layout.caddyfile, before);
+    const c = ctx();
+    vi.spyOn(c.docker, 'rename').mockRejectedValueOnce(new Error('rename refused'));
+    expect(await upgradeProxy(c, 'proxy_apply')).toMatchObject({ result: 'failed', error: 'rename refused' });
+    // Still the old front, serving with the old Caddy and its file: nothing new runs under it at the next reload
+    expect(fake.containers.get(PROXY_CONTAINER)).toBe(old);
+    expect(fs.readlinkSync(path.join(caddyDir(), 'caddy'))).toBe(`${OLD_CADDY}/caddy`);
+    expect(fs.readFileSync(layout.caddyfile, 'utf8')).toBe(before);
+    expect(fs.existsSync(`${layout.caddyfile}.before-upgrade`)).toBe(false);
   });
 
   it('gives up waiting for a new front that never accepts connections, and restores', async () => {
