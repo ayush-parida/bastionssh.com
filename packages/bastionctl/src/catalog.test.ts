@@ -5,6 +5,7 @@ import {
   SERVICE_BACKUP_FILE,
   SERVICE_CATALOG,
   SERVICE_CATEGORIES,
+  compareReleases,
   defaultServiceVersion,
   serviceConfigYaml,
   serviceConnectionDetails,
@@ -132,6 +133,29 @@ describe('the service catalog', () => {
     expect(!refused.ok && refused.reason).toContain('PostgreSQL cannot be moved from PostgreSQL 16 to PostgreSQL 17 in place');
     const grafana = serviceTemplate('grafana')!;
     expect(serviceUpgradeAllowed(grafana, serviceVersion(grafana, '12'), serviceVersion(grafana, '13')!)).toEqual({ ok: true });
+    // Never back to an older line, even where any line may replace another: the data was migrated forward
+    const back = serviceUpgradeAllowed(grafana, serviceVersion(grafana, '13'), serviceVersion(grafana, '12')!);
+    expect(back.ok).toBe(false);
+    expect(!back.ok && back.reason).toContain('Grafana cannot be moved back from Grafana 13 to Grafana 12');
+    const mysql = serviceTemplate('mysql')!;
+    expect(serviceUpgradeAllowed(mysql, serviceVersion(mysql, '9'), serviceVersion(mysql, '8.4')!).ok).toBe(false);
+    expect(compareReleases('13.2.3', '12.4.12')).toBeGreaterThan(0);
+    expect(compareReleases('v1.52.4', 'v1.52.10')).toBeLessThan(0);
+    expect(compareReleases('RELEASE.2026-08-04T00-00-00Z', 'RELEASE.2026-08-04T00-00-00Z')).toBe(0);
+  });
+
+  it('keeps credentials off command lines: Mongo through a --config file, Redis and Valkey through REDISCLI_AUTH', () => {
+    for (const id of ['mongodb', 'redis', 'valkey']) {
+      const t = serviceTemplate(id)!;
+      const scripts = [t.backup!.dump, t.backup!.restore.type === 'exec' ? t.backup!.restore.command : [], t.healthcheck.type === 'command' ? t.healthcheck.command : []].map((c) => c.join(' '));
+      for (const script of scripts) expect(script, `${id}: ${script}`).not.toMatch(/ -p "\$|-a "\$|--password/);
+    }
+    expect(serviceTemplate('mongodb')!.backup!.dump.join(' ')).toContain('mongodump --config "$c"');
+    expect(serviceTemplate('valkey')!.healthcheck).toMatchObject({ command: ['sh', '-c', 'REDISCLI_AUTH="$VALKEY_PASSWORD" valkey-cli -h 127.0.0.1 ping | grep -q PONG'] });
+  });
+
+  it('health-checks RabbitMQ as its own user (a root CLI would write a cookie the server cannot read)', () => {
+    expect(serviceTemplate('rabbitmq')!.healthcheck).toEqual({ type: 'command', command: ['sh', '-c', 'exec su-exec rabbitmq rabbitmq-diagnostics -q ping'], timeout: '120s' });
   });
 
   it('gives connection strings with host, port and fixed values filled in and secrets left to reveal', () => {

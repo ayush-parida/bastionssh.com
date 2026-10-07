@@ -136,7 +136,7 @@ export interface ServiceTemplate {
   warning?: string;
 }
 
-type Pins = Record<string, Record<string, { track: string; image: string; version: string; match?: string }>>;
+type Pins = Record<string, Record<string, { track: string; image: string; version: string; match?: string; community?: boolean }>>;
 
 /** A line of `id` with its pinned image from images.json. */
 function line(id: string, major: string, label: string, extra: Omit<ServiceVersion, 'major' | 'label' | 'track' | 'image' | 'version'> = {}): ServiceVersion {
@@ -146,6 +146,8 @@ function line(id: string, major: string, label: string, extra: Omit<ServiceVersi
 }
 
 const sh = (script: string): string[] => ['sh', '-c', script];
+/** A mongodump/mongorestore `--config` file `$c` holding the root password (umask 077, removed when the shell exits). */
+const MONGO_AUTH = 'umask 077; c=$(mktemp) || exit 1; trap \'rm -f "$c"\' EXIT; printf \'password: "%s"\\n\' "$MONGO_INITDB_ROOT_PASSWORD" > "$c"';
 const SAME_MAJOR = 'Updates stay within the line: a new major version changes the data format, so move with a backup and restore into a new service.';
 
 const redisLike = (id: 'redis' | 'valkey', name: string, server: string, cli: string, key: string): ServiceTemplate => ({
@@ -169,7 +171,8 @@ const redisLike = (id: 'redis' | 'valkey', name: string, server: string, cli: st
   env: {},
   secrets: [{ key, bytes: 24, description: 'The password clients authenticate with (AUTH)' }],
   volumes: [{ name: 'data', path: '/data', exclusive: true }],
-  healthcheck: { type: 'command', command: sh(`${cli} --no-auth-warning -a "$${key}" -h 127.0.0.1 ping | grep -q PONG`), timeout: '60s' },
+  // The password through REDISCLI_AUTH (valkey-cli reads it too), never on the CLI's command line where `ps` on the host shows it
+  healthcheck: { type: 'command', command: sh(`REDISCLI_AUTH="$${key}" ${cli} -h 127.0.0.1 ping | grep -q PONG`), timeout: '60s' },
   memory: '256m',
   minMemory: '32m',
   connection: {
@@ -180,7 +183,7 @@ const redisLike = (id: 'redis' | 'valkey', name: string, server: string, cli: st
     ext: 'rdb',
     format: `RDB snapshot (${cli} --rdb)`,
     // To a file first, then out: --rdb's progress messages never mix with the snapshot
-    dump: sh(`f=/tmp/bastion-backup.rdb; ${cli} --no-auth-warning -a "$${key}" -h 127.0.0.1 --rdb "$f" >&2 && cat "$f"; s=$?; rm -f "$f"; exit $s`),
+    dump: sh(`f=/tmp/bastion-backup.rdb; REDISCLI_AUTH="$${key}" ${cli} -h 127.0.0.1 --rdb "$f" >&2 && cat "$f"; s=$?; rm -f "$f"; exit $s`),
     restore: { type: 'replace-file', path: '/data/dump.rdb' },
   },
   upgrade: { within: 'major', note: SAME_MAJOR },
@@ -345,10 +348,11 @@ export const SERVICE_CATALOG: readonly ServiceTemplate[] = [
     backup: {
       ext: 'archive.gz',
       format: 'mongodump archive, gzip (mongodump --archive --gzip)',
-      dump: sh('exec mongodump --archive --gzip --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin'),
+      // The password in a 0600 --config file (removed on exit), never on the tool's command line where `ps` on the host shows it
+      dump: sh(`${MONGO_AUTH}; mongodump --config "$c" --archive --gzip --quiet -u "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin`),
       restore: {
         type: 'exec',
-        command: ['sh', '-c', 'exec mongorestore --archive="$0" --gzip --drop --quiet -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin', '{file}'],
+        command: ['sh', '-c', `${MONGO_AUTH}; mongorestore --config "$c" --archive="$0" --gzip --drop --quiet -u "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin`, '{file}'],
       },
     },
     upgrade: { within: 'major', note: SAME_MAJOR },
@@ -437,7 +441,9 @@ export const SERVICE_CATALOG: readonly ServiceTemplate[] = [
     env: { RABBITMQ_DEFAULT_USER: 'app', RABBITMQ_NODENAME: 'rabbit@localhost' },
     secrets: [{ key: 'RABBITMQ_DEFAULT_PASS', bytes: 24, description: 'The password of the app user (AMQP and the management UI)' }],
     volumes: [{ name: 'data', path: '/var/lib/rabbitmq', exclusive: true }],
-    healthcheck: { type: 'command', command: ['rabbitmq-diagnostics', '-q', 'ping'], timeout: '120s' },
+    // As the rabbitmq user: run as root on a new volume, the CLI would write a root-owned .erlang.cookie before
+    // the server does, and the server (the entrypoint drops to rabbitmq) could not read it (eacces at first start)
+    healthcheck: { type: 'command', command: sh('exec su-exec rabbitmq rabbitmq-diagnostics -q ping'), timeout: '120s' },
     memory: '512m',
     minMemory: '256m',
     connection: {
@@ -660,6 +666,18 @@ export function serviceVersionOfImage(t: ServiceTemplate, ref: string): ServiceV
   });
 }
 
+/** Compare two release strings numerically by their parts (`v1.52.4`, `13.2.3`, `RELEASE.2026-08-04T00-00-00Z`). */
+export function compareReleases(a: string, b: string): number {
+  const parts = (s: string) => (s.match(/\d+/g) ?? []).map(Number);
+  const x = parts(a);
+  const y = parts(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] ?? 0) - (y[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
 /**
  * Whether Update version may move a service from `from` to `to` (both lines
  * of `t`): within the line always; across lines only when the template says
@@ -668,6 +686,10 @@ export function serviceVersionOfImage(t: ServiceTemplate, ref: string): ServiceV
  */
 export function serviceUpgradeAllowed(t: ServiceTemplate, from: ServiceVersion | undefined, to: ServiceVersion): { ok: true } | { ok: false; reason: string } {
   if (from && from.major === to.major) return { ok: true };
+  // Forward only: a release migrates its data forward and an older one cannot read it (Grafana 13 → 12)
+  if (from && compareReleases(to.version, from.version) < 0) {
+    return { ok: false, reason: `${t.name} cannot be moved back from ${from.label} to ${to.label}: the data was written by the newer release. Restore a backup into a new service instead.` };
+  }
   if (t.upgrade.within === 'any') return { ok: true };
   const what = from ? `${from.label} to ${to.label}` : `this image to ${to.label}`;
   return { ok: false, reason: `${t.name} cannot be moved from ${what} in place. ${t.upgrade.note}` };
