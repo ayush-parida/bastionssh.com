@@ -686,11 +686,13 @@ export function compareReleases(a: string, b: string): number {
  */
 export function serviceUpgradeAllowed(t: ServiceTemplate, from: ServiceVersion | undefined, to: ServiceVersion): { ok: true } | { ok: false; reason: string } {
   if (from && from.major === to.major) return { ok: true };
-  // Forward only: a release migrates its data forward and an older one cannot read it (Grafana 13 → 12)
-  if (from && compareReleases(to.version, from.version) < 0) {
-    return { ok: false, reason: `${t.name} cannot be moved back from ${from.label} to ${to.label}: the data was written by the newer release. Restore a backup into a new service instead.` };
+  if (t.upgrade.within === 'any') {
+    // Forward only: a release migrates its data forward and an older one cannot read it (Grafana 13 → 12)
+    if (from && compareReleases(to.version, from.version) < 0) {
+      return { ok: false, reason: `${t.name} cannot be moved back from ${from.label} to ${to.label}: its data was migrated by the newer release. Restore a backup into a new service instead.` };
+    }
+    return { ok: true };
   }
-  if (t.upgrade.within === 'any') return { ok: true };
   const what = from ? `${from.label} to ${to.label}` : `this image to ${to.label}`;
   return { ok: false, reason: `${t.name} cannot be moved from ${what} in place. ${t.upgrade.note}` };
 }
