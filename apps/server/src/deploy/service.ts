@@ -1,4 +1,6 @@
 import type { FastifyReply } from 'fastify';
+import type { DeployProxyUpgrade } from '@smt/shared';
+import { auditAs } from '../audit/index.js';
 import { and, eq } from 'drizzle-orm';
 import { canAccessServer } from '../auth/server-access.js';
 import { getDb } from '../db/index.js';
@@ -32,8 +34,10 @@ export interface DeployContext {
   server: ServerRow;
   remote: Remote;
   root: string;
-  /** `bastionctl <args> --json`, as the caller. */
+  /** `bastionctl <args> --json`, as the caller; a proxy upgrade it reports is audited (`deploy.proxy_upgrade`). */
   run<T>(args: string[], opts?: RunOptions & { allowFailure?: boolean }): Promise<BastionctlRun<T>>;
+  /** Audit a proxy upgrade bastionctl reported (a streamed command's result). */
+  auditProxyUpgrade(upgrade: DeployProxyUpgrade): void;
   /** Set when this request upgraded the server's bastionctl before running. */
   upgraded?: BastionctlUpgrade;
 }
@@ -63,13 +67,40 @@ export async function withRemote<T>(req: Caller, serverId: string, fn: (remote: 
   }
 }
 
+/**
+ * Audit `deploy.proxy_upgrade` (services spec §2): bastionctl upgraded the
+ * server's proxy before running the caller's command (or tried, and put the
+ * previous one back). `from`/`to` are bastionctl builds; `trigger` the
+ * command; `replaced` caddy and/or front.
+ */
+export function auditProxyUpgrade(req: Caller, server: ServerRow, root: string, upgrade: DeployProxyUpgrade): void {
+  auditAs(
+    { orgId: req.orgId, userId: req.user.id, email: req.user.email, ip: req.ip, userAgent: req.headers?.['user-agent'] },
+    'deploy.proxy_upgrade',
+    'server',
+    server.id,
+    server.name,
+    {
+      root,
+      from: upgrade.from,
+      to: upgrade.to,
+      trigger: upgrade.trigger,
+      result: upgrade.result,
+      replaced: upgrade.replaced,
+      ...(upgrade.error && { error: upgrade.error.split('\n')[0]!.slice(0, 300) }),
+    },
+  );
+}
+
 export function contextFor(req: Caller, remote: Remote, root: string): DeployContext {
   const actor = actorLabel(req.user);
+  const onProxyUpgrade = (upgrade: DeployProxyUpgrade) => auditProxyUpgrade(req, remote.server, root, upgrade);
   return {
     server: remote.server,
     remote,
     root,
-    run: (args, opts) => bastionctl(remote, root, args, { actor, ...opts }),
+    run: (args, opts) => bastionctl(remote, root, args, { actor, onProxyUpgrade, ...opts }),
+    auditProxyUpgrade: onProxyUpgrade,
   };
 }
 

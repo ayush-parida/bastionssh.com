@@ -8,10 +8,14 @@ import {
   type AuditAction,
   type DeployAppStatus,
   type DeployAppSummary,
+  type DeployEnvGenerated,
   type DeployEnvKeys,
   type DeployEnvReveal,
   type DeployLogLine,
   type DeployOutcome,
+  type DeployProxyStatus,
+  type DeployProxyUpgrade,
+  type DeployRestartResult,
   type DeployRelease,
   type DeployServerState,
   type DeploySetupResult,
@@ -30,7 +34,7 @@ import { bastionctlInfo } from '../../deploy/bundle.js';
 import { DeployError } from '../../deploy/errors.js';
 import { discoverRoot, installBastionctl, isPinned, prepareRoot, requireBundle } from '../../deploy/install.js';
 import type { RunResult } from '../../deploy/remote.js';
-import { actorLabel, bastionctlCommand, DEPLOY_TIMEOUT_MS, parseResult, SETUP_TIMEOUT_MS } from '../../deploy/runner.js';
+import { actorLabel, bastionctlCommand, DEPLOY_TIMEOUT_MS, parseResult, proxyUpgradeOf, SETUP_TIMEOUT_MS } from '../../deploy/runner.js';
 import { contextFor, sendDeployError, withDeploy, withRemote, type DeployContext } from '../../deploy/service.js';
 import { ensureCurrent, forgetUpgradeFailures, upgradeAudit, withUpgradeLock } from '../../deploy/upgrade.js';
 import { openDeploySse, TOO_MANY_STREAMS, type DeploySse } from '../../deploy/sse.js';
@@ -43,6 +47,11 @@ import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
  * level on the server (spec §2.7): `view` lists apps, releases, status and
  * config; `operate` deploys, rolls back, restarts and stops; `manage` sets
  * the server up, writes `bastion.yml` and `.env`, and deletes apps.
+ *
+ * Commands that change traffic (deploy, rollback, restart, setup, Update
+ * proxy now) have bastionctl upgrade a proxy left by an older bastionctl
+ * first (services spec §2); what it reports is audited as
+ * `deploy.proxy_upgrade` (deploy/service.ts).
  *
  * Nothing about apps is stored here: each request reads the server through
  * bastionctl (deploy/service.ts checks it is the one we ship first), and the
@@ -62,6 +71,7 @@ const RESTART_TIMEOUT_MS = 15 * 60_000;
 const rollbackBody = z.object({ release: z.string().regex(DEPLOY_NAME_PATTERN, 'Invalid release id') }).strict();
 const configBody = z.object({ text: z.string().max(64 * 1024) }).strict();
 const envBody = z.object({ value: z.string().max(64 * 1024) }).strict();
+const generateBody = z.object({ bytes: z.number().int().min(16).max(512).optional(), ifMissing: z.boolean().optional() }).strict();
 const deleteQuery = z.object({ purge: boolQuery });
 const setupBody = z.object({ proxy: z.enum(['caddy', 'nginx']).optional() }).strict();
 
@@ -146,7 +156,10 @@ async function streamCommand(
   });
   if (timer) clearTimeout(timer);
   flush();
-  const parsed = parseResult(result.stdout) as (DeployOutcome & { error?: string | null }) | { error: string } | null;
+  const parsed = parseResult(result.stdout) as (DeployOutcome & { error?: string | null }) | { error: string; proxyUpgrade?: DeployProxyUpgrade } | null;
+  // Before the command ran, bastionctl may have upgraded the proxy (whether or not the command then succeeded)
+  const upgrade = proxyUpgradeOf(parsed);
+  if (upgrade) ctx.auditProxyUpgrade(upgrade);
   let outcome: DeployOutcome | null = null;
   let error: string | null = null;
   if (parsed && 'release' in parsed) {
@@ -194,6 +207,14 @@ export async function deployRoutes(app: FastifyInstance) {
         const root = await discoverRoot(remote);
         if (!root) return { root, integrity: 'missing', version: bundle.version, installedVersion: null, pinned: false };
         const installed = await ensureCurrent(remote, root, bundle, upgradeAudit(req, remote.server, 'request'));
+        // The proxy against this bastionctl (read-only: reading the state never upgrades it)
+        const proxy =
+          installed.integrity === 'ok'
+            ? await contextFor(req, remote, root)
+                .run<DeployProxyStatus>(['proxy', 'status'])
+                .then((r) => r.value)
+                .catch(() => null)
+            : null;
         return {
           root,
           integrity: installed.integrity,
@@ -202,6 +223,7 @@ export async function deployRoutes(app: FastifyInstance) {
           pinned: installed.pinned || (installed.integrity === 'ok' && (await isPinned(remote, root))),
           ...(installed.upgraded && { upgraded: installed.upgraded }),
           ...(installed.upgradeError && { upgradeError: installed.upgradeError }),
+          ...(proxy && { proxy, proxyOutdated: proxy.state === 'outdated' }),
         };
       });
     } catch (err) {
@@ -246,6 +268,25 @@ export async function deployRoutes(app: FastifyInstance) {
           await audit(req, 'deploy.setup', 'server', remote.server.id, remote.server.name, { ...base, result: 'failed', error: auditError((err as Error).message) });
           throw err;
         }
+      });
+    } catch (err) {
+      return sendDeployError(reply, err);
+    }
+  });
+
+  /**
+   * POST /servers/:id/proxy/upgrade — Update proxy now: `bastionctl proxy
+   * upgrade` replaces a proxy left by an older bastionctl (pinned or not):
+   * Caddy behind the running front, the front only when it changed. Audited
+   * as `deploy.proxy_upgrade` (trigger `manual`) when there was something to
+   * do; 409 with the reason when it failed (the previous proxy serves).
+   */
+  app.post('/servers/:id/proxy/upgrade', { preHandler: gate('operate') }, async (req, reply) => {
+    const { id } = serverParams.parse(req.params);
+    try {
+      return await withDeploy(req, id, async (ctx) => {
+        const { value } = await ctx.run<{ proxyUpgrade: DeployProxyUpgrade | null; status: DeployProxyStatus }>(['proxy', 'upgrade'], { timeoutMs: SETUP_TIMEOUT_MS });
+        return value;
       });
     } catch (err) {
       return sendDeployError(reply, err);
@@ -329,10 +370,38 @@ export async function deployRoutes(app: FastifyInstance) {
    * POST /servers/:id/apps/:app/deploy — multipart/form-data with one file
    * field `source` (.tar or .tar.gz), streamed to `<root>/tmp` on the
    * server. SSE: `log` batches, then `result`, `exit` and `end`.
+   *
+   * An app with `build.type: image` takes no upload: the request has no
+   * body (or an empty JSON one) and the server pulls the image.
    */
   app.post('/servers/:id/apps/:app/deploy', { preHandler: gate('operate') }, async (req, reply) => {
     const { id, app: name } = appParams.parse(req.params);
-    if (!req.isMultipart()) return reply.status(400).send({ error: 'Send the source as multipart/form-data, in a file field named "source"' });
+    if (!req.isMultipart()) {
+      if (req.body !== undefined && req.body !== null && (typeof req.body !== 'object' || Object.keys(req.body).length > 0)) {
+        return reply.status(400).send({ error: 'Send the source as multipart/form-data, in a file field named "source" (or no body for build.type: image)' });
+      }
+      return sseRoute(req, reply, id, async (ctx, open) => {
+        await requireDeployLevel(req, ctx, name);
+        const { value: status } = await ctx.run<DeployAppStatus>(['status', name]);
+        if (status.config?.build.type !== 'image') {
+          throw new DeployError(`${name} builds from an upload (build.type: ${status.config?.build.type ?? 'unknown'}): send the source as multipart/form-data`, 400);
+        }
+        const sse = open();
+        if (!sse) return;
+        await auditDeploy(req, 'deploy.start', ctx, { app: name, image: status.config.build.image });
+        const { outcome, error, result } = await streamCommand(req, ctx, sse, ['deploy', name], (log) => syncProxy(req, ctx, name, 'apply', log));
+        await auditDeploy(req, 'deploy.finish', ctx, {
+          app: name,
+          release: outcome?.release ?? null,
+          result: outcome?.result ?? 'failed',
+          error: auditError(outcome?.error ?? error),
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          ...(result.timedOut && { timedOut: true }),
+          ...(sse.closed && { detached: true }),
+        });
+      });
+    }
     return sseRoute(req, reply, id, async (ctx, open, slot) => {
       await requireDeployLevel(req, ctx, name);
       const part = await req.file();
@@ -396,7 +465,7 @@ export async function deployRoutes(app: FastifyInstance) {
       try {
         return await withDeploy(req, id, async (ctx) => {
           // A restart starts and health-checks a fresh container before switching: allow for it
-          const { value } = await ctx.run<{ app: string; container: string }>([action, name], action === 'restart' ? { timeoutMs: RESTART_TIMEOUT_MS } : undefined);
+          const { value } = await ctx.run<DeployRestartResult>([action, name], action === 'restart' ? { timeoutMs: RESTART_TIMEOUT_MS } : undefined);
           await auditDeploy(req, `deploy.${action}`, ctx, { app: name, container: value.container });
           return value;
         });
@@ -441,6 +510,27 @@ export async function deployRoutes(app: FastifyInstance) {
       return await withDeploy(req, id, async (ctx) => {
         const { value: result } = await ctx.run<{ key: string; changed: boolean }>(['env', 'set', name, key], { stdin: value });
         await auditDeploy(req, 'deploy.env_set', ctx, { app: name, key, changed: result.changed });
+        return result;
+      });
+    } catch (err) {
+      return sendDeployError(reply, err);
+    }
+  });
+
+  /**
+   * POST /servers/:id/apps/:app/env/:key/generate — `{ bytes?, ifMissing? }`:
+   * bastionctl writes a crypto-random URL-safe value (a database password)
+   * to the app's `.env` on the server. The value never leaves the server;
+   * reveal it like any other. Audited with the name only.
+   */
+  app.post('/servers/:id/apps/:app/env/:key/generate', { preHandler: gate('manage') }, async (req, reply) => {
+    const { id, app: name, key } = envParams.parse(req.params);
+    const { bytes, ifMissing } = generateBody.parse(req.body ?? {});
+    try {
+      return await withDeploy(req, id, async (ctx) => {
+        const args = ['env', 'generate', name, key, ...(bytes !== undefined ? ['--bytes', String(bytes)] : []), ...(ifMissing ? ['--if-missing'] : [])];
+        const { value: result } = await ctx.run<DeployEnvGenerated>(args);
+        await auditDeploy(req, 'deploy.env_generate', ctx, { app: name, key, generated: result.generated, ...(bytes !== undefined && { bytes }) });
         return result;
       });
     } catch (err) {

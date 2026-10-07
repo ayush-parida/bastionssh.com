@@ -1,3 +1,4 @@
+import type { DeployProxyUpgrade } from '@smt/shared';
 import { shellCommand } from '../docker/shell.js';
 import { DeployError } from './errors.js';
 import { wrapperPath } from './install.js';
@@ -17,7 +18,7 @@ export const DEPLOY_TIMEOUT_MS = 30 * 60_000;
 export const SETUP_TIMEOUT_MS = 10 * 60_000;
 export const COMMAND_TIMEOUT_MS = 2 * 60_000;
 
-const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy']);
+const FLAGS = new Set(['--source', '--config', '--file', '--force', '--purge', '--drain', '--proxy', '--bytes', '--if-missing']);
 const WORD = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 
 function checkedArg(arg: string, root: string): string {
@@ -36,6 +37,16 @@ export function actorLabel(user: { email: string; id: string }): string {
 
 export function bastionctlCommand(root: string, args: string[], actor: string): string {
   return shellCommand(['env', `BASTION_ACTOR=${actor}`, wrapperPath(root), ...args.map((a) => checkedArg(a, root)), '--json']);
+}
+
+/**
+ * The proxy upgrade bastionctl reports beside a result or an error (services
+ * spec §2): commands that change traffic upgrade an outdated proxy first.
+ */
+export function proxyUpgradeOf(value: unknown): DeployProxyUpgrade | null {
+  const u = (value as { proxyUpgrade?: unknown } | null)?.proxyUpgrade as Partial<DeployProxyUpgrade> | undefined;
+  if (!u || typeof u !== 'object' || typeof u.to !== 'string' || (u.result !== 'success' && u.result !== 'failed')) return null;
+  return u as DeployProxyUpgrade;
 }
 
 export interface BastionctlRun<T> {
@@ -72,7 +83,7 @@ export async function bastionctl<T>(
   remote: Remote,
   root: string,
   args: string[],
-  opts: RunOptions & { actor: string; allowFailure?: boolean },
+  opts: RunOptions & { actor: string; allowFailure?: boolean; onProxyUpgrade?: (upgrade: DeployProxyUpgrade) => void | Promise<void> },
 ): Promise<BastionctlRun<T>> {
   const result = await remote.run(bastionctlCommand(root, args, opts.actor), { timeoutMs: COMMAND_TIMEOUT_MS, ...opts });
   if (result.timedOut) throw new DeployError(`bastionctl ${args[0]} did not finish in time`, 504);
@@ -81,6 +92,8 @@ export async function bastionctl<T>(
     const detail = result.stderr.trim().split('\n').slice(-5).join('\n');
     throw new DeployError(`bastionctl ${args[0]} failed${detail ? `: ${detail}` : ' with no output'}`, 502);
   }
+  const upgrade = proxyUpgradeOf(value);
+  if (upgrade) await opts.onProxyUpgrade?.(upgrade);
   const failure = value as { error?: unknown; code?: unknown };
   if (typeof failure.error === 'string' && !opts.allowFailure) {
     throw new DeployError(failure.error, statusFor(failure.code, failure.error), failure.code === 4 ? 'locked' : undefined);

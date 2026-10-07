@@ -188,7 +188,7 @@ describe.skipIf(!host)('deployments against a live server over SSH', () => {
     expect(apps.json()).toEqual([expect.objectContaining({ name: 'site1' })]);
     expect(await installedSha()).toBe(bundle.scriptSha256);
     expect(upgrades()).toEqual([{ root: '/config/bastion', from: '0.1.0', to: bundle.version, result: 'success', trigger: 'request' }]);
-    expect((await api('GET', deployApi())).json()).toEqual({ root: '/config/bastion', integrity: 'ok', version: bundle.version, installedVersion: bundle.version, pinned: false });
+    expect((await api('GET', deployApi())).json()).toMatchObject({ root: '/config/bastion', integrity: 'ok', version: bundle.version, installedVersion: bundle.version, pinned: false, proxyOutdated: false });
 
     // Requests arriving together after another replacement: one upgrade, every command runs
     expect((await putFile(`${BIN}/bastionctl.mjs`, older)).statusCode).toBe(201);

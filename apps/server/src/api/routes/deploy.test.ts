@@ -190,6 +190,8 @@ function deferred() {
 }
 
 const OUTCOME = { app: 'site1', release: '20261005-120000-abcdef12', previous: null, result: 'success', error: null };
+const PROXY_OK = { state: 'ok', build: '9.9.9', target: '9.9.9', outdated: [], pinned: false };
+const PROXY_UPGRADE = { from: '0.1.0+1111111', to: '9.9.9', trigger: 'deploy', result: 'success', replaced: ['caddy'] };
 
 /** The default bastionctl: plausible answers for every command. */
 function defaultBastionctl(args: string[]): Scripted {
@@ -215,8 +217,13 @@ function defaultBastionctl(args: string[]): Scripted {
       return { stdout: { app: rest[0], container: `bastion-${rest[0]}-${OUTCOME.release}` } };
     case 'delete':
       return { stdout: { app: rest[0], purged: rest.includes('--purge') } };
+    case 'proxy':
+      if (rest[0] === 'status') return { stdout: PROXY_OK };
+      if (rest[0] === 'upgrade') return { stdout: { proxyUpgrade: null, status: PROXY_OK } };
+      return { stdout: { ok: true } };
     case 'env':
       if (rest[0] === 'keys') return { stdout: { keys: ['DB_URL'] } };
+      if (rest[0] === 'generate') return { stdout: { key: rest[2], generated: !rest.includes('--if-missing') } };
       if (rest[0] === 'get') return { stdout: { key: rest[2], value: 'postgres://user:hunter2@db/app' } };
       return { stdout: { key: rest[2], changed: true } };
     default:
@@ -437,9 +444,11 @@ describe('deployment routes', () => {
         pinned: false,
         // The program itself was the shipped one; its version is what it says (none, in this fake bundle)
         upgraded: { from: null, to: '9.9.9' },
+        proxy: PROXY_OK,
+        proxyOutdated: false,
       });
       expect(fake.files.get(`${BIN}/bastionctl`)).toEqual(WRAPPER);
-      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'ok', version: '9.9.9', installedVersion: '9.9.9', pinned: false });
+      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'ok', version: '9.9.9', installedVersion: '9.9.9', pinned: false, proxy: PROXY_OK, proxyOutdated: false });
     });
 
     it('refreshes the nginx helper copy left in bin/ when it is there and differs, and never creates one', async () => {
@@ -525,7 +534,8 @@ describe('deployment routes', () => {
       expect(answers.map((r) => r.statusCode)).toEqual([200, 200, 200, 200]);
       expect(fake.writes).toEqual([`${BIN}/bastionctl.mjs`, `${BIN}/bastionctl`]);
       expect(audits('deploy.bastionctl_upgrade')).toHaveLength(1);
-      expect(fake.runs.map((r) => r.argv[0]).sort()).toEqual(['list', 'restart', 'status']);
+      // The state read the proxy (after the upgrade, too)
+      expect(fake.runs.map((r) => r.argv[0]).sort()).toEqual(['list', 'proxy', 'restart', 'status']);
     });
 
     it('reports a server that is not set up, and never sets one up on its own', async () => {
@@ -898,6 +908,134 @@ describe('deployment routes', () => {
       expect(upload.status).toBe(403);
       expect(fake.runs.map((r) => r.argv[0])).toEqual(['status']);
       expect(activeDeployStreamCount(operator.userId)).toBe(0);
+    });
+  });
+
+  describe('proxy upgrades', () => {
+    beforeEach(() => {
+      getDb().delete(auditLog).where(eq(auditLog.action, 'deploy.proxy_upgrade')).run();
+    });
+
+    it('reports the proxy in the server state, read-only', async () => {
+      fake.bastionctl = (args) =>
+        args[0] === 'proxy' && args[1] === 'status'
+          ? { stdout: { state: 'outdated', build: '0.1.0+1111111', target: '9.9.9', outdated: ['caddy'], pinned: false } }
+          : defaultBastionctl(args);
+      const res = await call(viewer, 'GET', api());
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toMatchObject({
+        integrity: 'ok',
+        proxyOutdated: true,
+        proxy: { state: 'outdated', build: '0.1.0+1111111', target: '9.9.9', outdated: ['caddy'], pinned: false },
+      });
+      expect(fake.runs.map((r) => r.argv)).toEqual([['proxy', 'status']]);
+      expect(audits('deploy.proxy_upgrade')).toEqual([]);
+
+      // A proxy that cannot be read leaves the fields out; the state still answers
+      fake.bastionctl = (args) => (args[0] === 'proxy' ? { stderr: ['docker: no'], exitCode: 1 } : defaultBastionctl(args));
+      const without = await call(viewer, 'GET', api());
+      expect(without.statusCode).toBe(200);
+      expect(without.json()).not.toHaveProperty('proxyOutdated');
+      expect(without.json()).not.toHaveProperty('proxy');
+      // Not set up: nothing runs
+      fake.root = null;
+      fake.runs.length = 0;
+      expect((await call(viewer, 'GET', api())).json()).not.toHaveProperty('proxy');
+      expect(fake.runs).toEqual([]);
+    });
+
+    it('updates the proxy now (operate), auditing what bastionctl did', async () => {
+      const upgrade = { ...PROXY_UPGRADE, trigger: 'manual', replaced: ['front', 'caddy'] };
+      fake.bastionctl = (args) => (args[0] === 'proxy' && args[1] === 'upgrade' ? { stdout: { proxyUpgrade: upgrade, status: PROXY_OK, ...{} }, stderr: ['Upgrading the proxy'] } : defaultBastionctl(args));
+      expect((await call(viewer, 'POST', api('/proxy/upgrade'))).statusCode).toBe(403);
+      const res = await call(operator, 'POST', api('/proxy/upgrade'));
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({ proxyUpgrade: upgrade, status: PROXY_OK });
+      expect(fake.runs.map((r) => r.argv)).toEqual([['proxy', 'upgrade']]);
+      const [row, ...rest] = audits('deploy.proxy_upgrade');
+      expect(rest).toEqual([]);
+      expect(row!.actorId).toBe(operator.userId);
+      expect(row!.resourceId).toBe(serverA);
+      expect(row!.meta).toEqual({ root: '/opt/bastion', from: '0.1.0+1111111', to: '9.9.9', trigger: 'manual', result: 'success', replaced: ['front', 'caddy'] });
+
+      // Nothing to do: nothing audited
+      fake.bastionctl = defaultBastionctl;
+      expect((await call(operator, 'POST', api('/proxy/upgrade'))).json()).toEqual({ proxyUpgrade: null, status: PROXY_OK });
+      expect(audits('deploy.proxy_upgrade')).toHaveLength(1);
+
+      // Failed: 409 with the reason, and the attempt audited
+      const failed = { ...upgrade, result: 'failed', error: 'The new proxy did not accept connections in time' };
+      fake.bastionctl = () => ({ stdout: { proxyUpgrade: failed, error: 'The proxy could not be upgraded; the previous one keeps serving', code: 1 }, exitCode: 1 });
+      const refused = await call(operator, 'POST', api('/proxy/upgrade'));
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().error).toMatch(/previous one keeps serving/);
+      expect(audits('deploy.proxy_upgrade')[0]!.meta).toMatchObject({ trigger: 'manual', result: 'failed', error: 'The new proxy did not accept connections in time' });
+    });
+
+    it('audits the upgrade a deploy, a restart or setup did first, even when the command then failed', async () => {
+      fake.bastionctl = (args) => (args[0] === 'deploy' ? { stdout: { ...OUTCOME, proxyUpgrade: PROXY_UPGRADE } } : defaultBastionctl(args));
+      const { res } = await postForm(operator, api('/apps/site1/deploy'), tarGz());
+      const events = await allEvents(res);
+      expect(events.find((e) => e.type === 'result')).toMatchObject({ outcome: { result: 'success', proxyUpgrade: PROXY_UPGRADE } });
+      expect(audits('deploy.proxy_upgrade').map((r) => r.meta)).toEqual([{ root: '/opt/bastion', from: '0.1.0+1111111', to: '9.9.9', trigger: 'deploy', result: 'success', replaced: ['caddy'] }]);
+
+      // A rollback refused after the upgrade ran
+      fake.bastionctl = (args) =>
+        args[0] === 'rollback' ? { stdout: { error: 'already the current release', code: 1, proxyUpgrade: { ...PROXY_UPGRADE, trigger: 'rollback' } }, exitCode: 1 } : defaultBastionctl(args);
+      const back = await fetch(`${base}${api('/apps/site1/rollback')}`, {
+        method: 'POST',
+        headers: { ...operator.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ release: OUTCOME.release }),
+      });
+      expect((await allEvents(back)).find((e) => e.type === 'error')).toEqual({ type: 'error', error: 'already the current release' });
+      expect(audits('deploy.proxy_upgrade')[0]!.meta).toMatchObject({ trigger: 'rollback', result: 'success' });
+
+      fake.bastionctl = (args) => (args[0] === 'restart' ? { stdout: { app: 'site1', container: 'c', proxyUpgrade: { ...PROXY_UPGRADE, trigger: 'restart', result: 'failed', error: 'x' } } } : defaultBastionctl(args));
+      expect((await call(operator, 'POST', api('/apps/site1/restart'))).json()).toMatchObject({ proxyUpgrade: { result: 'failed' } });
+      expect(audits('deploy.proxy_upgrade')[0]!.meta).toMatchObject({ trigger: 'restart', result: 'failed', error: 'x' });
+
+      fake.bastionctl = (args) =>
+        args[0] === 'setup' ? { stdout: { ...(defaultBastionctl(args).stdout as object), proxyUpgrade: { ...PROXY_UPGRADE, trigger: 'setup', replaced: ['front'] } } } : defaultBastionctl(args);
+      expect((await call(admin, 'POST', api('/setup'))).statusCode).toBe(200);
+      expect(audits('deploy.proxy_upgrade')[0]!.meta).toMatchObject({ trigger: 'setup', replaced: ['front'] });
+      expect(audits('deploy.proxy_upgrade')).toHaveLength(4);
+    });
+  });
+
+  describe('services', () => {
+    it('deploys a build.type image app without an upload, and refuses one that builds from an upload', async () => {
+      const image = 'postgres:16.4';
+      fake.bastionctl = (args) =>
+        args[0] === 'status' ? { stdout: { name: 'site1', config: { build: { type: 'image', image } } } } : defaultBastionctl(args);
+      const res = await fetch(`${base}${api('/apps/site1/deploy')}`, { method: 'POST', headers: operator.headers });
+      expect(res.status).toBe(200);
+      expect((await allEvents(res)).find((e) => e.type === 'result')).toEqual({ type: 'result', outcome: OUTCOME });
+      expect(fake.runs.map((r) => r.argv)).toEqual([['status', 'site1'], ['status', 'site1'], ['deploy', 'site1']]);
+      expect(audits('deploy.start')[0]!.meta).toEqual({ app: 'site1', image });
+      expect(audits('deploy.finish')[0]!.meta).toMatchObject({ app: 'site1', result: 'success' });
+
+      fake.bastionctl = defaultBastionctl;
+      fake.runs.length = 0;
+      const upload = await fetch(`${base}${api('/apps/site1/deploy')}`, { method: 'POST', headers: operator.headers });
+      expect(upload.status).toBe(400);
+      expect((await upload.json()).error).toMatch(/builds from an upload/);
+      expect(fake.runs.map((r) => r.argv[0])).not.toContain('deploy');
+      const junk = await call(operator, 'POST', api('/apps/site1/deploy'), { source: 'x' });
+      expect(junk.statusCode).toBe(400);
+    });
+
+    it('generates a secret into .env (manage), never seeing the value, and audits the name', async () => {
+      expect((await call(operator, 'POST', api('/apps/site1/env/POSTGRES_PASSWORD/generate'), {})).statusCode).toBe(403);
+      const res = await call(admin, 'POST', api('/apps/site1/env/POSTGRES_PASSWORD/generate'), { bytes: 48, ifMissing: true });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json()).toEqual({ key: 'POSTGRES_PASSWORD', generated: false });
+      expect(fake.runs.at(-1)!.argv).toEqual(['env', 'generate', 'site1', 'POSTGRES_PASSWORD', '--bytes', '48', '--if-missing']);
+      expect(audits('deploy.env_generate')[0]!.meta).toEqual({ app: 'site1', key: 'POSTGRES_PASSWORD', generated: false, bytes: 48 });
+      expect((await call(admin, 'POST', api('/apps/site1/env/POSTGRES_PASSWORD/generate'))).json()).toEqual({ key: 'POSTGRES_PASSWORD', generated: true });
+      expect(fake.runs.at(-1)!.argv).toEqual(['env', 'generate', 'site1', 'POSTGRES_PASSWORD']);
+      for (const body of [{ bytes: 8 }, { bytes: 4096 }, { bytes: '32' }, { length: 32 }]) {
+        expect((await call(admin, 'POST', api('/apps/site1/env/POSTGRES_PASSWORD/generate'), body)).statusCode, JSON.stringify(body)).toBe(400);
+      }
     });
   });
 
