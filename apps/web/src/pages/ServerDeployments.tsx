@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import type { DeployProxyState, DeployServerState, Server } from '@smt/shared';
 import { ArrowLeft, Rocket } from 'lucide-react';
+import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { deployErrorCode, deployKeys, deployPath, type DeployAppRow } from '@/lib/deploy.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
@@ -44,6 +45,14 @@ export default function ServerDeploymentsPage() {
     retry: false,
   });
   const ready = state.data?.integrity === 'ok';
+  // Reading the state upgraded the server's bastionctl to the one this BastionSSH ships: say so, once per answer
+  const announced = useRef<DeployServerState | null>(null);
+  useEffect(() => {
+    const upgraded = state.data?.upgraded;
+    if (!upgraded || announced.current === state.data) return;
+    announced.current = state.data ?? null;
+    toast.info(`bastionctl upgraded to ${upgraded.to}${upgraded.from ? ` (was ${upgraded.from})` : ''}`);
+  }, [state.data]);
   // The proxy mode and, in nginx mode, what an administrator still has to do; optional (an older server answers 404)
   const proxy = useQuery<DeployProxyState>({
     queryKey: deployKeys.proxy(serverId),

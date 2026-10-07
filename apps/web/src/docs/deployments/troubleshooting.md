@@ -3,7 +3,7 @@ title: Troubleshooting deployments
 section: deployments
 order: 120
 summary: What the common deploy failures mean and how to fix them — wrong folder uploaded, missing build script, standalone output, health checks, DNS, ports, Reinstall, memory and certificates.
-keywords: [error, failed, troubleshooting, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, out of memory, oom, killed, 137, certificate, next build folder]
+keywords: [error, failed, troubleshooting, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, certificate, next build folder]
 ---
 
 When a deploy fails, the previous release keeps serving. The deploy log ends with the reason, and failures this page knows about link here.
@@ -91,11 +91,18 @@ The previous release kept serving throughout.
 
 ## Integrity check failed: Reinstall
 
-**You see** *bastionctl needs reinstalling*, or *The bastionctl on this server is not the version this BastionSSH ships (or it was modified). Reinstall it with Set up.*
+**You see** *bastionctl is pinned* or *bastionctl could not be upgraded*, or a command refused with *The bastionctl on this server is not the version this BastionSSH ships (installed …, this BastionSSH ships …)*.
 
-**Why.** Before every command BastionSSH checks the server's `bastionctl` against its own copy. After a BastionSSH update the shipped version is new, so every server asks for this once; a file edited on the server is refused for the same reason.
+**Why.** Before every command BastionSSH checks the server's `bastionctl` against its own copy, and when they differ it installs its own copy automatically ([Automatic upgrades](overview.md#automatic-upgrades)). You only see this when that could not happen:
 
-**Fix.** Click **Reinstall bastionctl** on the Deployments tab (manage access). Your apps, configs, secrets and releases are untouched. See [Reinstall](overview.md#reinstall).
+- **the server is pinned** — `bin/.pinned` exists in the deployments folder, so BastionSSH leaves `bastionctl` alone; or
+- **the upgrade failed** — usually the SSH user cannot write the `bin/` folder (it was chowned to root, the disk is full or read-only). The message ends with the error the server gave. BastionSSH tries again after five minutes, or at once after a Reinstall.
+
+**Fix.**
+
+- Pinned on purpose and ready to move on: remove the pin on the server (`rm /opt/bastion/bin/.pinned`, or `~/bastion/bin/.pinned`) and reload the tab. See [Pinning](overview.md#pinning).
+- Upgrade failed: give the SSH user write access to `bin/` again (`sudo chown -R <ssh-user> /opt/bastion/bin`), then reload the tab.
+- Either way, **Reinstall bastionctl** on the Deployments tab (manage access) installs the shipped copy. Your apps, configs, secrets and releases are untouched. See [Reinstall](overview.md#reinstall).
 
 ## Build ran out of memory
 

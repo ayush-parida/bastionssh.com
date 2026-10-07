@@ -2,8 +2,8 @@
 title: How deployments work
 section: deployments
 order: 10
-summary: Deploy web apps to your own servers with Docker — what lives where, what the server needs, and how Setup and Reinstall work.
-keywords: [deploy, bastionctl, caddy, setup, reinstall, prerequisites, docker, opt/bastion, overview]
+summary: Deploy web apps to your own servers with Docker — what lives where, what the server needs, how Setup and Reinstall work, and how bastionctl keeps itself up to date.
+keywords: [deploy, bastionctl, caddy, setup, reinstall, upgrade, pinned, version, prerequisites, docker, opt/bastion, overview]
 ---
 
 Deployments put web apps — static sites, Next.js apps, or anything with a Dockerfile — on a server you manage, behind an automatic-HTTPS proxy, with zero-downtime switches and one-click rollback. There is no Git integration and no build service: you upload the source (or a build), the server builds it and serves it.
@@ -31,6 +31,7 @@ The deployments folder is `/opt/bastion` when the SSH user can write it (Setup c
 ```text
 /opt/bastion/
   bin/bastionctl, bin/bastionctl.mjs, bin/bastion-nginx
+  bin/.pinned                     # optional: never upgrade bastionctl automatically
   proxy/Caddyfile                 # generated from every app; never edit
   proxy/data/ proxy/config/       # Caddy's certificates and state
   proxy/mode                      # caddy or nginx, chosen at setup
@@ -62,16 +63,42 @@ Setup creates the folder, installs `bastionctl`, creates the `bastion-apps` netw
 
 Setting up needs **manage** access to Deployments on that server (see [Permissions](permissions.md)).
 
+## Automatic upgrades
+
+Before every command, BastionSSH checks that the `bastionctl` on the server is byte-for-byte the copy it ships (program and wrapper, by SHA-256). When it is not — usually because BastionSSH was updated and ships a newer `bastionctl` — BastionSSH installs its own copy over the old one, checks the hashes of what it wrote, and then runs your command. There is nothing to click: opening the Deployments tab, a deploy, or the background certificate check all do it, and a toast says **bastionctl upgraded to …** when it happens while you watch.
+
+- It only replaces the two files in `bin/` (and refreshes the `bin/bastion-nginx` copy in [nginx mode](nginx.md) if it is there). The network, the proxy and your apps are not touched, and a server that was never set up stays that way.
+- Each file is written beside the old one and renamed over it, so a deploy already running keeps going on the version it started with. The first command after an upgrade can take a little longer when Docker has to pull the Node.js image the new `bastionctl` runs in.
+- Every upgrade is in the audit log as **deploy.bastionctl_upgrade**, with the version it went from and to, under the member whose request triggered it (or *system* for the background check).
+- It needs the SSH user to be able to write `bin/` in the deployments folder, as it can after Setup. If writing fails, the command is refused as before, with the reason, and the tab shows **bastionctl could not be upgraded** — fix the permissions or click **Reinstall bastionctl**.
+
+The version shown on the tab is `0.1.0+<build>`: the build is the first 7 characters of the hash of the shipped files, so two BastionSSH versions that ship the same `bastionctl` show the same build. A server installed before builds were numbered shows plain `0.1.0` until it is upgraded. `bastionctl version` on the server prints the same.
+
+## Pinning
+
+To keep a server on the `bastionctl` it has — while you test a BastionSSH update on another server first, say — pin it by creating an empty file named `.pinned` in its `bin/` folder:
+
+```sh
+touch /opt/bastion/bin/.pinned        # or ~/bastion/bin/.pinned
+```
+
+A pinned server is never upgraded automatically. While its `bastionctl` matches the shipped one nothing changes (the tab shows **pinned** next to the version); once BastionSSH ships a different one, commands on that server are refused and the tab says **bastionctl is pinned**, as before automatic upgrades. To unpin, remove the file and reload the tab — the next request upgrades it:
+
+```sh
+rm /opt/bastion/bin/.pinned
+```
+
+**Reinstall bastionctl** installs the shipped copy on a pinned server too; the pin stays in place.
+
 ## Reinstall
 
-Before every command, BastionSSH checks that the `bastionctl` on the server is byte-for-byte the copy it ships (by SHA-256). If it is not, nothing runs and the tab says **bastionctl needs reinstalling**. Click **Reinstall** (or **Reinstall bastionctl**).
+**Reinstall** on the Deployments tab is Setup again: it installs the shipped `bastionctl` (whether or not the server is pinned), then re-creates the network and the proxy with the images this BastionSSH pins. It keeps the server's proxy mode and every app, config, secret and release.
 
-You need to reinstall:
+Automatic upgrades replace only `bastionctl` itself, so you still reinstall:
 
-- **After updating BastionSSH.** A new version ships a new `bastionctl`, so every server with deployments asks to be reinstalled before the next deploy. Pinned base images (Node.js for builds, Caddy) move with BastionSSH too; a server gets them at its next Reinstall.
-- **If someone edited or replaced the files in `bin/`.** A modified program is refused on purpose — it runs with Docker access.
-
-Reinstall is Setup again: it keeps the server's proxy mode and every app. If the proxy image changed in the update, `bastion-caddy` is recreated, so sites are unreachable for a moment; plan reinstalls outside busy hours.
+- **When a BastionSSH update moves the proxy image.** Pinned base images (Node.js, Caddy) move with BastionSSH; builds use the new ones right after the upgrade, but `bastion-caddy` is only recreated by Reinstall. Until then a deploy stops with *bastion-caddy runs a proxy from an older bastionctl; run bastionctl setup (Reinstall in BastionSSH)*. Sites are unreachable for a moment during the Reinstall; plan it outside busy hours.
+- **When an automatic upgrade cannot run**: the server is pinned, or the SSH user cannot write `bin/`.
+- **If the network or the proxy container was removed or changed by hand.**
 
 ## Creating an app and deploying
 

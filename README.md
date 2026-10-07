@@ -344,11 +344,12 @@ The **Compose** tab lists Compose projects found from their containers' labels, 
 
 Deploy web apps — Next.js, anything with a Dockerfile, or a static site — to your own servers, without Git and without BastionSSH keeping any of it. The server is the source of truth: each app's config, secrets, releases and the proxy config are files there, and `bastionctl` on the server does the work, so a deploy runs the same from BastionSSH or from a shell (`ssh server /opt/bastion/bin/bastionctl deploy site1 --source site.tar.gz`). BastionSSH only uploads, streams the log, and records who did what in the audit log ([design](docs/superpowers/specs/2026-10-05-server-deployments-design.md)).
 
-**Set up** on a server's Deployments tab needs Docker on the server and an SSH user that may use it (docker group, or passwordless `sudo docker`). It installs `bastionctl` (one file, checked against the copy this BastionSSH ships before every use — a modified one is refused until you reinstall), creates the private `bastion-apps` network and the proxy. Deployments live in `/opt/bastion` when the SSH user can write it (created with passwordless `sudo` when allowed), otherwise in `~/bastion`:
+**Set up** on a server's Deployments tab needs Docker on the server and an SSH user that may use it (docker group, or passwordless `sudo docker`). It installs `bastionctl` (one file, checked against the copy this BastionSSH ships before every use), creates the private `bastion-apps` network and the proxy. Deployments live in `/opt/bastion` when the SSH user can write it (created with passwordless `sudo` when allowed), otherwise in `~/bastion`:
 
 ```
 /opt/bastion/
   bin/bastionctl, bin/bastionctl.mjs, bin/bastion-nginx
+  bin/.pinned                     # optional: never upgrade bastionctl automatically
   proxy/Caddyfile                 # generated from every app; never edit
   proxy/data/ proxy/config/       # Caddy's certificates and state
   proxy/mode                      # caddy or nginx, chosen at setup
@@ -359,6 +360,8 @@ Deploy web apps — Next.js, anything with a Dockerfile, or a static site — to
     releases/<id>/                # source, build.log, release.json
     current -> releases/<id>
 ```
+
+**bastionctl upgrades itself.** When a BastionSSH update ships a different `bastionctl` (or the installed files were changed), the next request to that server — opening the Deployments tab, a deploy, the background certificate check — installs the shipped program and wrapper over the old ones (written beside them and renamed into place, so a running deploy is unaffected), checks their SHA-256, audits it as `deploy.bastionctl_upgrade` (from/to versions; the requesting member, or *system*), and carries on. Only the files are replaced: a server that was never set up stays that way, and moving `bastion-caddy` to a newly pinned proxy image still takes **Reinstall** (Setup again). The version shown is `0.1.0+<build>` — the first 7 hex digits of the shipped files' hash; older installs show `0.1.0`. To opt a server out, `touch /opt/bastion/bin/.pinned` (or `~/bastion/bin/.pinned`): it is never upgraded automatically, and once it differs its commands are refused (409 `bastionctl_mismatch`, `pinned: true`) and the tab shows a *pinned* banner until you `rm` the pin or click Reinstall. If the upgrade cannot write `bin/`, commands are refused the same way with the reason, and it is retried after five minutes or a Reinstall.
 
 **Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>`, starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. Before building — and in the browser before uploading a folder or zip — the upload is checked against the build type: Next's `.next` build folder given to a static app, a `package.json` with no `build` script, or an output folder that is not there is refused with what to upload instead. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
 

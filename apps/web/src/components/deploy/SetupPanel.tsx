@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { DeployProxyMode, DeployProxyState, DeployServerState, DeploySetupResult } from '@smt/shared';
-import { CheckCircle2, Circle, Loader2, ShieldAlert, TriangleAlert, Wrench } from 'lucide-react';
+import { CheckCircle2, Circle, Loader2, Pin, ShieldAlert, TriangleAlert, Wrench } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api.js';
 import { deployErrorCode, deployKeys, deployPath } from '@/lib/deploy.js';
@@ -59,9 +59,41 @@ function NginxSteps({ proxy }: { proxy: DeployProxyState }) {
   );
 }
 
+/** The installed build, and the shipped one when they differ. */
+function BastionctlVersion({ state }: { state: DeployServerState }) {
+  const installed = state.installedVersion ?? (state.integrity === 'ok' ? state.version : null);
+  if (installed === state.version) return <span className="font-mono text-foreground">{installed}</span>;
+  return (
+    <span className="font-mono text-foreground">
+      {installed ?? 'unknown'} <span className="font-sans text-muted-foreground">installed, ships</span> {state.version}
+    </span>
+  );
+}
+
+/** A pinned server: what the pin does and how to remove it. */
+function PinNotice({ state }: { state: DeployServerState }) {
+  const pin = `${state.root ?? '/opt/bastion'}/bin/.pinned`;
+  return (
+    <div aria-label="bastionctl pinned" className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+      <Pin size={14} className="mt-0.5 shrink-0 text-amber-500" />
+      <span>
+        {state.integrity === 'ok'
+          ? 'bastionctl is pinned on this server: BastionSSH will not upgrade it automatically after an update. '
+          : 'bastionctl is pinned on this server, so BastionSSH does not upgrade it, and it is not the version this BastionSSH ships: nothing runs until it matches. '}
+        To unpin, run <code className="rounded bg-muted px-1 py-0.5 font-mono text-foreground">rm {pin}</code> on the server and reload this page
+        {state.integrity === 'ok' ? '.' : ' (BastionSSH then upgrades it), or click Reinstall bastionctl.'}{' '}
+        <DocsLink to={`${DEPLOY_DOCS.overview}#pinning`}>About pinning</DocsLink>
+      </span>
+    </div>
+  );
+}
+
 /**
  * Deployments on this server: where they live, whether its bastionctl is the
- * one this BastionSSH ships, and Set up / Reinstall (spec §7). Setting up
+ * one this BastionSSH ships, and Set up / Reinstall (spec §7). A set-up
+ * server's bastionctl is upgraded by the server whenever it differs (reading
+ * the state does it), so this only shows a mismatch for a pinned server or a
+ * failed upgrade. Setting up
  * creates the root folder (with sudo when the SSH user may), installs
  * bastionctl, the `bastion-apps` network and the proxy; it is safe to run
  * again. Prerequisites are checked by the server during setup; their state
@@ -98,6 +130,7 @@ export default function SetupPanel({
     },
   });
   const code = deployErrorCode(setup.error);
+  const mismatch = state.integrity === 'mismatch';
   const proxy = result?.proxy ?? proxyState?.mode ?? null;
   const nginxDetected = !proxyState?.mode && proxyState?.nginx.detected;
 
@@ -129,13 +162,19 @@ export default function SetupPanel({
             Proxy <span className="text-foreground">{proxy === 'nginx' ? 'nginx on the host' : (proxy ?? 'caddy')}</span>
           </span>
           <span className="text-muted-foreground">
-            bastionctl <span className="font-mono text-foreground">{state.version}</span>
+            bastionctl <BastionctlVersion state={state} />
+            {state.pinned && (
+              <span className="ml-1.5 inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-600 dark:text-amber-400">
+                <Pin size={10} /> pinned
+              </span>
+            )}
           </span>
           <DocsLink to={`${DEPLOY_DOCS.overview}#reinstall`} className="ml-auto text-xs">
             When to reinstall
           </DocsLink>
           <span>{button}</span>
         </div>
+        {state.pinned && <PinNotice state={state} />}
         {proxyState?.mode === 'nginx' && <NginxSteps proxy={proxyState} />}
       </div>
     );
@@ -146,14 +185,16 @@ export default function SetupPanel({
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <h2 className="text-lg font-semibold">
-            {state.integrity === 'mismatch' ? 'bastionctl needs reinstalling' : state.integrity === 'ok' ? 'Setup' : 'Set up deployments'}
+            {mismatch ? (state.pinned ? 'bastionctl is pinned' : 'bastionctl could not be upgraded') : state.integrity === 'ok' ? 'Setup' : 'Set up deployments'}
           </h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            {state.integrity === 'mismatch'
-              ? 'The bastionctl installed on this server is not the one this BastionSSH ships (another version, or the file was changed). Nothing runs until it is reinstalled.'
+            {mismatch
+              ? state.pinned
+                ? 'The bastionctl on this server is not the one this BastionSSH ships, and the server is pinned, so BastionSSH leaves it alone. Nothing runs until it matches.'
+                : `BastionSSH upgrades the bastionctl on this server by itself when it differs from the one it ships, but that failed${state.upgradeError ? `: ${state.upgradeError}` : ''}. Nothing runs until it matches: make ${state.root ?? 'the deployments folder'}/bin writable by the SSH user, or reinstall.`
               : 'Apps, their config, secrets and releases live on the server, in one folder. BastionSSH installs bastionctl there and runs it over SSH; it stores nothing about your apps.'}{' '}
-            <DocsLink to={state.integrity === 'mismatch' ? `${DEPLOY_DOCS.overview}#reinstall` : `${DEPLOY_DOCS.overview}#setup`}>
-              {state.integrity === 'mismatch' ? 'When and why to reinstall' : 'Setup guide'}
+            <DocsLink to={mismatch ? `${DEPLOY_DOCS.overview}#${state.pinned ? 'pinning' : 'automatic-upgrades'}` : `${DEPLOY_DOCS.overview}#setup`}>
+              {mismatch ? (state.pinned ? 'About pinning' : 'About automatic upgrades') : 'Setup guide'}
             </DocsLink>
           </p>
         </div>
@@ -194,9 +235,10 @@ export default function SetupPanel({
         </div>
         <div>
           <dt className="text-xs text-muted-foreground">bastionctl</dt>
-          <dd className="font-mono">{state.version}</dd>
+          <dd>{state.integrity === 'missing' ? <span className="font-mono">{state.version}</span> : <BastionctlVersion state={state} />}</dd>
         </div>
       </dl>
+      {mismatch && state.pinned && <PinNotice state={state} />}
 
       <div>
         <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">Prerequisites</p>

@@ -124,13 +124,20 @@ const sse = (events: unknown[]) => events.map((e) => `data: ${JSON.stringify(e)}
 /**
  * Answer the tab's calls; everything but GETs is recorded in `sent`. `state.setUp` flips when Setup runs;
  * `state.deployLevel` is site1's bastion.yml `permissions.deploy`; `state.buildType` its build type
- * (static: `output: .`); `state.deployFails` makes a deploy fail its health check.
+ * (static: `output: .`); `state.deployFails` makes a deploy fail its health check; `state.server` is merged into
+ * the server state (`GET /`: versions, pinned, an upgrade).
  */
 async function stubDeploy(
   page: Page,
   serverId: string,
   sent: Sent[],
-  state: { setUp: boolean; deployLevel?: 'operate' | 'manage'; buildType?: 'nextjs' | 'static'; deployFails?: boolean } = { setUp: true },
+  state: {
+    setUp: boolean;
+    deployLevel?: 'operate' | 'manage';
+    buildType?: 'nextjs' | 'static';
+    deployFails?: boolean;
+    server?: Record<string, unknown>;
+  } = { setUp: true },
 ) {
   // The app's Runtime section asks Docker; nothing to show here
   await page.route(`**/api/docker/servers/${serverId}**`, (route) => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found"}' }));
@@ -152,7 +159,7 @@ async function stubDeploy(
     }
 
     if (method === 'GET' && path === '/') {
-      return json({ root: state.setUp ? '/opt/bastion' : null, integrity: state.setUp ? 'ok' : 'missing', version: '0.1.0' });
+      return json({ root: state.setUp ? '/opt/bastion' : null, integrity: state.setUp ? 'ok' : 'missing', version: '0.1.0', ...state.server });
     }
     if (path === '/setup') {
       state.setUp = true;
@@ -354,6 +361,32 @@ test.describe('Deployments', () => {
     await expect(page.getByRole('button', { name: 'Reinstall' })).toBeVisible();
     await expect(apps.getByRole('button', { name: 'New app' })).toBeVisible();
     await snap(page, 'deployments-tab');
+  });
+
+  test('says when bastionctl was upgraded, and shows a pinned server with how to unpin', async ({ page }) => {
+    const sent: Sent[] = [];
+    const state: Parameters<typeof stubDeploy>[3] = {
+      setUp: true,
+      server: { version: '0.1.0+e53ab47', installedVersion: '0.1.0+e53ab47', pinned: false, upgraded: { from: '0.1.0', to: '0.1.0+e53ab47' } },
+    };
+    await stubDeploy(page, serverId, sent, state);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments`);
+    await expect(page.getByText('bastionctl upgraded to 0.1.0+e53ab47 (was 0.1.0)')).toBeVisible();
+    await expect(page.getByText('0.1.0+e53ab47', { exact: true })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Apps' }).getByRole('row', { name: /site1/ })).toBeVisible();
+    await expect(page.getByText(/needs reinstalling/)).toHaveCount(0);
+
+    // Pinned, and BastionSSH now ships another build: nothing runs, and the tab says how to unpin
+    state.server = { version: '0.1.0+e53ab47', integrity: 'mismatch', installedVersion: '0.1.0', pinned: true };
+    await page.reload();
+    const setup = page.getByRole('region', { name: 'Setup' });
+    await expect(setup.getByRole('heading', { name: 'bastionctl is pinned' })).toBeVisible();
+    await expect(setup.getByLabel('bastionctl pinned')).toContainText('rm /opt/bastion/bin/.pinned');
+    await expect(setup).toContainText('0.1.0 installed, ships 0.1.0+e53ab47');
+    await expect(setup.getByRole('button', { name: 'Reinstall bastionctl' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Apps' })).toHaveCount(0);
+    expect(sent).toEqual([]);
   });
 
   test('deploys a folder without node_modules, .next and .git, and shows the log as it streams', async ({ page }) => {

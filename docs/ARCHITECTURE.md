@@ -723,10 +723,29 @@ Deployments section.
   `http://` site redirecting to HTTPS, and serves HTTP/1.1 and HTTP/2 (no HTTP/3: the front is
   TCP). `proxy-live.test.ts` (`BASTION_TEST_DOCKER=1`) runs the real image on unusual ports
   and switches domains, upstream port and TLS under continuous requests with none failing.
-- **Install and integrity** (`deploy/bundle.ts`, `deploy/install.ts`): the server ships the
-  built files; setup uploads them over SFTP (0755) and every other request first hashes the
-  installed program and wrapper — a mismatch is refused with 409 `bastionctl_mismatch`
-  (Reinstall = setup), a missing one with `not_set_up`.
+- **Install and integrity** (`deploy/bundle.ts`, `deploy/install.ts`, `deploy/upgrade.ts`): the
+  server ships the built files; setup uploads them over SFTP (0755) and every other request
+  first hashes the installed program and wrapper. A missing one is `not_set_up` (never set up
+  automatically). A mismatch is upgraded in place (`ensureCurrent`): the same file install
+  setup does — program, wrapper, and the `bin/bastion-nginx` copy when present — each written
+  to a temp name in `bin/` and renamed over the target (a running bastionctl keeps its file),
+  then hashed again; serialized per server and root in-process (each waiter re-checks, so
+  concurrent requests upgrade once; setup's install joins the same queue); audited as
+  `deploy.bastionctl_upgrade` (`root`, `from`, `to`, `result`, `trigger: request |
+  certificate_check`) under the requesting user or `system`. Every caller does it — view-level
+  reads and `GET /servers/:id` (which answers `upgraded`, `installedVersion`, `pinned`,
+  `upgradeError`) included, and the certificate check, whose otherwise read-only system
+  connection may write only `…/bin/bastionctl{,.mjs}` and `…/bin/bastion-nginx`. It needs
+  nothing but a `bin/` the SSH user can write (as setup leaves it; no sudo). `<root>/bin/.pinned`
+  opts out: a pinned mismatch is refused with 409 `bastionctl_mismatch` + `pinned: true`; a
+  failed write or hash check is refused the same way with the error, audited, and not retried
+  for 5 minutes (Reinstall clears that). Versions are build-aware: `build.mjs` hashes the three
+  shipped files with a placeholder build id, takes the first 7 hex as the build and writes
+  `0.1.0+<build>` into the program's banner (line 2, `// bastionctl 0.1.0+<build>`, which
+  BastionSSH reads to show installed vs bundled), `bastionctl version` and `manifest.json`;
+  older programs are read by their `BASTIONCTL_VERSION` constant (`0.1.0`). Auto-upgrade does
+  not touch the network or the proxy container: when an update changes `PROXY_IMAGE`, switches
+  refuse until Reinstall (as before).
 - **Remote** (`deploy/remote.ts`): commands run on an exec channel of the caller's pooled
   Docker SSH connection, files through the caller's pooled SFTP channel — both opened with
   `sshConnectConfig` + `connectSsh` and evicted on revocation. Command lines are built from
@@ -821,12 +840,14 @@ Deployments section.
   reconciliation leaves them alone. They are reconciled on each Domains read and by the
   background check (`deploy/cert-check.ts`, started in `index.ts` with monitoring): every 6 h, a
   few servers at a time over a short-lived SSH connection with the server's own credentials, it
-  discovers the root as a request does (nothing records which servers have deployments), skips a
-  bastionctl that is not ours, reads each deployed app's certificates, keeps alerts of an
+  discovers the root as a request does (nothing records which servers have deployments), upgrades
+  a bastionctl that is not ours (as `system`) and skips one it could not (pinned, write failed), reads each deployed app's certificates, keeps alerts of an
   unreachable server or unreadable app, resolves those of apps or deployments that are gone, and
   quietly those of servers whose monitoring is off.
 - Tests: `packages/bastionctl` against a fake Engine API on a unix socket; route tests with
-  the remote layer faked (matrix, integrity, streams, audit, no rows but audit); env-gated
+  the remote layer faked (matrix, integrity and automatic upgrades — pinned, write failure,
+  hash check after writing, concurrent requests upgrading once — streams, audit, no rows but
+  audit); env-gated
   integration tests over a throwaway sshd + `docker:dind` (`deploy.integration.test.ts`;
   `release.integration.test.ts`: dockerfile and static apps by Host header through Caddy,
   redeploy and rollback under continuous requests, a failing health check, pruning, delete,
