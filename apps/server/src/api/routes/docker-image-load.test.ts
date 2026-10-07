@@ -59,6 +59,7 @@ import { gzipSync } from 'node:zlib';
 import { and, desc, eq } from 'drizzle-orm';
 import type { DockerImageLoadResult } from '@smt/shared';
 import { buildApp } from '../app.js';
+import { MAX_REPORTED_IMAGES } from './docker-image-load.js';
 import { runMigrations } from '../../db/migrate.js';
 import { getDb } from '../../db/index.js';
 import { auditLog, servers } from '../../db/schema.js';
@@ -273,6 +274,19 @@ describe('docker image load route', () => {
     expect(engine.images.some((i) => i.Id === first.id)).toBe(false);
     expect(engine.images.find((i) => i.Id === second.id)!.RepoTags).toEqual(['blog:latest']);
     expect(audits('docker.image_remove')[0]!.meta).toMatchObject({ image: first.id, unusedOnly: true, force: false });
+  });
+
+  it('lists and audits at most MAX_REPORTED_IMAGES of an archive naming many tags, counting the rest', async () => {
+    const before = audits('docker.image_load').length;
+    const tags = Array.from({ length: MAX_REPORTED_IMAGES + 20 }, (_, i) => `many:${i}`);
+    const res = await upload(operator, imageArchive({ tags, seed: 'many' }));
+    expect(res.statusCode).toBe(200);
+    const result = loaded(res.body)!;
+    expect(result.images).toHaveLength(MAX_REPORTED_IMAGES);
+    expect(result.warnings).toContain(`Docker loaded ${tags.length} images; only the first ${MAX_REPORTED_IMAGES} are listed and checked here.`);
+    const { meta } = await lastLoadAudit(before + 1);
+    expect(meta.images).toHaveLength(MAX_REPORTED_IMAGES);
+    expect(meta.imagesLoaded).toBe(tags.length);
   });
 
   it('refuses an upload over the limit before reading it, with nothing sent to the engine', async () => {

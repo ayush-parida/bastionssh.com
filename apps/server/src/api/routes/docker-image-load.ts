@@ -61,6 +61,12 @@ const ARCHIVE_TYPES = [
   'application/x-bzip2',
 ];
 
+/**
+ * Most loaded images inspected, reported and audited one by one; an archive
+ * may name any number of tags, and the rest are only counted.
+ */
+export const MAX_REPORTED_IMAGES = 100;
+
 /** After the last byte arrived, how long the engine may take to import before the call is given up. */
 const LOAD_TIMEOUT_MS = 30 * 60_000;
 
@@ -129,9 +135,11 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
       meter?: ArchiveMeter;
       outcome: 'loaded' | 'failed' | 'too_large' | 'cancelled';
       images: DockerLoadedImage[];
+      /** Every image the engine reported loaded, listed or not. */
+      loadedCount: number;
       error?: string;
       cut?: Error;
-    } = { started: false, outcome: 'cancelled', images: [] };
+    } = { started: false, outcome: 'cancelled', images: [], loadedCount: 0 };
     let sse: DockerSse | null = null;
     let timer: NodeJS.Timeout | undefined;
     // A failure that is not Docker's (a host key mismatch) goes to the app's error handler, after the audit
@@ -201,20 +209,24 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
             failure = parsed.error;
             return;
           }
-          if (parsed.loaded) loaded.push(parsed.loaded);
+          if (parsed.loaded && run.loadedCount++ < MAX_REPORTED_IMAGES) loaded.push(parsed.loaded);
           if (parsed.progress.status) send({ type: 'load', progress: parsed.progress });
         };
         for await (const chunk of res as AsyncIterable<Buffer>) splitter.push(chunk).forEach(handle);
         splitter.flush().forEach(handle);
         if (failure) throw new DockerError(failure, 502);
 
+        const previous = tagIndex(before);
         for (const item of loaded) {
           const ref = 'ref' in item ? item.ref : null;
           const inspect = await ctx.docker.json<RawJson>({ path: imageApiPath(ref ?? (item as { id: string }).id, 'json') });
-          run.images.push(toLoadedImage(ref, inspect, engine, tagIndex(before)));
+          run.images.push(toLoadedImage(ref, inspect, engine, previous));
         }
         const warnings = run.images.filter((i) => i.platformMismatch).map((i) => platformWarning(i, engine));
         if (run.images.length === 0) warnings.push('Docker read the archive but did not report any image as loaded.');
+        if (run.loadedCount > run.images.length) {
+          warnings.push(`Docker loaded ${run.loadedCount} images; only the first ${run.images.length} are listed and checked here.`);
+        }
         run.outcome = 'loaded';
         const result: DockerImageLoadResult = {
           images: run.images,
@@ -256,6 +268,7 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
         format: run.meter?.format ?? null,
         outcome: run.outcome,
         images: run.images.map((i) => ({ ref: i.ref, id: i.id, platform: `${i.os}/${i.architecture}`, replaced: i.replacedId })),
+        ...(run.loadedCount > run.images.length && { imagesLoaded: run.loadedCount }),
         ...(run.images.some((i) => i.platformMismatch) && { platformMismatch: true }),
         ...(run.error && { error: run.error.slice(0, 500) }),
       });
