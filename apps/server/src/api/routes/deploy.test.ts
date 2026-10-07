@@ -995,7 +995,7 @@ describe('deployment routes', () => {
       expect(audits('deploy.proxy_upgrade')[0]!.meta).toMatchObject({ trigger: 'restart', result: 'failed', error: 'x' });
 
       fake.bastionctl = (args) =>
-        args[0] === 'setup' ? { stdout: { ...(defaultBastionctl(args).stdout as object), proxyUpgrade: { ...PROXY_UPGRADE, trigger: 'setup', replaced: ['front'] } } } : defaultBastionctl(args);
+        args[0] === 'setup' ? { stdout: { ...(defaultBastionctl(args).stdout as Record<string, unknown>), proxyUpgrade: { ...PROXY_UPGRADE, trigger: 'setup', replaced: ['front'] } } } : defaultBastionctl(args);
       expect((await call(admin, 'POST', api('/setup'))).statusCode).toBe(200);
       expect(audits('deploy.proxy_upgrade')[0]!.meta).toMatchObject({ trigger: 'setup', replaced: ['front'] });
       expect(audits('deploy.proxy_upgrade')).toHaveLength(4);
@@ -1018,7 +1018,7 @@ describe('deployment routes', () => {
       fake.runs.length = 0;
       const upload = await fetch(`${base}${api('/apps/site1/deploy')}`, { method: 'POST', headers: operator.headers });
       expect(upload.status).toBe(400);
-      expect((await upload.json()).error).toMatch(/builds from an upload/);
+      expect(((await upload.json()) as { error: string }).error).toMatch(/builds from an upload/);
       expect(fake.runs.map((r) => r.argv[0])).not.toContain('deploy');
       const junk = await call(operator, 'POST', api('/apps/site1/deploy'), { source: 'x' });
       expect(junk.statusCode).toBe(400);
