@@ -4,6 +4,15 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '@/lib/api.js';
 import { formatBytes } from '@/lib/utils.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
+import { useFolderDownload } from '@/hooks/useFolderDownload.js';
+import { FolderDownloadStatus } from '@/components/FolderDownloadStatus.js';
+import {
+  ARCHIVE_FORMATS,
+  archiveName,
+  recallFormat,
+  rememberFormat,
+  type ArchiveFormat,
+} from '@/lib/folder-download.js';
 import type { FtpConnection, FtpEntry, FtpListResponse, FtpUploadResponse } from '@smt/shared';
 import {
   ArrowLeft,
@@ -11,6 +20,7 @@ import {
   Download,
   File as FileIcon,
   Folder,
+  FolderDown,
   FolderPlus,
   Link2,
   Pencil,
@@ -57,6 +67,9 @@ export default function FtpFilesPage() {
   const [path, setPath] = useState('.');
   // One upload can finish while another is still going, so count rather than flag
   const [uploadsInFlight, setUploadsInFlight] = useState(0);
+
+  const folderDownload = useFolderDownload();
+  const [archiveFormat, setArchiveFormat] = useState<ArchiveFormat>(recallFormat);
 
   // Server enforces these too — this only keeps unusable controls off the screen
   const canWrite = useAccessLevels('ftp_connection').can(id, 'operate');
@@ -133,6 +146,14 @@ export default function FtpFilesPage() {
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Download failed');
     }
+  }
+
+  /** The folder as one archive, built on the server while it streams. */
+  function handleFolderDownload(folderPath: string) {
+    void folderDownload.start(
+      `${base}/folder?path=${encodeURIComponent(folderPath)}&format=${encodeURIComponent(archiveFormat)}`,
+      archiveName(folderPath, archiveFormat, connection?.name),
+    );
   }
 
   function handleMkdir() {
@@ -215,6 +236,33 @@ export default function FtpFilesPage() {
               </button>
             </>
           )}
+          <div className="border-border flex items-center overflow-hidden rounded-md border">
+            <button
+              onClick={() => handleFolderDownload(cwd)}
+              disabled={!!folderDownload.active || !listQuery.data}
+              title="Download this folder as one archive"
+              className="hover:bg-muted flex items-center gap-1.5 px-3 py-2 text-sm disabled:opacity-50"
+            >
+              <FolderDown size={15} /> Download folder
+            </button>
+            <select
+              value={archiveFormat}
+              onChange={(e) => {
+                const format = e.target.value as ArchiveFormat;
+                setArchiveFormat(format);
+                rememberFormat(format);
+              }}
+              aria-label="Archive format"
+              title="Archive format for folder downloads"
+              className="border-border bg-background border-l px-2 py-2 text-sm"
+            >
+              {ARCHIVE_FORMATS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <button
             onClick={refresh}
             title="Refresh"
@@ -267,6 +315,10 @@ export default function FtpFilesPage() {
           </span>
         ))}
       </div>
+
+      {folderDownload.active && (
+        <FolderDownloadStatus active={folderDownload.active} onCancel={folderDownload.cancel} />
+      )}
 
       {uploadsInFlight > 0 && (
         <p className="text-muted-foreground mb-3 text-sm">
@@ -339,6 +391,16 @@ export default function FtpFilesPage() {
                           className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5"
                         >
                           <Download size={13} />
+                        </button>
+                      )}
+                      {isFolderLike(entry) && (
+                        <button
+                          onClick={() => handleFolderDownload(entry.path)}
+                          disabled={!!folderDownload.active}
+                          title={`Download folder (${archiveFormat === 'zip' ? '.zip' : '.tar.gz'})`}
+                          className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5 disabled:opacity-50"
+                        >
+                          <FolderDown size={13} />
                         </button>
                       )}
                       {canWrite && (

@@ -330,6 +330,17 @@ straight to the response. Uploads pipe a raw `application/octet-stream` body
 to the server, capped by `SMT_FTP_MAX_UPLOAD_BYTES`. `.` as a path opens the
 connection's configured start directory, else the login directory.
 
+Folder downloads (`GET …/folder`) feed the shared archive engine
+(`/server/archive`) through `folder-walker.ts`, a walker over a `FileSession`
+of its own, opened outside the pool so browsing carries on. Every listing and
+read goes through that session, so the jail (and SFTP's realpath checks) and
+the backends' timeouts apply per step; one operation, and one FTP data
+connection, at a time, the next waiting until the previous transfer has
+finished on the server. Listed names that are not one plain path segment are
+never sent back. A session the backend reports broken is replaced by a new
+login. Edits, deletes and revocations end running downloads through the same
+eviction calls as the pool.
+
 REST surface, all under `/api/ftp`:
 
 | Method   | Path                                   | Purpose                                      |
@@ -342,6 +353,7 @@ REST surface, all under `/api/ftp`:
 | `POST`   | `/connections/:id/test`                | Log in and list the login directory, result recorded |
 | `GET`    | `/connections/:id/list?path=`          | Directory listing (`.` = start directory)    |
 | `GET`    | `/connections/:id/download?path=`      | Stream a file to the client                  |
+| `GET`    | `/connections/:id/folder?path=&format=` | Stream a folder as `.zip` / `.tar.gz`        |
 | `PUT`    | `/connections/:id/file?path=`          | Upload a raw body to that path               |
 | `POST`   | `/connections/:id/mkdir`               | Create a directory                           |
 | `POST`   | `/connections/:id/rename`              | Rename or move                               |

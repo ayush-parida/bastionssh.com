@@ -287,6 +287,7 @@ Some hosts only speak FTP. Add one under **FTP** with a host, port, protocol and
 
 - Browse from the account's login directory or a configured start directory
 - Upload (streamed), download, create folders, rename, delete a file or a whole tree
+- Download a whole folder as one `.zip` or `.tar.gz`, built while it streams, inside the start-directory restriction (`ftp.folder_download`)
 - Roles: viewers browse and download, operators change files and test the connection, admins manage connections (with custom roles: the `view`, `operate` and `manage` levels)
 - One logged-in session per user per connection, reused across requests and closed after two minutes idle
 

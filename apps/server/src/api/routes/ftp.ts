@@ -27,14 +27,19 @@ import {
   assertSafeHost,
   backendFor,
   baseName,
+  connectionWalker,
   evictConnection,
   loadConnection,
   normalizeRemotePath,
+  openSession,
   parentOf,
   resolveCredentials,
+  trackFolderDownload,
   withSession,
+  type FileSession,
   type FtpConnectionRow,
 } from '../../ftp/index.js';
+import { archiveFormatSchema, sendFolderArchive } from '../../archive/index.js';
 import {
   clearedFtpHostKeyColumns,
   forgetFtpHostKey,
@@ -84,6 +89,7 @@ const updateSchema = z.object({
 });
 
 const pathQuery = z.object({ path: pathSchema });
+const folderQuery = z.object({ path: pathSchema, format: archiveFormatSchema });
 const deleteQuery = z.object({ path: pathSchema, recursive: boolQuery });
 const mkdirSchema = z.object({ path: pathSchema });
 const renameSchema = z.object({ from: pathSchema, to: pathSchema });
@@ -112,6 +118,30 @@ const publicColumns = {
   createdAt: ftpConnections.createdAt,
   updatedAt: ftpConnections.updatedAt,
 };
+
+/** Jail refusals during one folder download recorded as `ftp.path_refused`; the rest are only counted. */
+const MAX_REFUSALS_AUDITED = 10;
+
+/**
+ * A folder download must start at a folder. The connection's start directory
+ * and `/` are taken as they are: checking them would list their parent,
+ * which the account may not be allowed to read. A link counts when what it
+ * points at is not a file (SIZE / stat answer only for files).
+ */
+async function assertFolder(session: FileSession, path: string, isStart: boolean): Promise<void> {
+  if (isStart || path === '/' || path === (await session.jailRoot?.())) return;
+  const entry = await session.stat(path);
+  if (entry.type === 'directory') return;
+  if (entry.type === 'symlink') {
+    try {
+      await session.linkTargetSize(path);
+    } catch (err) {
+      if (err instanceof FtpError && err.statusCode === 400) return;
+      throw err;
+    }
+  }
+  throw new FtpError('Not a folder; download files on their own', 400);
+}
 
 function sendError(reply: FastifyReply, err: unknown) {
   if (err instanceof FtpError) {
@@ -700,6 +730,63 @@ export async function ftpRoutes(app: FastifyInstance) {
     } catch (err) {
       if (reply.sent || streaming) return reply;
       return fileError(req, reply, id, err);
+    }
+  });
+
+  /**
+   * GET …/folder?path=/var/www&format=zip — the folder as one .zip or .tar.gz,
+   * built while it streams (archive/). It runs on a session of its own, so
+   * browsing carries on meanwhile; editing or deleting the connection, or
+   * revoking the user's access to it, ends it.
+   */
+  app.get('/connections/:id/folder', { preHandler: requireResource('ftp_connection', 'download') }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const query = folderQuery.parse(req.query);
+    const stop = new AbortController();
+    const release = trackFolderDownload(req.orgId, id, req.user.id, () => stop.abort(new Error('Access revoked')));
+    let session: FileSession | undefined;
+    try {
+      const connection = loadConnection(req.orgId, id);
+      session = await openSession(connection);
+      const isStart = query.path === '.';
+      const path = isStart ? await session.home(connection.rootPath) : normalizeRemotePath(query.path);
+      await assertFolder(session, path, isStart);
+
+      const walker = connectionWalker({ session, reconnect: () => openSession(connection) });
+      // The walker owns the session from here; sendFolderArchive closes it
+      session = undefined;
+      await sendFolderArchive(req, reply, {
+        resourceId: id,
+        walker,
+        rootRef: path,
+        folderName: baseName(path) || connection.name,
+        format: query.format,
+        signal: stop.signal,
+        onDone: async (result) => {
+          for (const refused of walker.refused.slice(0, MAX_REFUSALS_AUDITED)) {
+            await audit(req, 'ftp.path_refused', 'ftp_connection', id, connection.name, { path: refused });
+          }
+          await audit(req, 'ftp.folder_download', 'ftp_connection', id, connection.name, {
+            path,
+            format: result.format,
+            files: result.files,
+            bytes: result.bytes,
+            skipped: result.skipped,
+            truncated: result.truncated,
+            aborted: result.aborted,
+            durationMs: result.durationMs,
+            ...(walker.refusedCount > 0 && { refused: walker.refusedCount }),
+            ...(result.error && { error: result.error }),
+          });
+        },
+      });
+      return reply;
+    } catch (err) {
+      session?.close();
+      if (reply.sent) return reply;
+      return fileError(req, reply, id, err);
+    } finally {
+      release();
     }
   });
 
