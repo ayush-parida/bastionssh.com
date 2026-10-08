@@ -352,6 +352,54 @@ describe('storage folder download', () => {
       await until(() => s3.stats.abortedGets.includes('rev/b.bin'), 'the GetObject to be aborted');
       expect(audits()[0]).toMatchObject({ aborted: true });
     });
+
+    it('ends the download when its connection is deleted', async () => {
+      // A connection of its own: the rest of the suite keeps using the shared one
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/storage/connections',
+        headers: admin.headers,
+        payload: { name: 'doomed', provider: 'minio', endpoint: s3.endpoint, accessKeyId: 'AKIA', secretAccessKey: 'secret' },
+      });
+      expect(created.statusCode).toBe(201);
+      const doomed = created.json().id as string;
+      s3.put('big', 'del/a.bin', { data: randomBytes(256 * 1024) });
+      s3.put('big', 'del/b.bin', { size: 2 * 1024 * 1024, stallAfter: 256 * 1024 });
+      if (!app.server.listening) await app.listen({ port: 0, host: '127.0.0.1' });
+      const { port } = app.server.address() as AddressInfo;
+      let deleted = -1;
+      await new Promise<void>((resolve, reject) => {
+        const path = `/api/storage/connections/${doomed}/buckets/big/folder?prefix=del/`;
+        const req = http.get({ host: '127.0.0.1', port, path, headers: admin.headers }, (res) => {
+          expect(res.statusCode).toBe(200);
+          res.resume();
+          res.on('close', () => resolve());
+          res.on('error', () => resolve());
+        });
+        req.on('error', () => resolve());
+        const timer = setInterval(() => {
+          if (deleted !== -1 || !s3.stats.gets.includes('del/b.bin')) return;
+          deleted = 0;
+          void app
+            .inject({ method: 'DELETE', url: `/api/storage/connections/${doomed}`, headers: admin.headers })
+            .then((r) => (deleted = r.statusCode));
+        }, 10);
+        setTimeout(() => {
+          clearInterval(timer);
+          reject(new Error('download did not stop'));
+        }, 15_000).unref();
+        req.on('close', () => clearInterval(timer));
+      });
+      expect(deleted).toBe(204);
+      await until(() => s3.stats.abortedGets.includes('del/b.bin'), 'the GetObject to be aborted');
+      await until(() => activeStreamCount(admin.userId) === 0, 'the stream slot to be released');
+      const row = getDb()
+        .select()
+        .from(auditLog)
+        .where(and(eq(auditLog.resourceId, doomed), eq(auditLog.action, 'storage.folder_download')))
+        .get();
+      expect(JSON.parse(row?.metadata ?? '{}')).toMatchObject({ aborted: true });
+    });
   });
 
   describe('estimate', () => {
