@@ -12,6 +12,8 @@ import { config } from '../../config/index.js';
 import { CredentialError, resolveServerAuth } from '../../ssh/credentials.js';
 import * as sftp from '../../ssh/sftp.js';
 import type { SftpLease } from '../../ssh/sftp.js';
+import { archiveFormatSchema } from '../../archive/index.js';
+import { sendServerFolder } from '../../ssh/folder-download.js';
 import type { SftpListResponse, SftpReadResponse } from '@smt/shared';
 
 /** Upper bound on files openable in the inline editor. */
@@ -19,6 +21,12 @@ const MAX_EDIT_BYTES = 2 * 1024 * 1024;
 
 const pathQuerySchema = z.object({
   path: z.string().default('.'),
+  keyId: z.string().optional(),
+});
+
+const folderQuerySchema = z.object({
+  path: z.string().min(1),
+  format: archiveFormatSchema,
   keyId: z.string().optional(),
 });
 
@@ -142,6 +150,61 @@ export async function sftpRoutes(app: FastifyInstance) {
     } catch (err) {
       held?.release();
       return sendError(reply, err);
+    }
+  });
+
+  /**
+   * GET /api/sftp/:serverId/folder?path=/var/www&format=zip|tar.gz — a whole
+   * folder as one archive, built while it streams (ssh/folder-download.ts).
+   * Same access as downloading one file.
+   */
+  app.get('/:serverId/folder', async (req, reply) => {
+    const { serverId } = req.params as { serverId: string };
+    const query = folderQuerySchema.parse(req.query);
+
+    let held: SftpLease | undefined;
+    try {
+      // Refused rather than collapsed: a folder download names exactly the folder it means
+      if (query.path.split('/').includes('..')) {
+        return reply.status(400).send({ error: 'Path cannot contain ".."' });
+      }
+      const target = sftp.normalizeRemotePath(query.path);
+      const opened = await lease(req, serverId, query.keyId);
+      held = opened.held;
+
+      // stat, not lstat: a link to a folder downloads that folder, as clicking it opens it
+      const attrs = await sftp.stat(held.sftp, target);
+      if (((attrs.mode ?? 0) & 0o170000) !== 0o040000) {
+        return reply.status(400).send({ error: 'Not a folder; download a single file instead' });
+      }
+
+      // Released by sendServerFolder once the archive has ended
+      const folderLease = held;
+      held = undefined;
+      await sendServerFolder(req, reply, {
+        serverId,
+        lease: folderLease,
+        path: target,
+        format: query.format,
+        onDone: (result) =>
+          audit(req, 'sftp.folder_download', 'server', serverId, opened.server.name, {
+            path: target,
+            format: result.format,
+            method: result.method,
+            files: result.files,
+            bytes: result.bytes,
+            skipped: result.skipped,
+            truncated: result.truncated,
+            ...(result.aborted && { aborted: true }),
+            durationMs: result.durationMs,
+            ...(result.error && { error: result.error }),
+            ...(result.tarMessages && { tarMessages: result.tarMessages }),
+          }),
+      });
+    } catch (err) {
+      return sendError(reply, err);
+    } finally {
+      held?.release();
     }
   });
 

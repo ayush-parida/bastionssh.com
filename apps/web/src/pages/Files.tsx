@@ -10,6 +10,7 @@ import {
   Download,
   File as FileIcon,
   Folder,
+  FolderDown,
   FolderPlus,
   Link2,
   FileCode,
@@ -23,6 +24,7 @@ import {
 import { toast } from 'sonner';
 import { hostKeyMismatchOf } from '@/lib/host-keys.js';
 import { HostKeyMismatchNotice } from '@/components/servers/HostKey.js';
+import FolderDownloadDialog from '@/components/files/FolderDownloadDialog.js';
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -69,6 +71,8 @@ export default function FilesPage() {
     null,
   );
   const [editorLoading, setEditorLoading] = useState(false);
+  // The folder whose "Download folder" dialog is open
+  const [folderDownload, setFolderDownload] = useState<{ path: string; name: string } | null>(null);
 
   // Server enforces these too — this only keeps unusable controls off the screen
   const canWrite = useAccessLevels('server').can(serverId, 'operate');
@@ -235,6 +239,17 @@ export default function FilesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {listQuery.data && (
+            <button
+              onClick={() =>
+                setFolderDownload({ path: cwd, name: cwd.split('/').filter(Boolean).pop() ?? '' })
+              }
+              title="Download this folder as a .zip or .tar.gz"
+              className="flex items-center gap-1.5 rounded-md border border-border px-3 py-2 text-sm hover:bg-muted"
+            >
+              <FolderDown size={15} /> Download folder
+            </button>
+          )}
           {canWrite && (
             <>
               <button
@@ -359,6 +374,16 @@ export default function FilesPage() {
                   </td>
                   <td className="px-4 py-2">
                     <div className="flex items-center justify-end gap-1">
+                      {isFolderLike(entry) && (
+                        <button
+                          onClick={() => setFolderDownload({ path: entry.path, name: entry.name })}
+                          title="Download folder"
+                          aria-label={`Download folder ${entry.name}`}
+                          className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        >
+                          <FolderDown size={13} />
+                        </button>
+                      )}
                       {isFileLike(entry) && (
                         <>
                           <button
@@ -402,6 +427,24 @@ export default function FilesPage() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {folderDownload && serverId && (
+        <FolderDownloadDialog
+          folderName={folderDownload.name}
+          folderPath={folderDownload.path}
+          apiPath={(format) =>
+            `/sftp/${serverId}/folder?path=${encodeURIComponent(folderDownload.path)}&format=${format}`
+          }
+          note={
+            <>
+              A <span className="font-mono">.tar.gz</span> is made by <span className="font-mono">tar</span> on the
+              server when the SSH account has a shell, which is much faster for folders with many small files.
+            </>
+          }
+          docsTo="/docs/files/sftp-file-browser#downloading-a-folder"
+          onClose={() => setFolderDownload(null)}
+        />
       )}
 
       {editorLoading && !editor && <p className="mt-3 text-sm text-muted-foreground">Opening…</p>}

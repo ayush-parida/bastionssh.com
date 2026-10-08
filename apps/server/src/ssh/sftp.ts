@@ -1,5 +1,5 @@
 import { Client } from 'ssh2';
-import type { SFTPWrapper, FileEntry, Attributes, Stats } from 'ssh2';
+import type { ClientChannel, SFTPWrapper, FileEntry, Attributes, Stats } from 'ssh2';
 import posix from 'node:path/posix';
 import type { Readable, Writable } from 'node:stream';
 import type { SftpEntry, SftpEntryType } from '@smt/shared';
@@ -10,6 +10,14 @@ import { connectSsh } from './jump.js';
 /** Close a pooled connection after this long with no in-flight operations. */
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 20_000;
+/** How long the shell probe (see {@link SftpLease.hasShell}) may take before the account counts as shell-less. */
+const SHELL_PROBE_TIMEOUT_MS = 10_000;
+/**
+ * The probe: a POSIX-ish shell that finds `tar` and `gzip`, and prints exactly
+ * this — a login script that writes to stdout would corrupt a streamed tar too.
+ */
+const SHELL_PROBE = `command -v tar >/dev/null 2>&1 && command -v gzip >/dev/null 2>&1 && printf '%s' smt-tar-ok`;
+const SHELL_PROBE_OK = 'smt-tar-ok';
 
 export type SftpTarget = SshTarget;
 
@@ -24,12 +32,26 @@ interface PooledConnection {
   /** Number of in-flight operations; the idle timer only fires at 0. */
   active: number;
   idleTimer?: NodeJS.Timeout;
+  /** Aborted when the connection closes (idle, evicted on revocation, dropped). */
+  closed: AbortController;
+  /** Whether commands can run on this connection, probed once (folder downloads' tar fast path). */
+  shell?: Promise<boolean>;
 }
 
 export interface SftpLease {
   sftp: SFTPWrapper;
   /** Must be called exactly once, in a `finally` or on stream close. */
   release: () => void;
+  /** Aborted once the pooled connection closes — evicted after a revocation, or dropped. */
+  closed: AbortSignal;
+  /**
+   * True when the account has a usable shell with `tar` and `gzip`; false for
+   * SFTP-only accounts (`ForceCommand internal-sftp`, a nologin shell) or a
+   * shell that prints anything else. Probed once per connection, then cached.
+   */
+  hasShell: () => Promise<boolean>;
+  /** Run a command on the same SSH connection. Only for fixed, fully quoted commands. */
+  exec: (command: string) => Promise<ClientChannel>;
 }
 
 /** Keyed by `${orgId}:${serverId}:${userId}` so connections are never shared across users. */
@@ -110,6 +132,7 @@ function openConnection(
 ): Promise<PooledConnection> {
   return new Promise<PooledConnection>((resolve, reject) => {
     const client = new Client();
+    const closed = new AbortController();
     const { config: connectConfig, guard } = sshConnectConfig(target, auth, 'sftp');
     const timer = setTimeout(() => {
       client.end();
@@ -126,7 +149,7 @@ function openConnection(
             reject(new SftpError(`Failed to open SFTP subsystem: ${err.message}`, 502));
             return;
           }
-          const conn: PooledConnection = { client, sftp, active: 0 };
+          const conn: PooledConnection = { client, sftp, active: 0, closed };
           scheduleIdleClose(key, conn);
           resolve(conn);
         });
@@ -146,6 +169,7 @@ function openConnection(
       .on('close', () => {
         clearTimeout(timer);
         pool.delete(key);
+        closed.abort(new SftpError('The SFTP connection closed', 502));
       });
     connectSsh(client, target, connectConfig, 'sftp', { actorUserId });
   });
@@ -192,7 +216,59 @@ export async function acquire(
       conn.active = Math.max(0, conn.active - 1);
       if (conn.active === 0) scheduleIdleClose(key, conn);
     },
+    closed: conn.closed.signal,
+    hasShell: () => (conn.shell ??= probeShell(conn.client)),
+    exec: (command) =>
+      new Promise<ClientChannel>((resolve, reject) => {
+        const failed = (err: unknown) =>
+          reject(new SftpError(`Could not run a command on the server: ${err instanceof Error ? err.message : String(err)}`, 502));
+        try {
+          conn.client.exec(command, (err, channel) => {
+            if (err) failed(err);
+            else resolve(channel);
+          });
+        } catch (err) {
+          // ssh2 throws rather than calling back once the connection is gone
+          failed(err);
+        }
+      }),
   };
+}
+
+/** Never rejects: anything but the exact marker on stdout means "no usable shell". */
+function probeShell(client: Client): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let channel: ClientChannel | undefined;
+    const timer = setTimeout(() => {
+      channel?.close();
+      resolve(false);
+    }, SHELL_PROBE_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      client.exec(SHELL_PROBE, (err, ch) => {
+        if (err) {
+          clearTimeout(timer);
+          resolve(false);
+          return;
+        }
+        channel = ch;
+        let out = '';
+        ch.on('data', (data: Buffer) => {
+          if (out.length <= SHELL_PROBE_OK.length) out += data.toString('utf8');
+        });
+        ch.stderr.resume();
+        // Nothing to send: an SFTP-only account's forced sftp-server then exits instead of waiting for a client
+        ch.end();
+        ch.on('close', () => {
+          clearTimeout(timer);
+          resolve(out === SHELL_PROBE_OK);
+        });
+      });
+    } catch {
+      clearTimeout(timer);
+      resolve(false);
+    }
+  });
 }
 
 /** Drop every pooled connection for a server (e.g. after its credentials change). */
@@ -419,6 +495,26 @@ export function readFile(sftp: SFTPWrapper, path: string, maxBytes: number): Pro
     });
     stream.once('end', () => resolve(Buffer.concat(chunks)));
     stream.once('error', (err: unknown) => reject(toSftpError(err, 'Failed to read file')));
+  });
+}
+
+/** A folder's raw entries (`.` and `..` left out), as the server describes them — links not followed. */
+export async function readdir(sftp: SFTPWrapper, path: string): Promise<FileEntry[]> {
+  const files = await new Promise<FileEntry[]>((resolve, reject) => {
+    sftp.readdir(path, (err, entries) => {
+      if (err) reject(toSftpError(err, 'Failed to list directory'));
+      else resolve(entries);
+    });
+  });
+  return files.filter((f) => f.filename !== '.' && f.filename !== '..');
+}
+
+export function readlink(sftp: SFTPWrapper, path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    sftp.readlink(path, (err, target) => {
+      if (err) reject(toSftpError(err, 'Failed to read link'));
+      else resolve(target);
+    });
   });
 }
 
