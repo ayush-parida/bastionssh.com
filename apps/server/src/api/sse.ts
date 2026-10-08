@@ -20,7 +20,8 @@ const REVOKED = 'Access revoked';
 
 /** Which feature a stream belongs to, and the server or cluster it is about. */
 export interface StreamTarget {
-  feature: 'docker' | 'kube' | 'deploy';
+  /** `files`: a folder download (archive/http.ts), which holds a place for as long as it streams. */
+  feature: 'docker' | 'kube' | 'deploy' | 'files';
   resourceId: string;
   /** Streams from the AI provider (Kubernetes Explain): they end with the member's AI Assistant module. */
   ai?: boolean;

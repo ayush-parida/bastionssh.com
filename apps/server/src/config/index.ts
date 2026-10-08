@@ -21,6 +21,9 @@ const envSchema = z.object({
   SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES: z.coerce.number().int().min(1).default(5_368_709_120), // 5 GiB
   // One SFTP request on a file connection (or a stalled transfer) may take this long
   SMT_SFTP_OP_TIMEOUT_MS: z.coerce.number().int().min(1).default(30_000),
+  // A folder download (zip / tar.gz from any file viewer) stops here and ends with _TRUNCATED.txt
+  SMT_FOLDER_DOWNLOAD_MAX_BYTES: z.coerce.number().int().min(1).default(10_737_418_240), // 10 GiB
+  SMT_FOLDER_DOWNLOAD_MAX_FILES: z.coerce.number().int().min(1).default(100_000),
   SMT_AI_REQUEST_TIMEOUT: z.coerce.number().default(60_000),
 
   // ── Outbound email (alert notifications) ──
@@ -310,6 +313,10 @@ export const config = {
   ftpMaxUploadBytes: env.SMT_FTP_MAX_UPLOAD_BYTES,
   dockerImageUploadMaxBytes: env.SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES,
   sftpOpTimeoutMs: env.SMT_SFTP_OP_TIMEOUT_MS,
+  folderDownload: {
+    maxBytes: env.SMT_FOLDER_DOWNLOAD_MAX_BYTES,
+    maxFiles: env.SMT_FOLDER_DOWNLOAD_MAX_FILES,
+  },
   aiRequestTimeout: env.SMT_AI_REQUEST_TIMEOUT,
   /** null = email delivery unavailable; the notifications UI says so. */
   smtp: env.SMT_SMTP_URL ? { url: env.SMT_SMTP_URL, from: env.SMT_SMTP_FROM ?? '' } : null,
