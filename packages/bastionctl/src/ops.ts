@@ -39,7 +39,8 @@ import { ensureCron } from './cron.js';
 import { DockerApiError, usageFrom } from './docker.js';
 import { containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
 import { pinnedRef } from './images.js';
-import { deployedLine, rollbackLineCheck } from './lines.js';
+import { checkKernel, hostKernel } from './kernel.js';
+import { deployedLine, releaseRef, rollbackLineCheck } from './lines.js';
 import { acquireLock, lockView, readLock, waitForLock } from './lock.js';
 import { envFileMasker } from './mask.js';
 import {
@@ -700,6 +701,8 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
   if (imageRef && source !== undefined) throw new BastionError(`build.type of ${app} is image: ${imageRef} is pulled from its registry, so deploy takes no --source`, 2);
   if (!imageRef && source === undefined) throw new BastionError('Usage: bastionctl deploy <app> --source <file>', 2);
   const sourceFile = source === undefined ? null : fileInRoot(baseCtx, source);
+  // A line that will not start on this kernel is refused before hundreds of megabytes are pulled
+  await checkKernel(baseCtx, config, imageRef, 'Nothing was pulled or changed.');
   await ensureProxyCurrent(baseCtx, 'deploy');
   const proxy = await proxyContainer(baseCtx);
   if (proxy?.state !== 'running') throw new BastionError('The proxy is not running on this server (run bastionctl setup)');
@@ -845,6 +848,7 @@ export async function rollback(baseCtx: Ctx, app: string, id: string, opts: { fo
       if (!opts.forceLine) throw new BastionError(`${line.reason} Nothing was changed (--force-line rolls back anyway).`, 1, { refused: 'line_change' });
       ctx.log(`warning: ${line.reason} Rolling back anyway (--force-line, by ${ctx.actor}).`);
     }
+    await checkKernel(ctx, config, releaseRef(ctx.layout, record), `Release ${id} was not rolled back to.`);
     if (!(await ctx.docker.imageExists(record.image))) throw new BastionError(`The image of release ${id} is gone (pruned); deploy it again instead`);
     ctx.log(`Rolling ${app} back to ${id} (by ${ctx.actor})`);
     try {
@@ -964,8 +968,9 @@ export async function proxyApply(ctx: Ctx): Promise<{ ok: true }> {
 }
 
 /** `proxy status`: the proxy against what this bastionctl runs. Read-only: never upgrades. */
-export function proxyStatusCommand(ctx: Ctx): Promise<DeployProxyStatus> {
-  return proxyStatus(ctx);
+export async function proxyStatusCommand(ctx: Ctx): Promise<DeployProxyStatus> {
+  // The host's kernel too: BastionSSH reads this with the server's state, and marks lines that will not start on it
+  return { ...(await proxyStatus(ctx)), kernelVersion: await hostKernel(ctx) };
 }
 
 /** `proxy upgrade`: replace an outdated proxy now (pinned or not). */

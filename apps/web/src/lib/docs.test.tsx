@@ -22,7 +22,7 @@ import {
   slugify,
   type DocPage,
 } from './docs.js';
-import { DEPLOY_LOG_HINTS, deployLogHint } from './deploy-help.js';
+import { DEPLOY_LOG_HINTS, deployFailureHint, deployLogHint } from './deploy-help.js';
 
 // React Router's Link uses useLayoutEffect, which React warns about when rendering to a string
 beforeAll(() => {
@@ -254,6 +254,13 @@ describe('deploy log hints', () => {
     expect(deployLogHint('ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 137')?.href).toContain('#build-ran-out-of-memory');
     expect(deployLogHint("This is Next's .next build folder, not a static export.")?.href).toContain('#uploaded-a-nextjs-build-folder');
     expect(deployLogHint('Step 3/9 : RUN npm ci')).toBeNull();
+    // MongoDB 8 on a 6.19+ kernel: bastionctl's refusal, and mongod's own message when it got to start (ahead of the health check it fails)
+    const kernel = `${DEPLOY_DOCS.troubleshooting}#${DEPLOY_TROUBLESHOOTING_ANCHORS.mongodbKernel}`;
+    expect(deployLogHint("MongoDB 8.0 will not start on this server's Linux kernel 7.0.0-1012-aws: MongoDB 8 refuses …")?.href).toBe(kernel);
+    const mongod = '{"t":{"$date":"2026-10-08T12:00:00Z"},"s":"F","msg":"MongoDB cannot start: Linux kernel versions 6.19 and newer has a known incompatibility with this version of MongoDB"}';
+    expect(deployLogHint(mongod)?.href).toBe(kernel);
+    expect(deployFailureHint(`The new container stopped (exit code 14). Its last lines:\n${mongod}`, [])?.href).toBe(kernel);
+    expect(deployFailureHint(null, [{ text: mongod }, { text: 'Deploy failed' }])?.href).toBe(kernel);
     for (const hint of DEPLOY_LOG_HINTS) expect(findDoc('deployments', 'troubleshooting')!.headings.map((h) => `#${h.id}`)).toContain(hint.href.slice(hint.href.indexOf('#')));
   });
 });

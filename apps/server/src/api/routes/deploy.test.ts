@@ -449,9 +449,10 @@ describe('deployment routes', () => {
         upgraded: { from: null, to: '9.9.9' },
         proxy: PROXY_OK,
         proxyOutdated: false,
+        kernelVersion: null,
       });
       expect(fake.files.get(`${BIN}/bastionctl`)).toEqual(WRAPPER);
-      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'ok', version: '9.9.9', installedVersion: '9.9.9', pinned: false, proxy: PROXY_OK, proxyOutdated: false });
+      expect((await call(viewer, 'GET', api())).json()).toEqual({ root: '/opt/bastion', integrity: 'ok', version: '9.9.9', installedVersion: '9.9.9', pinned: false, proxy: PROXY_OK, proxyOutdated: false, kernelVersion: null });
     });
 
     it('refreshes the nginx helper copy left in bin/ when it is there and differs, and never creates one', async () => {
@@ -933,6 +934,12 @@ describe('deployment routes', () => {
       });
       expect(fake.runs.map((r) => r.argv)).toEqual([['proxy', 'status']]);
       expect(audits('deploy.proxy_upgrade')).toEqual([]);
+
+      // The host's kernel comes with it (the web marks catalog lines that will not start on it); no other command runs for it
+      fake.bastionctl = (args) => (args[0] === 'proxy' && args[1] === 'status' ? { stdout: { ...PROXY_OK, kernelVersion: '7.0.0-1012-aws' } } : defaultBastionctl(args));
+      fake.runs.length = 0;
+      expect((await call(viewer, 'GET', api())).json()).toMatchObject({ kernelVersion: '7.0.0-1012-aws', proxy: { kernelVersion: '7.0.0-1012-aws' } });
+      expect(fake.runs.map((r) => r.argv)).toEqual([['proxy', 'status']]);
 
       // A proxy that cannot be read leaves the fields out; the state still answers
       fake.bastionctl = (args) => (args[0] === 'proxy' ? { stderr: ['docker: no'], exitCode: 1 } : defaultBastionctl(args));

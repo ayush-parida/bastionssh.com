@@ -356,6 +356,8 @@ export interface DeployProxyStatus {
   outdated: Array<'caddy' | 'front'>;
   /** `<root>/bin/.pinned`: not upgraded automatically. */
   pinned: boolean;
+  /** The host's kernel release as Docker reports it (`7.0.0-1012-aws`); null when unreadable, absent from older bastionctls. */
+  kernelVersion?: string | null;
 }
 
 export interface DeployVersion {
@@ -392,6 +394,8 @@ export interface DeployServerState {
   proxyOutdated?: boolean;
   /** `bastionctl proxy status`, when it could be read. */
   proxy?: DeployProxyStatus;
+  /** The server's kernel release (Docker's `KernelVersion`, from `proxy status`): the web marks catalog lines that will not start on it. Null or absent when unknown. */
+  kernelVersion?: string | null;
 }
 
 export interface BastionctlInfo {

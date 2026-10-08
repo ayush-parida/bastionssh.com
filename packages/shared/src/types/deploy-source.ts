@@ -63,6 +63,7 @@ export const DEPLOY_TROUBLESHOOTING_ANCHORS = {
   integrity: 'integrity-check-failed-reinstall',
   memory: 'build-ran-out-of-memory',
   certificate: 'certificate-not-issued',
+  mongodbKernel: 'mongodb-8-wont-start-on-linux-kernel-619',
 } as const;
 
 const trouble = (anchor: keyof typeof DEPLOY_TROUBLESHOOTING_ANCHORS) => `${DEPLOY_DOCS.troubleshooting}#${DEPLOY_TROUBLESHOOTING_ANCHORS[anchor]}`;

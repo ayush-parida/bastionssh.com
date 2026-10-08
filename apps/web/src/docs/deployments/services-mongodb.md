@@ -3,14 +3,14 @@ title: MongoDB
 section: deployments
 order: 160
 summary: Run MongoDB 8.0 or 7.0 on a server and connect from Node.js (driver, Mongoose, Next.js), Python and Go; backups with mongodump, restores and upgrades.
-keywords: [mongodb, mongo, mongoose, pymongo, mongo-driver, mongodump, mongorestore, authsource]
+keywords: [mongodb, mongo, mongoose, pymongo, mongo-driver, mongodump, mongorestore, authsource, kernel, 6.19]
 ---
 
 The MongoDB template runs the official `mongo` image with authentication on: a root user `root` whose password is generated on the server.
 
 | | |
 | --- | --- |
-| Versions | 8.0 (default), 7.0 |
+| Versions | 8.0 (default), 7.0 — 7.0 on Linux kernels 6.19 and newer ([why](#linux-kernel-619-and-newer)) |
 | Port | 27017 |
 | `.env` | `MONGO_INITDB_ROOT_USERNAME=root`, `MONGO_INITDB_ROOT_PASSWORD` (generated) |
 | Data | `/data/db` and `/data/configdb`, exclusive |
@@ -69,7 +69,12 @@ On your own machine: `mongorestore --archive=events-db-20261007T030000Z.archive.
 
 7.0 → 8.0 is refused in place: MongoDB needs its `featureCompatibilityVersion` raised one major at a time. Create an 8.0 service, restore a backup of the 7.0 one into it (`mongodump` archives restore into newer versions), and switch your apps over — see [Upgrading](services-overview.md#upgrading).
 
+## Linux kernel 6.19 and newer
+
+MongoDB 8 refuses to start on Linux kernels it reads as 6.19 or newer ([SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912)) — including Ubuntu kernels that report `7.0.0-…` even when they carry the fix. On such a server BastionSSH offers MongoDB 8.0 greyed out, picks 7.0 for a new service, and refuses to deploy, update or roll back to 8.0 before anything is pulled. Check with `uname -r`; see [MongoDB 8 won't start on Linux kernel 6.19+](troubleshooting.md#mongodb-8-wont-start-on-linux-kernel-619) for the details and the fix.
+
 ## Troubleshooting
 
 - **`Authentication failed`** — check `authSource=admin`, and that the password is the one revealed now: changing `MONGO_INITDB_ROOT_PASSWORD` after the first start does not change the user (use `db.changeUserPassword` in `mongosh`).
+- **`MongoDB cannot start: Linux kernel versions 6.19 and newer has a known incompatibility`** — use 7.0 on this server: see [Linux kernel 6.19 and newer](#linux-kernel-619-and-newer).
 - **High memory use** — MongoDB's cache takes about half of the container's memory limit: that is expected; lower or raise `run.memory` to taste.

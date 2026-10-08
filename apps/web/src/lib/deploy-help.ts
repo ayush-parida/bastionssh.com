@@ -58,6 +58,12 @@ export interface LogHint {
 
 /** Failures the deploy log may show, most specific first. */
 export const DEPLOY_LOG_HINTS: readonly LogHint[] = [
+  {
+    // bastionctl's refusal, or mongod's own when it got as far as starting (before the health check's hint: a crash ends with it)
+    pattern: /will not start on this server's Linux kernel|Linux kernel versions 6\.19 and newer has a known incompatibility|SERVER-121912/,
+    label: 'MongoDB 8 won’t start on Linux kernel 6.19+',
+    href: trouble(A.mongodbKernel),
+  },
   { pattern: /\.next build folder|is a Next\.js build folder/, label: 'Uploaded a Next.js build folder', href: trouble(A.nextBuildFolder) },
   { pattern: /Missing script:\s*"?build"?|has no build script|package\.json is not valid JSON/i, label: 'Missing script: build', href: trouble(A.missingBuildScript) },
   { pattern: /standalone output|output: 'standalone'/, label: 'Standalone output required', href: trouble(A.standalone) },

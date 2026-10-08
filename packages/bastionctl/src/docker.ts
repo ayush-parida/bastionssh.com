@@ -151,6 +151,11 @@ export class DockerApi {
     return this.request('GET', '/_ping', { timeoutMs: 10_000 });
   }
 
+  /** The daemon's host: its kernel release (`uname -r` of the host, e.g. `7.0.0-1012-aws`) among the rest. */
+  info(): Promise<{ KernelVersion?: string; OperatingSystem?: string }> {
+    return this.json('GET', '/info', { timeoutMs: 10_000 });
+  }
+
   inspectContainer(name: string) {
     return this.inspect<ContainerInspect>(`/containers/${encodeURIComponent(name)}/json`);
   }

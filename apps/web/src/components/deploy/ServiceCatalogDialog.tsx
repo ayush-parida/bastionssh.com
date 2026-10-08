@@ -3,7 +3,8 @@ import {
   DEPLOY_NAME_PATTERN,
   SERVICE_CATALOG,
   SERVICE_CATEGORIES,
-  defaultServiceVersion,
+  defaultServiceVersionFor,
+  serviceKernelConflict,
   type DeployProxyMode,
   type ServiceCategory,
   type ServiceTemplate,
@@ -124,12 +125,15 @@ export default function ServiceCatalogDialog({
   serverId,
   existing,
   proxyMode,
+  kernelVersion = null,
   onOpen,
   onClose,
 }: {
   serverId: string;
   existing: string[];
   proxyMode: DeployProxyMode;
+  /** The server's kernel release (from its deployments state): lines that will not start on it are offered disabled. */
+  kernelVersion?: string | null;
   /** Go to the service's page. */
   onOpen: (name: string) => void;
   onClose: () => void;
@@ -149,7 +153,8 @@ export default function ServiceCatalogDialog({
   const pick = (t: ServiceTemplate) => {
     setTemplate(t);
     setName(freeName(t, existing));
-    setVersion(defaultServiceVersion(t).major);
+    // A line that will not start on this server's kernel is not the default here (MongoDB 8 on 6.19+)
+    setVersion(defaultServiceVersionFor(t, kernelVersion).major);
     setMemory(t.memory);
     setScope('none');
     setPort(String(suggestedPort(t)));
@@ -162,7 +167,9 @@ export default function ServiceCatalogDialog({
   const portNumber = Number(port);
   const portError = scope === 'none' ? null : !/^\d{4,5}$/.test(port) || portNumber < 1024 || portNumber > 65535 ? 'A port from 1024 to 65535' : null;
   const domainError = domain && !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$/.test(domain) ? 'A domain like admin.example.com' : null;
-  const valid = !!template && !nameError && !memoryError && !portError && !domainError;
+  const selectedVersion = template?.versions.find((v) => v.major === version);
+  const blocked = template?.versions.map((v) => ({ v, rule: serviceKernelConflict(v, kernelVersion) })).filter((x) => x.rule !== null) ?? [];
+  const valid = !!template && !nameError && !memoryError && !portError && !domainError && !!selectedVersion && !serviceKernelConflict(selectedVersion, kernelVersion);
 
   const create = () => {
     if (!template || !valid) return;
@@ -181,7 +188,6 @@ export default function ServiceCatalogDialog({
   const running = started !== null && run.state.phase !== 'idle';
   // The service exists once the server streamed anything (the deploy may still have failed)
   const created = running && (run.state.lines.length > 0 || run.state.outcome !== null);
-  const selectedVersion = template?.versions.find((v) => v.major === version);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={(e) => e.target === e.currentTarget && !run.busy && onClose()}>
@@ -241,14 +247,27 @@ export default function ServiceCatalogDialog({
               <label className="block">
                 <span className="text-xs font-medium text-muted-foreground">Version</span>
                 <select aria-label="Version" value={version} onChange={(e) => setVersion(e.target.value)} className={input}>
-                  {template.versions.map((v) => (
-                    <option key={v.major} value={v.major}>
-                      {v.label} ({v.version}){v.note ? ` — ${v.note}` : ''}
-                    </option>
-                  ))}
+                  {template.versions.map((v) => {
+                    const rule = serviceKernelConflict(v, kernelVersion);
+                    return (
+                      <option key={v.major} value={v.major} disabled={!!rule} title={rule ? `${rule.reason}. Use ${template.name} ${rule.instead} on this server.` : undefined}>
+                        {v.label} ({v.version}){rule ? ' — won’t start on this server’s kernel' : v.note ? ` — ${v.note}` : ''}
+                      </option>
+                    );
+                  })}
                 </select>
                 <span className="mt-1 block break-all font-mono text-[11px] text-muted-foreground">{selectedVersion?.image}</span>
               </label>
+              {blocked.length > 0 && (
+                <p data-testid="kernel-note" className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-amber-700 dark:text-amber-400 md:col-span-2">
+                  <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+                  <span>
+                    {blocked.map((b) => b.v.label).join(', ')} won’t start on this server’s Linux kernel ({kernelVersion}): {blocked[0]!.rule!.reason}.{' '}
+                    {serviceKernelConflict(defaultServiceVersionFor(template, kernelVersion), kernelVersion) ? '' : `${template.name} ${blocked[0]!.rule!.instead} is picked instead. `}
+                    <DocsLink to={blocked[0]!.rule!.docs}>Why, and how to check</DocsLink>
+                  </span>
+                </p>
+              )}
               <label className="block">
                 <span className="text-xs font-medium text-muted-foreground">Memory limit</span>
                 <input aria-label="Memory" value={memory} onChange={(e) => setMemory(e.target.value.trim().toLowerCase())} className={`${input} font-mono`} />

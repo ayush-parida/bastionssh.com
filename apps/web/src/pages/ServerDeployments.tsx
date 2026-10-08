@@ -102,7 +102,7 @@ export default function ServerDeploymentsPage() {
           <SetupPanel serverId={serverId} state={state.data} proxy={proxy.data ?? null} canManage={levels.manage} canOperate={levels.operate} compact={ready} />
           {ready &&
             (app ? (
-              <AppDetail serverId={serverId} app={app} proxyMode={proxyMode} levels={levels} onBack={() => openApp(null)} />
+              <AppDetail serverId={serverId} app={app} proxyMode={proxyMode} kernelVersion={state.data.kernelVersion ?? null} levels={levels} onBack={() => openApp(null)} />
             ) : apps.isLoading ? (
               <p className="text-sm text-muted-foreground">Reading apps from the server…</p>
             ) : apps.error ? (
@@ -131,6 +131,7 @@ export default function ServerDeploymentsPage() {
           serverId={serverId}
           existing={(apps.data ?? []).map((a) => a.name)}
           proxyMode={proxyMode}
+          kernelVersion={state.data?.kernelVersion ?? null}
           onOpen={(name) => {
             setCatalog(false);
             openApp(name);

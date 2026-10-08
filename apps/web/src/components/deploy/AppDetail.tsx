@@ -92,6 +92,7 @@ export default function AppDetail({
   serverId,
   app,
   proxyMode,
+  kernelVersion = null,
   levels,
   onBack,
 }: {
@@ -99,6 +100,8 @@ export default function AppDetail({
   app: string;
   /** The server's proxy mode (Domains). */
   proxyMode: DeployProxyMode;
+  /** The server's kernel release (Update version marks lines that will not start on it). */
+  kernelVersion?: string | null;
   levels: DeployLevels;
   onBack: () => void;
 }) {
@@ -306,6 +309,7 @@ export default function AppDetail({
           app={app}
           template={template}
           image={image}
+          kernelVersion={kernelVersion}
           onUpdate={(major, label) => {
             setDialog(null);
             void run.follow('update', label, appPath(serverId, app, '/service/version'), { version: major });

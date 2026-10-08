@@ -59,6 +59,8 @@ export interface FakeDocker {
   crashOnStart: (name: string) => boolean;
   /** Make a pull fail with this message. */
   pullError: string | null;
+  /** `GET /info`'s KernelVersion (null: the answer has none; `fail`: it answers 500). */
+  kernelVersion: string | null | 'fail';
   /** What `GET /containers/<id>/archive` answers with: the file's bytes (the Caddy binary). */
   archive: (container: FakeContainer, file: string) => Buffer | null;
   /** Every container state change, in order (`start <name>`, `stop <name>`, `remove <name>`). */
@@ -112,6 +114,7 @@ export async function startFakeDocker(): Promise<FakeDocker> {
     buildError: null,
     crashOnStart: () => false,
     pullError: null,
+    kernelVersion: '6.8.0-45-generic',
     archive: (_c, file) => (file === '/usr/bin/caddy' ? Buffer.from('#!/bin/sh\n# caddy\n') : null),
     events: [],
     archives: [],
@@ -149,6 +152,10 @@ export async function startFakeDocker(): Promise<FakeDocker> {
       let m: RegExpExecArray | null;
 
       if (p === '/_ping') return void res.end('OK');
+      if (p === '/info') {
+        if (fake.kernelVersion === 'fail') return json(500, { message: 'info is broken' });
+        return json(200, { OperatingSystem: 'Ubuntu 24.04 LTS', ...(fake.kernelVersion !== null && { KernelVersion: fake.kernelVersion }) });
+      }
 
       if (p === '/containers/json') {
         const wanted = labelFilter(q);

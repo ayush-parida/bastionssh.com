@@ -1,4 +1,5 @@
 import type { DeployConnectionField, DeployConnectionString, DeployProxyMode, DeployPublishScope } from '../types/deploy.js';
+import { DEPLOY_DOCS, DEPLOY_TROUBLESHOOTING_ANCHORS } from '../types/deploy-source.js';
 import pins from './images.json' with { type: 'json' };
 
 /**
@@ -52,6 +53,27 @@ export interface ServiceVersion {
   volumePaths?: Record<string, string>;
   /** Said next to the version (LTS, innovation release…). */
   note?: string;
+  /** Host kernels the line refuses to start on (MongoDB 8 on 6.19+): bastionctl refuses to deploy it there, the web disables it. */
+  kernelIncompatibility?: ServiceKernelIncompatibility;
+}
+
+/**
+ * A line that will not start on newer Linux kernels — as the image reads the
+ * kernel (`uname -r`), which may not be what the kernel really is: Ubuntu
+ * names a patched 7.0.14 `7.0.0-1012-aws`. A newer release of the line that
+ * fixes its check drops the rule here (and the line is offered again).
+ */
+export interface ServiceKernelIncompatibility {
+  /** The first kernel, `major.minor`, the line refuses (`6.19`). */
+  from: string;
+  /** Why, in a sentence: said in the refusal and next to the version. */
+  reason: string;
+  /** The line to use instead (`7.0`). */
+  instead: string;
+  /** What to do, in a sentence. */
+  fix: string;
+  /** The docs that explain it (`/docs/deployments/troubleshooting#…`). */
+  docs: string;
 }
 
 export interface ServiceSecret {
@@ -148,6 +170,22 @@ function line(id: string, major: string, label: string, extra: Omit<ServiceVersi
 }
 
 const sh = (script: string): string[] => ['sh', '-c', script];
+
+/**
+ * MongoDB 8's vendored TCMalloc breaks the rseq ABI of kernels 6.19 to
+ * 7.0.13 (SERVER-121912), so mongod checks `uname -r` and refuses to start
+ * on 6.19 and newer. Releases meant to run on 7.0.14+ still read Ubuntu's
+ * `7.0.0-1012-aws` (a patched 7.0.14) as 7.0.0 and refuse. 7.0 is not
+ * affected. When MongoDB ships a check that reads the kernel right, drop
+ * this from the 8.0 line (and pin that release).
+ */
+const MONGODB_8_KERNEL: ServiceKernelIncompatibility = {
+  from: '6.19',
+  reason: 'MongoDB 8 refuses Linux kernels it reads as 6.19 or newer (SERVER-121912), including Ubuntu kernels that report x.y.0 even when they are patched',
+  instead: '7.0',
+  fix: 'Use MongoDB 7.0: delete this service and create it again with version 7.0, or update the image once MongoDB fixes its check',
+  docs: `${DEPLOY_DOCS.troubleshooting}#${DEPLOY_TROUBLESHOOTING_ANCHORS.mongodbKernel}`,
+};
 /** A mongodump/mongorestore `--config` file `$c` holding the root password (umask 077, removed when the shell exits). */
 const MONGO_AUTH = 'umask 077; c=$(mktemp) || exit 1; trap \'rm -f "$c"\' EXIT; printf \'password: "%s"\\n\' "$MONGO_INITDB_ROOT_PASSWORD" > "$c"';
 const SAME_MAJOR = 'Updates stay within the line: a new major version changes the data format, so move with a backup and restore into a new service.';
@@ -330,7 +368,7 @@ export const SERVICE_CATALOG: readonly ServiceTemplate[] = [
     category: 'database',
     icon: 'layers',
     docs: 'services-mongodb',
-    versions: [line('mongodb', '8.0', 'MongoDB 8.0', { default: true }), line('mongodb', '7.0', 'MongoDB 7.0')],
+    versions: [line('mongodb', '8.0', 'MongoDB 8.0', { default: true, kernelIncompatibility: MONGODB_8_KERNEL }), line('mongodb', '7.0', 'MongoDB 7.0')],
     port: 27017,
     publishPort: 27017,
     ports: [{ port: 27017, label: 'MongoDB' }],
@@ -770,6 +808,55 @@ function lineOf(t: ServiceTemplate, major: string): ServiceVersion {
  */
 export function serviceLineChangeAllowed(t: ServiceTemplate, from: string, to: string): { ok: true } | { ok: false; reason: string } {
   return serviceUpgradeAllowed(t, lineOf(t, from), lineOf(t, to));
+}
+
+/** `7.0.0-1012-aws` → `[7, 0]`: a kernel release's major and minor, or null when it does not start with them. */
+export function kernelMajorMinor(release: string | null | undefined): [number, number] | null {
+  const m = /^\s*(\d{1,4})\.(\d{1,4})(?!\d)/.exec(release ?? '');
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+/** Whether kernel `release` is `from` (`6.19`) or newer by its major.minor; null when either cannot be read as one. */
+export function kernelAtLeast(release: string | null | undefined, from: string): boolean | null {
+  const k = kernelMajorMinor(release);
+  const f = kernelMajorMinor(from);
+  if (!k || !f) return null;
+  return k[0] !== f[0] ? k[0] > f[0] : k[1] >= f[1];
+}
+
+/** The rule line `v` breaks on kernel `release`, or null (no rule, an older kernel, or one that cannot be read). */
+export function serviceKernelConflict(v: ServiceVersion, release: string | null | undefined): ServiceKernelIncompatibility | null {
+  const rule = v.kernelIncompatibility;
+  return rule && kernelAtLeast(release, rule.from) === true ? rule : null;
+}
+
+/** The line a new service of `t` starts on, on a host with kernel `release`: the default, or — when it will not start there — the line its rule names instead. */
+export function defaultServiceVersionFor(t: ServiceTemplate, release: string | null | undefined): ServiceVersion {
+  const d = defaultServiceVersion(t);
+  const rule = serviceKernelConflict(d, release);
+  if (!rule) return d;
+  return serviceVersion(t, rule.instead) ?? t.versions.find((v) => !serviceKernelConflict(v, release)) ?? d;
+}
+
+/**
+ * The kernel rule for image `ref` of `t`, with the line's label: its line's,
+ * or — for a release of a line the catalog does not offer (`mongo:8.2.1`) —
+ * the nearest older offered line's. Null when none applies.
+ */
+export function serviceKernelRuleOfImage(t: ServiceTemplate, ref: string): { label: string; rule: ServiceKernelIncompatibility } | null {
+  const own = serviceVersionOfImage(t, ref);
+  if (own) return own.kernelIncompatibility ? { label: own.label, rule: own.kernelIncompatibility } : null;
+  const { repo, tag } = imageRepoAndTag(ref);
+  if (!tag || !/^\d/.test(tag)) return null;
+  const older = t.versions
+    .filter((v) => imageRepoAndTag(v.image).repo === repo && compareReleases(v.major, tag) <= 0)
+    .sort((a, b) => compareReleases(b.major, a.major))[0];
+  return older?.kernelIncompatibility ? { label: `${t.name} ${tag.replace(/-.*$/, '')}`, rule: older.kernelIncompatibility } : null;
+}
+
+/** Why `label` will not run on kernel `release`, what to do (and `done`: what was left alone), and where the docs explain it. */
+export function serviceKernelRefusal(label: string, release: string, rule: ServiceKernelIncompatibility, done = ''): string {
+  return `${label} will not start on this server's Linux kernel ${release}: ${rule.reason}. ${rule.fix}.${done ? ` ${done}` : ''} See ${rule.docs}`;
 }
 
 /** Container paths of `t`'s volumes for line `v`. */

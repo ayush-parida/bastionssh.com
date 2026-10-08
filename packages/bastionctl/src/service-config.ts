@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import { parseDocument } from 'yaml';
 import type { DeployBackupSchedule, DeployBackupSettings } from '@smt/shared';
-import { formatIssues, isImageRef, MAX_CONFIG_BYTES, validateForServer } from './config.js';
+import { formatIssues, isImageRef, MAX_CONFIG_BYTES, tryLoadConfig, validateForServer } from './config.js';
 import type { Ctx } from './context.js';
 import { ensureCron } from './cron.js';
+import { checkKernel } from './kernel.js';
 import { appName, BastionError } from './names.js';
 import { withProxyLock } from './proxy.js';
 
@@ -44,10 +45,14 @@ async function editConfig(ctx: Ctx, app: string, edit: (doc: ReturnType<typeof p
 /**
  * `set-image <app> <ref>`: `build.image` of a `build.type: image` app. The
  * next deploy pulls it (BastionSSH deploys right away). Which images a
- * quick service may move to is BastionSSH's to decide (its catalog's lines).
+ * quick service may move to is BastionSSH's to decide (its catalog's lines);
+ * one whose line will not start on this host's kernel is refused here.
  */
 export async function setImage(ctx: Ctx, app: string, ref: string): Promise<{ app: string; from: string | null; to: string; changed: boolean }> {
   if (!isImageRef(ref)) throw new BastionError(`Not an image reference: ${JSON.stringify(ref)}`, 2);
+  // Not a line that will not start on this kernel (MongoDB 8 on 6.19+): the deploy that follows would only fail
+  const { config } = tryLoadConfig(ctx.layout, appName(app));
+  if (config) await checkKernel(ctx, config, ref, `${app} keeps its image; nothing was changed.`);
   const seen: { from: string | null } = { from: null };
   const { before, after } = await editConfig(ctx, app, (doc) => {
     if (doc.getIn(['build', 'type']) !== 'image') throw new BastionError(`${app} is not built from an image (build.type: image)`, 3);

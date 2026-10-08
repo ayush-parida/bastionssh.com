@@ -2,8 +2,8 @@
 title: Troubleshooting deployments
 section: deployments
 order: 120
-summary: What the common deploy failures mean and how to fix them — wrong folder uploaded, missing build script, standalone output, health checks, DNS, ports, Reinstall, memory and certificates.
-keywords: [error, failed, troubleshooting, proxy upgrade, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, certificate, next build folder]
+summary: What the common deploy failures mean and how to fix them — wrong folder uploaded, missing build script, standalone output, health checks, DNS, ports, Reinstall, memory, certificates and MongoDB 8 on newer Linux kernels.
+keywords: [error, failed, troubleshooting, proxy upgrade, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, certificate, next build folder, mongodb, kernel, 6.19, uname, server-121912, tcmalloc, rseq]
 ---
 
 When a deploy fails, the previous release keeps serving. The deploy log ends with the reason, and failures this page knows about link here.
@@ -144,3 +144,26 @@ Check, in order:
 5. In **nginx mode**, run **Apply nginx again** under Domains after fixing any of the above; certbot's error is shown there.
 
 The proxy keeps retrying on its own; once the cause is fixed, the certificate usually appears within minutes.
+
+## MongoDB 8 won't start on Linux kernel 6.19+
+
+**You see** a MongoDB service refused before anything is pulled with *MongoDB 8.0 will not start on this server's Linux kernel …*, or a MongoDB 8 container that stops at once with *MongoDB cannot start: Linux kernel versions 6.19 and newer has a known incompatibility with this version of MongoDB* in its log. In **New service** and **Update version**, MongoDB 8.0 is greyed out as *won't start on this server's kernel*.
+
+**Why.** MongoDB 8 bundles its own memory allocator (TCMalloc), which breaks the kernel's restartable-sequences (`rseq`) rules on Linux 6.19 up to 7.0.13 — MongoDB's bug [SERVER-121912](https://jira.mongodb.org/browse/SERVER-121912). So `mongod` reads the kernel version (`uname -r`) when it starts and refuses 6.19 and newer. Recent 8.0 releases are meant to run again on kernels with the fix (7.0.14 and later), but the check reads only the version the kernel reports — and Ubuntu's kernels report the base version plus their own build number: an Ubuntu 24.04 server on AWS can say `7.0.0-1012-aws` while its kernel is upstream 7.0.14 with the fix. MongoDB sees 7.0.0 and refuses anyway.
+
+BastionSSH reads the server's kernel from Docker and refuses MongoDB 8 on 6.19 and newer up front, so you don't wait for a few hundred megabytes to download only to watch `mongod` exit. MongoDB 7.0 is not affected.
+
+**Check** on the server:
+
+```sh
+uname -r                          # what MongoDB reads, e.g. 7.0.0-1012-aws
+cat /proc/version_signature       # Ubuntu only: the upstream kernel it is built from, e.g. Ubuntu 7.0.0-1012.12-aws 7.0.14
+```
+
+**Fix.** Use MongoDB 7.0:
+
+- **A new service:** pick version 7.0 (on such a server, New service picks it for you).
+- **A MongoDB 8.0 service that was refused or won't start:** delete the service and create it again with version 7.0. One that was refused never started, so it holds no data. One that ran before the server's kernel was upgraded keeps its 8.0 data files, which 7.0 cannot open: restore a [backup](services-overview.md#backups) into the new 7.0 service instead (a `mongodump` archive of ordinary data restores into 7.0; check your app afterwards).
+- Moving the kernel back below 6.19 also works, but is rarely the better choice.
+
+When MongoDB ships an 8.x release whose check reads the kernel correctly, BastionSSH's catalog will pin it and offer 8.x on these servers again; until then, Update version keeps MongoDB 8.0 greyed out there. See [MongoDB](services-mongodb.md#linux-kernel-619-and-newer).

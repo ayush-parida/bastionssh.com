@@ -232,7 +232,8 @@ export async function deployRoutes(app: FastifyInstance) {
           pinned: installed.pinned || (installed.integrity === 'ok' && (await isPinned(remote, root))),
           ...(installed.upgraded && { upgraded: installed.upgraded }),
           ...(installed.upgradeError && { upgradeError: installed.upgradeError }),
-          ...(proxy && { proxy, proxyOutdated: proxy.state === 'outdated' }),
+          // The host's kernel comes with the proxy status: no command of its own
+          ...(proxy && { proxy, proxyOutdated: proxy.state === 'outdated', kernelVersion: proxy.kernelVersion ?? null }),
         };
       });
     } catch (err) {

@@ -72,7 +72,12 @@ const ordersDb = {
   permissions: { deploy: 'operate' },
 };
 
-async function stubServices(page: Page, serverId: string, sent: Sent[]) {
+/** A Ubuntu 24.04 kernel on AWS: upstream 7.0.14, reported as 7.0.0 — MongoDB 8 refuses it. */
+const UBUNTU_AWS = '7.0.0-1012-aws';
+const MONGO8_OLD = PINS.mongodb!['8.0']!.image.replace(/:[^@]+@/, ':8.0.30@');
+const KERNEL_DOCS = '/docs/deployments/troubleshooting#mongodb-8-wont-start-on-linux-kernel-619';
+
+async function stubServices(page: Page, serverId: string, sent: Sent[], opts: { kernelVersion?: string } = {}) {
   await page.route(`**/api/docker/servers/${serverId}**`, (route) => route.fulfill({ status: 404, contentType: 'application/json', body: '{"error":"Not found"}' }));
   await page.route(`**/api/deploy/servers/${serverId}**`, async (route: Route) => {
     const req = route.request();
@@ -90,7 +95,7 @@ async function stubServices(page: Page, serverId: string, sent: Sent[]) {
       }
       sent.push({ method, path, body });
     }
-    if (path === '/') return json({ root: '/opt/bastion', integrity: 'ok', version: '0.1.0' });
+    if (path === '/') return json({ root: '/opt/bastion', integrity: 'ok', version: '0.1.0', ...(opts.kernelVersion && { kernelVersion: opts.kernelVersion }) });
     if (path === '/proxy') {
       return json({
         mode: 'caddy',
@@ -122,6 +127,30 @@ async function stubServices(page: Page, serverId: string, sent: Sent[]) {
           build: { type: 'image', node: null, dir: '.', output: null, image: PG17_OLD },
           run: { port: 5432, env_file: '.env', volumes: [{ name: 'data', path: '/var/lib/postgresql/data', readonly: false, exclusive: true }], memory: '512m', cpus: null, strategy: 'recreate', publish: { scope: 'localhost', port: 15432, target: null } },
           healthcheck: { type: 'command', path: '/', command: ['sh', '-c', 'pg_isready'], timeout: '120s' },
+          keep_releases: 3,
+          proxy: 'caddy',
+          permissions: { deploy: 'operate' },
+          backups: { schedule: 'off', keep: 7 },
+        },
+        previousRelease: null,
+        lock: null,
+      });
+    }
+    if (path === '/apps/events-db' && method === 'GET') {
+      return json({
+        ...ordersDb,
+        name: 'events-db',
+        service: 'mongodb',
+        container: { ...container, name: `bastion-events-db-${RELEASE}` },
+        config: {
+          name: 'events-db',
+          service: 'mongodb',
+          domains: [],
+          redirect_www: 'none',
+          tls: 'auto',
+          build: { type: 'image', node: null, dir: '.', output: null, image: MONGO8_OLD },
+          run: { port: 27017, env_file: '.env', volumes: [{ name: 'data', path: '/data/db', readonly: false, exclusive: true }], memory: '1g', cpus: null, strategy: 'recreate', publish: { scope: 'none', port: null, target: null } },
+          healthcheck: { type: 'command', path: '/', command: ['mongosh', '--eval', 'quit()'], timeout: '120s' },
           keep_releases: 3,
           proxy: 'caddy',
           permissions: { deploy: 'operate' },
@@ -401,6 +430,58 @@ test.describe('Quick services', () => {
     await page.getByRole('alertdialog').getByRole('button', { name: 'Roll back' }).click();
     await expect(page.getByTestId('deploy-log')).toContainText(`Rolling orders-db back to ${SAME_LINE}`);
     expect(sent).toEqual([{ method: 'POST', path: '/apps/orders-db/rollback', body: { release: SAME_LINE } }]);
+  });
+
+  test('on a kernel MongoDB 8 refuses, offers 7.0 and keeps 8.0 off, saying why', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubServices(page, serverId, sent, { kernelVersion: UBUNTU_AWS });
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments`);
+    await page.getByRole('region', { name: 'Apps' }).getByRole('button', { name: 'New service' }).click();
+    const dialog = page.getByRole('dialog', { name: 'New service' });
+    await dialog.getByRole('button', { name: 'MongoDB', exact: true }).click();
+
+    // 7.0 by default; 8.0 listed, disabled, with the reason on hover
+    const version = dialog.getByLabel('Version');
+    await expect(version).toHaveValue('7.0');
+    const m8 = version.locator('option[value="8.0"]');
+    // A closed select's options are not "enabled" to Playwright: their property says it
+    await expect(m8).toHaveJSProperty('disabled', true);
+    await expect(m8).toContainText('won’t start on this server’s kernel');
+    await expect(m8).toHaveAttribute('title', /SERVER-121912.*Use MongoDB 7\.0 on this server\./);
+    await expect(version.locator('option[value="7.0"]')).toHaveJSProperty('disabled', false);
+    const note = dialog.getByTestId('kernel-note');
+    await expect(note).toContainText(`MongoDB 8.0 won’t start on this server’s Linux kernel (${UBUNTU_AWS})`);
+    await expect(note).toContainText('MongoDB 7.0 is picked instead.');
+    await expect(note.getByRole('link', { name: 'Why, and how to check' })).toHaveAttribute('href', KERNEL_DOCS);
+    await snap(page, 'services-mongodb-kernel');
+    await expect(dialog.getByRole('button', { name: 'Create MongoDB' })).toBeEnabled();
+    await dialog.getByRole('button', { name: 'Create MongoDB' }).click();
+    expect(sent).toEqual([{ method: 'POST', path: '/services', body: { name: 'mongodb', template: 'mongodb', version: '7.0', memory: '1g', publish: { scope: 'none' } } }]);
+
+    // Update version of a MongoDB 8.0 service on the same server: the newer 8.0 release is not offered either
+    sent.length = 0;
+    await page.goto(`/servers/${serverId}/deployments/events-db`);
+    await page.getByRole('button', { name: 'Update version' }).click();
+    const update = page.getByRole('dialog', { name: 'Update events-db' });
+    await expect(update.getByLabel(/MongoDB 8\.0/)).toBeChecked();
+    await expect(update).toContainText('(won’t start on this server’s kernel)');
+    await expect(update.getByTestId('kernel-note')).toContainText('Use MongoDB 7.0: delete this service and create it again with version 7.0');
+    await expect(update.getByTestId('kernel-note').getByRole('link', { name: 'Why, and how to check' })).toHaveAttribute('href', KERNEL_DOCS);
+    await expect(update.getByRole('button', { name: 'Update' })).toBeDisabled();
+    expect(sent).toEqual([]);
+  });
+
+  test('offers MongoDB 8.0 by default where the kernel is older', async ({ page }) => {
+    await stubServices(page, serverId, [], { kernelVersion: '6.8.0-45-generic' });
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments`);
+    await page.getByRole('region', { name: 'Apps' }).getByRole('button', { name: 'New service' }).click();
+    const dialog = page.getByRole('dialog', { name: 'New service' });
+    await dialog.getByRole('button', { name: 'MongoDB', exact: true }).click();
+    await expect(dialog.getByLabel('Version')).toHaveValue('8.0');
+    await expect(dialog.getByLabel('Version').locator('option[value="8.0"]')).toHaveJSProperty('disabled', false);
+    await expect(dialog.getByTestId('kernel-note')).toHaveCount(0);
   });
 
   test('offers each role what it may do', async ({ page }) => {
