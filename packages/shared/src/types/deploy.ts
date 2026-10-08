@@ -10,6 +10,12 @@ export const DEPLOY_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,40}$/;
 export const DEPLOY_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
 export type DeployBuildType = 'nextjs' | 'dockerfile' | 'static' | 'image';
+/**
+ * Where an app's image is built (`build.where`): on the server itself
+ * (`server`, the default), or next to BastionSSH by its BuildKit service
+ * (`bastion`), which ships only the finished image to the server.
+ */
+export type DeployBuildWhere = 'server' | 'bastion';
 /** How a release replaces the one serving: side by side (`rolling`), or the old one stopped first (`recreate`). */
 export type DeployRunStrategy = 'rolling' | 'recreate';
 export type DeployHealthcheckType = 'http' | 'tcp' | 'command';
@@ -50,8 +56,25 @@ export interface DeployAppConfig {
   name: string;
   redirect_www: DeployRedirectWww;
   tls: DeployTls;
-  /** `image`: a registry reference pulled instead of built (`dir`/`node`/`output` unused). */
-  build: { type: DeployBuildType; node: string | null; dir: string; output: string | null; image: string | null };
+  /**
+   * `image`: a registry reference pulled instead of built (`dir`/`node`/`output` unused).
+   * `where` and `args` are absent from older versions (read as `server` and `[]`).
+   */
+  build: {
+    type: DeployBuildType;
+    node: string | null;
+    dir: string;
+    output: string | null;
+    image: string | null;
+    /** Where the image is built: on the server (default) or on the BastionSSH side. */
+    where?: DeployBuildWhere;
+    /**
+     * `.env` names passed to the build as build args besides every
+     * `NEXT_PUBLIC_*` (`build.args`): read from the server's `.env` for the
+     * build only, and declared with `ARG` in generated Dockerfiles.
+     */
+    args?: string[];
+  };
   run: {
     port: number;
     env_file: string;
@@ -268,10 +291,20 @@ export interface DeployRelease {
   result: DeployReleaseResult;
   error: string | null;
   previous: string | null;
-  /** `build.type: image`: the digest the pulled image resolved to (`sha256:…`); null for builds. Absent from older releases. */
+  /**
+   * `build.type: image`: the digest the pulled image resolved to
+   * (`sha256:…`); an image built on the BastionSSH side: its image id. Null
+   * for builds on the server. Absent from older releases.
+   */
   digest?: string | null;
   /** `build.type: image`: the image reference pulled (`postgres:17.6-alpine@sha256:…`). Absent from older releases. */
   ref?: string | null;
+  /** Where the image was built (`build.where` at deploy time); null for a pulled image. Absent from older releases. */
+  builtOn?: DeployBuildWhere | null;
+  /** The image's platform (`linux/amd64`), for images built on the BastionSSH side. Absent from older releases. */
+  platform?: string | null;
+  /** How long the image build took on the BastionSSH side (ms, without the transfer). Absent from older releases. */
+  buildMs?: number | null;
   /** A quick service's template id when it was deployed. Absent from older releases and apps. */
   service?: string | null;
   /** A quick service: the template line the release runs (`17`), recorded at deploy, or read from its image for an older release; null when it cannot be told. */
@@ -415,7 +448,16 @@ export type DeployStreamEvent =
   /** `exitCode` is null when the command was cut off (timeout, lost connection). */
   | { type: 'exit'; exitCode: number | null; signal: string | null; durationMs: number; timedOut: boolean }
   | { type: 'end' }
-  | { type: 'error'; error: string; status?: number };
+  | { type: 'error'; error: string; status?: number }
+  /**
+   * A build on the BastionSSH side (`build.where: bastion`) moving on:
+   * waiting its turn, building, loading the image into the server's Docker,
+   * then handed to the usual release flow. Absent for builds on the server.
+   */
+  | { type: 'build'; state: DeployBuildState; platform?: string; position?: number };
+
+/** The steps of a build on the BastionSSH side, in order. */
+export type DeployBuildState = 'queued' | 'building' | 'loading' | 'deploying';
 
 export interface DeployEnvKeys {
   keys: string[];

@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { build } from 'esbuild';
 
-const images = JSON.parse(readFileSync('src/images.json', 'utf8'));
+const images = JSON.parse(readFileSync('../shared/src/build/images.json', 'utf8'));
 const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 
 mkdirSync('dist', { recursive: true });

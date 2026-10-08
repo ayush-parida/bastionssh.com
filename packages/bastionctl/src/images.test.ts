@@ -4,8 +4,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { DeployAppConfig } from '@smt/shared';
 import { planBuild } from './build.js';
-import images from './images.json' with { type: 'json' };
-import { NODE_BUILD_VERSIONS, nodeBuildImage, pinnedRef } from './images.js';
+import { IMAGES as images, NODE_BUILD_VERSIONS, nodeBuildImage, pinnedRef } from './images.js';
 import { proxyDockerfile } from './proxy-image.js';
 
 /**

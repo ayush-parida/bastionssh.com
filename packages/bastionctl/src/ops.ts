@@ -18,7 +18,6 @@ import type {
   DeployValidation,
   DeployVersion,
 } from '@smt/shared';
-import images from './images.json' with { type: 'json' };
 import { planBuild, GENERATED_DOCKERFILE } from './build.js';
 import {
   appNames,
@@ -38,7 +37,7 @@ import { appCertificates } from './certs.js';
 import { ensureCron } from './cron.js';
 import { DockerApiError, usageFrom } from './docker.js';
 import { containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
-import { pinnedRef } from './images.js';
+import { IMAGES as images, pinnedRef } from './images.js';
 import { checkKernel, hostKernel } from './kernel.js';
 import { deployedLine, releaseRef, rollbackLineCheck } from './lines.js';
 import { acquireLock, lockView, readLock, waitForLock } from './lock.js';

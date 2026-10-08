@@ -1,4 +1,4 @@
-// Re-pin every image in src/images.json (deployments spec §8): each reference's
+// Re-pin every image in ../shared/src/build/images.json (deployments spec §8): each reference's
 // tag is resolved to its current multi-platform digest with
 // `docker buildx imagetools inspect`, and the file is rewritten. Review the
 // diff, run `pnpm --filter @smt/bastionctl test` (images.test.ts checks that
@@ -9,7 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
-const FILE = new URL('./src/images.json', import.meta.url);
+const FILE = new URL('../shared/src/build/images.json', import.meta.url);
 const images = JSON.parse(readFileSync(FILE, 'utf8'));
 
 function repin(ref) {

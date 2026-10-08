@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { DEPLOY_MASK, DEPLOY_MIN_SECRET_LENGTH, secretMasker } from '@smt/shared';
 import { parseEnv, readEnvFile } from './env.js';
 
 /**
@@ -8,38 +9,13 @@ import { parseEnv, readEnvFile } from './env.js';
  * build.log and release.json. Every exact occurrence of a value of at least
  * {@link MIN_SECRET_LENGTH} characters is replaced with {@link MASK} in all
  * of those; shorter values (`1`, `true`, `prod`) would mask ordinary words.
+ * The masker itself is shared (@smt/shared, `secretMasker`) with BastionSSH's
+ * builder, which masks build args the same way.
  */
 
-export const MASK = '••••';
-export const MIN_SECRET_LENGTH = 6;
-
-/**
- * The texts a value can show up as: itself; each of its lines, since a
- * multi-line value (a PEM key) printed by the app reaches bastionctl one log
- * line at a time; and its JSON-escaped form (an app logging its config as
- * JSON, release.json).
- */
-function forms(value: string): string[] {
-  const out = [value];
-  if (/[\r\n]/.test(value)) out.push(...value.split(/\r?\n|\r/).map((line) => line.trim()));
-  const escaped = JSON.stringify(value).slice(1, -1);
-  if (escaped !== value) out.push(escaped);
-  return out;
-}
-
-/** A function replacing every occurrence of `values` (long enough) in a text. */
-export function secretMasker(values: Iterable<string>): (text: string) => string {
-  // Longest first: a value containing another is masked whole
-  const secrets = [...new Set([...values].filter((v) => v.length >= MIN_SECRET_LENGTH).flatMap(forms).filter((v) => v.length >= MIN_SECRET_LENGTH))].sort(
-    (a, b) => b.length - a.length,
-  );
-  if (secrets.length === 0) return (text) => text;
-  return (text) => {
-    let out = text;
-    for (const secret of secrets) if (out.includes(secret)) out = out.split(secret).join(MASK);
-    return out;
-  };
-}
+export const MASK = DEPLOY_MASK;
+export const MIN_SECRET_LENGTH = DEPLOY_MIN_SECRET_LENGTH;
+export { secretMasker };
 
 /**
  * A masker for the values in an env file, read again whenever the file
