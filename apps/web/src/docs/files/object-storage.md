@@ -3,7 +3,7 @@ title: Object storage
 section: files
 order: 30
 summary: Connect S3-compatible storage such as AWS S3, MinIO, R2 or B2 and manage buckets and objects from the browser.
-keywords: [s3, object storage, minio, r2, backblaze, wasabi, spaces, gcs, buckets, upload]
+keywords: [s3, object storage, minio, r2, backblaze, wasabi, spaces, gcs, buckets, upload, download folder, zip, tar.gz]
 ---
 
 The **Object Storage** module connects to any storage service that speaks the S3 API. Once a connection is added you can list and create buckets, browse objects by folder, upload, download, rename and delete, all under the same roles and audit log as your servers.
@@ -58,6 +58,7 @@ Inside a bucket, objects are shown as folders and files based on `/` in their ke
 | --- | --- | --- |
 | Browse | Click folders, use the breadcrumbs or the up arrow | view |
 | Download | Download icon, or click a file | view |
+| Download a folder | Download-folder icon on the folder row, or **Download folder** for the folder you are in | view |
 | Upload | **Upload**, or drag files onto the page | operate |
 | New folder | **New folder** | operate |
 | Rename | Pencil icon | operate |
@@ -70,6 +71,25 @@ Long listings load in pages; click **Load more** at the bottom to see the rest.
 
 Uploads are streamed through BastionSSH to the provider. Files above 8 MiB are sent as a multipart upload. The largest upload allowed is set by `SMT_STORAGE_MAX_UPLOAD_BYTES` (default 5 GiB).
 
+### Download a folder
+
+A folder (everything under its prefix, subfolders included) or the whole bucket downloads as one archive. Click the download-folder icon on a folder row, or **Download folder** at the top for the folder you are in (at the bucket root, that is the whole bucket).
+
+1. The dialog counts what is inside first: the number of files and their total size. A large folder is counted only up to 10 000 objects or 5 seconds, and then shown as "at least …".
+2. Pick the format: **.zip** (opens on macOS and Windows without extra software) or **.tar.gz** (keeps the archive smaller for text and logs).
+3. Click **Download**. In Chrome and Edge you choose where to save it, and the archive is written straight to that file while the dialog shows the bytes received; **Cancel** stops it and discards the partial file. In other browsers a small folder is downloaded inside the page the same way; a large one is handed to the browser, whose downloads list shows the progress.
+
+The archive is built while the objects stream down. Nothing is stored on the BastionSSH host or in the bucket, so a large folder starts downloading at once. Cancelling (or closing the tab) stops the transfer from the provider too.
+
+What ends up in the archive:
+
+- Paths are relative to the folder you chose. Folder marker objects (keys ending in `/`) become folders, so empty folders are kept.
+- A key that cannot be a file name is left out: a `..` segment, an empty segment such as the middle of `logs//today.txt`. So is an object that disappears or cannot be read while the archive is built. Everything left out is listed in `_skipped.txt` at the root of the archive.
+- A folder download stops at `SMT_FOLDER_DOWNLOAD_MAX_BYTES` of content (default 10 GiB) or `SMT_FOLDER_DOWNLOAD_MAX_FILES` entries (default 100 000). The archive then ends with `_TRUNCATED.txt` saying where it stopped; the dialog warns you beforehand when the count is already over. Download the subfolders separately to get the rest.
+- Each folder download holds one of your live streams (the same limit as live log views) until it ends.
+
+Downloading a folder needs the same **view** level as downloading a single object. Each one is audited as `storage.folder_download` with the bucket, prefix, format, number of files and bytes, what was skipped, whether it was truncated or cancelled, and how long it took. Losing access to the connection stops a folder download that is still running.
+
 ### Rename
 
 S3 has no real rename, so BastionSSH copies the object to the new name and then deletes the original. If an object with the new name already exists, you are asked whether to replace it. In a bucket without versioning, replacing is permanent.
@@ -78,7 +98,7 @@ S3 has no real rename, so BastionSSH copies the object to the new name and then 
 
 | Level | Can |
 | --- | --- |
-| view | List buckets and objects, download |
+| view | List buckets and objects, download objects and folders |
 | operate | Also upload, rename and delete objects, **Test** and **Diagnose** the connection |
 | manage | Also add, edit and remove connections, and create or delete buckets |
 

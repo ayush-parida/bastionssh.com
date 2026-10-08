@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { ApiError, api } from '@/lib/api.js';
 import { useAccessLevels } from '@/hooks/useAccessLevels.js';
 import { formatBytes } from '@/lib/utils.js';
+import FolderDownloadDialog from '@/components/storage/FolderDownloadDialog.js';
 import type {
   StorageFolder,
   StorageListResponse,
@@ -17,6 +18,7 @@ import {
   Download,
   File as FileIcon,
   Folder,
+  FolderDown,
   FolderPlus,
   Pencil,
   RefreshCw,
@@ -41,6 +43,8 @@ export default function StorageObjectsPage() {
   const [prefix, setPrefix] = useState('');
   // One upload can finish while another is still going, so count rather than flag
   const [uploadsInFlight, setUploadsInFlight] = useState(0);
+  // The prefix whose "Download folder" dialog is open ('' = the whole bucket)
+  const [downloadPrefix, setDownloadPrefix] = useState<string | null>(null);
 
   // Server enforces these too — this only keeps unusable controls off the screen
   const canWrite = useAccessLevels('storage_connection').can(id, 'operate');
@@ -217,6 +221,13 @@ export default function StorageObjectsPage() {
             </>
           )}
           <button
+            onClick={() => setDownloadPrefix(prefix)}
+            title={prefix ? 'Download this folder as one archive' : 'Download the whole bucket as one archive'}
+            className="border-border hover:bg-muted flex items-center gap-1.5 rounded-md border px-3 py-2 text-sm"
+          >
+            <FolderDown size={15} /> Download folder
+          </button>
+          <button
             onClick={refresh}
             title="Refresh"
             className="border-border hover:bg-muted rounded-md border p-2"
@@ -310,8 +321,16 @@ export default function StorageObjectsPage() {
                   <td className="text-muted-foreground px-4 py-2">—</td>
                   <td className="text-muted-foreground px-4 py-2">—</td>
                   <td className="px-4 py-2">
-                    {canWrite && (
-                      <div className="flex items-center justify-end gap-1">
+                    <div className="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => setDownloadPrefix(folder.prefix)}
+                        title="Download folder"
+                        aria-label={`Download folder ${folder.name}`}
+                        className="text-muted-foreground hover:bg-muted hover:text-foreground rounded-md p-1.5"
+                      >
+                        <FolderDown size={13} />
+                      </button>
+                      {canWrite && (
                         <button
                           onClick={() => handleDeleteFolder(folder)}
                           title="Delete folder"
@@ -319,8 +338,8 @@ export default function StorageObjectsPage() {
                         >
                           <Trash2 size={13} />
                         </button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -388,6 +407,16 @@ export default function StorageObjectsPage() {
             </div>
           )}
         </div>
+      )}
+
+      {downloadPrefix !== null && id && bucket && (
+        <FolderDownloadDialog
+          connectionId={id}
+          bucket={bucket}
+          base={base}
+          prefix={downloadPrefix}
+          onClose={() => setDownloadPrefix(null)}
+        />
       )}
     </div>
   );

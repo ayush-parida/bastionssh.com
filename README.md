@@ -276,6 +276,7 @@ Add an S3-compatible connection under **Object Storage** with an endpoint, regio
 
 - Buckets: list, create, delete (optionally emptying it first, with a typed-name confirmation)
 - Objects: browse by folder, upload (streamed, multipart above 8 MiB), download, rename, delete a file or a whole folder
+- Download a folder (or the whole bucket) as one `.zip` or `.tar.gz`, built while the objects stream down, with a quick size estimate first, progress and cancel; capped by `SMT_FOLDER_DOWNLOAD_MAX_BYTES` / `SMT_FOLDER_DOWNLOAD_MAX_FILES`
 - Every action is audited with the bucket and key
 - Roles: viewers browse and download, operators change objects and test the connection, admins manage connections and buckets (with custom roles: the `view`, `operate` and `manage` levels)
 

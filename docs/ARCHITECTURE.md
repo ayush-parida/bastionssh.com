@@ -285,6 +285,12 @@ streaming multipart uploads), which MinIO itself recommends for Node.
   credentials, 409 bucket conflicts, 502/504 unreachable/timeout).
 - `index.ts` — resolves a connection for the caller's org, decrypts the secret, and
   caches one client per connection until the row changes.
+- `folder.ts` — folder downloads: a `FolderWalker` (archive/) over a prefix, paging
+  `ListObjectsV2` with the `/` delimiter per folder (common prefixes are folders, the
+  `prefix/` marker is the folder itself) and streaming each `GetObject` body with the
+  download's abort signal; the flat pre-estimate (`estimatePrefix`, capped at 10 000
+  objects / 5 s, "at least" past that); and ending a user's storage downloads on
+  revocation (`keepStorageConnectionIds` in `revokeLiveAccess`).
 
 Downloads stream the SDK body straight to the response; uploads pipe a raw
 `application/octet-stream` body through `lib-storage`'s `Upload` (single PUT below
@@ -309,6 +315,8 @@ REST surface, all under `/api/storage`:
 | `GET`    | `/connections/:id/buckets/:bucket/object?key=`      | Stream an object down                        |
 | `PUT`    | `/connections/:id/buckets/:bucket/object?key=&contentType=` | Stream a raw body up                 |
 | `POST`   | `/connections/:id/buckets/:bucket/folder`           | Create a folder marker                       |
+| `GET`    | `/connections/:id/buckets/:bucket/folder?prefix=&format=` | A prefix as one zip / tar.gz (`storage.folder_download`) |
+| `GET`    | `/connections/:id/buckets/:bucket/folder/estimate?prefix=` | Objects and bytes under a prefix, counted quickly |
 | `POST`   | `/connections/:id/buckets/:bucket/rename`           | Copy + delete one object                     |
 | `DELETE` | `/connections/:id/buckets/:bucket/object?key=&recursive=` | Delete an object or a whole prefix     |
 

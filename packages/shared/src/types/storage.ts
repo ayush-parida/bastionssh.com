@@ -247,3 +247,18 @@ export interface StorageDeleteBucketResponse {
   /** Objects removed before the bucket itself, when `force` was set. */
   deletedObjects: number;
 }
+
+/** GET …/folder/estimate — what downloading a prefix as one archive would take, as far as a quick count got. */
+export interface StorageFolderEstimate {
+  bucket: string;
+  prefix: string;
+  /** Objects under the prefix (folder markers not counted). */
+  files: number;
+  /** Their total size, in bytes. */
+  bytes: number;
+  /** False when the count stopped early (too many objects, or too slow): the real totals are at least these. */
+  complete: boolean;
+  /** The server's folder download limits; past either the archive is cut short with _TRUNCATED.txt. */
+  maxBytes: number;
+  maxFiles: number;
+}
