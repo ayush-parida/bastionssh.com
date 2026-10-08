@@ -1048,6 +1048,61 @@ Deployments section.
   and rollback, forwarded headers from nginx only, `nginx -t` refusing a change, a stale server
   block removed by the next apply, delete.
 
+#### Builds on the BastionSSH side (`/server/build`, `api/routes/deploy-build.ts`)
+
+Design: `docs/superpowers/specs/2026-10-09-bastion-side-builds-design.md`. An app with
+`build.where: bastion` (or the Deploy dialog's `?where=bastion`) is built next to BastionSSH and
+only the image reaches the server; the server never runs `npm install` or the build.
+
+- **Builder**: the `buildkit` service of `deploy/docker/docker-compose.yml` — `moby/buildkit`
+  rootless, pinned by digest, on the `builder` network shared only with `smt` (internet egress
+  for package installs; no Redis), `mem_limit`/`cpus` from `SMT_BUILDKIT_MEMORY`/`_CPUS`, GC
+  capped at `SMT_BUILDKIT_CACHE_MB` (`--oci-worker-gc-keepstorage`), healthcheck on its unix
+  socket. Mutual TLS is on by default: rootless BuildKit cannot give RUN steps their own network
+  namespace, so without client certificates a build script could reach buildkitd's TCP API;
+  the one-shot `buildkit-tls` (`buildkit/tls.sh`, run as root in the same image) makes a CA
+  (key discarded), a server certificate (`buildkit`, `localhost`) and a client certificate into
+  `buildkit-tls` / `buildkit-client-tls`, the latter mounted read-only into `smt`
+  (`SMT_BUILDKIT_TLS_DIR`). `smt` drives it with the pinned `buildctl` binary in its image
+  (Dockerfile stage `buildctl`, SHA-256 checked; `SMT_BUILDCTL_PATH`), argv only, never a shell
+  (`build/buildctl.ts`). `SMT_BUILDKIT_ADDR` unset/empty: builds on BastionSSH are refused
+  (409 `builder_unavailable`) and the UI greys the choice out.
+- **Flow** (`build/builder.ts`, `deployOnBastion`): the multipart upload is written to a fresh
+  0700 folder under `SMT_BUILD_WORK_DIR` (or `<tmp>/smt-builds`; leftovers are removed at
+  start-up) with its SHA-256; one build at a time (`build/queue.ts`, in memory, `queued` events
+  with the place in line, `SMT_BUILD_QUEUE_MAX`); the server's platform from its Docker `/info`
+  (over the same SSH connection: `Remote.docker()`), checked against the worker's platforms
+  (another architecture builds under QEMU; a missing one is refused with the binfmt command);
+  `bastionctl env build-args <app>` returns only `NEXT_PUBLIC_*` and `build.args` values (masked
+  with `secretMasker` in every line after); the upload is extracted with `@smt/shared/build`'s
+  `extractTar` (the bastionctl checks and caps, `SMT_BUILD_MAX_CONTEXT_BYTES`, `.env`/`.env.*`
+  but `.env.example` skipped unless `includeEnvFiles`) and planned with the same Dockerfile
+  generators as bastionctl (`planBuild`), so both sides build the same image.
+  `buildctl build --output type=docker,name=bastion-<app>:<release>` streams the image tar on
+  stdout; the first byte opens `POST /images/load` on the server's engine, gzipped through the
+  image upload's `ArchiveMeter`; the load succeeds only when buildctl exits 0 and the engine
+  reports the tag. Then `bastionctl deploy <app> --prebuilt <tag> --checksum <sha256>
+  --build-ms N` runs the release as usual (labels checked; `release.json` gets `builtOn`,
+  `platform`, image id as `digest`, `buildMs`). The job folder is removed as soon as the build
+  ends, whatever the outcome; a loaded image is removed again when the transfer is cut, the
+  build fails late, or bastionctl refuses before a release exists.
+- **Cancel and limits**: `POST …/apps/:app/build/cancel` (operate, audited
+  `deploy.build_cancel`) aborts the job's controller until the server takes over: buildctl gets
+  SIGTERM (BuildKit cancels the solve; SIGKILL after 5 s) and the load request is destroyed so
+  the engine discards the partial archive. `SMT_BUILD_TIMEOUT_MS` (30 min) does the same and
+  answers 504. Audit: `deploy.start`/`finish` carry `builtOn` (`server` or `bastion`) and, for
+  bastion builds, `platform`, `queueMs`, `buildMs`, `loadMs`, `imageBytes`.
+- **Builder routes**: `GET /api/deploy/builder` (module view: configured, reachable, platform,
+  platforms, version, cache size and GC limit from `buildctl debug workers` / `du`, the running
+  build and queue length; never fails for an unreachable builder), `POST /builder/prune`
+  (Deployments manage; `buildctl prune` filtered to `regular`, `source.local` and
+  `exec.cachemount` records — no `--all`; audited `deploy.build_cache_clear`) and
+  `GET /servers/:id/platform` (view) for the Deploy dialog's note on emulation.
+- **Environment files** are left out of every upload by default — the browser packer
+  (`lib/archive.ts`), bastionctl's extraction for server builds, and the builder's — with
+  `includeEnvFiles` / `--include-env-files` to keep them. Server builds also get `NEXT_PUBLIC_*`
+  and `build.args` from `.env` as build args, so leaving `.env.production` out loses nothing.
+
 ### 4.16 Kubernetes (`/server/kube`, `api/routes/kube.ts`, `api/routes/kube-views.ts`)
 
 Design: `docs/superpowers/specs/2026-10-03-kubernetes-visual-design.md`. Phase K1 (connect

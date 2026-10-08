@@ -58,7 +58,7 @@ Images are published to `ghcr.io/ayush-parida/bastionssh` when a version is tagg
 
 ### Option 1: Docker Compose (recommended)
 
-The repository's [`deploy/docker/docker-compose.yml`](deploy/docker/docker-compose.yml) runs the app with Redis, a data volume and a health check, and has an opt-in `https` profile with Caddy ([below](#-self-hosted-environment-setup)).
+The repository's [`deploy/docker/docker-compose.yml`](deploy/docker/docker-compose.yml) runs the app with Redis, a data volume and a health check, a rootless BuildKit builder for [builds on BastionSSH](#builds-on-bastionssh), and has an opt-in `https` profile with Caddy ([below](#-self-hosted-environment-setup)).
 
 ```bash
 git clone https://github.com/ayush-parida/bastionssh.com.git
@@ -367,7 +367,7 @@ Deploy web apps — Next.js, anything with a Dockerfile, or a static site — to
 
 **The proxy upgrades itself too.** When a newer `bastionctl` ships another Caddy or proxy front, the proxy is brought up to date at the start of the next deploy, rollback, restart, `proxy apply` or Setup/Reinstall (never by just reading), or at once with **Update proxy now** (operate) on the Setup line, which shows *up to date* or *outdated*. A new Caddy is started behind the running proxy front, which keeps the ports: no connection is dropped and the container stays. A changed front replaces the `bastion-caddy` container — the old one is kept aside until the new one accepts connections and put back if it does not — and connections in flight can drop for about a second (the log says so). Each attempt is audited as `deploy.proxy_upgrade` (from/to build, trigger, result, what was replaced). A pinned server's proxy is left alone except by Update proxy now and Reinstall. From a shell: `bastionctl proxy status`, `bastionctl proxy upgrade`.
 
-**Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>`, starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. Before building — and in the browser before uploading a folder or zip — the upload is checked against the build type: Next's `.next` build folder given to a static app, a `package.json` with no `build` script, or an output folder that is not there is refused with what to upload instead. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
+**Deploying.** Upload the source (a `.tar` or `.tar.gz`); the server unpacks it (every path checked), builds the image `bastion-<app>:<release>` — or BastionSSH builds it and ships only the image, with `build.where: bastion` ([below](#builds-on-bastionssh)) — starts it next to the running one, waits for its health check, switches the proxy, then stops the old container. Environment files (`.env`, `.env.local`, any `.env.*` but `.env.example`) are left out of uploads unless **Include environment files** is ticked in the Deploy dialog (`--include-env-files`), after a warning: their secrets would otherwise sit in the release and, through `COPY . .`, in the image. Builds get every `NEXT_PUBLIC_*` value, and the names listed in `build.args`, from the app's `.env` on the server as build args (masked in the log), and nothing else from it. Before building — and in the browser before uploading a folder or zip — the upload is checked against the build type: Next's `.next` build folder given to a static app, a `package.json` with no `build` script, or an output folder that is not there is refused with what to upload instead. A failed build or health check leaves the previous release serving. **Rollback** serves a kept release's image again without rebuilding. Only one image builds per server at a time; other deploys wait their turn.
 
 The step-by-step guides (static sites, Next.js built on the server or prebuilt, Dockerfiles, every `bastion.yml` field, secrets, domains, troubleshooting) are in the app under **Docs → Deployments**, and the Deployments tab links to the right page from its setup, config editor, deploy dialog and failed deploys.
 
@@ -383,6 +383,8 @@ build:
   node: "20"                        # nextjs and static: Node.js 18, 20, 22 or 24 (default: .nvmrc, engines, else 20)
   dir: .                            # project folder inside the upload
   output: out                       # static only: the folder to serve after the build
+  where: server                     # server (default) | bastion: build next to BastionSSH, ship only the image
+  args: [SENTRY_RELEASE]            # .env names the build gets besides every NEXT_PUBLIC_*
 run:
   port: 3000                        # what the app listens on (static: always 80)
   env_file: .env                    # in the app folder
@@ -419,6 +421,30 @@ healthcheck: { type: command, command: [pg_isready, -h, 127.0.0.1, -U, app], tim
 A service's page shows how to connect — its name on the private network (`orders-db:5432`), ports, the published address and ready connection strings with the password masked until revealed — and offers **Update version** within its line (a database's major-version change is refused: move with a backup and restore). **Roll back** keeps the same rules: a release on another major line of a database, or an older line of a forward-only template (Grafana 13 → 12), cannot be rolled back to — the Releases tab disables the button and says why, the API answers `409 line_change_refused`, and `bastionctl rollback` refuses it on the server too (each release records its line in `release.json`; an older one's line is read from the image its build log names, checked against its checksum; managers can override with `forceLine` / `--force-line`, audited). Databases (PostgreSQL, MySQL, MariaDB, MongoDB, Redis, Valkey) get **Backups**: back up now (the dump runs inside the container and is written to `apps/<name>/backups/` on the server — nothing passes through BastionSSH), retention, an hourly or daily schedule run by a small `bastion-cron` container on the server, download (passkey) and restore (type the name; the current data is backed up first). Viewers see services and backups, operators also back up, managers create, update, download, restore and delete; every step is audited. SeaweedFS runs master, volume server, filer and S3 gateway in one container with only the S3 port on the private network, its keys generated on the server and read from the environment (no config file, nothing on a command line); it has no backup command — copy buckets out with any S3 client. Guides for each service, with Node.js/Next.js/Prisma, Python and Go examples, are under **Docs → Deployments → Quick services**.
 
 Unknown keys are refused, and the editor shows every problem at once. Builds use Node.js images pinned by digest (one per supported major version; `22.11` builds on the pinned 22), so a build never changes under you between BastionSSH updates. A config saved while a deploy runs is the one the deploy goes live with: the domains and TLS are read again when traffic switches. Next.js apps need `output: 'standalone'` in `next.config.js`; the build explains how if it is missing.
+
+### Builds on BastionSSH
+
+A small server can be killed halfway through `next build` (`exit code: 137`: a Next.js build wants 1–2 GB). With `build.where: bastion` in `bastion.yml` — the config form's **Build on**, or **Build on: BastionSSH** in the Deploy dialog for one deploy — the image is built next to BastionSSH and only the finished image travels to the server ([design](docs/superpowers/specs/2026-10-09-bastion-side-builds-design.md)):
+
+1. The upload stays on BastionSSH's host in an ephemeral folder (the same tar checks and caps as bastionctl, environment files left out), deleted when the build ends however it ends.
+2. `NEXT_PUBLIC_*` and `build.args` values are read from the app's `.env` over SSH for this build only and passed as build args; nothing else from `.env` reaches the builder, and nothing is stored on BastionSSH's side.
+3. BuildKit builds it **for the server's platform** (read from its Docker) with the same Dockerfile generators bastionctl uses, so both sides produce the same image. Another CPU architecture builds under QEMU emulation — slower; the Deploy dialog says so (here a small Next.js app took 29 s natively and 71 s for `linux/amd64` on Apple silicon).
+4. The image is streamed, gzipped, into the server's Docker over the existing SSH connection as `bastion-<app>:<release>`; `bastionctl deploy <app> --prebuilt <tag>` then runs the usual release (health check, zero-downtime switch, rollback). `release.json` records `builtOn: bastion`, the platform, the image id and the build time.
+
+One build runs at a time (others wait, told their place); **Cancel build** stops the build or the transfer and nothing partial reaches the server. The **Setup** line shows the builder — reachable, platform, cache size — and managers of Deployments get **Clear build cache**. Audit: `deploy.start`/`deploy.finish` carry `builtOn` and the timings; `deploy.build_cancel`, `deploy.build_cache_clear`.
+
+**The builder** is the `buildkit` service of `deploy/docker/docker-compose.yml`, started with the stack: `moby/buildkit` rootless (no `--privileged`, no Docker socket; it runs with unconfined seccomp/AppArmor, which rootless BuildKit needs to create its user namespace), pinned by digest, on a `builder` network shared only with `smt` (builds reach the internet, not Redis), spoken to over mutual TLS with certificates the one-shot `buildkit-tls` service makes on the first start (rootless BuildKit cannot isolate a build's `RUN` steps from its own network, so this keeps a build script from driving it). Settings in `deploy/docker/.env`:
+
+| Variable | Default | |
+| --- | --- | --- |
+| `SMT_BUILDKIT_ADDR` | `tcp://buildkit:1234` | empty turns builds on BastionSSH off (then start just `smt redis`) |
+| `SMT_BUILDKIT_MEMORY` / `SMT_BUILDKIT_CPUS` | `4g` / `2` | the builder's limits |
+| `SMT_BUILDKIT_CACHE_MB` | `10240` | layer cache garbage-collected beyond this |
+| `SMT_BUILD_TIMEOUT_MS` | `1800000` | a build and its transfer stop after 30 min |
+| `SMT_BUILD_MAX_CONTEXT_BYTES` | `1073741824` | largest unpacked upload |
+| `SMT_BUILD_QUEUE_MAX` | `20` | builds waiting beyond this are refused |
+
+Building for another CPU architecture needs QEMU: Docker Desktop has it; on a Linux host run `docker run --privileged --rm tonistiigi/binfmt --install all` once (per boot, unless your distribution's binfmt packages persist it), then `docker compose restart buildkit`. Certificates last 10 years; to rotate them remove the `buildkit-tls` and `buildkit-client-tls` volumes and start the stack again. Without Compose, point `SMT_BUILDKIT_ADDR` at any BuildKit, with `SMT_BUILDKIT_TLS_DIR` (`ca.pem`, `cert.pem`, `key.pem`) for mTLS and `SMT_BUILDCTL_PATH` for the `buildctl` binary. The full guide is under **Docs → Deployments → Build on BastionSSH**.
 
 ### Caddy or nginx
 
@@ -463,7 +489,7 @@ Nothing an app's log prints of its `.env` values (6 characters or longer) reache
 
 ### Sizing
 
-- **Builds run on the server.** A Next.js build wants about 1–2 GB of memory on its own; on a 1 GB server add 2 GB of swap or builds may be killed. Static and Dockerfile builds depend on the project.
+- **Builds run on the server** unless `build.where: bastion`. A Next.js build wants about 1–2 GB of memory on its own; on a 1 GB server build on BastionSSH, or add 2 GB of swap, or builds may be killed. Static and Dockerfile builds depend on the project. Builds on BastionSSH need that memory on BastionSSH's host instead (`SMT_BUILDKIT_MEMORY`, 4 GB by default) and disk for the layer cache (`SMT_BUILDKIT_CACHE_MB`).
 - **Running apps**: Caddy uses a few tens of MB; a Next.js standalone server typically 100–300 MB, a static site served by Caddy a few MB. Set `run.memory` so one app cannot starve the others.
 - **Disk**: each kept release keeps its image (often 150–500 MB for Node apps; layers are shared between releases of an app). `keep_releases: 5` with a few apps fits comfortably in 20 GB; lower it on small disks.
 - As a rule of thumb: 1 vCPU / 1 GB for a few static or small Dockerfile sites, 2 vCPU / 2–4 GB to build and run several Next.js apps.
@@ -836,6 +862,10 @@ pnpm test:e2e      # Playwright browser tests (below)
 ### Live Kubernetes tests
 
 The `*.integration.test.ts` files under `apps/server/src/kube` run against a real cluster and are skipped unless `SMT_TEST_KUBE_KUBECONFIG` is set. `apps/server/scripts/kube-it.sh up` starts a throwaway k3s server in Docker on port 26443 with a sample app that has known problems (a crash loop, an image that cannot be pulled, an unschedulable pod, a Service with no pods…), a read-only service account and an `openssh-server` container on port 22423 to tunnel through, writes the kubeconfig to a temp directory (never `~/.kube`) and prints the `SMT_TEST_KUBE_*` variables to export; then run `cd apps/server && pnpm vitest run src/kube --no-file-parallelism`, and `kube-it.sh down` removes the containers, their volumes, the network and the temp directory. `SMT_KIT_PREFIX`, `SMT_KIT_API_PORT` and `SMT_KIT_SSH_PORT` keep two runs apart.
+
+### Live build tests
+
+`apps/server/src/build/bastion-build.integration.test.ts` builds a small Next.js app with `build.where: bastion` against a real rootless BuildKit and a throwaway `docker:dind` server behind `openssh-server`, and is skipped unless `SMT_TEST_DEPLOY_SSH_HOST`, `SMT_TEST_DIND_CONTAINER`, `SMT_BUILDKIT_ADDR` and `SMT_BUILD_WORK_DIR` are set. It checks that the server never runs npm (no build image, containers or build cache there), that a `NEXT_PUBLIC_*` value from the server's `.env` is baked in while a non-build-arg secret and the upload's `.env.local` are nowhere in the image, and that cancelling mid-build leaves no image and no context folder. Its header lists the commands: the builder runs as its own Compose project (`docker compose -p <name> … up -d buildkit` with an override that publishes it on loopback and binds the client certificates to a temp folder), the server as in the deployments live test; remove both by name afterwards.
 
 ---
 
