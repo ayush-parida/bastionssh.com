@@ -34,7 +34,7 @@ import { and, eq } from 'drizzle-orm';
  *   SMT_LIVE_S3_ACCESS_KEY=fdlliveaccesskey SMT_LIVE_S3_SECRET_KEY=fdllivesecretkey0123456789abcd \
  *     pnpm vitest run src/archive/folder-download.live.integration.test.ts
  *
- *   docker rm -f smt-fdl-live-openssh smt-fdl-live-atmoz smt-fdl-live-ftp smt-fdl-live-s3
+ *   docker rm -f -v smt-fdl-live-openssh smt-fdl-live-atmoz smt-fdl-live-ftp smt-fdl-live-s3   # -v: their anonymous volumes too
  *
  * SMT_LIVE_BIG_MB (default 200) sizes the large file. The limits block cuts
  * the limits down for its requests, or uses SMT_FOLDER_DOWNLOAD_MAX_BYTES /
