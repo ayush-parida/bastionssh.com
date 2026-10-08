@@ -416,6 +416,7 @@ describe('storage folder download', () => {
         bucket: 'photos',
         prefix: 'trip/',
         files: 2,
+        folders: 1,
         bytes: 11,
         complete: true,
         maxBytes: 4 * 1024 * 1024,
@@ -423,11 +424,20 @@ describe('storage folder download', () => {
       });
     });
 
+    it('counts the folders implied by keys without markers, as the file limit does', async () => {
+      s3.put('photos', 'trip/a/b/c.txt', 'x');
+      s3.put('photos', 'trip/a/d.txt', 'y');
+      s3.put('photos', 'trip/e/', '');
+      s3.put('photos', 'trip/top.txt', 'z');
+      const { client } = await resolveConnection(orgId, connectionId);
+      expect(await estimatePrefix(client, 'photos', 'trip/')).toEqual({ files: 3, folders: 3, bytes: 3, complete: true });
+    });
+
     it('stops early and says so', async () => {
       for (let i = 0; i < 2500; i++) s3.put('big', `k/${i}`, 'xy');
       const { client } = await resolveConnection(orgId, connectionId);
-      expect(await estimatePrefix(client, 'big', 'k/', { maxObjects: 1000 })).toEqual({ files: 1000, bytes: 2000, complete: false });
-      expect(await estimatePrefix(client, 'big', 'k/')).toEqual({ files: 2500, bytes: 5000, complete: true });
+      expect(await estimatePrefix(client, 'big', 'k/', { maxObjects: 1000 })).toEqual({ files: 1000, folders: 0, bytes: 2000, complete: false });
+      expect(await estimatePrefix(client, 'big', 'k/')).toEqual({ files: 2500, folders: 0, bytes: 5000, complete: true });
       // A listing slower than the time allowed: whatever was counted, marked incomplete
       s3.pageSize = 1;
       const slow = await estimatePrefix(client, 'big', 'k/', { maxMs: 30 });

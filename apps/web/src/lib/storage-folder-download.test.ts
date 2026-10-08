@@ -17,6 +17,7 @@ const estimate = (over: Partial<StorageFolderEstimate> = {}): StorageFolderEstim
   bucket: 'b',
   prefix: 'p/',
   files: 12,
+  folders: 2,
   bytes: 3 * 1024 * 1024,
   complete: true,
   maxBytes: 10 * 1024 ** 3,
@@ -54,9 +55,12 @@ describe('folder download helpers', () => {
     expect(describeEstimate(estimate({ files: 10_000, complete: false }))).toBe(`at least ${n(10_000)} files, 3 MB`);
     expect(limitWarning(estimate())).toBeNull();
     const files = limitWarning(estimate({ files: 200_000 }))!;
-    expect(files).toContain(`(${n(100_000)} files)`);
+    expect(files).toContain(`(${n(100_000)} files and folders)`);
     expect(files).toContain('_TRUNCATED.txt');
-    expect(limitWarning(estimate({ files: 200_000, bytes: 11 * 1024 ** 3 }))).toContain(`${n(100_000)} files or 10 GB`);
+    expect(limitWarning(estimate({ files: 200_000, bytes: 11 * 1024 ** 3 }))).toContain(`${n(100_000)} files and folders or 10 GB`);
+    // Under the limit in files alone, over it once the folders are counted too
+    expect(limitWarning(estimate({ files: 90_000, folders: 20_000 }))).toContain('files and folders');
+    expect(limitWarning(estimate({ files: 90_000, folders: 9_000 }))).toBeNull();
   });
 
   it('points at a docs heading that exists', () => {

@@ -110,6 +110,8 @@ export function prefixWalker(client: S3Client, bucket: string, opts: PrefixWalke
 
 export interface PrefixEstimate {
   files: number;
+  /** Subfolders under the prefix (from the keys' paths): the file limit counts them too. */
+  folders: number;
   bytes: number;
   complete: boolean;
 }
@@ -118,7 +120,8 @@ export interface PrefixEstimate {
  * Count the objects under a prefix and add up their sizes with a flat
  * listing (no delimiter, 1000 keys a request), stopping after `maxObjects`
  * or `maxMs`; `complete` says whether it got to the end. Folder markers
- * (keys ending in `/`) are not counted: the archive never holds them as files.
+ * (keys ending in `/`) are not counted as files: the archive never holds them
+ * as files, only as the folders `folders` counts.
  */
 export async function estimatePrefix(
   client: S3Client,
@@ -130,6 +133,9 @@ export async function estimatePrefix(
   const deadline = AbortSignal.timeout(limits.maxMs ?? ESTIMATE_MAX_MS);
   let files = 0;
   let bytes = 0;
+  // Every folder a key sits in below the prefix is an archive entry of its own
+  const folders = new Set<string>();
+  const result = (complete: boolean): PrefixEstimate => ({ files, folders: folders.size, bytes, complete });
   let token: string | undefined;
   do {
     let page;
@@ -145,18 +151,21 @@ export async function estimatePrefix(
       );
     } catch (err) {
       // Out of time: what was counted so far is the answer
-      if (deadline.aborted) return { files, bytes, complete: false };
+      if (deadline.aborted) return result(false);
       throw toStorageError(err, 'Could not list objects');
     }
     for (const o of page.Contents ?? []) {
-      if (!o.Key || o.Key.endsWith('/')) continue;
+      if (!o.Key) continue;
+      const rest = o.Key.slice(prefix.length);
+      for (let i = rest.indexOf('/'); i > 0; i = rest.indexOf('/', i + 1)) folders.add(rest.slice(0, i));
+      if (o.Key.endsWith('/')) continue;
       files++;
       bytes += o.Size ?? 0;
     }
     token = page.IsTruncated ? page.NextContinuationToken : undefined;
-    if (token && (files >= maxObjects || deadline.aborted)) return { files, bytes, complete: false };
+    if (token && (files >= maxObjects || deadline.aborted)) return result(false);
   } while (token);
-  return { files, bytes, complete: true };
+  return result(true);
 }
 
 /**

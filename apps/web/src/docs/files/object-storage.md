@@ -77,7 +77,7 @@ A folder (everything under its prefix, subfolders included) or the whole bucket 
 
 1. The dialog counts what is inside first: the number of files and their total size. A large folder is counted only up to 10 000 objects or 5 seconds, and then shown as "at least …".
 2. Pick the format: **.zip** (opens on macOS and Windows without extra software) or **.tar.gz** (keeps the archive smaller for text and logs).
-3. Click **Download**. In Chrome and Edge you choose where to save it, and the archive is written straight to that file while the dialog shows the bytes received; **Cancel** stops it and discards the partial file. In other browsers a small folder is downloaded inside the page the same way; a large one is handed to the browser, whose downloads list shows the progress.
+3. Click **Download**. In Chrome and Edge you choose where to save it, and the archive is written straight to that file while the dialog shows the bytes received; **Cancel** stops it and discards what was written (the browser may leave an empty file with that name). In other browsers a small folder is downloaded inside the page the same way; a large one is handed to the browser, whose downloads list shows the progress.
 
 The archive is built while the objects stream down. Nothing is stored on the BastionSSH host or in the bucket, so a large folder starts downloading at once. Cancelling (or closing the tab) stops the transfer from the provider too.
 
@@ -85,7 +85,7 @@ What ends up in the archive:
 
 - Paths are relative to the folder you chose. Folder marker objects (keys ending in `/`) become folders, so empty folders are kept.
 - A key that cannot be a file name is left out: a `..` segment, an empty segment such as the middle of `logs//today.txt`. So is an object that disappears or cannot be read while the archive is built. Everything left out is listed in `_skipped.txt` at the root of the archive.
-- A folder download stops at `SMT_FOLDER_DOWNLOAD_MAX_BYTES` of content (default 10 GiB) or `SMT_FOLDER_DOWNLOAD_MAX_FILES` entries (default 100 000). The archive then ends with `_TRUNCATED.txt` saying where it stopped; the dialog warns you beforehand when the count is already over. Download the subfolders separately to get the rest.
+- A folder download stops at `SMT_FOLDER_DOWNLOAD_MAX_BYTES` of content (default 10 GiB) or `SMT_FOLDER_DOWNLOAD_MAX_FILES` entries (default 100 000). The archive then ends with `_TRUNCATED.txt` saying where it stopped; the dialog warns you beforehand when the count (files and folders) is already over. Download the subfolders separately to get the rest.
 - Each folder download holds one of your live streams (the same limit as live log views) until it ends.
 
 Downloading a folder needs the same **view** level as downloading a single object. Each one is audited as `storage.folder_download` with the bucket, prefix, format, number of files and bytes, what was skipped, whether it was truncated or cancelled, and how long it took. Losing access to the connection stops a folder download that is still running.

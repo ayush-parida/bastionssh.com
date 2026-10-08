@@ -70,7 +70,7 @@ What is in the archive:
 - Files that cannot be read (permission denied, deleted while downloading) are left out and listed in **`_skipped.txt`** at the top of the archive; the download carries on. For a `.tar.gz` made by `tar` on the server, the list is what `tar` reported.
 - If a limit is reached (see [Limits](#limits)), the archive ends cleanly with **`_TRUNCATED.txt`** saying where it stopped. Download the remaining subfolders separately.
 
-If the connection breaks part-way, the dialog says so and nothing is saved: an archive cut short cannot be opened.
+If the connection breaks part-way, the dialog says so and nothing is saved: an archive cut short cannot be opened. (When you picked a file to save to, the browser may leave it there empty.)
 
 ### Deleting folders
 

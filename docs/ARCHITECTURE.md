@@ -316,7 +316,7 @@ REST surface, all under `/api/storage`:
 | `PUT`    | `/connections/:id/buckets/:bucket/object?key=&contentType=` | Stream a raw body up                 |
 | `POST`   | `/connections/:id/buckets/:bucket/folder`           | Create a folder marker                       |
 | `GET`    | `/connections/:id/buckets/:bucket/folder?prefix=&format=` | A prefix as one zip / tar.gz (`storage.folder_download`) |
-| `GET`    | `/connections/:id/buckets/:bucket/folder/estimate?prefix=` | Objects and bytes under a prefix, counted quickly |
+| `GET`    | `/connections/:id/buckets/:bucket/folder/estimate?prefix=` | Objects, subfolders and bytes under a prefix, counted quickly |
 | `POST`   | `/connections/:id/buckets/:bucket/rename`           | Copy + delete one object                     |
 | `DELETE` | `/connections/:id/buckets/:bucket/object?key=&recursive=` | Delete an object or a whole prefix     |
 

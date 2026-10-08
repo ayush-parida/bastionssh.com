@@ -68,7 +68,8 @@ export function describeEstimate(e: StorageFolderEstimate): string {
 /** Why the archive will stop early, or null when the estimate fits the server's limits. */
 export function limitWarning(e: StorageFolderEstimate): string | null {
   const over: string[] = [];
-  if (e.files > e.maxFiles) over.push(`${e.maxFiles.toLocaleString()} files`);
+  // The entry limit counts folders as well as files
+  if (e.files + e.folders > e.maxFiles) over.push(`${e.maxFiles.toLocaleString()} files and folders`);
   if (e.bytes > e.maxBytes) over.push(formatBytes(e.maxBytes, 1));
   if (over.length === 0) return null;
   return `This is more than a folder download may hold (${over.join(' or ')}). The archive will stop there and end with _TRUNCATED.txt; download the subfolders separately to get the rest.`;

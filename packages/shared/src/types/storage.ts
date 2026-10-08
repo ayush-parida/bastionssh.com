@@ -254,6 +254,8 @@ export interface StorageFolderEstimate {
   prefix: string;
   /** Objects under the prefix (folder markers not counted). */
   files: number;
+  /** Subfolders under the prefix; SMT_FOLDER_DOWNLOAD_MAX_FILES counts them as well as files. */
+  folders: number;
   /** Their total size, in bytes. */
   bytes: number;
   /** False when the count stopped early (too many objects, or too slow): the real totals are at least these. */
