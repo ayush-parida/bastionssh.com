@@ -25,12 +25,17 @@ export const USAGE = `Usage: bastionctl <command> [options] [--json]
   status <app>                            One app in detail
   releases <app>                          An app's releases, newest first
   certs <app>                             Certificates of the app's domains (issuer, expiry, last error)
-  deploy <app> --source <file>            Build and serve an upload (.tar or .tar.gz)
+  deploy <app> --source <file> [--include-env-files]
+                                          Build and serve an upload (.tar or .tar.gz); its .env and
+                                          .env.* files (but .env.example) are left out unless asked
+  deploy <app> --prebuilt bastion-<app>:<release> [--checksum <sha256>] [--build-ms N]
+                                          Serve an image BastionSSH built and loaded (no build here)
   deploy <app>                            Pull and serve build.image (build.type: image)
   rollback <app> <release> [--force-line] Serve a kept release again (no rebuild); a quick service's
                                           release on another version line is refused unless --force-line
   restart <app> | stop <app>              The app's live container
   env keys|set|unset|get <app> [KEY]      .env: names only; set reads the value from stdin
+  env build-args <app>                    NEXT_PUBLIC_* and build.args values (what a build gets)
   env generate <app> <KEY> [--bytes N] [--if-missing]
                                           A random URL-safe value into .env (never printed)
   exec <app> -- <program> [args…]         Run a program in the app's live container
@@ -58,8 +63,8 @@ interface Parsed {
   flags: Map<string, string | true>;
 }
 
-const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy', 'bytes', 'keep']);
-const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help', 'if-missing', 'force-line']);
+const VALUE_FLAGS = new Set(['source', 'config', 'file', 'drain', 'root', 'proxy', 'bytes', 'keep', 'prebuilt', 'checksum', 'build-ms']);
+const BOOL_FLAGS = new Set(['json', 'force', 'purge', 'help', 'if-missing', 'force-line', 'include-env-files']);
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -223,8 +228,16 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
       return { value: r, text: lines(r.map((c) => `${c.domain}\t${c.issuer ?? 'no certificate'}\t${c.notAfter ?? '-'}${c.lastError ? `\t${c.lastError.message}` : ''}`)) };
     }
     case 'deploy': {
-      expect(args, 1, 'deploy <app> [--source <file>]');
-      const r = await ops.deploy(ctx, appName(args[0]), flag(parsed, 'source'));
+      expect(args, 1, 'deploy <app> [--source <file> [--include-env-files] | --prebuilt <image> [--checksum <sha256>] [--build-ms N]]');
+      const buildMs = flag(parsed, 'build-ms');
+      if (buildMs !== undefined && !/^\d{1,9}$/.test(buildMs)) throw new BastionError('--build-ms takes whole milliseconds', 2);
+      const r = await ops.deploy(ctx, appName(args[0]), {
+        source: flag(parsed, 'source'),
+        includeEnvFiles: parsed.flags.has('include-env-files'),
+        prebuilt: flag(parsed, 'prebuilt'),
+        checksum: flag(parsed, 'checksum'),
+        buildMs: buildMs === undefined ? undefined : Number(buildMs),
+      });
       return { value: r, exitCode: r.result === 'success' ? 0 : 1 };
     }
     case 'rollback': {
@@ -328,6 +341,12 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
         const value = await io.readStdin(MAX_VALUE_BYTES + 1);
         return { value: ops.envSet(ctx, a, k, value) };
       }
+      if (sub === 'build-args') {
+        // NEXT_PUBLIC_* and build.args only: what a build on the BastionSSH side gets, read for that build
+        expect(args, 2, 'env build-args <app>');
+        const r = ops.envBuildArgs(ctx, appName(app));
+        return { value: r, text: lines(Object.keys(r.args)) };
+      }
       if (sub === 'generate') {
         expect(args, 3, 'env generate <app> <KEY> [--bytes N] [--if-missing]');
         const bytes = flag(parsed, 'bytes');
@@ -335,7 +354,7 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
         const r = ops.envGenerate(ctx, appName(app), envKey(key), { bytes: bytes === undefined ? undefined : Number(bytes), ifMissing: parsed.flags.has('if-missing') });
         return { value: r, text: r.generated ? `Generated ${r.key}\n` : `${r.key} is set already; left as it is\n` };
       }
-      throw new BastionError('Usage: bastionctl env keys|set|unset|get|generate <app> [KEY]', 2);
+      throw new BastionError('Usage: bastionctl env keys|set|unset|get|generate|build-args <app> [KEY]', 2);
     }
     default:
       throw new BastionError(`Unknown command ${command}\n\n${USAGE}`, 2);

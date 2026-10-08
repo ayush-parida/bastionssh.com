@@ -40,7 +40,7 @@ export interface ExecCall {
 export interface FakeDocker {
   socket: string;
   containers: Map<string, FakeContainer>;
-  images: Map<string, { Id: string; Labels: Record<string, string>; RepoDigests?: string[] }>;
+  images: Map<string, { Id: string; Labels: Record<string, string>; RepoDigests?: string[]; Architecture?: string }>;
   networks: Set<string>;
   /** Networks created internal. */
   internalNetworks: Set<string>;
@@ -316,7 +316,9 @@ export async function startFakeDocker(): Promise<FakeDocker> {
       }
       if ((m = /^\/images\/(.+)\/json$/.exec(p))) {
         const key = imageKey(m[1]!);
-        return key ? json(200, { Id: fake.images.get(key)!.Id, RepoTags: [key], RepoDigests: fake.images.get(key)!.RepoDigests ?? [] }) : notFound('image');
+        if (!key) return notFound('image');
+        const image = fake.images.get(key)!;
+        return json(200, { Id: image.Id, RepoTags: [key], RepoDigests: image.RepoDigests ?? [], Os: 'linux', Architecture: image.Architecture ?? 'amd64', Config: { Labels: image.Labels } });
       }
       if ((m = /^\/images\/(.+)\/tag$/.exec(p)) && req.method === 'POST') {
         const key = imageKey(m[1]!);

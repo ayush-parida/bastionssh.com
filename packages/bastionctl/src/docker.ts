@@ -372,7 +372,15 @@ export class DockerApi {
 
   /** An image's id and the registry digests it is known by (`repo@sha256:…`); null when absent. */
   inspectImage(ref: string) {
-    return this.inspect<{ Id: string; RepoDigests?: string[] | null; RepoTags?: string[] | null }>(`/images/${encodeURIComponent(ref)}/json`);
+    return this.inspect<{
+      Id: string;
+      RepoDigests?: string[] | null;
+      RepoTags?: string[] | null;
+      Os?: string;
+      Architecture?: string;
+      Variant?: string;
+      Config?: { Labels?: Record<string, string> | null } | null;
+    }>(`/images/${encodeURIComponent(ref)}/json`);
   }
 
   /** Tag image `ref` as `repo:tag` (a pulled image under the release's own name). */

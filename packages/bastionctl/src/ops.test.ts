@@ -545,6 +545,161 @@ describe('secrets in what bastionctl prints and keeps', () => {
   });
 });
 
+describe('environment files, build args and images built on the BastionSSH side', () => {
+  /** An upload with a Dockerfile, environment files at the top and deeper, and the template that may stay. */
+  function uploadWithEnv(name: string): string {
+    const file = path.join(layout.tmp, name);
+    fs.writeFileSync(
+      file,
+      zlib.gzipSync(
+        tarBuffer([
+          { name: 'Dockerfile', content: 'FROM busybox\nCOPY . /app\n' },
+          { name: '.env', content: 'SECRET=top\n' },
+          { name: '.env.local', content: 'SECRET=local\n' },
+          { name: '.env.example', content: 'SECRET=\n' },
+          { name: 'apps/web/.env.production', content: 'NEXT_PUBLIC_X=1\n' },
+          { name: 'src/environment.ts', content: 'export {};\n' },
+        ]),
+      ),
+    );
+    return file;
+  }
+
+  /** The names in a build context (the fake keeps the tar Docker got). */
+  const contextNames = (tar: Buffer) => {
+    const names: string[] = [];
+    for (let at = 0; at + 512 <= tar.length; ) {
+      const name = tar.subarray(at, at + 100).toString('utf8').replace(/\0.*$/s, '');
+      if (!name) break;
+      const size = parseInt(tar.subarray(at + 124, at + 136).toString('ascii').replace(/\0.*$/s, '').trim() || '0', 8);
+      names.push(name);
+      at += 512 + Math.ceil(size / 512) * 512;
+    }
+    return names;
+  };
+
+  it('leaves .env and .env.* files of the upload out of the build (not .env.example), and says which', async () => {
+    await app();
+    const outcome = await ops.deploy(ctx(), 'site1', uploadWithEnv('a.tgz'));
+    expect(outcome.result).toBe('success');
+    const names = contextNames(fake.builds[0]!.tar);
+    expect(names).toEqual(expect.arrayContaining(['Dockerfile', '.env.example', 'src/environment.ts']));
+    for (const name of ['.env', '.env.local', 'apps/web/.env.production']) expect(names).not.toContain(name);
+    const note = logs.find((l) => l.startsWith('Left out 3 environment files'))!;
+    expect(note).toContain('.env, .env.local, apps/web/.env.production');
+    expect(note).toContain('Include environment files');
+    expect(readRelease(layout, 'site1', outcome.release)).toMatchObject({ builtOn: 'server' });
+  });
+
+  it('keeps them when asked (--include-env-files), and says so', async () => {
+    await app();
+    uploadWithEnv('b.tgz');
+    const out: string[] = [];
+    const code = await run(['deploy', 'site1', '--source', 'tmp/b.tgz', '--include-env-files', '--json'], {
+      env: { BASTION_ROOT: root },
+      stdout: (t) => out.push(t),
+      stderr: () => {},
+      readStdin: async () => '',
+      ctx: { docker: new DockerApi(fake.socket), drainMs: 0, healthIntervalMs: 1, now: () => new Date((clock += 1000)), log: (l) => logs.push(l) },
+    });
+    expect(code, out.join('')).toBe(0);
+    expect(JSON.parse(out.join(''))).toMatchObject({ result: 'success' });
+    expect(contextNames(fake.builds.at(-1)!.tar)).toEqual(expect.arrayContaining(['.env', '.env.local', 'apps/web/.env.production']));
+    expect(logs.some((l) => l.startsWith('Environment files in the upload were kept'))).toBe(true);
+  });
+
+  it('gives a build the NEXT_PUBLIC_* and build.args values of .env as build args, declared in the generated Dockerfile, values masked', async () => {
+    await app('web', 'name: web\ndomains: [web.com]\nbuild:\n  type: static\n  output: dist\n  args: [VITE_API_URL]\n');
+    fs.writeFileSync(
+      layout.env('web'),
+      'NEXT_PUBLIC_SITE_URL=https://web.example.com\nVITE_API_URL=https://api.example.com\nDATABASE_URL=postgres://u:p@db/x\n',
+      { mode: 0o600 },
+    );
+    const file = path.join(layout.tmp, 'web.tgz');
+    fs.writeFileSync(file, zlib.gzipSync(tarBuffer([{ name: 'package.json', content: '{"scripts":{"build":"node b.mjs"}}' }])));
+    fake.buildOutput = ['building for https://api.example.com\n'];
+    const outcome = await ops.deploy(ctx(), 'web', file);
+    expect(outcome.result).toBe('success');
+    const q = fake.builds[0]!.query;
+    // Only the public prefix and the allowlist: nothing else from .env reaches the build
+    expect(JSON.parse(q.get('buildargs')!)).toEqual({ NEXT_PUBLIC_SITE_URL: 'https://web.example.com', VITE_API_URL: 'https://api.example.com' });
+    const dockerfile = fake.builds[0]!.tar.toString('latin1');
+    expect(dockerfile).toContain('ARG NEXT_PUBLIC_SITE_URL\nARG VITE_API_URL\nRUN npm run build');
+    expect(dockerfile).not.toContain('DATABASE_URL');
+    expect(logs).toContain('Build args from .env: NEXT_PUBLIC_SITE_URL, VITE_API_URL');
+    expect(logs.join('\n')).toContain('building for ••••');
+    expect(logs.join('\n')).not.toContain('https://api.example.com');
+  });
+
+  it('prints only the build args for a build on the BastionSSH side (env build-args)', async () => {
+    await app('web', 'name: web\ndomains: [web.com]\nbuild: { type: nextjs, where: bastion, args: [SENTRY_RELEASE] }\n');
+    fs.writeFileSync(layout.env('web'), 'NEXT_PUBLIC_A=1\nSENTRY_RELEASE=abc\nSECRET_KEY=hunter2hunter2\n', { mode: 0o600 });
+    expect(ops.envBuildArgs(ctx(), 'web')).toEqual({ args: { NEXT_PUBLIC_A: '1', SENTRY_RELEASE: 'abc' } });
+    const out: string[] = [];
+    await run(['env', 'build-args', 'web', '--json'], {
+      env: { BASTION_ROOT: root },
+      stdout: (t) => out.push(t),
+      stderr: () => {},
+      readStdin: async () => '',
+      ctx: { docker: new DockerApi(fake.socket) },
+    });
+    expect(JSON.parse(out.join(''))).toEqual({ args: { NEXT_PUBLIC_A: '1', SENTRY_RELEASE: 'abc' } });
+    expect(out.join('')).not.toContain('hunter2hunter2');
+  });
+
+  it('serves an image BastionSSH built and loaded (--prebuilt), recording where, the platform, image id and build time', async () => {
+    await app();
+    const id = '20261005-130000-0123abcd';
+    fake.images.set(`bastion-site1:${id}`, {
+      Id: `sha256:${'a'.repeat(64)}`,
+      Labels: { 'bastion.app': 'site1', 'bastion.release': id, 'bastion.managed': 'app' },
+      Architecture: 'arm64',
+    });
+    const outcome = await ops.deploy(ctx(), 'site1', { prebuilt: `bastion-site1:${id}`, checksum: 'b'.repeat(64), buildMs: 61_000 });
+    expect(outcome).toMatchObject({ release: id, result: 'success' });
+    // Nothing was built here
+    expect(fake.builds).toEqual([]);
+    expect(fake.containers.get(`bastion-site1-${id}`)!.State.Running).toBe(true);
+    expect(readRelease(layout, 'site1', id)).toMatchObject({
+      builtOn: 'bastion',
+      platform: 'linux/arm64',
+      digest: `sha256:${'a'.repeat(64)}`,
+      buildMs: 61_000,
+      checksum: 'b'.repeat(64),
+      image: `bastion-site1:${id}`,
+      result: 'success',
+    });
+    expect(logs.some((l) => l.startsWith(`Built on BastionSSH in 61 s: bastion-site1:${id} (linux/arm64`))).toBe(true);
+    const [listed] = await ops.releases(ctx(), 'site1');
+    expect(listed).toMatchObject({ builtOn: 'bastion', platform: 'linux/arm64', buildMs: 61_000, imagePresent: true });
+  });
+
+  it('refuses --prebuilt when the image is missing, made for another app or release, or named otherwise', async () => {
+    await app();
+    const id = '20261005-130000-0123abcd';
+    await expect(ops.deploy(ctx(), 'site1', { prebuilt: `bastion-site1:${id}` })).rejects.toThrow(/is not on this server.*Nothing was changed/);
+    fake.images.set(`bastion-site1:${id}`, { Id: `sha256:${'c'.repeat(64)}`, Labels: { 'bastion.app': 'other', 'bastion.release': id } });
+    await expect(ops.deploy(ctx(), 'site1', { prebuilt: `bastion-site1:${id}` })).rejects.toThrow(/was not built for site1/);
+    await expect(ops.deploy(ctx(), 'site1', { prebuilt: 'nginx:latest' })).rejects.toThrow(/--prebuilt takes bastion-site1:<release>/);
+    await expect(ops.deploy(ctx(), 'site1', { prebuilt: `bastion-site1:${id}`, source: 'tmp/x.tgz' })).rejects.toThrow(/not both/);
+    await expect(ops.deploy(ctx(), 'site1', { source: 'tmp/x.tgz', buildMs: 5 })).rejects.toThrow(/go with --prebuilt/);
+    expect(releaseIds(layout, 'site1')).toEqual([]);
+  });
+
+  it('removes a loaded image whose release fails its health check; the previous release keeps serving', async () => {
+    await app();
+    const good = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;
+    const id = '20261005-130000-0123abcd';
+    fake.images.set(`bastion-site1:${id}`, { Id: `sha256:${'d'.repeat(64)}`, Labels: { 'bastion.app': 'site1', 'bastion.release': id, 'bastion.managed': 'app' } });
+    fake.exec = ({ cmd }) => (cmd[0] === 'wget' ? { exitCode: 1, stderr: 'refused' } : { exitCode: 0 });
+    const outcome = await ops.deploy(ctx(), 'site1', { prebuilt: `bastion-site1:${id}` });
+    expect(outcome).toMatchObject({ release: id, result: 'failed' });
+    expect(fake.images.has(`bastion-site1:${id}`)).toBe(false);
+    expect(currentRelease(layout, 'site1')).toBe(good);
+    expect(readRelease(layout, 'site1', id)).toMatchObject({ builtOn: 'bastion', result: 'failed' });
+  });
+});
+
 describe('the app list', () => {
   /** Self-signed for list.test, valid 2026-10-05 to 2027-01-03 (certs.test.ts has the same). */
   const PEM = fs.readFileSync(path.join(import.meta.dirname, 'certs.test.ts'), 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----\n/)![0];

@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { extractTar, packDirectory, tarBuffer } from './tar.js';
+import { isDeployEnvFile } from '@smt/shared';
+import { extractTar, MAX_SKIPPED_NAMES, packDirectory, tarBuffer } from './tar.js';
 
 let work: string;
 beforeEach(() => {
@@ -27,6 +28,31 @@ async function refused(entries: Parameters<typeof tarBuffer>[0], message: RegExp
 }
 
 describe('extracting an upload', () => {
+  it('leaves out the files skip names (environment files), counts them, and names the first ones', async () => {
+    const many = Array.from({ length: MAX_SKIPPED_NAMES + 5 }, (_, i) => ({ name: `pkg${i}/.env`, content: `S=${i}` }));
+    const result = await extractTar(
+      archive([
+        { name: '.env', content: 'SECRET=1' },
+        { name: '.env.local', content: 'SECRET=2' },
+        { name: '.env.example', content: 'SECRET=' },
+        { name: 'config/.env.production', content: 'X=1' },
+        { name: '.env.link', type: '2', linkname: '.env.example' },
+        { name: 'index.js', content: 'ok' },
+        ...many,
+      ]),
+      dest(),
+      { skip: isDeployEnvFile },
+    );
+    // Not written, and no folder made for them either
+    expect(fs.readdirSync(dest()).sort()).toEqual(['.env.example', 'index.js']);
+    expect(result.skippedCount).toBe(4 + many.length);
+    expect(result.skipped).toHaveLength(MAX_SKIPPED_NAMES);
+    expect(result.skipped.slice(0, 4)).toEqual(['.env', '.env.local', 'config/.env.production', '.env.link']);
+    // Their bytes do not count against the cap
+    expect(result.bytes).toBe('SECRET='.length + 'ok'.length);
+  });
+
+
   it('extracts files, folders and links that stay inside, gzip or not', async () => {
     const long = `deep/${'d'.repeat(120)}/file.txt`;
     const entries: Parameters<typeof tarBuffer>[0] = [

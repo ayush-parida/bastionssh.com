@@ -18,6 +18,7 @@ import type {
   DeployValidation,
   DeployVersion,
 } from '@smt/shared';
+import { isDeployEnvFile, pickDeployBuildArgs } from '@smt/shared';
 import { planBuild, GENERATED_DOCKERFILE } from './build.js';
 import {
   appNames,
@@ -681,6 +682,58 @@ async function pullImage(ctx: Ctx, app: string, ref: string, id: string): Promis
   return digest;
 }
 
+/** What `deploy` takes besides the app (cli: `--source`, `--include-env-files`, `--prebuilt`, `--checksum`, `--build-ms`). */
+export interface DeployOptions {
+  /** An upload under the root: built here. */
+  source?: string;
+  /** Keep `.env` and `.env.*` files of the upload (left out by default). */
+  includeEnvFiles?: boolean;
+  /**
+   * `bastion-<app>:<release>`: an image BastionSSH built on its side and
+   * loaded into this server's Docker; served as release `<release>` with no
+   * build here.
+   */
+  prebuilt?: string;
+  /** With `prebuilt`: SHA-256 of the upload it was built from (release.json's checksum). */
+  checksum?: string;
+  /** With `prebuilt`: how long the build took on the BastionSSH side. */
+  buildMs?: number;
+}
+
+/** `.env` values a build gets as build args: every `NEXT_PUBLIC_*` and the names `build.args` lists; nothing else. */
+export function buildArgs(ctx: Ctx, app: string, config: DeployAppConfig): Record<string, string> {
+  return pickDeployBuildArgs(parseEnv(readEnvFile(envFilePath(ctx.layout, app, config))), config.build.args ?? []);
+}
+
+/**
+ * `env build-args <app>`: the values {@link buildArgs} picks, for a build on
+ * the BastionSSH side (`build.where: bastion`), which reads them for the
+ * build only and keeps nothing. No other `.env` value is ever printed here.
+ */
+export function envBuildArgs(ctx: Ctx, app: string): { args: Record<string, string> } {
+  requireApp(ctx, app);
+  const config = loadConfig(ctx.layout, app);
+  if (config.build.type === 'image') throw new BastionError(`build.type of ${app} is image: nothing is built`, 2);
+  return { args: buildArgs(ctx, app, config) };
+}
+
+/** `bastion-<app>:<release>` → the release id, refused for any other app or form. */
+function prebuiltRelease(app: string, tag: string): string {
+  const m = /^bastion-([a-z0-9][a-z0-9-]{0,40}):([a-z0-9][a-z0-9-]{0,40})$/.exec(tag);
+  if (!m || m[1] !== app) throw new BastionError(`--prebuilt takes bastion-${app}:<release>, not ${JSON.stringify(tag.slice(0, 100))}`, 2);
+  return releaseId(m[2]);
+}
+
+/** The build log's line naming the environment files an upload was deployed without. */
+export function envFilesNote(skipped: readonly string[], count: number): string {
+  const more = count > skipped.length ? ` and ${count - skipped.length} more` : '';
+  return (
+    `Left out ${count === 1 ? 'an environment file' : `${count} environment files`} of the upload: ${skipped.join(', ')}${more}. ` +
+    "Runtime values belong in the app's .env on the server (NEXT_PUBLIC_* and build.args reach the build from there); " +
+    'to deploy these files anyway, choose "Include environment files" (bastionctl deploy --include-env-files).'
+  );
+}
+
 /**
  * `deploy <app> --source <file>` (spec §5): lock, new release from the
  * upload, build, start, health check, proxy switch, `current`, prune. A
@@ -690,16 +743,47 @@ async function pullImage(ctx: Ctx, app: string, ref: string, id: string): Promis
  * `build.type: image` takes no upload (`deploy <app>`): the image is pulled
  * instead of built, and the release records the digest it resolved to.
  *
+ * `--prebuilt bastion-<app>:<release>` (bastion-side builds): the image was
+ * built next to BastionSSH and loaded into this server's Docker already;
+ * it must be here, labelled for this app and release, and the release flow
+ * goes on from there (release.json: `builtOn: bastion`, platform, image id,
+ * build time). Refused when the image is missing.
+ *
+ * Environment files (`.env`, `.env.*` but `.env.example`) of an upload are
+ * left out unless `includeEnvFiles`; the log names them. A build gets the
+ * app's `NEXT_PUBLIC_*` and `build.args` values from `.env` as build args.
+ *
  * An outdated proxy is upgraded first (proxy-upgrade.ts).
  */
-export async function deploy(baseCtx: Ctx, app: string, source?: string): Promise<DeployOutcome> {
+export async function deploy(baseCtx: Ctx, app: string, options: DeployOptions | string = {}): Promise<DeployOutcome> {
+  // A plain string is the upload (`deploy <app> --source <file>`)
+  const opts: DeployOptions = typeof options === 'string' ? { source: options } : options;
+  const { source, prebuilt } = opts;
   const config = loadConfig(baseCtx.layout, app);
   const conflicts = validateForServer(baseCtx.layout, app, fs.readFileSync(baseCtx.layout.config(app), 'utf8'));
   if (!conflicts.ok) throw new BastionError(`Invalid config: ${formatIssues(conflicts.errors)}`, 3);
   const imageRef = config.build.type === 'image' ? config.build.image! : null;
-  if (imageRef && source !== undefined) throw new BastionError(`build.type of ${app} is image: ${imageRef} is pulled from its registry, so deploy takes no --source`, 2);
-  if (!imageRef && source === undefined) throw new BastionError('Usage: bastionctl deploy <app> --source <file>', 2);
+  if (imageRef && (source !== undefined || prebuilt !== undefined)) {
+    throw new BastionError(`build.type of ${app} is image: ${imageRef} is pulled from its registry, so deploy takes no --source or --prebuilt`, 2);
+  }
+  if (source !== undefined && prebuilt !== undefined) throw new BastionError('deploy takes --source or --prebuilt, not both', 2);
+  if (!imageRef && source === undefined && prebuilt === undefined) throw new BastionError('Usage: bastionctl deploy <app> --source <file> | --prebuilt <image>', 2);
+  if (prebuilt === undefined && (opts.checksum !== undefined || opts.buildMs !== undefined)) throw new BastionError('--checksum and --build-ms go with --prebuilt', 2);
+  if (opts.checksum !== undefined && !/^[a-f0-9]{64}$/.test(opts.checksum)) throw new BastionError('--checksum is a SHA-256 in hex', 2);
   const sourceFile = source === undefined ? null : fileInRoot(baseCtx, source);
+  // The image BastionSSH loaded: it must be here and made for this app and release
+  let prebuiltImage: { id: string; tag: string; platform: string | null } | null = null;
+  if (prebuilt !== undefined) {
+    const id = prebuiltRelease(app, prebuilt);
+    const info = await baseCtx.docker.inspectImage(prebuilt);
+    if (!info) throw new BastionError(`Image ${prebuilt} is not on this server (it is loaded by BastionSSH before this deploy). Nothing was changed.`);
+    const labels = info.Config?.Labels ?? {};
+    if (labels[LABEL_APP] !== app || labels[LABEL_RELEASE] !== id) {
+      throw new BastionError(`Image ${prebuilt} was not built for ${app} release ${id} (its labels say otherwise). Nothing was changed.`);
+    }
+    const platform = info.Architecture ? `${info.Os || 'linux'}/${info.Architecture}${info.Variant ? `/${info.Variant}` : ''}` : null;
+    prebuiltImage = { id: info.Id, tag: prebuilt, platform };
+  }
   // A line that will not start on this kernel is refused before hundreds of megabytes are pulled
   await checkKernel(baseCtx, config, imageRef, 'Nothing was pulled or changed.');
   await ensureProxyCurrent(baseCtx, 'deploy');
@@ -709,8 +793,12 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
   const releaseLock = await acquireLock(baseCtx.layout.lock(app), { holder: baseCtx.actor, docker: baseCtx.docker, now: baseCtx.now, what: `deploy of ${app}` });
   try {
     cleanTmp(baseCtx);
-    const checksum = sourceFile ? await sha256File(sourceFile) : createHash('sha256').update(imageRef!).digest('hex');
-    const id = newReleaseId(baseCtx.now(), checksum);
+    const checksum = sourceFile
+      ? await sha256File(sourceFile)
+      : prebuiltImage
+        ? (opts.checksum ?? prebuiltImage.id.replace(/^sha256:/, ''))
+        : createHash('sha256').update(imageRef!).digest('hex');
+    const id = prebuiltImage ? prebuiltRelease(app, prebuiltImage.tag) : newReleaseId(baseCtx.now(), checksum);
     const dir = baseCtx.layout.release(app, id);
     fs.mkdirSync(baseCtx.layout.releases(app), { recursive: true });
     try {
@@ -744,18 +832,24 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
       result: 'building',
       error: null,
       previous,
+      builtOn: imageRef ? null : prebuiltImage ? 'bastion' : 'server',
       // A quick service's release says which template line it runs: a rollback keeps Update version's rules (lines.ts)
       ...(imageRef && { digest: null, ref: imageRef, ...deployedLine(config, imageRef) }),
+      ...(prebuiltImage && { digest: prebuiltImage.id, platform: prebuiltImage.platform, buildMs: opts.buildMs ?? null }),
     };
     writeRelease(ctx.layout, record);
     ctx.log(`Release ${id} of ${app} by ${ctx.actor}`);
 
-    let built = false;
+    // A loaded image is the release's own from the start: a failure removes it like one built here
+    let built = prebuiltImage !== null;
     try {
       if (imageRef) {
         record = { ...record, digest: await pullImage(ctx, app, imageRef, id) };
         built = true;
         writeRelease(ctx.layout, record);
+      } else if (prebuiltImage) {
+        const took = opts.buildMs !== undefined ? ` in ${Math.round(opts.buildMs / 1000)} s` : '';
+        ctx.log(`Built on BastionSSH${took}: ${prebuiltImage.tag} (${prebuiltImage.platform ?? 'unknown platform'}, ${prebuiltImage.id.slice(0, 19)})`);
       } else {
         const gz = Buffer.alloc(2);
         const fd = fs.openSync(sourceFile!, 'r');
@@ -768,10 +862,15 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
         const work = path.join(ctx.layout.tmp, `build-${app}-${id}`);
         try {
           ctx.log('Unpacking the upload');
-          const extracted = await extractTar(kept, work, { maxBytes: ctx.maxSourceBytes });
+          const extracted = await extractTar(kept, work, { maxBytes: ctx.maxSourceBytes, ...(!opts.includeEnvFiles && { skip: isDeployEnvFile }) });
           ctx.log(`Unpacked ${extracted.files} entries (${Math.round(extracted.bytes / 1024)} KiB)`);
-          const plan = planBuild(work, config);
+          if (extracted.skippedCount > 0) ctx.log(envFilesNote(extracted.skipped, extracted.skippedCount));
+          else if (opts.includeEnvFiles) ctx.log('Environment files in the upload were kept, as asked (they are part of this release and can end up in the image)');
+          const args = buildArgs(ctx, app, config);
+          const argNames = Object.keys(args);
+          const plan = planBuild(work, config, argNames);
           for (const note of plan.notes) ctx.log(note);
+          if (argNames.length > 0) ctx.log(`Build args from .env: ${argNames.join(', ')}`);
           // One build per server at a time: a second deploy waits its turn rather than failing
           const buildOpts = { holder: `${ctx.actor} (${app})`, docker: ctx.docker, now: ctx.now, what: 'image build on this server' };
           const buildLock = await acquireLock(ctx.layout.buildLock, buildOpts).catch(async (err: unknown) => {
@@ -786,6 +885,7 @@ export async function deploy(baseCtx: Ctx, app: string, source?: string): Promis
                 t: record.image,
                 dockerfile: plan.dockerfile,
                 labels: JSON.stringify({ [LABEL_APP]: app, [LABEL_RELEASE]: id, [LABEL_MANAGED]: 'app' }),
+                ...(argNames.length > 0 && { buildargs: JSON.stringify(args) }),
                 rm: true,
                 forcerm: true,
               },

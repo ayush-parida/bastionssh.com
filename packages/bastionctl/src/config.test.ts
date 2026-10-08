@@ -37,7 +37,7 @@ describe('bastion.yml validation', () => {
       domains: ['site1.com', 'www.site1.com'],
       redirect_www: 'apex',
       tls: 'auto',
-      build: { type: 'nextjs', node: '20', dir: '.', output: null, image: null },
+      build: { type: 'nextjs', node: '20', dir: '.', output: null, image: null, where: 'server', args: [] },
       run: {
         port: 3000,
         env_file: '.env',
@@ -55,6 +55,23 @@ describe('bastion.yml validation', () => {
       permissions: { deploy: 'operate' },
       backups: { schedule: 'off', keep: 7 },
     });
+  });
+
+  it('takes where the image is built (server by default, or bastion) and the build args allowlist', () => {
+    const base = 'name: a\ndomains: [a.example.com]\nbuild:\n  type: nextjs\n';
+    expect(checkConfigText(base, 'a').config?.build).toMatchObject({ where: 'server', args: [] });
+    expect(checkConfigText(`${base}  where: bastion\n  args: [SENTRY_RELEASE, VITE_API_URL]\n`, 'a').config?.build).toMatchObject({
+      where: 'bastion',
+      args: ['SENTRY_RELEASE', 'VITE_API_URL'],
+    });
+    expect(paths(`${base}  where: laptop\n`, 'a')).toEqual(['build.where']);
+    expect(paths(`${base}  args: VITE_API_URL\n`, 'a')).toEqual(['build.args']);
+    expect(paths(`${base}  args: [VITE_API_URL, 1BAD, "with space", VITE_API_URL]\n`, 'a')).toEqual(['build.args.1', 'build.args.2', 'build.args.3']);
+    expect(paths(`${base}  args: [${Array.from({ length: 65 }, (_, i) => `A${i}`).join(', ')}]\n`, 'a')).toEqual(['build.args']);
+    // An image is pulled, never built: neither applies
+    const image = 'name: a\ndomains: []\nbuild:\n  type: image\n  image: "redis:7"\n';
+    expect(paths(`${image}  where: bastion\n`, 'a')).toEqual(['build.where']);
+    expect(paths(`${image}  args: [X]\n`, 'a')).toEqual(['build.args']);
   });
 
   it('takes who may deploy: operate (the default) or manage', () => {
@@ -80,7 +97,7 @@ describe('bastion.yml validation', () => {
   it('refuses unknown keys at every level', () => {
     expect(paths(`${valid}\nimage: nginx\n`)).toEqual(['image']);
     expect(paths(valid.replace('  port: 3000', '  port: 3000\n  privileged: true'))).toEqual(['run.privileged']);
-    expect(paths(valid.replace('type: nextjs', 'type: nextjs\n  args: [x]'))).toEqual(['build.args']);
+    expect(paths(valid.replace('type: nextjs', 'type: nextjs\n  buildargs: [x]'))).toEqual(['build.buildargs']);
     expect(paths(valid.replace('{ path: /, timeout: 30s }', '{ path: /, timeout: 30s, cmd: x }'))).toEqual(['healthcheck.cmd']);
   });
 

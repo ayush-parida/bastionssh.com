@@ -51,6 +51,10 @@ export function readRelease(layout: Layout, app: string, id: string): ReleaseRec
     previous: typeof raw.previous === 'string' ? raw.previous : null,
     ...('digest' in raw && { digest: typeof raw.digest === 'string' && /^sha256:[a-f0-9]{64}$/.test(raw.digest) ? raw.digest : null }),
     // Quick services (from this bastionctl on): what was pulled, of which template and line
+    // Where the image was built, and for one built on the BastionSSH side its platform and build time
+    ...('builtOn' in raw && { builtOn: raw.builtOn === 'server' || raw.builtOn === 'bastion' ? raw.builtOn : null }),
+    ...('platform' in raw && { platform: typeof raw.platform === 'string' && /^[a-z0-9]+\/[a-z0-9_]+(?:\/[a-z0-9]+)?$/.test(raw.platform) ? raw.platform : null }),
+    ...('buildMs' in raw && { buildMs: typeof raw.buildMs === 'number' && Number.isFinite(raw.buildMs) && raw.buildMs >= 0 ? raw.buildMs : null }),
     ...('ref' in raw && { ref: typeof raw.ref === 'string' && raw.ref.length <= 512 ? raw.ref : null }),
     ...('service' in raw && { service: typeof raw.service === 'string' && NAME_PATTERN.test(raw.service) ? raw.service : null }),
     ...('line' in raw && { line: typeof raw.line === 'string' && /^[A-Za-z0-9._-]{1,64}$/.test(raw.line) ? raw.line : null }),

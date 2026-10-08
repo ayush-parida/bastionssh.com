@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseDocument } from 'yaml';
-import { serviceTemplate, type DeployAppConfig, type DeployBackupSettings, type DeployBuildType, type DeployHealthcheckType, type DeployValidation, type DeployValidationIssue, type DeployVolume } from '@smt/shared';
+import { DEPLOY_MAX_BUILD_ARGS, serviceTemplate, type DeployAppConfig, type DeployBackupSettings, type DeployBuildType, type DeployHealthcheckType, type DeployValidation, type DeployValidationIssue, type DeployVolume } from '@smt/shared';
 import { NODE_BUILD_VERSIONS } from './images.js';
-import { BastionError, Layout, NAME_PATTERN } from './names.js';
+import { BastionError, ENV_KEY_PATTERN, Layout, NAME_PATTERN } from './names.js';
 import { NGINX_TLS, NGINX_UPSTREAM_PORT, proxyMode } from './nginx.js';
 
 /**
@@ -55,7 +55,7 @@ export const DEFAULTS = {
 
 const KEYS = {
   root: ['name', 'service', 'domains', 'redirect_www', 'tls', 'build', 'run', 'healthcheck', 'keep_releases', 'proxy', 'permissions', 'backups'],
-  build: ['type', 'node', 'dir', 'output', 'image'],
+  build: ['type', 'node', 'dir', 'output', 'image', 'where', 'args'],
   run: ['port', 'env_file', 'volumes', 'memory', 'cpus', 'strategy', 'publish', 'command', 'entrypoint'],
   volume: ['name', 'path', 'readonly', 'exclusive'],
   healthcheck: ['type', 'path', 'command', 'timeout'],
@@ -254,12 +254,12 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
   }
 
   // build
-  let build: DeployAppConfig['build'] = { type: 'dockerfile', node: null, dir: '.', output: null, image: null };
+  let build: DeployAppConfig['build'] = { type: 'dockerfile', node: null, dir: '.', output: null, image: null, where: 'server', args: [] };
   if (!isObject(data.build)) {
     issues.add('build', 'Required: { type: nextjs | dockerfile | static | image }');
   } else {
     issues.unknownKeys(data.build, KEYS.build, 'build');
-    const { type, node, dir, output, image } = data.build;
+    const { type, node, dir, output, image, where, args } = data.build;
     if (typeof type !== 'string' || !(BUILD_TYPES as readonly string[]).includes(type)) {
       issues.add('build.type', 'Must be nextjs, dockerfile, static or image');
     }
@@ -271,7 +271,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       else if (typeof image !== 'string' || !isImageRef(image)) {
         issues.add('build.image', 'A registry reference with a tag or digest, like postgres:16.4 or postgres@sha256:<64 hex digits>');
       } else imageRef = image;
-      for (const key of ['node', 'dir', 'output'] as const) {
+      for (const key of ['node', 'dir', 'output', 'where', 'args'] as const) {
         if (data.build[key] !== undefined) issues.add(`build.${key}`, 'Not used with type image: nothing is built');
       }
     } else if (image !== undefined && known) {
@@ -296,7 +296,26 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
       else if (typeof output !== 'string' || !isSafeRelative(output)) issues.add('build.output', 'A relative path inside build.dir, without ..');
       else buildOutput = output;
     }
-    build = { type: buildType, node: nodeVersion, dir: buildDir, output: buildOutput, image: imageRef };
+    // Where the image is built: on the server (default) or by BastionSSH's builder, which ships only the image
+    let buildWhere: 'server' | 'bastion' = 'server';
+    if (where !== undefined && buildType !== 'image') {
+      if (where !== 'server' && where !== 'bastion') issues.add('build.where', 'Must be server or bastion');
+      else buildWhere = where;
+    }
+    // .env names a build gets besides NEXT_PUBLIC_* (values read for the build only, never kept)
+    const buildArgs: string[] = [];
+    if (args !== undefined && buildType !== 'image') {
+      if (!Array.isArray(args) || args.length > DEPLOY_MAX_BUILD_ARGS) {
+        issues.add('build.args', `A list of up to ${DEPLOY_MAX_BUILD_ARGS} .env variable names, like [VITE_API_URL]`);
+      } else {
+        args.forEach((a, i) => {
+          if (typeof a !== 'string' || !ENV_KEY_PATTERN.test(a)) return issues.add(`build.args.${i}`, 'A variable name: letters, digits and _, not starting with a digit');
+          if (buildArgs.includes(a)) return issues.add(`build.args.${i}`, `Listed twice: ${a}`);
+          buildArgs.push(a);
+        });
+      }
+    }
+    build = { type: buildType, node: nodeVersion, dir: buildDir, output: buildOutput, image: imageRef, where: buildWhere, args: buildArgs };
   }
 
   // run
