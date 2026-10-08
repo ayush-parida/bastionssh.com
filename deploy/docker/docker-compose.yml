@@ -16,6 +16,15 @@
 # mistake breaks passkeys, the second makes every user share Caddy's IP for
 # rate limits and the audit log, the third lets anyone reach smt directly and
 # claim any client address in X-Forwarded-For.
+#
+# buildkit builds deployment images next to BastionSSH for apps with
+# build.where: bastion (README → Builds on BastionSSH): rootless, on a network
+# only smt shares, limited by SMT_BUILDKIT_MEMORY / SMT_BUILDKIT_CPUS, its
+# layer cache kept under SMT_BUILDKIT_CACHE_MB, and reached over mutual TLS
+# with certificates buildkit-tls makes on the first start. Building for a
+# server of another CPU architecture needs QEMU: Docker Desktop has it; on a
+# Linux host run once: docker run --privileged --rm tonistiigi/binfmt --install all
+# Not wanted: set SMT_BUILDKIT_ADDR= (empty) and start only smt and redis.
 services:
   smt:
     build:
@@ -70,8 +79,20 @@ services:
       SMT_SMTP_FROM: ${SMT_SMTP_FROM:-}
       # Private networks audit-log forwarding (syslog/webhook) may reach, e.g. 10.0.0.0/8
       SMT_AUDIT_FORWARD_ALLOW_NETS: ${SMT_AUDIT_FORWARD_ALLOW_NETS:-}
+      # Builds on the BastionSSH side (build.where: bastion). An empty
+      # SMT_BUILDKIT_ADDR turns them off: every app then builds on its server.
+      SMT_BUILDKIT_ADDR: ${SMT_BUILDKIT_ADDR-tcp://buildkit:1234}
+      SMT_BUILDKIT_TLS_DIR: /run/buildkit-tls
+      SMT_BUILD_TIMEOUT_MS: ${SMT_BUILD_TIMEOUT_MS:-1800000} # 30 min, the image's transfer included
+      SMT_BUILD_MAX_CONTEXT_BYTES: ${SMT_BUILD_MAX_CONTEXT_BYTES:-1073741824} # unpacked upload, 1 GiB
+      SMT_BUILD_QUEUE_MAX: ${SMT_BUILD_QUEUE_MAX:-20} # one build runs at a time; more waiting are refused
     volumes:
       - smt-data:/data
+      # The client certificate for buildkit (made by buildkit-tls)
+      - buildkit-client-tls:/run/buildkit-tls:ro
+    networks:
+      - default
+      - builder
     depends_on:
       redis:
         condition: service_healthy
@@ -108,6 +129,60 @@ services:
       smt:
         condition: service_started
 
+  # Builds for build.where: bastion. Rootless (BuildKit runs as an ordinary
+  # user inside its own user namespace; the unconfined profiles below are what
+  # rootless BuildKit needs to create it — no --privileged, no Docker socket),
+  # on the builder network only: it reaches the internet for package installs
+  # and smt reaches it, nothing else (not Redis). Pinned by digest; buildctl in
+  # the smt image is the same release (Dockerfile).
+  buildkit:
+    image: moby/buildkit:v0.33.1-rootless@sha256:f8a833b2de9d68e27f0815e4a737abdfaf8a2e4c615650557df11025101557b4
+    restart: unless-stopped
+    command:
+      - --addr=unix:///run/user/1000/buildkit/buildkitd.sock # the health check below
+      - --addr=tcp://0.0.0.0:1234
+      - --tlscacert=/tls/ca.pem
+      - --tlscert=/tls/cert.pem
+      - --tlskey=/tls/key.pem
+      - --oci-worker-gc
+      # Reserved,Free,Maximum in MB: the layer cache is garbage-collected beyond the maximum
+      - --oci-worker-gc-keepstorage=0,0,${SMT_BUILDKIT_CACHE_MB:-10240}
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+    mem_limit: ${SMT_BUILDKIT_MEMORY:-4g}
+    memswap_limit: ${SMT_BUILDKIT_MEMORY:-4g}
+    cpus: ${SMT_BUILDKIT_CPUS:-2}
+    pids_limit: 4096
+    volumes:
+      - buildkit-cache:/home/user/.local/share/buildkit
+      - buildkit-tls:/tls:ro
+    networks:
+      - builder
+    depends_on:
+      buildkit-tls:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "buildctl", "--addr", "unix:///run/user/1000/buildkit/buildkitd.sock", "debug", "workers"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Once, before buildkit: the mutual-TLS certificates (buildkit/tls.sh), kept
+  # in buildkit-tls (BuildKit's side) and buildkit-client-tls (smt's side)
+  buildkit-tls:
+    image: moby/buildkit:v0.33.1-rootless@sha256:f8a833b2de9d68e27f0815e4a737abdfaf8a2e4c615650557df11025101557b4
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/tls.sh"]
+    network_mode: none
+    restart: "no"
+    volumes:
+      - ./buildkit/tls.sh:/tls.sh:ro
+      - buildkit-tls:/tls/server
+      - buildkit-client-tls:/tls/client
+
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -120,9 +195,18 @@ services:
       timeout: 3s
       retries: 5
 
+networks:
+  default:
+  # smt and buildkit only: a build reaches the internet, smt and nothing else here
+  builder:
+
 volumes:
   smt-data:
   redis-data:
+  # BuildKit's layer cache (Deployments → Setup → Clear build cache empties it)
+  buildkit-cache:
+  buildkit-tls:
+  buildkit-client-tls:
   # Caddy's certificates and ACME account; keep it, or every restart re-issues
   caddy-data:
   caddy-config:
