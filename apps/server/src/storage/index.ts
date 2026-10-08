@@ -10,6 +10,7 @@ import { StorageError } from './errors.js';
 export * from './errors.js';
 export * from './keys.js';
 export * as ops from './ops.js';
+export * from './folder.js';
 
 export type StorageConnectionRow = typeof storageConnections.$inferSelect;
 

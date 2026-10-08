@@ -3,12 +3,19 @@ import { z } from 'zod';
 import type { Readable } from 'node:stream';
 import { and, desc, eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import { STORAGE_PROVIDERS, type StorageConnection, type StorageProvider } from '@smt/shared';
+import {
+  STORAGE_PROVIDERS,
+  type StorageConnection,
+  type StorageFolderEstimate,
+  type StorageProvider,
+} from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { requireModule } from '../../auth/access/modules.js';
 import { accessibleFilter, requireResource } from '../../auth/access/index.js';
 import { boolQuery } from '../query.js';
 import { audit } from '../../audit/index.js';
+import { archiveFormatSchema, sendFolderArchive } from '../../archive/index.js';
+import { abortStreamsFor } from '../sse.js';
 import { config } from '../../config/index.js';
 import { getDb } from '../../db/index.js';
 import { storageConnections } from '../../db/schema.js';
@@ -18,10 +25,12 @@ import {
   assertBucketParam,
   assertSafeEndpoint,
   baseName,
+  estimatePrefix,
   evictConnection,
   normalizeKey,
   normalizePrefix,
   ops,
+  prefixWalker,
   resolveConnection,
   validateBucketName,
 } from '../../storage/index.js';
@@ -60,6 +69,11 @@ const keyQuery = z.object({ key: keySchema });
 const uploadQuery = z.object({ key: keySchema, contentType: z.string().max(255).optional() });
 const deleteObjectQuery = z.object({ key: keySchema, recursive: boolQuery });
 const folderSchema = z.object({ prefix: keySchema });
+const folderDownloadQuery = z.object({
+  prefix: z.string().max(1024).default(''),
+  format: archiveFormatSchema,
+});
+const estimateQuery = z.object({ prefix: z.string().max(1024).default('') });
 const renameSchema = z.object({
   from: keySchema,
   to: keySchema,
@@ -243,6 +257,7 @@ export async function storageRoutes(app: FastifyInstance) {
 
     db.delete(storageConnections).where(eq(storageConnections.id, id)).run();
     evictConnection(id);
+    abortStreamsFor('files', id, 'The storage connection was deleted');
     await audit(req, 'storage_connection.delete', 'storage_connection', id, existing.name);
     return reply.status(204).send();
   });
@@ -380,6 +395,67 @@ export async function storageRoutes(app: FastifyInstance) {
       return sendError(reply, err);
     }
   });
+
+  /**
+   * GET …/folder?prefix=photos/&format=zip — the prefix (or the whole bucket)
+   * as one zip / tar.gz, built while the objects stream down (archive/).
+   * Same permission as downloading one object.
+   */
+  app.get(
+    '/connections/:id/buckets/:bucket/folder',
+    { preHandler: requireResource('storage_connection', 'download') },
+    async (req, reply) => {
+      const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
+      const query = folderDownloadQuery.parse(req.query);
+      try {
+        const { connection, client } = await resolveConnection(req.orgId, id);
+        const bucket = assertBucketParam(rawBucket);
+        const prefix = normalizePrefix(query.prefix);
+        await sendFolderArchive(req, reply, {
+          resourceId: id,
+          walker: prefixWalker(client, bucket, { maxEntries: config.folderDownload.maxFiles }),
+          rootRef: prefix,
+          folderName: prefix === '' ? bucket : baseName(prefix),
+          format: query.format,
+          onDone: (result) =>
+            audit(req, 'storage.folder_download', 'storage_connection', id, connection.name, {
+              bucket,
+              prefix,
+              format: result.format,
+              files: result.files,
+              bytes: result.bytes,
+              skipped: result.skipped,
+              truncated: result.truncated,
+              aborted: result.aborted,
+              durationMs: result.durationMs,
+              ...(result.error && { error: result.error }),
+            }),
+        });
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
+
+  /** GET …/folder/estimate?prefix=photos/ — objects and bytes under a prefix, counted quickly (or "at least") */
+  app.get(
+    '/connections/:id/buckets/:bucket/folder/estimate',
+    { preHandler: requireResource('storage_connection', 'download') },
+    async (req, reply) => {
+      const { id, bucket: rawBucket } = req.params as { id: string; bucket: string };
+      const query = estimateQuery.parse(req.query);
+      try {
+        const { client } = await resolveConnection(req.orgId, id);
+        const bucket = assertBucketParam(rawBucket);
+        const prefix = normalizePrefix(query.prefix);
+        const estimate = await estimatePrefix(client, bucket, prefix);
+        const body: StorageFolderEstimate = { bucket, prefix, ...estimate, ...config.folderDownload };
+        return body;
+      } catch (err) {
+        return sendError(reply, err);
+      }
+    },
+  );
 
   /** PUT …/object?key=photos/cat.jpg&contentType=image/jpeg — stream a raw body up */
   app.put(

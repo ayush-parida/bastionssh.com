@@ -86,6 +86,8 @@ export function keepSets(orgId: string, after: AccessSnapshot): LiveAccessScope 
     keepShellClusterIds: ids(after.cluster.view, 'cluster'),
     // Browsing is `view`: a session stays open wherever the connection is still seen
     keepFtpConnectionIds: ids(after.ftp_connection.view, 'ftp_connection'),
+    // Downloading is `view` too: a folder download runs on wherever the connection is still seen
+    keepStorageConnectionIds: ids(after.storage_connection.view, 'storage_connection'),
   };
 }
 

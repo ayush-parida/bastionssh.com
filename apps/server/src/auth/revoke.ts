@@ -5,15 +5,17 @@ import { closeDockerForUser } from '../docker/index.js';
 import { abortDeployStreams } from '../deploy/sse.js';
 import { closeKubeForUser } from '../kube/index.js';
 import { evictFtpUser } from '../ftp/index.js';
+import { abortStorageFolderDownloads } from '../storage/folder.js';
 
 /**
  * Ending browser sessions does not end what those sessions already opened.
  * This closes a user's live terminals (and their WebSockets), pooled SFTP,
  * FTP and Docker connections, Docker, Kubernetes and deploy log streams and
  * in-flight AI agent streams, so a revocation takes effect immediately rather
- * than when those connections happen to close. Storage, cloud accounts,
- * saved commands and cron jobs hold nothing open per user, so they have no
- * keep set: their next request is simply refused.
+ * than when those connections happen to close. Object Storage folder
+ * downloads end too. Cloud accounts, saved commands and cron jobs hold
+ * nothing open per user, so they have no keep set: their next request is
+ * simply refused.
  */
 export interface LiveAccessScope {
   /** Only what is open in this org; omit for every org (account-wide revocations). */
@@ -44,6 +46,12 @@ export interface LiveAccessScope {
    * say nothing about connections) and closed when everything is revoked.
    */
   keepFtpConnectionIds?: Iterable<string>;
+  /**
+   * Keep Object Storage folder downloads on these connections (the only
+   * storage request that outlives a click). Omitted, like FTP: kept when
+   * another keep set narrows access, ended when everything is revoked.
+   */
+  keepStorageConnectionIds?: Iterable<string>;
 }
 
 export interface LiveAccessRevoked {
@@ -56,6 +64,8 @@ export interface LiveAccessRevoked {
   agents: number;
   /** Pooled FTP/SFTP-connection sessions. */
   ftp?: number;
+  /** Object Storage folder downloads. */
+  storage?: number;
 }
 
 export function revokeLiveAccess(userId: string, scope: LiveAccessScope = {}): LiveAccessRevoked {
@@ -68,6 +78,10 @@ export function revokeLiveAccess(userId: string, scope: LiveAccessScope = {}): L
     scope.keepFtpConnectionIds || !narrowing
       ? evictFtpUser(userId, { orgId: scope.orgId, keepConnectionIds: scope.keepFtpConnectionIds })
       : 0;
+  const storage =
+    scope.keepStorageConnectionIds || !narrowing
+      ? abortStorageFolderDownloads(userId, { orgId: scope.orgId, keepConnectionIds: scope.keepStorageConnectionIds })
+      : 0;
   return {
     terminals: SSHBroker.closeForUser(userId, {
       orgId: scope.orgId,
@@ -79,5 +93,6 @@ export function revokeLiveAccess(userId: string, scope: LiveAccessScope = {}): L
     kube: closeKubeForUser(userId, { orgId: scope.orgId, keepClusterIds }),
     agents: abortAgentStreams(userId, { orgId: scope.orgId }),
     ...(ftp && { ftp }),
+    ...(storage && { storage }),
   };
 }

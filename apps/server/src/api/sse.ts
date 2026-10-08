@@ -179,20 +179,23 @@ export function openEventStream<E>(
 
 /**
  * End a user's open streams of one feature — in one org when `orgId` is
- * given, sparing the servers or clusters in `keepResourceIds`. Returns how
- * many were ended.
+ * given, sparing the servers or clusters in `keepResourceIds` (and, with
+ * `onlyResourceIds`, everything not in it). Returns how many were ended.
  */
 export function abortEventStreams(
   userId: string,
   feature: StreamTarget['feature'],
-  scope: { orgId?: string; keepResourceIds?: Iterable<string> } = {},
+  scope: { orgId?: string; keepResourceIds?: Iterable<string>; onlyResourceIds?: Iterable<string> } = {},
 ): number {
   const keep = new Set(scope.keepResourceIds ?? []);
+  // A feature shared by several kinds of resource (folder downloads) is ended one kind at a time
+  const only = scope.onlyResourceIds ? new Set(scope.onlyResourceIds) : null;
   let aborted = 0;
   for (const entry of [...streams]) {
     if (entry.userId !== userId || entry.feature !== feature) continue;
     if (scope.orgId && entry.orgId !== scope.orgId) continue;
     if (keep.has(entry.resourceId)) continue;
+    if (only && !only.has(entry.resourceId)) continue;
     entry.controller.abort(new Error(REVOKED));
     aborted++;
   }
