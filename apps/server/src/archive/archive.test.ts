@@ -335,6 +335,48 @@ describe.each(['zip', 'tar.gz'] as const)('driver (%s)', (format) => {
     }
   });
 
+  it('drops setuid / setgid bits and keeps one _skipped.txt line per entry', async () => {
+    const { buf } = await build(
+      dir({
+        'suid-bin': file('x', { mode: 0o4755 }),
+        'sgid-dir': dir({}, { mode: 0o2775 }),
+        'evil\nfake.txt\tok': { type: 'other' },
+      }),
+      format,
+    );
+    const entries = format === 'zip' ? (await readZip(buf)).entries : readTarGz(buf);
+    const modes = new Map(entries.map((e) => [e.name, e.mode & 0o7777]));
+    expect(modes.get('suid-bin')).toBe(0o755);
+    expect(modes.get('sgid-dir/')).toBe(0o775);
+    const note = entries.find((e) => e.name === SKIPPED_NOTE)!.data!.toString();
+    expect(note.trim().split('\n').slice(2)).toEqual(['evil?fake.txt?ok\tnot a regular file (device, socket or pipe)']);
+  });
+
+  it('closes a stream the walker hands over after the download was cancelled', async () => {
+    const controller = new AbortController();
+    const inner = fakeWalker(dir({ 'slow-open.bin': file('data') }));
+    // A walker that ignores the signal and opens late (a slow SFTP open)
+    const walker = {
+      ...inner,
+      open: (entry: Parameters<typeof inner.open>[0]) =>
+        new Promise<Awaited<ReturnType<typeof inner.open>>>((resolve, reject) => {
+          setTimeout(() => inner.open(entry, new AbortController().signal).then(resolve, reject), 100);
+        }),
+    };
+    setTimeout(() => controller.abort(), 20);
+    const summary = await writeFolderArchive(walker, collector(), {
+      format,
+      rootRef: '',
+      maxBytes: GiB,
+      maxFiles: 100,
+      signal: controller.signal,
+    });
+    expect(summary.aborted).toBe(true);
+    for (let i = 0; i < 50 && inner.stats.destroyed.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    expect(inner.stats.opened).toEqual(['slow-open.bin']);
+    expect(inner.stats.destroyed).toEqual(['slow-open.bin']);
+  });
+
   it('cuts a file that grew since it was listed at its listed size', async () => {
     const { buf, summary } = await build(dir({ 'grow.log': { type: 'file', size: 100, actualSize: 300 } }), format);
     expect(summary.bytes).toBe(100);

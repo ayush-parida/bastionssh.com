@@ -2,8 +2,9 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config/index.js';
 import { MAX_STREAMS_PER_USER, abortEventStreams, reserveStream } from '../api/sse.js';
-import { writeFolderArchive } from './driver.js';
+import { raceAbort, writeFolderArchive } from './driver.js';
 import { contentDisposition } from './names.js';
+import { abortError } from './sink.js';
 import type { ArchiveFormat, ArchiveSummary, FolderWalker } from './types.js';
 
 /**
@@ -18,6 +19,8 @@ import type { ArchiveFormat, ArchiveSummary, FolderWalker } from './types.js';
 export const archiveFormatSchema = z.enum(['zip', 'tar.gz']).default('zip');
 
 export const TOO_MANY_DOWNLOADS = `Too many downloads and live views open (at most ${MAX_STREAMS_PER_USER}); wait for one to finish`;
+
+const ACCESS_CHANGED = 'Your access has changed. This download was stopped.';
 
 const CONTENT_TYPES: Record<ArchiveFormat, string> = {
   zip: 'application/zip',
@@ -63,13 +66,20 @@ export async function sendFolderArchive(req: FastifyRequest, reply: FastifyReply
   const started = Date.now();
   const controller = new AbortController();
   let finished = false;
+  // Wired before the folder is listed: access revoked (or the browser gone) while it lists must stop the download too
+  const onRevoke = () => controller.abort(slot.signal.reason);
+  if (slot.signal.aborted) onRevoke();
+  else slot.signal.addEventListener('abort', onRevoke, { once: true });
+  reply.raw.on('close', () => {
+    if (!finished) controller.abort(new Error('The download was cancelled'));
+  });
   try {
-    const rootEntries = await opts.walker.list(opts.rootRef);
-
-    slot.signal.addEventListener('abort', () => controller.abort(slot.signal.reason), { once: true });
-    reply.raw.on('close', () => {
-      if (!finished) controller.abort(new Error('The download was cancelled'));
+    const accessChanged = () => Object.assign(new Error(ACCESS_CHANGED), { statusCode: 403 });
+    const rootEntries = await raceAbort(opts.walker.list(opts.rootRef), controller.signal).catch((err: unknown) => {
+      throw slot.signal.aborted ? accessChanged() : err;
     });
+    if (slot.signal.aborted) throw accessChanged();
+    if (controller.signal.aborted) throw abortError(controller.signal);
 
     const filename = `${opts.folderName.replace(/[/\\]/g, '_') || 'folder'}.${opts.format}`;
     // Taken over from Fastify: headers set by hooks so far (CORS, security) are kept

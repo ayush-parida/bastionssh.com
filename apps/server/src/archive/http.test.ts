@@ -92,6 +92,25 @@ describe('sendFolderArchive', () => {
     expect(activeStreamCount(USER)).toBe(0);
   });
 
+  it('stops before any header when access is revoked while the folder is being listed', async () => {
+    const t = appFor(dir({ 'a.txt': file('alpha') }));
+    const list = t.walker.list.bind(t.walker);
+    t.walker.list = async (ref) => {
+      // Revocation lands while the (slow) root listing is still out
+      abortFolderDownloads(USER, { orgId: 'org-folder-dl' });
+      await new Promise((r) => setTimeout(r, 20));
+      return list(ref);
+    };
+    app = t.app;
+    const res = await app.inject('/download');
+    expect(res.statusCode).toBe(404);
+    expect(res.json()).toEqual({ error: 'Your access has changed. This download was stopped.' });
+    expect(t.results).toEqual([]);
+    expect(t.walker.stats.opened).toEqual([]);
+    expect(t.walker.stats.closed).toBe(true);
+    expect(activeStreamCount(USER)).toBe(0);
+  });
+
   it(`answers 429 when the user already holds ${MAX_STREAMS_PER_USER} streams`, async () => {
     const t = appFor(dir({ 'a.txt': file('a') }));
     app = t.app;

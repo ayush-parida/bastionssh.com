@@ -64,7 +64,10 @@ export async function writeFolderArchive(
 
   const skip = (path: string, reason: string) => {
     summary.skipped++;
-    if (skipLines.length < MAX_SKIP_LINES) skipLines.push(`${path}\t${reason}`);
+    // Remote names may hold tabs and newlines: keep one line per entry
+    // eslint-disable-next-line no-control-regex
+    const line = (s: string) => s.replace(/[\u0000-\u001f\u007f]/g, '?');
+    if (skipLines.length < MAX_SKIP_LINES) skipLines.push(`${line(path)}\t${line(reason)}`);
   };
 
   const takeEntry = () => {
@@ -85,7 +88,8 @@ export async function writeFolderArchive(
       }
       const meta: EntryMeta = {
         mtime: entry.mtime && !Number.isNaN(entry.mtime.getTime()) ? entry.mtime : new Date(),
-        mode: entry.mode ?? (entry.type === 'dir' ? 0o755 : 0o644),
+        // setuid / setgid dropped: tar extracted as root would otherwise recreate them on root-owned files
+        mode: (entry.mode ?? (entry.type === 'dir' ? 0o755 : 0o644)) & 0o1777,
       };
       if (entry.type === 'dir') {
         takeEntry();
@@ -125,11 +129,16 @@ export async function writeFolderArchive(
 
   const addFile = async (dir: string, segment: string, shown: string, entry: WalkEntry, size: number, meta: EntryMeta) => {
     let stream: Readable;
+    const opening = walker.open(entry, signal);
     try {
-      stream = await raceAbort(walker.open(entry, signal), signal);
+      stream = await raceAbort(opening, signal);
     } catch (err) {
       entries--;
-      if (signal.aborted) throw abortError(signal);
+      if (signal.aborted) {
+        // A walker that ignores the signal may still hand over a stream (an open SFTP handle): close it
+        opening.then((late) => late.destroy(), () => {});
+        throw abortError(signal);
+      }
       skip(shown, `could not be opened: ${message(err)}`);
       return;
     }
@@ -227,7 +236,7 @@ async function* capped(first: IteratorResult<Buffer>, iterator: AsyncIterator<Bu
   }
 }
 
-function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+export function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(abortError(signal));
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(abortError(signal));
