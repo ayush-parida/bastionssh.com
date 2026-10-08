@@ -243,11 +243,28 @@ REST surface, all under `/api/sftp/:serverId`:
 | -------- | -------------------------- | -------------------------------- |
 | `GET`    | `/list?path=`              | Directory listing (`.` = `$HOME`) |
 | `GET`    | `/download?path=`          | Stream a file to the client      |
+| `GET`    | `/folder?path=&format=zip\|tar.gz` | Stream a folder as one archive (below) |
 | `GET`    | `/read?path=`              | Text contents for the inline editor (2 MiB cap) |
 | `PUT`    | `/file?path=`              | Upload a raw body to that path   |
 | `POST`   | `/mkdir`                   | Create a directory               |
 | `POST`   | `/rename`                  | Rename or move                   |
 | `DELETE` | `/file?path=&recursive=`   | Delete a file or directory       |
+
+Folder downloads (`ssh/folder-download.ts`, on the archive engine in `server/archive/`)
+need the same access as `/download`; the path is refused if it has a `..` segment and must
+be a folder. A `.zip` — and a `.tar.gz` from an account without a shell — is built by the
+engine over the pooled SFTP channel (readdir attributes, links never followed). A `.tar.gz`
+from an account with a shell runs `env LC_ALL=C tar -czf - -C '<folder>' .` on the same SSH
+connection (the path single-quoted by `docker/shell.ts`), and `archive/tar-relay.ts` gunzips
+it, copies members through (dropping the `./` entry, devices, unsafe names and setuid bits),
+counts the limits on the members, stops the remote tar at a limit or on cancel, re-compresses,
+and appends `_skipped.txt` (tar's stderr) and `_TRUNCATED.txt` before its own end blocks.
+Nothing is sent until the first member has been read, so an unusable stream (a login script
+printing, no gzip, an unreadable folder) falls back to SFTP. Whether the account can run
+`tar` and `gzip` is probed once per pooled connection (the probe must print exactly its
+marker; stdin is closed so a forced `internal-sftp` exits). The pooled connection closing —
+revocation evicts it — cuts the download; it is audited once, as `sftp.folder_download`,
+with the method (`tar` / `sftp`), counts, truncation, cancellation and tar's first messages.
 
 ### 4.4b Object Storage (`/server/storage`)
 
@@ -1829,6 +1846,8 @@ All configuration is via environment variables. Sensible defaults are provided.
 | `SMT_MAX_SSH_SESSIONS`   | no       | Per-user concurrent SSH session cap                           |
 | `SMT_AI_REQUEST_TIMEOUT` | no       | Timeout for outbound AI calls (ms)                            |
 | `SMT_SFTP_MAX_UPLOAD_BYTES` | no    | Max SFTP upload size in bytes (default 1 GiB)                 |
+| `SMT_FOLDER_DOWNLOAD_MAX_BYTES` | no | A folder download stops here (file content bytes) and ends with `_TRUNCATED.txt` (default 10 GiB) |
+| `SMT_FOLDER_DOWNLOAD_MAX_FILES` | no | Most files and folders in one folder download (default 100000) |
 | `SMT_STORAGE_MAX_UPLOAD_BYTES` | no | Max object-storage upload size in bytes (default 5 GiB)       |
 | `SMT_FTP_MAX_UPLOAD_BYTES` | no     | Max FTP upload size in bytes (default 1 GiB)                  |
 | `SMT_DOCKER_IMAGE_UPLOAD_MAX_BYTES` | no | Max image archive for Docker → Upload image (default 5 GiB) |

@@ -23,7 +23,7 @@ const TYPE_SYMLINK = '2';
 const TYPE_DIR = '5';
 const TYPE_PAX = 'x';
 
-interface HeaderFields {
+export interface HeaderFields {
   name: string;
   type: string;
   size: number;
@@ -132,7 +132,7 @@ export function paxRecord(key: string, value: string): Buffer {
   return Buffer.from(`${len} ${key}=${value}\n`, 'utf8');
 }
 
-function ustarHeader(f: HeaderFields): Buffer {
+export function ustarHeader(f: HeaderFields): Buffer {
   const h = Buffer.alloc(BLOCK);
   h.write(asciiName(f.name), 0, 100, 'ascii');
   octal(h, 100, 8, f.meta.mode & 0o7777);

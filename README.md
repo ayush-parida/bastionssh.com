@@ -15,7 +15,7 @@
 - 🔑 **SSH Key Management** — Generate, import, organize, and rotate multiple SSH keys.
 - 🖥️ **Server Inventory** — Add and tag unlimited servers (production, staging, clients, personal, etc.); tags drive filtering, fan-out runs and tag-based access grants.
 - 💻 **In-Browser Terminal** — Full interactive SSH sessions in your browser via WebSocket + xterm.js.
-- 📁 **SFTP File Browser** — Browse, upload, download, rename and delete files on a server over its SSH connection (needs `operate` access to the server).
+- 📁 **SFTP File Browser** — Browse, upload, download, rename and delete files on a server over its SSH connection, or download a whole folder as one `.zip` / `.tar.gz` built while it streams (needs `operate` access to the server).
 - 📌 **Saved Commands** — Save frequently-used commands (optionally tied to a default server) and run them on one server, a list of servers, or every server with a tag.
 - ⏰ **App-Level Cron Jobs** — Schedule recurring commands that run **from the application** (not from the server's crontab). Keeps your servers untouched and gives you a single place to view run history and output. Scheduled runs need Redis (`SMT_REDIS_URL`).
 - ☁️ **Cloud Inventory Sync** — Register an AWS, Google Cloud, Azure, DigitalOcean or Hetzner Cloud account and its instances appear as servers, tagged by provider and region, and stay current: new instances are imported, changed IPs are picked up, stopped and deleted instances are flagged. Read-only credentials; nothing is ever changed in your cloud account.
