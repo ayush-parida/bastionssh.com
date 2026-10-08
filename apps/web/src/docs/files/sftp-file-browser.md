@@ -59,14 +59,14 @@ The archive is built on the fly while it downloads; nothing is staged on the ser
 
 How it is built:
 
-- **`.tar.gz` from an account with a shell** runs `tar` on the server over the same SSH connection, which is much faster for folders with many small files. The archive is compressed on the server.
+- **`.tar.gz` from an account with a shell** runs `tar` on the server over the same SSH connection, which is much faster for folders with many small files. BastionSSH checks what `tar` sends member by member (the same rules as below) and re-compresses it, so the archive you get follows the same rules either way. A folder whose path holds a backslash or a line break is always read over SFTP.
 - **`.zip`, and `.tar.gz` from an SFTP-only account** (for example `ForceCommand internal-sftp` or a `nologin` shell), are built by BastionSSH reading one file at a time over SFTP.
 
 BastionSSH checks once per connection whether the account can run `tar` and `gzip`, and uses SFTP whenever it cannot, so you do not need to choose.
 
 What is in the archive:
 
-- Paths are relative to the folder you chose. Symbolic links are never followed. Devices, sockets and pipes are left out, and setuid / setgid bits are dropped.
+- Paths are relative to the folder you chose; nothing in the archive can extract outside it (no absolute names, no `..`, nothing stored under a symbolic link, no hard link to a file that is not in the archive). Symbolic links are never followed. Devices, sockets and pipes are left out, and setuid / setgid bits are dropped.
 - Files that cannot be read (permission denied, deleted while downloading) are left out and listed in **`_skipped.txt`** at the top of the archive; the download carries on. For a `.tar.gz` made by `tar` on the server, the list is what `tar` reported.
 - If a limit is reached (see [Limits](#limits)), the archive ends cleanly with **`_TRUNCATED.txt`** saying where it stopped. Download the remaining subfolders separately.
 

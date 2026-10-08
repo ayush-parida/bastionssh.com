@@ -369,7 +369,7 @@ describe('GET /api/sftp/:serverId/folder', () => {
   });
 
   it('quotes the folder path so no part of it reaches the shell as syntax', async () => {
-    const hostile = `it's $(touch PWNED) \`touch PWNED2\`; touch PWNED3 && "x" -rf\n*`;
+    const hostile = `it's $(touch PWNED) \`touch PWNED2\`; touch PWNED3 && "x" -rf *`;
     const dir = folder(hostile, { 'inside.txt': 'safe' });
     const res = await get(admin, url(dir, 'tar.gz'));
     expect(res.statusCode).toBe(200);
@@ -380,6 +380,14 @@ describe('GET /api/sftp/:serverId/folder', () => {
     // Same path with `-` and quotes at the start of a segment
     const dashed = folder('-C x', { 'f': '1' });
     expect(fileNames(tarMembers((await get(admin, url(dashed, 'tar.gz'))).rawPayload))).toEqual(['f']);
+    // A backslash or newline is not literal inside single quotes in every login shell (fish, csh): SFTP instead
+    for (const odd of ['back\\slash\\', 'new\nline']) {
+      const sent = shell.commands.length;
+      const res2 = await get(admin, url(folder(odd, { 'g': '2' }), 'tar.gz'));
+      expect(res2.statusCode).toBe(200);
+      expect(shell.commands.length).toBe(sent);
+      expect(fileNames(tarMembers(res2.rawPayload))).toEqual(['g']);
+    }
   });
 
   it.skipIf(process.getuid?.() === 0)('lists what tar could not read in _skipped.txt and the audit entry', async () => {

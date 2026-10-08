@@ -125,7 +125,7 @@ export async function sendServerFolder(req: FastifyRequest, reply: FastifyReply,
   if (lease.closed.aborted) cut();
   else lease.closed.addEventListener('abort', cut, { once: true });
   try {
-    if (opts.format === 'tar.gz' && (await lease.hasShell())) {
+    if (opts.format === 'tar.gz' && quotesEverywhere(opts.path) && (await lease.hasShell())) {
       if (await sendWithTar(req, reply, opts)) return;
     }
     await sendFolderArchive(req, reply, {
@@ -142,6 +142,15 @@ export async function sendServerFolder(req: FastifyRequest, reply: FastifyReply,
     lease.closed.removeEventListener('abort', cut);
     lease.release();
   }
+}
+
+/**
+ * Whether single quotes keep `path` literal in any login shell: fish reads
+ * `\'` inside them as a quote, csh refuses a newline. Such folders go over SFTP.
+ */
+function quotesEverywhere(path: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return !/[\\\u0000-\u001f\u007f]/.test(path);
 }
 
 function folderName(path: string): string {
@@ -216,7 +225,7 @@ async function sendWithTar(req: FastifyRequest, reply: FastifyReply, opts: Serve
       }
       if (!hijacked) throw slot.signal.aborted ? accessChanged() : err;
       error = err instanceof Error ? err.message : String(err);
-      summary = { files: 0, bytes: 0, skipped: 0, truncated: false, aborted: false };
+      summary = (err as { summary?: ArchiveSummary }).summary ?? { files: 0, bytes: 0, skipped: 0, truncated: false, aborted: false };
     }
     finished = true;
     if (summary.aborted || error) {

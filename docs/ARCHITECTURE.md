@@ -254,9 +254,12 @@ Folder downloads (`ssh/folder-download.ts`, on the archive engine in `server/arc
 need the same access as `/download`; the path is refused if it has a `..` segment and must
 be a folder. A `.zip` — and a `.tar.gz` from an account without a shell — is built by the
 engine over the pooled SFTP channel (readdir attributes, links never followed). A `.tar.gz`
-from an account with a shell runs `env LC_ALL=C tar -czf - -C '<folder>' .` on the same SSH
+from an account with a shell (and a path without a backslash or control character, which
+not every login shell keeps literal in single quotes) runs `env LC_ALL=C tar -czf - -C '<folder>' .` on the same SSH
 connection (the path single-quoted by `docker/shell.ts`), and `archive/tar-relay.ts` gunzips
-it, copies members through (dropping the `./` entry, devices, unsafe names and setuid bits),
+it, copies members through (dropping the `./` entry, devices, names that are absolute or climb
+out — `\` counting as a separator —, members under a kept symlink, hard links to files not in the
+archive, and setuid bits),
 counts the limits on the members, stops the remote tar at a limit or on cancel, re-compresses,
 and appends `_skipped.txt` (tar's stderr) and `_TRUNCATED.txt` before its own end blocks.
 Nothing is sent until the first member has been read, so an unusable stream (a login script

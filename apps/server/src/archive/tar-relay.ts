@@ -13,8 +13,12 @@ import type { ArchiveSummary } from './types.js';
  * engine's guarantees although tar walked the folder:
  *
  * - The folder's own `./` entry, devices, FIFOs and sockets, and any member
- *   whose name is absolute or climbs out with `..` are left out (the last two
- *   listed in `_skipped.txt`); setuid / setgid bits are dropped.
+ *   whose name is absolute or climbs out with `..` (a backslash counting as a
+ *   separator, as Windows extractors read it) are left out, the last two
+ *   listed in `_skipped.txt`. So are members that would land inside a
+ *   symbolic link stored earlier, and hard links to anything but a file
+ *   already in the archive: extracted, either would write outside the folder.
+ *   setuid / setgid bits are dropped.
  * - SMT_FOLDER_DOWNLOAD_MAX_BYTES / _MAX_FILES are counted on the members
  *   themselves; at a limit the remote tar is stopped and the archive ends
  *   cleanly with `_TRUNCATED.txt`.
@@ -89,6 +93,9 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
   let sink: ByteSink | undefined;
   let entries = 0;
   let truncation = '';
+  /** Kept members that are not folders (what a hard link may point at), and the symbolic links among them. */
+  const keptFiles = new Set<string>();
+  const keptLinks = new Set<string>();
 
   const onAbort = () => {
     remote.stop();
@@ -161,10 +168,12 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
 
         // Records describing the next member: hold them until it is decided whether it goes in
         if ('xgLK'.includes(h.type)) {
+          if (preambleBytes + BLOCK + padded(h.size) > MAX_PREAMBLE_BYTES) {
+            throw new Error('The server’s tar output has an oversized header');
+          }
           const data = await reader.read(padded(h.size));
           if (data.length < padded(h.size)) throw new Error('The server’s tar output ended inside a header');
           preambleBytes += BLOCK + data.length;
-          if (preambleBytes > MAX_PREAMBLE_BYTES) throw new Error('The server’s tar output has an oversized header');
           preamble.push(block, data);
           const content = data.subarray(0, h.size);
           if (h.type === 'L') longName = cString(content);
@@ -185,6 +194,8 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
         const name = memberPath(rawName);
         const isDir = h.type === '5';
         const isContent = !'123456'.includes(h.type);
+        const linkTarget = h.type === '1' ? memberPath(linkName) : null;
+        const throughLink = name ? insideLink(name, keptLinks) : undefined;
         let keep = true;
         if (name === '') {
           // The folder itself (`./`): extracting it would re-permission the user's current directory
@@ -192,8 +203,11 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
         } else if (name === null) {
           skip(rawName, 'name is absolute or leaves the folder');
           keep = false;
-        } else if (h.type === '1' && memberPath(linkName) === null) {
-          skip(rawName, `hard link to ${linkName}, outside the folder`);
+        } else if (throughLink !== undefined) {
+          skip(rawName, `inside the symbolic link ${throughLink}`);
+          keep = false;
+        } else if (h.type === '1' && (linkTarget === null || !keptFiles.has(linkTarget))) {
+          skip(rawName, `hard link to ${linkName}, which is not in this archive`);
           keep = false;
         } else if ('346'.includes(h.type)) {
           skip(rawName, 'not a regular file (device, socket or pipe)');
@@ -213,7 +227,11 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
           for (const b of held) await out.write(b);
           await out.write(withoutSetId(h.block));
           await body(size, out);
-          if (!isDir) summary.files++;
+          if (!isDir) {
+            summary.files++;
+            keptFiles.add(name!);
+            if (h.type === '2') keptLinks.add(name!);
+          }
           if (isContent) summary.bytes += size;
         } else {
           await body(size, null);
@@ -277,6 +295,8 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
       summary.aborted = true;
       return summary;
     }
+    // What had gone out before it broke, for the audit entry
+    if (sink && err instanceof Error) throw Object.assign(err, { summary });
     throw err;
   } finally {
     signal.removeEventListener('abort', onAbort);
@@ -288,10 +308,23 @@ export async function relayTar(remote: RemoteTar, opts: TarRelayOptions): Promis
  * itself, null for an absolute name or one with a `..` segment.
  */
 function memberPath(raw: string): string | null {
-  if (raw.startsWith('/')) return null;
-  const parts = raw.split('/').filter((p) => p !== '' && p !== '.');
-  if (parts.includes('..')) return null;
-  return parts.join('/');
+  // A backslash is a separator, and `C:` a drive, to Windows extractors
+  if (raw.startsWith('/') || raw.startsWith('\\') || raw.split(/[\\/]/).includes('..')) return null;
+  const path = raw
+    .split('/')
+    .filter((p) => p !== '' && p !== '.')
+    .join('/');
+  return /^[A-Za-z]:/.test(path) ? null : path;
+}
+
+/** The kept symbolic link that `path` would be extracted through, if any. */
+function insideLink(path: string, links: Set<string>): string | undefined {
+  if (links.size === 0) return undefined;
+  for (let i = path.indexOf('/'); i !== -1; i = path.indexOf('/', i + 1)) {
+    const ancestor = path.slice(0, i);
+    if (links.has(ancestor)) return ancestor;
+  }
+  return undefined;
 }
 
 function parseHeader(block: Buffer): Header | null {
