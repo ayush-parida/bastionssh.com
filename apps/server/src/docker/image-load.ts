@@ -1,5 +1,5 @@
 import type { IncomingMessage } from 'node:http';
-import { Transform, type Readable, type TransformCallback } from 'node:stream';
+import { Transform, type TransformCallback } from 'node:stream';
 import {
   dockerPlatform,
   normalizeDockerArch,

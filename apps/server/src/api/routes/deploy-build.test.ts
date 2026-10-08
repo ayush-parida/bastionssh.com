@@ -38,6 +38,8 @@ const fake = vi.hoisted(() => ({
   loads: [] as Buffer[],
   removed: [] as string[],
   images: new Set<string>(),
+  /** What the server's Docker says it runs on (`/info`). */
+  arch: 'x86_64',
 }));
 
 function parseQuoted(command: string): string[] {
@@ -223,7 +225,7 @@ describe('builds on the BastionSSH side', () => {
       const route = (req.url ?? '').replace(/^\/v[\d.]+/, '');
       if (route === '/info') {
         res.setHeader('content-type', 'application/json');
-        return res.end(JSON.stringify({ OSType: 'linux', Architecture: 'x86_64' }));
+        return res.end(JSON.stringify({ OSType: 'linux', Architecture: fake.arch }));
       }
       if (route.startsWith('/images/load') && req.method === 'POST') {
         const chunks: Buffer[] = [];
@@ -273,11 +275,13 @@ describe('builds on the BastionSSH side', () => {
     fake.loads.length = 0;
     fake.removed.length = 0;
     fake.images.clear();
+    fake.arch = 'x86_64';
     fake.bastionctl = defaultBastionctl;
     fs.rmSync(env.log, { force: true });
     process.env.FAKE_BUILDCTL_LOG = env.log;
     for (const k of ['FAKE_BUILD_DELAY_MS', 'FAKE_BUILD_EXIT', 'FAKE_BUILD_SIGNAL_FILE', 'FAKE_BUILDKIT_DOWN', 'FAKE_BUILDKIT_PLATFORM']) delete process.env[k];
     (config.builder as { addr: string | null }).addr = 'tcp://buildkit:1234';
+    (config.builder as { timeoutMs: number }).timeoutMs = 30 * 60_000;
     resetBastionctlUpgradesForTests();
   });
 
@@ -395,6 +399,51 @@ describe('builds on the BastionSSH side', () => {
     expect(audits('deploy.finish')[0]).toMatchObject({ result: 'cancelled' });
     const again = await app.inject({ method: 'POST', url: api('/apps/site1/build/cancel'), headers: operator.headers });
     expect(again.statusCode).toBe(409);
+  });
+
+  it('refuses a server platform the builder cannot build for, saying how to add emulation, before building anything', async () => {
+    fake.arch = 's390x';
+    const evs = await events(await deploy());
+    const error = evs.find((e) => e.type === 'error') as { error: string; status: number };
+    expect(error.error).toContain('The builder cannot build for linux/s390x');
+    expect(error.error).toContain('docker run --privileged --rm tonistiigi/binfmt --install all');
+    expect(error.status).toBe(409);
+    expect(fakeBuildctlCalls(env.log).filter((c) => c.command === 'build')).toEqual([]);
+    expect(fake.loads).toEqual([]);
+    expect(fake.runs.some((r) => r[0] === 'deploy' || (r[0] === 'env' && r[1] === 'build-args'))).toBe(false);
+    expect(workLeft()).toEqual([]);
+  });
+
+  it('builds natively without a note on emulation when the server is the builder’s platform', async () => {
+    fake.arch = 'aarch64';
+    const evs = await events(await deploy());
+    expect(evs.find((e) => e.type === 'result')).toMatchObject({ outcome: { result: 'success' } });
+    expect(fakeBuildctlCalls(env.log).find((c) => c.command === 'build')!.argv).toContain('platform=linux/arm64');
+    expect(logText(evs)).not.toContain('emulation');
+  });
+
+  it('stops a build past the timeout (504): BuildKit is told to stop, nothing is loaded, nothing kept', async () => {
+    (config.builder as { timeoutMs: number }).timeoutMs = 1500;
+    process.env.FAKE_BUILD_DELAY_MS = '20000';
+    const signalFile = path.join(env.dir, 'signal-timeout');
+    process.env.FAKE_BUILD_SIGNAL_FILE = signalFile;
+    const evs = await events(await deploy());
+    expect(evs.find((e) => e.type === 'error')).toMatchObject({ error: expect.stringMatching(/did not finish within/), status: 504 });
+    expect(evs.find((e) => e.type === 'exit')).toMatchObject({ timedOut: true });
+    expect(fs.readFileSync(signalFile, 'utf8')).toBe('SIGTERM');
+    expect(fake.loads).toEqual([]);
+    expect(fake.runs.some((r) => r[0] === 'deploy')).toBe(false);
+    expect(workLeft()).toEqual([]);
+    expect(activeBuildCount()).toBe(0);
+  });
+
+  it('fails a deploy when the builder is away (503), with nothing loaded or kept', async () => {
+    process.env.FAKE_BUILDKIT_DOWN = '1';
+    const evs = await events(await deploy());
+    expect(evs.find((e) => e.type === 'error')).toMatchObject({ error: expect.stringMatching(/The builder did not answer: .*connection refused/), status: 503 });
+    expect(fake.loads).toEqual([]);
+    expect(workLeft()).toEqual([]);
+    expect(audits('deploy.finish')[0]).toMatchObject({ builtOn: 'bastion', result: 'failed' });
   });
 
   it('runs one build at a time: a second deploy waits its turn and is told so', async () => {
