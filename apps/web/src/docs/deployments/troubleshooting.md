@@ -2,8 +2,8 @@
 title: Troubleshooting deployments
 section: deployments
 order: 120
-summary: What the common deploy failures mean and how to fix them — wrong folder uploaded, missing build script, standalone output, health checks, DNS, ports, Reinstall, memory, certificates and MongoDB 8 on newer Linux kernels.
-keywords: [error, failed, troubleshooting, proxy upgrade, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, certificate, next build folder, mongodb, kernel, 6.19, uname, server-121912, tcmalloc, rseq]
+summary: What the common deploy failures mean and how to fix them — wrong folder uploaded, missing build script, standalone output, health checks, DNS, ports, Reinstall, memory, environment files left out, certificates and MongoDB 8 on newer Linux kernels.
+keywords: [error, failed, troubleshooting, proxy upgrade, missing script build, standalone, health check, dns, port 80, port 443, address already in use, integrity, reinstall, upgrade, pinned, out of memory, oom, killed, 137, build.where, bastion, .env.local, env files, left out, NEXT_PUBLIC, certificate, next build folder, mongodb, kernel, 6.19, uname, server-121912, tcmalloc, rseq]
 ---
 
 When a deploy fails, the previous release keeps serving. The deploy log ends with the reason, and failures this page knows about link here.
@@ -120,7 +120,8 @@ The previous release kept serving throughout.
 
 **Fix.**
 
-- Add swap (2 GB is plenty for most builds):
+- **Build on BastionSSH** instead: set `build.where: bastion` (the config form's **Build on**, or **Build on: BastionSSH** in the Deploy dialog for one deploy). BastionSSH's builder makes the image and ships only the image, so the server needs no memory for builds at all ([Build on BastionSSH](build-on-bastionssh.md)). When a build *on BastionSSH* is killed with 137, raise the builder's limit, `SMT_BUILDKIT_MEMORY`.
+- Or add swap (2 GB is plenty for most builds):
 
   ```sh
   sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
@@ -130,6 +131,26 @@ The previous release kept serving throughout.
 
 - Or build on your machine or in CI and upload the result ([option 2](nextjs-dynamic.md#option-2-build-yourself-upload-only-the-build), or a [static export](static-site.md)).
 - Or move to a bigger server ([sizing](releases-rollback.md#resource-limits-and-server-sizing)).
+
+## Build on BastionSSH failed
+
+**You see** "This BastionSSH has no builder", "The builder did not answer", or "The builder cannot build for linux/amd64" when deploying an app with `build.where: bastion` (or **Build on: BastionSSH** in the Deploy dialog).
+
+**Why and fix.**
+
+- **No builder** — `SMT_BUILDKIT_ADDR` is empty on this BastionSSH. Start the `buildkit` service ([Setting up the builder](build-on-bastionssh.md#setting-up-the-builder)), or deploy with **Build on: the server**.
+- **Did not answer** — the `buildkit` service is down, or its certificates and BastionSSH's do not match. `docker compose ps buildkit` and `docker compose logs buildkit` in `deploy/docker`; if one certificate volume was removed, remove both and start the stack again.
+- **Cannot build for** another platform — QEMU emulation is not registered on BastionSSH's Linux host. Run `docker run --privileged --rm tonistiigi/binfmt --install all` once, then `docker compose restart buildkit` ([Another CPU architecture](build-on-bastionssh.md#another-cpu-architecture)).
+
+The Setup line of the Deployments tab shows the builder's state. Nothing reached the server in any of these cases.
+
+## Environment files left out
+
+**You see** `Left out an environment file of the upload: .env.local` (or several) in the deploy log, and a value the app read from that file is missing — often a `NEXT_PUBLIC_*` value that is empty in the browser.
+
+**Why.** `.env` and every `.env.*` file but `.env.example` are left out of uploads: they tend to hold secrets that would otherwise be kept in the release on the server and copied into the image.
+
+**Fix.** Put the values in the app's `.env` on the server (the **Environment** tab). Builds get every `NEXT_PUBLIC_*` value from there, and the names listed in [`build.args`](bastion-yml.md#buildargs); the running app gets them all. Deploy again after changing a build-time value. To upload the files anyway, tick **Include environment files** in the Deploy dialog ([why it warns](build-on-bastionssh.md#environment-files)).
 
 ## Certificate not issued
 

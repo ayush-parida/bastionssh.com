@@ -26,10 +26,13 @@ STRIPE_SECRET_KEY="sk_live_…"
 
 Next.js replaces `process.env.NEXT_PUBLIC_…` in your code with its value **while it builds**, so the value ends up in the JavaScript sent to browsers. It must exist at build time, and setting it in the server's `.env` afterwards changes nothing.
 
-- **Server builds from source** (`build.type: nextjs` or a `static` build): put the values in a `.env.production` file in the project you upload. Next reads it during `next build`.
+- **Built from the upload** (`build.type: nextjs`, a `static` build or your Dockerfile; on the server or [on BastionSSH](build-on-bastionssh.md)): set them in the app's `.env` like any other variable. Every build gets each `NEXT_PUBLIC_*` value from `.env` as a build argument, read when the build starts (generated Dockerfiles declare them with `ARG`; your own Dockerfile needs `ARG NEXT_PUBLIC_…`). Change one, then deploy again.
+- **Other names a build needs** (a Sentry release, a CMS preview token): list them in [`build.args`](bastion-yml.md#buildargs). Nothing else in `.env` reaches a build.
 - **You build** ([option 2](nextjs-dynamic.md#option-2-build-yourself-upload-only-the-build)): have them in your environment or `.env.production` when you run the build.
 
-Only put values in `.env.production` that may be public — they are in the upload, which the server keeps with each release, and in the site's JavaScript. Everything secret belongs in the server's `.env`.
+`NEXT_PUBLIC_*` values end up in the site's JavaScript, so only use the prefix for values that may be public. Build-argument values are masked in the build log.
+
+**Environment files in the upload** — `.env`, `.env.local`, `.env.production` and every other `.env.*` but `.env.example` — are left out of deploys, so a secret in one never lands in a release or an image. **Include environment files** in the Deploy dialog (`--include-env-files` from a shell) keeps them, after a warning ([why](build-on-bastionssh.md#environment-files)).
 
 > **Tip:** Pages Next pre-renders at build time also see only build-time values. Read runtime secrets in code that runs per request — route handlers, server actions, or pages marked `export const dynamic = 'force-dynamic'`.
 

@@ -228,7 +228,7 @@ export default function AppDetail({
         </div>
       </div>
 
-      <DeployRunPanel state={run.state} onDismiss={run.dismiss} />
+      <DeployRunPanel state={run.state} onDismiss={run.dismiss} onCancelBuild={canDeploy ? () => void run.cancelBuild() : undefined} />
 
       {levels.operate && !canDeploy && (
         <p role="note" className="mb-4 flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-sm text-amber-700 dark:text-amber-400">
@@ -302,7 +302,13 @@ export default function AppDetail({
       )}
 
       {dialog === 'deploy' && (
-        <DeploySourceDialog app={app} build={s.config?.build ?? null} onDeploy={(label, pack) => void run.deploy(label, pack)} onClose={() => setDialog(null)} />
+        <DeploySourceDialog
+          serverId={serverId}
+          app={app}
+          build={s.config?.build ?? null}
+          onDeploy={(label, pack, options) => void run.deploy(label, pack, options)}
+          onClose={() => setDialog(null)}
+        />
       )}
       {dialog === 'update' && template && image && (
         <UpdateVersionDialog

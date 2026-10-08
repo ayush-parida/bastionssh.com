@@ -254,6 +254,10 @@ describe('deploy log hints', () => {
     expect(deployLogHint('ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 137')?.href).toContain('#build-ran-out-of-memory');
     expect(deployLogHint("This is Next's .next build folder, not a static export.")?.href).toContain('#uploaded-a-nextjs-build-folder');
     expect(deployLogHint('Step 3/9 : RUN npm ci')).toBeNull();
+    // Builds on BastionSSH: its builder missing, away or unable to build for the server
+    expect(deployLogHint('This BastionSSH has no builder (SMT_BUILDKIT_ADDR is not set), so it cannot build on its side.')?.href).toContain('#build-on-bastionssh-failed');
+    expect(deployLogHint('The builder did not answer: connection refused')?.href).toContain('#build-on-bastionssh-failed');
+    expect(deployLogHint('The builder cannot build for linux/amd64 (it builds for linux/arm64)')?.href).toContain('#build-on-bastionssh-failed');
     // MongoDB 8 on a 6.19+ kernel: bastionctl's refusal, and mongod's own message when it got to start (ahead of the health check it fails)
     const kernel = `${DEPLOY_DOCS.troubleshooting}#${DEPLOY_TROUBLESHOOTING_ANCHORS.mongodbKernel}`;
     expect(deployLogHint("MongoDB 8.0 will not start on this server's Linux kernel 7.0.0-1012-aws: MongoDB 8 refuses …")?.href).toBe(kernel);

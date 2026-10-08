@@ -46,6 +46,7 @@ export const DEPLOY_DOCS = {
   staticSite: '/docs/deployments/static-site',
   nextjs: '/docs/deployments/nextjs-dynamic',
   dockerfile: '/docs/deployments/dockerfile',
+  bastionBuild: '/docs/deployments/build-on-bastionssh',
   config: '/docs/deployments/bastion-yml',
   troubleshooting: '/docs/deployments/troubleshooting',
 } as const;
@@ -62,6 +63,7 @@ export const DEPLOY_TROUBLESHOOTING_ANCHORS = {
   ports: 'ports-80-or-443-already-in-use',
   integrity: 'integrity-check-failed-reinstall',
   memory: 'build-ran-out-of-memory',
+  bastionBuild: 'build-on-bastionssh-failed',
   certificate: 'certificate-not-issued',
   mongodbKernel: 'mongodb-8-wont-start-on-linux-kernel-619',
 } as const;

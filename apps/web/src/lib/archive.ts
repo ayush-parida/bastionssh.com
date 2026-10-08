@@ -7,11 +7,24 @@
  * is dropped so the project root is the upload's root, where `build.dir: .`
  * looks.
  *
+ * Environment files (`.env`, `.env.local`, any `.env.*` but `.env.example`)
+ * are left out too unless the person deploying includes them on purpose
+ * (bastion-side builds spec §5): they tend to hold secrets, which would end
+ * up in the release's source and, through `COPY . .`, in the image. The
+ * server leaves them out of tarballs uploaded as they are, by the same rule.
+ *
  * Only regular files go in. bastionctl checks every entry again when it
  * extracts (no absolute names, no `..`, size and count caps).
  */
 
-import { checkDeploySource, deploySourceViewFromPaths, joinSourcePath, type DeployAppConfig, type DeploySourceProblem } from '@smt/shared';
+import {
+  checkDeploySource,
+  deploySourceViewFromPaths,
+  isDeployEnvFile,
+  joinSourcePath,
+  type DeployAppConfig,
+  type DeploySourceProblem,
+} from '@smt/shared';
 
 /** Folders never uploaded, at any depth. */
 export const EXCLUDED_DIRS = ['node_modules', '.next', '.git'] as const;
@@ -29,8 +42,15 @@ export interface PackedSource {
   files: number;
   /** Bytes before compression. */
   bytes: number;
-  /** Entries left out (excluded folders, links). */
+  /** Entries left out (excluded folders, links, environment files). */
   skipped: number;
+  /** The environment files left out, by path (none when they were included). */
+  envFiles: string[];
+}
+
+export interface PackOptions {
+  /** Keep `.env` and `.env.*` files (they are left out by default). */
+  includeEnvFiles?: boolean;
 }
 
 /** True for a path inside one of {@link EXCLUDED_DIRS}. */
@@ -131,23 +151,28 @@ async function gzip(blob: Blob): Promise<Blob> {
   return new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).blob();
 }
 
-async function pack(entries: SourceEntry[], skipped: number, others: string[] = []): Promise<PackedSource> {
+async function pack(entries: SourceEntry[], skipped: number, others: string[] = [], opts: PackOptions = {}): Promise<PackedSource> {
   const normal = normalizeEntries(entries, others);
-  if (normal.entries.length === 0) throw new Error('Nothing to upload: every file is in node_modules, .next or .git, or the source is empty');
-  const tar = tarBlob(normal.entries);
+  const envFiles = opts.includeEnvFiles ? [] : normal.entries.filter((e) => isDeployEnvFile(e.path)).map((e) => e.path);
+  const kept = envFiles.length > 0 ? normal.entries.filter((e) => !isDeployEnvFile(e.path)) : normal.entries;
+  if (kept.length === 0) throw new Error('Nothing to upload: every file is in node_modules, .next or .git, or an environment file, or the source is empty');
+  const tar = tarBlob(kept);
   return {
     blob: await gzip(tar),
-    files: normal.entries.length,
-    bytes: normal.entries.reduce((n, e) => n + e.data.size, 0),
-    skipped: skipped + normal.skipped,
+    files: kept.length,
+    bytes: kept.reduce((n, e) => n + e.data.size, 0),
+    skipped: skipped + normal.skipped + envFiles.length,
+    envFiles,
   };
 }
 
 /** A folder from `<input webkitdirectory>`: paths come from `webkitRelativePath`. */
-export function packFolder(files: File[]): Promise<PackedSource> {
+export function packFolder(files: File[], opts: PackOptions = {}): Promise<PackedSource> {
   return pack(
     files.map((f) => ({ path: f.webkitRelativePath || f.name, data: f, mode: 0o644 })),
     0,
+    [],
+    opts,
   );
 }
 
@@ -244,9 +269,9 @@ export async function readZip(file: Blob): Promise<{ entries: SourceEntry[]; ski
   return { entries, skipped: left.length, left };
 }
 
-export async function packZip(file: File): Promise<PackedSource> {
+export async function packZip(file: File, opts: PackOptions = {}): Promise<PackedSource> {
   const { entries, skipped, left } = await readZip(file);
-  return pack(entries, skipped, left);
+  return pack(entries, skipped, left, opts);
 }
 
 /** `.tar`, `.tar.gz` and `.tgz` go up as they are. */
@@ -263,21 +288,28 @@ export function isTarball(name: string): boolean {
  * a build script, an output folder that is not there. Only package.json is
  * read, and only when the check needs it.
  */
-export async function checkSource(
-  source: { kind: 'folder'; files: File[] } | { kind: 'zip'; file: File },
-  build: Pick<DeployAppConfig['build'], 'type' | 'dir' | 'output'>,
-): Promise<DeploySourceProblem | null> {
-  type Listed = SourceEntry & { read: () => Promise<Blob> };
-  let listed: Listed[];
-  let others: string[] = [];
+export type PickedSource = { kind: 'folder'; files: File[] } | { kind: 'zip'; file: File };
+type Listed = SourceEntry & { read: () => Promise<Blob> };
+
+/** A folder's or zip's entries as they would be uploaded (before environment files are left out), without reading any data. */
+async function listSource(source: PickedSource): Promise<Listed[]> {
   if (source.kind === 'folder') {
-    listed = source.files.map((f) => ({ path: f.webkitRelativePath || f.name, data: f, mode: 0o644, read: async () => f }));
-  } else {
-    const { files, left } = zipFiles(await zipDirectory(source.file));
-    others = left;
-    listed = files.map((r) => ({ path: r.name, data: new Blob(), mode: 0o644, read: () => zipData(source.file, r) }));
+    return normalizeEntries(source.files.map((f) => ({ path: f.webkitRelativePath || f.name, data: f, mode: 0o644, read: async () => f }))).entries;
   }
-  const { entries } = normalizeEntries(listed, others);
+  const { files, left } = zipFiles(await zipDirectory(source.file));
+  return normalizeEntries(
+    files.map((r) => ({ path: r.name, data: new Blob(), mode: 0o644, read: () => zipData(source.file, r) })),
+    left,
+  ).entries;
+}
+
+/** The environment files a folder or zip holds (`.env.local`, `apps/web/.env`): left out of the upload unless included. */
+export async function sourceEnvFiles(source: PickedSource): Promise<string[]> {
+  return (await listSource(source)).map((e) => e.path).filter(isDeployEnvFile);
+}
+
+export async function checkSource(source: PickedSource, build: Pick<DeployAppConfig['build'], 'type' | 'dir' | 'output'>): Promise<DeploySourceProblem | null> {
+  const entries = await listSource(source);
   const packageJson = joinSourcePath(build.dir, 'package.json');
   const texts: Record<string, string> = {};
   const pkg = entries.find((e) => e.path === packageJson);

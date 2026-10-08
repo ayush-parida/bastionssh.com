@@ -19,6 +19,8 @@ build:
   type: nextjs                      # nextjs | dockerfile | static | image
   node: "20"
   dir: .
+  where: server                     # server | bastion: build next to BastionSSH, ship only the image
+  args: [SENTRY_RELEASE]            # .env names the build gets besides every NEXT_PUBLIC_*
 run:
   port: 3000
   env_file: .env
@@ -184,6 +186,22 @@ Where the project (`package.json`, `Dockerfile`) is inside the upload. `apps/web
 | text | `out` | a relative folder inside `build.dir`, without `..`; `.` is `build.dir` itself |
 
 Only for `static`: the folder that is served. With a `package.json`, the folder the build writes; without one, a folder of the upload.
+
+### build.where
+
+| Type | Default | Accepted |
+| --- | --- | --- |
+| text | `server` | `server`, `bastion` |
+
+Where the image is built. `server`: the server installs dependencies and builds, next to the apps it serves. `bastion`: BastionSSH's builder builds it for the server's platform and ships only the image, so the server never runs `npm install` or the build — for small servers, or builds that need more memory than the server has. The Deploy dialog starts at this value and can change it for one deploy. Not with `type: image`. See [Build on BastionSSH](build-on-bastionssh.md).
+
+### build.args
+
+| Type | Default | Accepted |
+| --- | --- | --- |
+| list of text | `[]` | up to 64 `.env` variable names (`A-Z`, `a-z`, `0-9`, `_`, not starting with a digit) |
+
+Names from the app's `.env` passed to the build as build arguments, besides every `NEXT_PUBLIC_*` (which builds always get). The values are read from `.env` when the build starts, masked in the build log and stored nowhere else. Generated Dockerfiles declare them with `ARG` in the build stage; your own Dockerfile must declare `ARG NAME` to use one. Whatever the build writes into its output ends up in the image, so pass only what the build needs. Not with `type: image`. See [Build-time values](build-on-bastionssh.md#build-time-values).
 
 ## run
 

@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils.js';
 import { deployLogHint } from '@/lib/deploy-help.js';
 import DocsLink from '@/components/docs/DocsLink.js';
 import { DEPLOY_DOCS } from '@smt/shared';
+import BuilderStatus from './BuilderStatus.js';
 
 export type SetupAnswer = DeploySetupResult & { sudo: boolean; socket: 'writable' | 'sudo' | 'denied' | 'missing' };
 
@@ -176,6 +177,7 @@ export default function SetupPanel({
   proxy: proxyState,
   canManage,
   canOperate = canManage,
+  canClearCache = false,
   compact,
 }: {
   serverId: string;
@@ -185,6 +187,8 @@ export default function SetupPanel({
   canManage: boolean;
   /** Update proxy now. */
   canOperate?: boolean;
+  /** Clear build cache on BastionSSH's builder: manage on the Deployments module (the builder is not any one server's). */
+  canClearCache?: boolean;
   /** A set-up server: one line, with Reinstall. */
   compact?: boolean;
 }) {
@@ -256,6 +260,7 @@ export default function SetupPanel({
         {state.pinned && <PinNotice state={state} />}
         {state.proxy && (state.proxy.state !== 'ok' || state.proxyOutdated) && <ProxyStatus serverId={serverId} status={state.proxy} canOperate={canOperate} />}
         {proxyState?.mode === 'nginx' && <NginxSteps proxy={proxyState} />}
+        <BuilderStatus canClearCache={canClearCache} />
       </div>
     );
   }
@@ -364,6 +369,7 @@ export default function SetupPanel({
       {!canManage && state.integrity !== 'ok' && (
         <p className="text-sm text-muted-foreground">Setting up needs manage access to Deployments on this server.</p>
       )}
+      <BuilderStatus canClearCache={canClearCache} />
     </section>
   );
 }

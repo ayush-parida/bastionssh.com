@@ -1,4 +1,4 @@
-import type { DeployAppSummary, DeployNginxApplyResult, DeployProxyMode, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
+import type { DeployAppSummary, DeployBuildWhere, DeployNginxApplyResult, DeployProxyMode, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
 import { api, ApiError } from '@/lib/api.js';
 import { readSSE } from '@/lib/sse.js';
 import { useAuthStore } from '@/store/auth.js';
@@ -14,6 +14,19 @@ import { useAuthStore } from '@/store/auth.js';
 export const deployPath = (serverId: string, rest = '') => `/deploy/servers/${encodeURIComponent(serverId)}${rest}`;
 export const appPath = (serverId: string, app: string, rest = '') => deployPath(serverId, `/apps/${encodeURIComponent(app)}${rest}`);
 
+/** The deploy upload's path, with the Deploy dialog's choices (`where`, `includeEnvFiles`) as its query. */
+export function deployUploadPath(serverId: string, app: string, options: { where?: DeployBuildWhere; includeEnvFiles?: boolean } = {}): string {
+  const query = new URLSearchParams();
+  if (options.where) query.set('where', options.where);
+  if (options.includeEnvFiles) query.set('includeEnvFiles', 'true');
+  const qs = query.toString();
+  return appPath(serverId, app, `/deploy${qs ? `?${qs}` : ''}`);
+}
+
+/** BastionSSH's builder (`GET /deploy/builder`): one for the whole BastionSSH, not per server. */
+export const builderKey = ['deploy', 'builder'] as const;
+export const builderPath = '/deploy/builder';
+
 export const deployKeys = {
   all: (serverId: string) => ['deploy', serverId] as const,
   state: (serverId: string) => ['deploy', serverId, 'state'] as const,
@@ -26,6 +39,7 @@ export const deployKeys = {
   domains: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'domains'] as const,
   connection: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'connection'] as const,
   backups: (serverId: string, app: string) => ['deploy', serverId, 'app', app, 'backups'] as const,
+  platform: (serverId: string) => ['deploy', serverId, 'platform'] as const,
 };
 
 /**

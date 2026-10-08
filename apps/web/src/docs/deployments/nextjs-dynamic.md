@@ -2,23 +2,23 @@
 title: Deploy a dynamic Next.js app
 section: deployments
 order: 30
-summary: Run a Next.js app with server-side rendering and API routes — built on the server from source, or built by you and uploaded as a ready image context.
-keywords: [next.js, nextjs, standalone, ssr, server, api routes, node, build, docker, platform, amd64, arm64, prebuilt]
+summary: Run a Next.js app with server-side rendering and API routes — built from source on the server or on BastionSSH, or built by you and uploaded as a ready image context.
+keywords: [next.js, nextjs, standalone, ssr, server, api routes, node, build, docker, platform, amd64, arm64, prebuilt, build.where, bastion, small server, oom]
 ---
 
 A dynamic Next.js app runs `next`'s Node.js server in its container: server-side rendering, API routes, server actions, middleware, image optimization. There are two ways to get it there:
 
-| | Option 1: the server builds | Option 2: you build |
+| | Option 1: upload the source | Option 2: you build |
 | --- | --- | --- |
 | `build.type` | `nextjs` | `dockerfile` |
 | You upload | the project source | the standalone build and a short Dockerfile |
-| Build runs on | the server | your machine or CI |
-| Server memory for builds | 1–2 GB free | almost none |
+| Build runs on | the server, or BastionSSH with `build.where: bastion` | your machine or CI |
+| Server memory for builds | 1–2 GB free (none when built on BastionSSH) | almost none |
 | Effort | least | a few commands per release |
 
-Start with option 1. Choose option 2 when the server is small (1 GB or less), when builds need things only your machine or CI has (private registries, a monorepo's other packages), or when you want the exact build you tested.
+Start with option 1. On a small server (1 GB or less), add `where: bastion` to it: BastionSSH builds the image and ships only the image, so the server never runs `next build` ([Build on BastionSSH](build-on-bastionssh.md)). Choose option 2 when builds need things only your machine or CI has (private registries, a monorepo's other packages), or when you want the exact build you tested.
 
-## Option 1: the server builds from source
+## Option 1: upload the source
 
 ### 1. Turn on standalone output
 
@@ -42,6 +42,7 @@ domains: [shop.example.com]
 build:
   type: nextjs
   node: "20"        # optional: 18, 20, 22 or 24
+  where: server     # optional: bastion builds next to BastionSSH and ships only the image
 run:
   port: 3000
   memory: 512m      # optional limit for the running app
@@ -59,14 +60,13 @@ my-app/
   next.config.js
   app/ or pages/, src/ …
   public/
-  .env.production          (optional: NEXT_PUBLIC_* values — see below)
 ```
 
-The browser leaves out `node_modules`, `.next` and `.git` when it packs the folder: the server installs and builds from scratch.
+The browser leaves out `node_modules`, `.next` and `.git` when it packs the folder — the build installs and builds from scratch — and every `.env` and `.env.*` file but `.env.example`: `NEXT_PUBLIC_*` values come from the app's `.env` on the server (see below), and **Include environment files** in the Deploy dialog uploads them anyway, after a warning ([why](build-on-bastionssh.md#environment-files)).
 
-### What the server does
+### What the build does
 
-It generates a three-stage Dockerfile (you never edit it):
+On the server, or on BastionSSH with `build.where: bastion` (the same Dockerfile either way), it generates a three-stage Dockerfile (you never edit it):
 
 1. **Dependencies** — installs with the package manager the lockfile names: `npm ci` (or `npm install` with no lockfile), `pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` (`--immutable` for Yarn Berry) or `bun install --frozen-lockfile`.
 2. **Build** — runs your `build` script.
@@ -76,7 +76,7 @@ The Node.js version comes from `build.node`, else `.nvmrc` or `.node-version`, e
 
 ### Memory
 
-`next build` wants about **1–2 GB** of memory on its own. On a server with 1 GB, add 2 GB of swap or builds may be killed (see [Troubleshooting](troubleshooting.md#build-ran-out-of-memory)). Only one build runs per server at a time, so several apps do not add up during builds. The running app typically uses 100–300 MB.
+`next build` wants about **1–2 GB** of memory on its own. On a server with 1 GB, [build on BastionSSH](build-on-bastionssh.md) (`build.where: bastion`) or add 2 GB of swap, or builds may be killed (see [Troubleshooting](troubleshooting.md#build-ran-out-of-memory)). Only one build runs per server at a time, so several apps do not add up during builds. The running app typically uses 100–300 MB.
 
 ### Monorepos
 
@@ -153,4 +153,4 @@ Then **Deploy → Archive** and pick `shop.tar.gz`. The server builds the image 
 
 ## Environment variables
 
-Runtime secrets (`DATABASE_URL`, API keys) go in the app's `.env` on the server — the **Environment** tab. `NEXT_PUBLIC_*` values are different: Next inlines them into the JavaScript **at build time**, and the server's `.env` is not available to the build. See [Environment variables and secrets](environment.md).
+Runtime secrets (`DATABASE_URL`, API keys) go in the app's `.env` on the server — the **Environment** tab. `NEXT_PUBLIC_*` values are different: Next inlines them into the JavaScript **at build time**. Builds get every `NEXT_PUBLIC_*` value from the app's `.env` as build arguments (and the names `build.args` lists), and nothing else from it — so set them in the Environment tab too, and deploy again after changing one. See [Environment variables and secrets](environment.md).

@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import type { DeployLogLine, DeployOutcome, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
-import { CheckCircle2, Loader2, TriangleAlert, X, XCircle } from 'lucide-react';
-import { appPath, deployKeys, followDeployStream, uploadDeploy, validationIssues } from '@/lib/deploy.js';
+import type { DeployBuildState, DeployBuildWhere, DeployLogLine, DeployOutcome, DeployStreamEvent, DeployValidationIssue } from '@smt/shared';
+import { CheckCircle2, Loader2, Square, TriangleAlert, X, XCircle } from 'lucide-react';
+import { toast } from 'sonner';
+import { api } from '@/lib/api.js';
+import { appPath, deployKeys, deployUploadPath, followDeployStream, uploadDeploy, validationIssues } from '@/lib/deploy.js';
 import { deployFailureHint } from '@/lib/deploy-help.js';
 import { cn, formatBytes } from '@/lib/utils.js';
 import DocsLink from '@/components/docs/DocsLink.js';
@@ -26,9 +28,31 @@ export interface DeployRunState {
   /** bastionctl's problems with a config, when the request was refused for one (422). */
   issues: DeployValidationIssue[] | null;
   exit: Extract<DeployStreamEvent, { type: 'exit' }> | null;
+  /** A build on the BastionSSH side: where it is (waiting its turn, building, loading the image, deploying); null otherwise. */
+  build: { state: DeployBuildState; platform?: string; position?: number } | null;
 }
 
-const IDLE: DeployRunState = { kind: 'deploy', phase: 'idle', label: '', progress: null, lines: [], outcome: null, error: null, issues: null, exit: null };
+/** What the Deploy dialog chose: where to build, and whether the upload's environment files stay. */
+export interface DeployOptions {
+  where?: DeployBuildWhere;
+  includeEnvFiles?: boolean;
+}
+
+const IDLE: DeployRunState = { kind: 'deploy', phase: 'idle', label: '', progress: null, lines: [], outcome: null, error: null, issues: null, exit: null, build: null };
+
+/** The header while a build on the BastionSSH side runs. */
+function buildLabel(build: NonNullable<DeployRunState['build']>): string {
+  switch (build.state) {
+    case 'queued':
+      return build.position && build.position > 1 ? `Waiting for ${build.position} builds before this one…` : 'Waiting for the build before this one…';
+    case 'building':
+      return `Building on BastionSSH${build.platform ? ` for ${build.platform}` : ''}…`;
+    case 'loading':
+      return "Loading the image into the server's Docker…";
+    default:
+      return 'Deploying…';
+  }
+}
 
 /**
  * One deploy or rollback of an app at a time, from this page: packing and
@@ -61,6 +85,8 @@ export function useDeployRun(serverId: string, app: string) {
           return { ...s, phase: 'failed', error: event.error };
         case 'exit':
           return { ...s, exit: event };
+        case 'build':
+          return { ...s, build: { state: event.state, platform: event.platform ?? s.build?.platform, position: event.position } };
         case 'end':
           return { ...s, phase: s.outcome?.result === 'success' ? 'success' : 'failed' };
         default:
@@ -87,7 +113,7 @@ export function useDeployRun(serverId: string, app: string) {
 
   /** Upload `source` (packed by the caller) and deploy it. `pack` runs first, with the panel showing "Packing". */
   const deploy = useCallback(
-    async (label: string, pack: () => Promise<{ blob: Blob; filename: string }>) => {
+    async (label: string, pack: () => Promise<{ blob: Blob; filename: string }>, options: DeployOptions = {}) => {
       abort.current?.abort();
       const controller = new AbortController();
       abort.current = controller;
@@ -97,7 +123,7 @@ export function useDeployRun(serverId: string, app: string) {
         if (controller.signal.aborted) return;
         setState((s) => ({ ...s, phase: 'uploading', progress: { loaded: 0, total: blob.size } }));
         await uploadDeploy(
-          appPath(serverId, app, '/deploy'),
+          deployUploadPath(serverId, app, options),
           blob,
           filename,
           {
@@ -156,8 +182,21 @@ export function useDeployRun(serverId: string, app: string) {
     setState(IDLE);
   }, []);
 
+  /**
+   * Stop a build on the BastionSSH side (waiting, building or loading the
+   * image): nothing reaches the server. Once the server deploys it, a deploy
+   * runs to its end (409).
+   */
+  const cancelBuild = useCallback(async () => {
+    try {
+      await api.post(appPath(serverId, app, '/build/cancel'));
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  }, [serverId, app]);
+
   const busy = state.phase === 'packing' || state.phase === 'uploading' || state.phase === 'running';
-  return { state, busy, deploy, pull, rollback, follow, dismiss };
+  return { state, busy, deploy, pull, rollback, follow, dismiss, cancelBuild };
 }
 
 /** A failure the docs know: a link to its troubleshooting section. */
@@ -172,7 +211,7 @@ function FailureHint({ error, lines }: { error: string | null; lines: DeployLogL
 }
 
 /** The panel for a run: progress, the log, and how it ended. */
-export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; onDismiss: () => void }) {
+export function DeployRunPanel({ state, onDismiss, onCancelBuild }: { state: DeployRunState; onDismiss: () => void; onCancelBuild?: () => void }) {
   const box = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   useEffect(() => {
@@ -195,7 +234,9 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
         <span className="font-medium">
           {state.phase === 'packing' && 'Packing files…'}
           {state.phase === 'uploading' && `Uploading ${state.label}… ${percent}%`}
+          {state.phase === 'running' && state.build && buildLabel(state.build)}
           {state.phase === 'running' &&
+            !state.build &&
             { deploy: 'Deploying…', rollback: `Rolling back to ${state.label}…`, create: `Creating ${state.label}…`, update: `Updating to ${state.label}…` }[state.kind]}
           {state.phase === 'success' &&
             {
@@ -209,10 +250,19 @@ export function DeployRunPanel({ state, onDismiss }: { state: DeployRunState; on
         {state.exit && state.phase !== 'running' && (
           <span className="text-xs text-muted-foreground">in {(state.exit.durationMs / 1000).toFixed(1)} s</span>
         )}
+        {state.phase === 'running' && state.build && state.build.state !== 'deploying' && onCancelBuild && (
+          <button
+            onClick={onCancelBuild}
+            className="ml-auto flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-muted"
+            title="Stop the build on BastionSSH; nothing reaches the server"
+          >
+            <Square size={11} /> Cancel build
+          </button>
+        )}
         <button
           onClick={onDismiss}
           title={state.phase === 'running' ? 'Stop following (the deploy keeps running on the server)' : 'Close'}
-          className="ml-auto text-muted-foreground hover:text-foreground"
+          className={cn('text-muted-foreground hover:text-foreground', !(state.phase === 'running' && state.build && state.build.state !== 'deploying' && onCancelBuild) && 'ml-auto')}
         >
           <X size={15} />
         </button>

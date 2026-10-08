@@ -73,6 +73,12 @@ export const DEPLOY_LOG_HINTS: readonly LogHint[] = [
   { pattern: /Health check failed|The new container stopped/, label: 'Health check failed', href: trouble(A.healthCheck) },
   { pattern: /Ports 80\/443 are taken|address already in use|port is already allocated/i, label: 'Ports 80 or 443 already in use', href: trouble(A.ports) },
   { pattern: /not the version this BastionSSH ships|bastionctl needs reinstalling/, label: 'Reinstall bastionctl', href: trouble(A.integrity) },
+  // BastionSSH's builder (build.where: bastion): missing, away, or unable to build for the server's platform
+  {
+    pattern: /has no builder \(SMT_BUILDKIT_ADDR|The builder did not answer|The builder cannot build for|buildctl could not start/,
+    label: 'Build on BastionSSH',
+    href: trouble(A.bastionBuild),
+  },
   { pattern: /exit code: 137|heap out of memory|Reached heap limit|\bKilled\b|out of memory/i, label: 'Build ran out of memory', href: trouble(A.memory) },
 ];
 

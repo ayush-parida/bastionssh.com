@@ -212,6 +212,8 @@ export default function ConfigEditor({
     'build.dir',
     'build.output',
     'build.image',
+    'build.where',
+    'build.args',
     'run.port',
     'run.env_file',
     'run.memory',
@@ -380,6 +382,33 @@ export default function ConfigEditor({
           {buildType !== 'image' && (
             <Field label="Project folder" issues={at('build.dir')} hint="Inside the upload; . is its root">
               {textField(['build', 'dir'], '.')}
+            </Field>
+          )}
+          {buildType !== 'image' && (
+            <Field
+              label="Build on"
+              issues={at('build.where')}
+              hint={
+                str(['build', 'where']) === 'bastion'
+                  ? "BastionSSH's builder makes the image for the server's platform and ships only the image: the server never runs npm or the build"
+                  : 'The server installs dependencies and builds (a Next.js build wants 1–2 GB of memory there)'
+              }
+            >
+              <select
+                className={input}
+                disabled={readOnly}
+                aria-label="Build on"
+                value={str(['build', 'where']) || 'server'}
+                onChange={(e) => update(['build', 'where'], e.target.value === 'server' ? undefined : e.target.value)}
+              >
+                <option value="server">the server (default)</option>
+                <option value="bastion">BastionSSH — only the image goes to the server</option>
+              </select>
+            </Field>
+          )}
+          {buildType !== 'image' && (
+            <Field label="Build args" issues={at('build.args')} hint="Other .env names the build gets besides every NEXT_PUBLIC_*, one per line; read from the app's .env for the build only">
+              {listField(['build', 'args'], 'SENTRY_RELEASE')}
             </Field>
           )}
           {buildType === 'static' && (

@@ -99,7 +99,15 @@ export default function ServerDeploymentsPage() {
         <p className="rounded-lg border border-border bg-card p-4 text-sm text-red-600">{state.error ? (state.error as Error).message : 'Server not found.'}</p>
       ) : (
         <>
-          <SetupPanel serverId={serverId} state={state.data} proxy={proxy.data ?? null} canManage={levels.manage} canOperate={levels.operate} compact={ready} />
+          <SetupPanel
+            serverId={serverId}
+            state={state.data}
+            proxy={proxy.data ?? null}
+            canManage={levels.manage}
+            canOperate={levels.operate}
+            canClearCache={moduleManage}
+            compact={ready}
+          />
           {ready &&
             (app ? (
               <AppDetail serverId={serverId} app={app} proxyMode={proxyMode} kernelVersion={state.data.kernelVersion ?? null} levels={levels} onBack={() => openApp(null)} />

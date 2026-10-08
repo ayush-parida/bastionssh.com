@@ -1,7 +1,21 @@
-import { crc32 } from 'node:zlib';
+import { crc32, gunzipSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import { deploySourceViewFromPaths, type DeployAppConfig } from '@smt/shared';
-import { checkSource, packZip } from './archive.js';
+import { checkSource, packFolder, packZip, sourceEnvFiles } from './archive.js';
+
+/** The names in a packed (gzipped tar) upload, sorted. */
+async function names(blob: Blob): Promise<string[]> {
+  const tar = gunzipSync(Buffer.from(await blob.arrayBuffer()));
+  const out: string[] = [];
+  for (let at = 0; at + 512 <= tar.length; ) {
+    const name = tar.subarray(at, at + 100).toString('utf8').replace(/\0.*$/s, '');
+    if (!name) break;
+    const size = parseInt(tar.subarray(at + 124, at + 136).toString('ascii').replace(/\0.*$/s, '').trim(), 8);
+    out.push(name);
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  return out.sort();
+}
 
 /** Files as `<input webkitdirectory>` gives them: paths start with the picked folder. */
 function folder(files: Record<string, string>): File[] {
@@ -95,5 +109,45 @@ describe('a source view of file paths', () => {
     expect(view.isFile('_next')).toBe(false);
     expect(view.list('.')).toEqual(['_next/', 'about/', 'index.html']);
     expect(view.readText('./package.json')).toBe('{}');
+  });
+});
+
+describe('environment files in an upload', () => {
+  const project = {
+    'site/package.json': '{"scripts":{"build":"next build"}}',
+    'site/.env': 'SECRET=1',
+    'site/.env.local': 'SECRET=2',
+    'site/.env.production': 'SECRET=3',
+    'site/.env.example': 'SECRET=',
+    'site/apps/web/.env.development.local': 'SECRET=4',
+    'site/src/env.ts': 'export {}',
+  };
+  const left = ['.env', '.env.local', '.env.production', 'apps/web/.env.development.local'];
+
+  it('are named before packing (.env.example is not one)', async () => {
+    expect((await sourceEnvFiles({ kind: 'folder', files: folder(project) })).sort()).toEqual(left);
+    expect((await sourceEnvFiles({ kind: 'zip', file: zip(project) })).sort()).toEqual(left);
+    expect(await sourceEnvFiles({ kind: 'folder', files: folder({ 'a/package.json': '{}' }) })).toEqual([]);
+  });
+
+  it('are left out of a folder or zip by default, and say which', async () => {
+    const packed = await packFolder(folder(project));
+    expect(await names(packed.blob)).toEqual(['.env.example', 'package.json', 'src/env.ts']);
+    expect(packed.envFiles.sort()).toEqual(left);
+    expect(packed.skipped).toBe(4);
+    const zipped = await packZip(zip(project));
+    expect(await names(zipped.blob)).toEqual(['.env.example', 'package.json', 'src/env.ts']);
+    expect(zipped.envFiles.sort()).toEqual(left);
+  });
+
+  it('go up when included on purpose', async () => {
+    const packed = await packFolder(folder(project), { includeEnvFiles: true });
+    expect(await names(packed.blob)).toEqual(['.env', '.env.example', '.env.local', '.env.production', 'apps/web/.env.development.local', 'package.json', 'src/env.ts']);
+    expect(packed.envFiles).toEqual([]);
+    expect((await packZip(zip(project), { includeEnvFiles: true })).files).toBe(7);
+  });
+
+  it('are not all an upload may hold', async () => {
+    await expect(packFolder(folder({ 'site/.env': 'A=1' }))).rejects.toThrow(/Nothing to upload/);
   });
 });
