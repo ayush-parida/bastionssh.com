@@ -117,7 +117,12 @@ function makeSftp(state: FakeSsh2State) {
   /** Follow links in the last component, like stat. */
   const follow = (p: string, depth = 0): [string, FakeNode] | undefined => {
     const node = state.fs.get(p);
-    if (!node) return undefined;
+    if (!node) {
+      // A link earlier in the path (`/site/current/app.js`): resolve the folder holding it
+      const dir = posix.dirname(p);
+      const real = p === '/' || depth > 8 ? undefined : resolveReal(dir);
+      return real && real !== dir ? follow(posix.join(real, posix.basename(p)), depth + 1) : undefined;
+    }
     if (node.type !== 'link') return [p, node];
     if (depth > 8) return undefined;
     return follow(posix.resolve(posix.dirname(p), node.target!), depth + 1);

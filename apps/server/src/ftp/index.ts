@@ -14,6 +14,7 @@ export * from './paths.js';
 export * as ops from './ops.js';
 export { toTarget } from './ftp-backend.js';
 export { FtpPathRefusedError, isWithin, jailSession } from './jail.js';
+export { connectionWalker, type ConnectionWalker } from './folder-walker.js';
 export type { FileBackend, FileCredentials, FileSession, FtpConnectionRow } from './backend.js';
 
 /** SFTP goes through ssh2; every other protocol is basic-ftp. */
@@ -60,6 +61,39 @@ function scheduleIdleClose(key: string, slot: Slot): void {
   slot.idleTimer.unref?.();
 }
 
+/**
+ * Folder downloads run on a session of their own, outside the pool, so the
+ * user can keep browsing while one streams. They are tracked here so the
+ * evictions below end them too.
+ */
+interface HeldDownload {
+  orgId: string;
+  connectionId: string;
+  userId: string;
+  stop: () => void;
+}
+
+const downloads = new Set<HeldDownload>();
+
+/** Register a running folder download; `stop` is called when it must end. Returns the release. */
+export function trackFolderDownload(
+  orgId: string,
+  connectionId: string,
+  userId: string,
+  stop: () => void,
+): () => void {
+  const held: HeldDownload = { orgId, connectionId, userId, stop };
+  downloads.add(held);
+  return () => {
+    downloads.delete(held);
+  };
+}
+
+function stopDownload(held: HeldDownload): void {
+  downloads.delete(held);
+  held.stop();
+}
+
 /** Drop every pooled client for a connection (after an edit, delete, or a broken session). */
 export function evictConnection(connectionId: string): void {
   for (const [key, slot] of pool) {
@@ -67,12 +101,17 @@ export function evictConnection(connectionId: string): void {
     pool.delete(key);
     closeSlot(slot);
   }
+  // The root, jail or credentials may have changed under a running download
+  for (const held of [...downloads]) {
+    if (held.connectionId === connectionId) stopDownload(held);
+  }
 }
 
 /**
- * Drop a user's pooled sessions after their access is revoked. Scoped to one
- * org when `orgId` is given; connections in `keepConnectionIds` stay open.
- * An operation in flight on a dropped session fails. Returns how many closed.
+ * Drop a user's pooled sessions, and end their folder downloads, after their
+ * access is revoked. Scoped to one org when `orgId` is given; connections in
+ * `keepConnectionIds` stay open. An operation in flight on a dropped session
+ * fails. Returns how many closed.
  */
 export function evictFtpUser(
   userId: string,
@@ -87,6 +126,13 @@ export function evictFtpUser(
     if (connectionId && keep.has(connectionId)) continue;
     pool.delete(key);
     closeSlot(slot);
+    closed++;
+  }
+  for (const held of [...downloads]) {
+    if (held.userId !== userId) continue;
+    if (scope.orgId && held.orgId !== scope.orgId) continue;
+    if (keep.has(held.connectionId)) continue;
+    stopDownload(held);
     closed++;
   }
   return closed;

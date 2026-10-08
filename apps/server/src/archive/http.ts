@@ -47,6 +47,12 @@ export interface FolderDownloadOptions {
   /** Defaults to SMT_FOLDER_DOWNLOAD_MAX_BYTES / SMT_FOLDER_DOWNLOAD_MAX_FILES. */
   maxBytes?: number;
   maxFiles?: number;
+  /**
+   * Ends the download from outside, like revoked access: for sources that
+   * track their own revocations (an FTP connection edited or deleted, or
+   * access to it removed).
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -67,18 +73,19 @@ export async function sendFolderArchive(req: FastifyRequest, reply: FastifyReply
   const controller = new AbortController();
   let finished = false;
   // Wired before the folder is listed: access revoked (or the browser gone) while it lists must stop the download too
-  const onRevoke = () => controller.abort(slot.signal.reason);
-  if (slot.signal.aborted) onRevoke();
-  else slot.signal.addEventListener('abort', onRevoke, { once: true });
+  const revoked = opts.signal ? AbortSignal.any([slot.signal, opts.signal]) : slot.signal;
+  const onRevoke = () => controller.abort(revoked.reason);
+  if (revoked.aborted) onRevoke();
+  else revoked.addEventListener('abort', onRevoke, { once: true });
   reply.raw.on('close', () => {
     if (!finished) controller.abort(new Error('The download was cancelled'));
   });
   try {
     const accessChanged = () => Object.assign(new Error(ACCESS_CHANGED), { statusCode: 403 });
     const rootEntries = await raceAbort(opts.walker.list(opts.rootRef), controller.signal).catch((err: unknown) => {
-      throw slot.signal.aborted ? accessChanged() : err;
+      throw revoked.aborted ? accessChanged() : err;
     });
-    if (slot.signal.aborted) throw accessChanged();
+    if (revoked.aborted) throw accessChanged();
     if (controller.signal.aborted) throw abortError(controller.signal);
 
     const filename = `${opts.folderName.replace(/[/\\]/g, '_') || 'folder'}.${opts.format}`;

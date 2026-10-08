@@ -3,7 +3,7 @@ title: FTP/SFTP connections
 section: files
 order: 20
 summary: Connect to FTP, FTPS and SFTP-only accounts that are not full servers, with stored credentials, a start-directory jail and host key checks.
-keywords: [ftp, ftps, sftp, shared hosting, cpanel, file transfer, host key, start directory]
+keywords: [ftp, ftps, sftp, shared hosting, cpanel, file transfer, host key, start directory, folder download, zip, tar.gz, archive]
 ---
 
 Some hosts only give you file access: shared hosting, cPanel accounts, SFTP-only (chrooted) users, or old appliances. The **FTP** module lets you register these as *connections* and browse them from the browser, without adding them as servers.
@@ -70,15 +70,37 @@ Click **Browse** on a connection. You can:
 - open folders, go up a level or use the breadcrumbs;
 - **Upload** files (or drag them onto the page) — uploads are streamed;
 - download a file by clicking it or the download icon;
+- download a whole folder as one `.zip` or `.tar.gz` (see below);
 - create a **New folder**, rename and delete files and whole folders.
 
 Over SFTP, a recursive delete is refused if the tree is more than 64 levels deep or has more than 10,000 entries; this is checked before anything is removed.
+
+## Downloading a folder
+
+Click **Download folder** at the top to download the folder you are in, or the folder icon on a folder's row to download that one. The list next to **Download folder** picks the format, and your choice is remembered in this browser:
+
+- **.zip** (default) opens with a double-click on macOS and Windows.
+- **.tar.gz** also keeps symlinks and file permissions.
+
+The archive is built on the BastionSSH server while it downloads; nothing is staged on disk on either side. A bar under the breadcrumbs shows how much has arrived, with **Cancel**. Cancelling, closing the page, or losing access to the connection stops the transfer on the remote server as well.
+
+- **One file at a time.** The download uses a separate login of its own (you can keep browsing meanwhile) and reads one file at a time; over FTP, one data connection at a time.
+- **The start-directory restriction applies to every file.** Over SFTP each folder and file is resolved on the server first; one that leads outside the start directory is left out and recorded as `ftp.path_refused`.
+- **Symlinks are never followed.** A `.tar.gz` stores them as links; a `.zip` leaves them out with a note. Devices, sockets and pipes are left out.
+- **Unreadable files don't stop the download.** A file the server refuses, or that vanished, is left out and listed in `_skipped.txt` at the top of the archive. If the connection drops part-way, BastionSSH logs in again and carries on with the next file.
+- **Limits.** A download stops at `SMT_FOLDER_DOWNLOAD_MAX_BYTES` (10 GiB by default) or `SMT_FOLDER_DOWNLOAD_MAX_FILES` (100,000 files and folders); the archive then ends with `_TRUNCATED.txt`. Download the remaining subfolders separately.
+- A folder download counts towards the eight live views and downloads each user can have open at once.
+- Editing or deleting the connection (including its host key) ends downloads running on it.
+
+Each folder download is audited as `ftp.folder_download` with the path, format, number of files, bytes, skipped entries, and whether it was truncated or cancelled.
+
+> **Tip:** The browser keeps the archive in memory (or its own temporary storage) until it is complete. For very large folders, download subfolders one by one.
 
 ## Who can do what
 
 | Level | Can |
 | --- | --- |
-| view | Browse and download |
+| view | Browse and download files and folders |
 | operate | Also upload, rename, create folders, delete files, and **Test** and **Diagnose** the connection |
 | manage | Also add, edit and remove connections and manage the host key |
 
@@ -89,6 +111,8 @@ Each user gets one logged-in session per connection, reused across clicks and cl
 | Limit | Default | Setting |
 | --- | --- | --- |
 | Largest upload | 1 GiB | `SMT_FTP_MAX_UPLOAD_BYTES` |
+| Folder download size | 10 GiB | `SMT_FOLDER_DOWNLOAD_MAX_BYTES` |
+| Files and folders in one folder download | 100,000 | `SMT_FOLDER_DOWNLOAD_MAX_FILES` |
 | One SFTP request, or a stalled transfer | 30 seconds | `SMT_SFTP_OP_TIMEOUT_MS` |
 | SFTP login (handshake and authentication) | 20 seconds, plus 10 s to open the file subsystem | fixed |
 | FTP/FTPS socket with no traffic | 30 seconds | fixed |
