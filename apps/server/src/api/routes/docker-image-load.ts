@@ -1,28 +1,18 @@
-import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { dockerPlatform, type DockerArchiveFormat, type DockerImageLoadResult, type DockerLoadedImage } from '@smt/shared';
+import { dockerPlatform, type DockerImageLoadResult, type DockerLoadedImage } from '@smt/shared';
 import { requireAuth } from '../../auth/middleware.js';
 import { requireModule } from '../../auth/access/modules.js';
 import { audit } from '../../audit/index.js';
 import { config } from '../../config/index.js';
 import { reserveStream } from '../sse.js';
-import { DockerError, fromDaemonStatus } from '../../docker/errors.js';
-import { LineSplitter } from '../../docker/demux.js';
+import { DockerError } from '../../docker/errors.js';
 import { requireDocker } from '../../docker/permissions.js';
 import { imageApiPath } from '../../docker/validation.js';
 import { withDockerClient } from '../../docker/service.js';
 import { openDockerSse, TOO_MANY_STREAMS, type DockerSse } from '../../docker/sse.js';
-import {
-  ArchiveMeter,
-  engineReads,
-  parseLoadLine,
-  platformWarning,
-  tagIndex,
-  toLoadedImage,
-  tooLarge,
-} from '../../docker/image-load.js';
+import { ArchiveMeter, engineAccepts, platformWarning, readLoadOutput, sendArchive, tagIndex, toLoadedImage, tooLarge } from '../../docker/image-load.js';
 import { sendDockerError, serverParams } from './docker.js';
 
 /**
@@ -74,17 +64,6 @@ const querySchema = z.object({
   /** The file's name, for the audit log. */
   name: z.string().trim().max(255).optional(),
 });
-
-/** Read a small error body (the engine refusing the archive). */
-async function readSmall(res: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of res as AsyncIterable<Buffer>) {
-    size += chunk.length;
-    if (size <= 64 * 1024) chunks.push(chunk);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
 
 export async function dockerImageLoadRoutes(app: FastifyInstance) {
   app.addHook('preHandler', requireAuth);
@@ -156,14 +135,7 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
           os: typeof version.Os === 'string' && version.Os ? version.Os : 'linux',
           arch: typeof version.Arch === 'string' ? version.Arch : '',
         };
-        const meter = new ArchiveMeter(limit, (format: DockerArchiveFormat) =>
-          engineReads(format, ctx.docker.apiVersion)
-            ? null
-            : new DockerError(
-                `This server's Docker Engine (${ctx.server.dockerVersion ?? `API ${ctx.docker.apiVersion}`}) cannot read zstd archives. Save the image with gzip instead: docker save <image> | gzip > image.tar.gz`,
-                400,
-              ),
-        );
+        const meter = new ArchiveMeter(limit, engineAccepts(ctx.docker, ctx.server.dockerVersion));
         run.meter = meter;
         // Why the upload was cut, when it was (the engine's side then only sees a broken request)
         meter.on('error', (e) => (run.cut ??= e));
@@ -174,16 +146,7 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
         });
         body.pipe(meter);
         run.started = true;
-        const res = await ctx.docker.send({
-          method: 'POST',
-          path: '/images/load',
-          query: { quiet: false },
-          body: meter,
-          contentType: 'application/x-tar',
-          signal: upload.signal,
-        });
-        clearTimeout(timer);
-        if (!res.statusCode || res.statusCode >= 300) throw fromDaemonStatus(res.statusCode ?? 502, await readSmall(res).catch(() => ''));
+        const res = await sendArchive(ctx.docker, meter, upload.signal).finally(() => clearTimeout(timer));
 
         // The engine has the whole archive: from here the load runs to its end, watched or not
         slot.release();
@@ -193,28 +156,8 @@ export async function dockerImageLoadRoutes(app: FastifyInstance) {
         };
         send({ type: 'uploaded', bytes: meter.bytes, format: meter.format! });
 
-        const loaded: Array<{ ref: string } | { id: string }> = [];
-        let failure: string | null = null;
-        const splitter = new LineSplitter(1024 * 1024);
-        const handle = (line: string) => {
-          if (!line.trim()) return;
-          let raw: RawJson;
-          try {
-            raw = JSON.parse(line) as RawJson;
-          } catch {
-            return;
-          }
-          const parsed = parseLoadLine(raw);
-          if (parsed.kind === 'error') {
-            failure = parsed.error;
-            return;
-          }
-          if (parsed.loaded && run.loadedCount++ < MAX_REPORTED_IMAGES) loaded.push(parsed.loaded);
-          if (parsed.progress.status) send({ type: 'load', progress: parsed.progress });
-        };
-        for await (const chunk of res as AsyncIterable<Buffer>) splitter.push(chunk).forEach(handle);
-        splitter.flush().forEach(handle);
-        if (failure) throw new DockerError(failure, 502);
+        const { loaded, count } = await readLoadOutput(res, { max: MAX_REPORTED_IMAGES, onProgress: (progress) => send({ type: 'load', progress }) });
+        run.loadedCount = count;
 
         const previous = tagIndex(before);
         for (const item of loaded) {

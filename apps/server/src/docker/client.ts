@@ -246,8 +246,6 @@ export class DockerClient {
       const onAbort = () => {
         if (!settled) cut(req.signal?.reason instanceof Error ? req.signal.reason : new DockerError('Request cancelled', 499));
       };
-      if (req.signal?.aborted) return onAbort();
-      req.signal?.addEventListener('abort', onAbort, { once: true });
 
       request.on('response', (res) => {
         if (settled) {
@@ -267,6 +265,9 @@ export class DockerClient {
       req.body.on('end', () => {
         sent = true;
       });
+      // After the listeners above: a request destroyed now still has its 'error' heard
+      if (req.signal?.aborted) return onAbort();
+      req.signal?.addEventListener('abort', onAbort, { once: true });
       req.body.pipe(request);
     });
   }

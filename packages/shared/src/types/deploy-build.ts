@@ -36,6 +36,26 @@ export function pickDeployBuildArgs(env: Iterable<[string, string]>, allowed: re
   return out;
 }
 
+/** The build log's line naming the environment files an upload was deployed without (bastionctl and BastionSSH say the same). */
+export function deployEnvFilesNote(skipped: readonly string[], count: number): string {
+  const more = count > skipped.length ? ` and ${count - skipped.length} more` : '';
+  return (
+    `Left out ${count === 1 ? 'an environment file' : `${count} environment files`} of the upload: ${skipped.join(', ')}${more}. ` +
+    "Runtime values belong in the app's .env on the server (NEXT_PUBLIC_* and build.args reach the build from there); " +
+    'to deploy these files anyway, choose "Include environment files" (bastionctl deploy --include-env-files).'
+  );
+}
+
+/**
+ * A release id (deployments spec §3): `<UTC yyyymmdd-hhmmss>-<first 8 hex of
+ * the upload's SHA-256>`. bastionctl names releases built on the server this
+ * way; BastionSSH names a release it builds the same way, in its image tag.
+ */
+export function deployReleaseId(now: Date, checksum: string): string {
+  const iso = now.toISOString(); // 2026-10-05T12:01:02.345Z
+  return `${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 19).replace(/:/g, '')}-${checksum.slice(0, 8).toLowerCase()}`;
+}
+
 // ── Masking secret values in logs ─────────────────────────────────────────────
 
 export const DEPLOY_MASK = '••••';

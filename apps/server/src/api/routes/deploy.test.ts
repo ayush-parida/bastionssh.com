@@ -706,9 +706,10 @@ describe('deployment routes', () => {
       expect(seenUpload).toEqual(payload);
       // Left over only if the deploy did not move it: removed either way
       expect(fake.files.has(deploy!.argv[3]!)).toBe(false);
-      expect(audits('deploy.start')[0]!.meta).toEqual({ app: 'site1', bytes: payload.length });
+      expect(audits('deploy.start')[0]!.meta).toEqual({ app: 'site1', bytes: payload.length, builtOn: 'server' });
       expect(audits('deploy.finish')[0]!.meta).toEqual({
         app: 'site1',
+        builtOn: 'server',
         release: OUTCOME.release,
         result: 'success',
         error: null,

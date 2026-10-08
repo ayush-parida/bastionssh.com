@@ -1,4 +1,5 @@
-import { Transform, type TransformCallback } from 'node:stream';
+import type { IncomingMessage } from 'node:http';
+import { Transform, type Readable, type TransformCallback } from 'node:stream';
 import {
   dockerPlatform,
   normalizeDockerArch,
@@ -6,8 +7,9 @@ import {
   type DockerLoadedImage,
   type DockerPullProgress,
 } from '@smt/shared';
-import { compareApiVersions } from './client.js';
-import { DockerError } from './errors.js';
+import { compareApiVersions, type DockerClient } from './client.js';
+import { LineSplitter } from './demux.js';
+import { DockerError, fromDaemonStatus } from './errors.js';
 
 /**
  * Uploading an image built elsewhere (`docker save`) into a server's engine:
@@ -195,4 +197,81 @@ export function platformWarning(image: DockerLoadedImage, engine: { os: string; 
     `${name} is built for ${built}, but this server is ${server}. Containers from it would fail with "exec format error". ` +
     `Rebuild it with docker build --platform ${server} and upload it again.`
   );
+}
+
+/** Read a small error body (the engine refusing the archive). */
+async function readSmall(res: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of res as AsyncIterable<Buffer>) {
+    size += chunk.length;
+    if (size <= 64 * 1024) chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/** An engine able to read archives in what {@link engineReads} allows, or the error saying why not. */
+export function engineAccepts(docker: Pick<DockerClient, 'apiVersion'>, dockerVersion: string | null): (format: DockerArchiveFormat) => DockerError | null {
+  return (format) =>
+    engineReads(format, docker.apiVersion)
+      ? null
+      : new DockerError(
+          `This server's Docker Engine (${dockerVersion ?? `API ${docker.apiVersion}`}) cannot read zstd archives. Save the image with gzip instead: docker save <image> | gzip > image.tar.gz`,
+          400,
+        );
+}
+
+/**
+ * Send an archive (already piped into `meter`) to the engine's
+ * `POST /images/load`. Resolves with the engine's answer once its headers
+ * arrive with a 2xx status — the engine then has the whole archive — and
+ * throws the engine's refusal otherwise. Aborting `signal` before that cuts
+ * the body, so nothing is loaded.
+ */
+export async function sendArchive(docker: DockerClient, meter: ArchiveMeter, signal: AbortSignal): Promise<IncomingMessage> {
+  const res = await docker.send({
+    method: 'POST',
+    path: '/images/load',
+    query: { quiet: false },
+    body: meter,
+    contentType: 'application/x-tar',
+    signal,
+  });
+  if (!res.statusCode || res.statusCode >= 300) throw fromDaemonStatus(res.statusCode ?? 502, await readSmall(res).catch(() => ''));
+  return res;
+}
+
+/**
+ * Read `/images/load` output to its end: progress lines go to `onProgress`;
+ * returns what the engine reported loaded (the first `max`, all counted).
+ * An `error` line throws (502) once the output ends.
+ */
+export async function readLoadOutput(
+  res: IncomingMessage,
+  opts: { max: number; onProgress?: (progress: DockerPullProgress) => void },
+): Promise<{ loaded: Array<{ ref: string } | { id: string }>; count: number }> {
+  const loaded: Array<{ ref: string } | { id: string }> = [];
+  let count = 0;
+  let failure: string | null = null;
+  const splitter = new LineSplitter(1024 * 1024);
+  const handle = (line: string) => {
+    if (!line.trim()) return;
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+    const parsed = parseLoadLine(raw);
+    if (parsed.kind === 'error') {
+      failure = parsed.error;
+      return;
+    }
+    if (parsed.loaded && count++ < opts.max) loaded.push(parsed.loaded);
+    if (parsed.progress.status) opts.onProgress?.(parsed.progress);
+  };
+  for await (const chunk of res as AsyncIterable<Buffer>) splitter.push(chunk).forEach(handle);
+  splitter.flush().forEach(handle);
+  if (failure) throw new DockerError(failure, 502);
+  return { loaded, count };
 }

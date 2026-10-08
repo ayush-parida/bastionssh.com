@@ -41,6 +41,7 @@ import { openDeploySse, TOO_MANY_STREAMS, type DeploySse } from '../../deploy/ss
 import { detectNginx, existingProxyMode, uploadHelper } from '../../deploy/nginx.js';
 import { deployDomainRoutes, syncProxy } from './deploy-domains.js';
 import { deployServiceRoutes } from './deploy-services.js';
+import { deployBuildRoutes, deployOnBastion } from './deploy-build.js';
 
 /**
  * Server-side deployments (deployments spec §7), under
@@ -74,6 +75,8 @@ const configBody = z.object({ text: z.string().max(64 * 1024) }).strict();
 const envBody = z.object({ value: z.string().max(64 * 1024) }).strict();
 const generateBody = z.object({ bytes: z.number().int().min(16).max(512).optional(), ifMissing: z.boolean().optional() }).strict();
 const deleteQuery = z.object({ purge: boolQuery });
+/** Where to build this time (the Deploy dialog's choice; default: build.where), and whether the upload's .env files stay. */
+const deployQuery = z.object({ where: z.enum(['server', 'bastion']).optional(), includeEnvFiles: boolQuery });
 const setupBody = z.object({ proxy: z.enum(['caddy', 'nginx']).optional() }).strict();
 
 /** How often buffered log lines are sent. */
@@ -386,6 +389,7 @@ export async function deployRoutes(app: FastifyInstance) {
    */
   app.post('/servers/:id/apps/:app/deploy', { preHandler: gate('operate') }, async (req, reply) => {
     const { id, app: name } = appParams.parse(req.params);
+    const query = deployQuery.parse(req.query);
     if (!req.isMultipart()) {
       if (req.body !== undefined && req.body !== null && (typeof req.body !== 'object' || Object.keys(req.body).length > 0)) {
         return reply.status(400).send({ error: 'Send the source as multipart/form-data, in a file field named "source" (or no body for build.type: image)' });
@@ -413,9 +417,14 @@ export async function deployRoutes(app: FastifyInstance) {
       });
     }
     return sseRoute(req, reply, id, async (ctx, open, slot) => {
-      await requireDeployLevel(req, ctx, name);
+      const status = await requireDeployLevel(req, ctx, name);
+      const where = query.where ?? status.config?.build?.where ?? 'server';
       const part = await req.file();
       if (!part || part.fieldname !== 'source') throw new DeployError('Send the source in a file field named "source"', 400);
+      if (where === 'bastion') {
+        // Built next to BastionSSH: the upload stays on this host for the build; only the image goes to the server
+        return deployOnBastion(req, ctx, open, slot, name, status, part.file, { includeEnvFiles: query.includeEnvFiles }, { streamCommand, auditError, auditDeploy });
+      }
       const upload = tmpName(ctx.root, 'upload', '.tar.gz');
       // Access revoked while the upload runs: stop taking it
       const revoked = () => part.file.destroy(new DeployError('Your access has changed. The upload was stopped.', 403));
@@ -426,11 +435,13 @@ export async function deployRoutes(app: FastifyInstance) {
         if (part.file.truncated) throw new DeployError('The upload is too large', 413);
         const sse = open();
         if (!sse) return;
-        await auditDeploy(req, 'deploy.start', ctx, { app: name, bytes });
+        await auditDeploy(req, 'deploy.start', ctx, { app: name, bytes, builtOn: 'server', ...(query.includeEnvFiles && { includeEnvFiles: true }) });
         // nginx mode: the host's server block (and certificate) follow the first deploy and domain changes
-        const { outcome, error, result } = await streamCommand(req, ctx, sse, ['deploy', name, '--source', upload], (log) => syncProxy(req, ctx, name, 'apply', log));
+        const args = ['deploy', name, '--source', upload, ...(query.includeEnvFiles ? ['--include-env-files'] : [])];
+        const { outcome, error, result } = await streamCommand(req, ctx, sse, args, (log) => syncProxy(req, ctx, name, 'apply', log));
         await auditDeploy(req, 'deploy.finish', ctx, {
           app: name,
+          builtOn: 'server',
           release: outcome?.release ?? null,
           result: outcome?.result ?? 'failed',
           error: auditError(outcome?.error ?? error),
@@ -612,6 +623,8 @@ export async function deployRoutes(app: FastifyInstance) {
   await app.register(deployDomainRoutes, { gate });
   // Quick services: create from the catalog, connection, Update version, backups (services spec §3)
   await app.register(deployServiceRoutes, { gate, sseRoute, streamCommand, auditError });
+  // Builds on the BastionSSH side: the builder's status, Clear build cache, the server's platform, Cancel
+  await app.register(deployBuildRoutes, { gate });
 }
 
 /**

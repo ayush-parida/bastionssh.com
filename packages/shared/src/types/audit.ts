@@ -201,6 +201,8 @@ export type AuditAction =
   | 'deploy.backup_restore'
   | 'deploy.backup_delete'
   | 'deploy.backup_schedule'
+  | 'deploy.build_cancel'
+  | 'deploy.build_cache_clear'
   | 'org.docker_settings'
   | 'ai.docker_read'
   | 'ai.kube_read'

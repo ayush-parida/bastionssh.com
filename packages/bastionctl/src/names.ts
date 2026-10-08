@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { deployReleaseId } from '@smt/shared';
 
 /**
  * Names and the on-server layout (deployments spec §3). App names and release
@@ -63,9 +64,7 @@ export function envKey(value: unknown): string {
  * second collide (refused) rather than overwrite each other.
  */
 export function newReleaseId(now: Date, checksum: string): string {
-  const iso = now.toISOString(); // 2026-10-05T12:01:02.345Z
-  const stamp = `${iso.slice(0, 10).replace(/-/g, '')}-${iso.slice(11, 19).replace(/:/g, '')}`;
-  return releaseId(`${stamp}-${checksum.slice(0, 8).toLowerCase()}`);
+  return releaseId(deployReleaseId(now, checksum));
 }
 
 export const imageName = (app: string, release: string) => `bastion-${app}:${release}`;

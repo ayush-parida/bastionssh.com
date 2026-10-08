@@ -18,7 +18,7 @@ import type {
   DeployValidation,
   DeployVersion,
 } from '@smt/shared';
-import { isDeployEnvFile, pickDeployBuildArgs } from '@smt/shared';
+import { deployEnvFilesNote, isDeployEnvFile, pickDeployBuildArgs } from '@smt/shared';
 import { planBuild, GENERATED_DOCKERFILE } from './build.js';
 import {
   appNames,
@@ -724,16 +724,6 @@ function prebuiltRelease(app: string, tag: string): string {
   return releaseId(m[2]);
 }
 
-/** The build log's line naming the environment files an upload was deployed without. */
-export function envFilesNote(skipped: readonly string[], count: number): string {
-  const more = count > skipped.length ? ` and ${count - skipped.length} more` : '';
-  return (
-    `Left out ${count === 1 ? 'an environment file' : `${count} environment files`} of the upload: ${skipped.join(', ')}${more}. ` +
-    "Runtime values belong in the app's .env on the server (NEXT_PUBLIC_* and build.args reach the build from there); " +
-    'to deploy these files anyway, choose "Include environment files" (bastionctl deploy --include-env-files).'
-  );
-}
-
 /**
  * `deploy <app> --source <file>` (spec §5): lock, new release from the
  * upload, build, start, health check, proxy switch, `current`, prune. A
@@ -864,7 +854,7 @@ export async function deploy(baseCtx: Ctx, app: string, options: DeployOptions |
           ctx.log('Unpacking the upload');
           const extracted = await extractTar(kept, work, { maxBytes: ctx.maxSourceBytes, ...(!opts.includeEnvFiles && { skip: isDeployEnvFile }) });
           ctx.log(`Unpacked ${extracted.files} entries (${Math.round(extracted.bytes / 1024)} KiB)`);
-          if (extracted.skippedCount > 0) ctx.log(envFilesNote(extracted.skipped, extracted.skippedCount));
+          if (extracted.skippedCount > 0) ctx.log(deployEnvFilesNote(extracted.skipped, extracted.skippedCount));
           else if (opts.includeEnvFiles) ctx.log('Environment files in the upload were kept, as asked (they are part of this release and can end up in the image)');
           const args = buildArgs(ctx, app, config);
           const argNames = Object.keys(args);

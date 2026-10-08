@@ -1,4 +1,5 @@
 import { buildApp } from './api/app.js';
+import { cleanBuildWorkRoot } from './api/routes/deploy-build.js';
 import { startWorker } from './worker/index.js';
 import { startHealthMonitor } from './monitoring/scheduler.js';
 import { startCertificateChecks } from './deploy/cert-check.js';
@@ -30,6 +31,8 @@ async function main() {
   await startRecordingMaintenance();
   // Rotations run in this process; any still open were cut short by a restart
   markInterruptedRotations();
+  // Builds run in this process; a folder left by one a restart cut short holds nothing anyone waits for
+  cleanBuildWorkRoot();
 
   const app = await buildApp();
 

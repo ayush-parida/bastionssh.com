@@ -4,7 +4,10 @@ import { pipeline } from 'node:stream/promises';
 import posix from 'node:path/posix';
 import type { FastifyRequest } from 'fastify';
 import { Client, type ClientChannel, type SFTPWrapper } from 'ssh2';
+import { DockerClient } from '../docker/client.js';
 import { LineSplitter } from '../docker/demux.js';
+import { ensureEndpoint } from '../docker/service.js';
+import { openDaemonStream } from '../docker/transport.js';
 import { acquire as acquireSsh, poolKey as sshPoolKey, type DockerLease } from '../docker/pool.js';
 import type { servers } from '../db/schema.js';
 import { resolveServerAuth } from '../ssh/credentials.js';
@@ -59,6 +62,12 @@ export interface Remote {
   remove(path: string): Promise<void>;
   /** A regular file (never through a link) as a stream, with its size; null when missing. */
   download(path: string): Promise<{ size: number; stream: Readable } | null>;
+  /**
+   * The server's Docker Engine API over the same SSH connection (a build on
+   * the BastionSSH side loads its image with it); the caller closes it.
+   * Absent where a connection does not offer it.
+   */
+  docker?(): Promise<DockerClient>;
   /** Give the pooled connections back (exactly once). */
   release(): void;
 }
@@ -249,6 +258,10 @@ export async function openRemote(req: Pick<FastifyRequest, 'orgId' | 'user'>, se
       await sftp.unlink(c, path).catch(() => {});
     },
     download: async (path) => downloadRemoteFile(await conn(), path),
+    async docker() {
+      const { endpoint, apiVersion } = await ensureEndpoint(ssh.client, server);
+      return new DockerClient(() => openDaemonStream(ssh.client, endpoint), apiVersion);
+    },
     release() {
       if (released) return;
       released = true;

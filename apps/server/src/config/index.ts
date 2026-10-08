@@ -101,6 +101,22 @@ const envSchema = z.object({
   /** Comma-separated origins allowed to complete a ceremony; defaults to SMT_BASE_URL's origin. */
   SMT_WEBAUTHN_ORIGINS: z.string().optional(),
 
+  // ── Builds on the BastionSSH side (build.where: bastion) ──
+  /** The BuildKit daemon (`tcp://buildkit:1234` in docker-compose.yml). Unset: builds happen on the servers only. */
+  SMT_BUILDKIT_ADDR: z.preprocess((v) => (v === '' ? undefined : v), z.string().regex(/^(tcp|unix):\/\/\S+$/).optional()),
+  /** A folder with ca.pem, cert.pem and key.pem when the builder takes mTLS (optional: its network is private to BastionSSH). */
+  SMT_BUILDKIT_TLS_DIR: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
+  /** The pinned buildctl binary (in the image: /usr/local/bin/buildctl). */
+  SMT_BUILDCTL_PATH: z.string().min(1).default('buildctl'),
+  /** Largest unpacked upload a build takes. */
+  SMT_BUILD_MAX_CONTEXT_BYTES: z.coerce.number().int().min(1).default(1_073_741_824), // 1 GiB
+  /** A build (with the image's transfer) is cut off after this. */
+  SMT_BUILD_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30 * 60_000),
+  /** Where uploads are unpacked for the length of their build (default: a folder in the OS temp dir). */
+  SMT_BUILD_WORK_DIR: z.preprocess((v) => (v === '' ? undefined : v), z.string().optional()),
+  /** Builds waiting their turn beyond this are refused (one runs at a time). */
+  SMT_BUILD_QUEUE_MAX: z.coerce.number().int().min(1).default(20),
+
   // ── Audit log forwarding ──
   /**
    * Comma-separated IPs/CIDRs a syslog or webhook target may resolve to even
@@ -359,6 +375,15 @@ export const config = {
     maxBytes: env.SMT_RECORDING_MAX_BYTES,
   },
   auditForward: { allowNets: auditForwardAllowNets },
+  builder: {
+    addr: env.SMT_BUILDKIT_ADDR ?? null,
+    tlsDir: env.SMT_BUILDKIT_TLS_DIR ?? null,
+    buildctl: env.SMT_BUILDCTL_PATH,
+    maxContextBytes: env.SMT_BUILD_MAX_CONTEXT_BYTES,
+    timeoutMs: env.SMT_BUILD_TIMEOUT_MS,
+    workDir: env.SMT_BUILD_WORK_DIR ?? null,
+    queueMax: env.SMT_BUILD_QUEUE_MAX,
+  },
   workerInProcess: env.SMT_WORKER_IN_PROCESS,
   staticDir: env.SMT_STATIC_DIR,
   adminEmail: env.SMT_ADMIN_EMAIL,
