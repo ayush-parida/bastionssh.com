@@ -46,7 +46,13 @@ const KEY = Buffer.from('AAAAC3NzaC1lZDI1NTE5AAAAIElIFDlvr3BbqwqJML2vALk7zEJk8g6
 // ── The fake server's shell ──
 
 type ShellMode = 'shell' | 'sftp-only' | 'refused';
-const shell = { mode: 'shell' as ShellMode, commands: [] as string[], children: [] as ChildProcess[] };
+const shell = {
+  mode: 'shell' as ShellMode,
+  commands: [] as string[],
+  children: [] as ChildProcess[],
+  /** Put first on the shell's PATH (a stand-in `tar`). */
+  pathPrefix: null as string | null,
+};
 /** Where the local shell runs, so a command that escaped its quoting would leave a file here. */
 let sandbox: string;
 
@@ -55,7 +61,11 @@ function localChannel(command: string) {
   const child = spawn('/bin/sh', ['-c', command], {
     cwd: sandbox,
     // macOS tar would otherwise add ._ AppleDouble members for extended attributes
-    env: { ...process.env, COPYFILE_DISABLE: '1' },
+    env: {
+      ...process.env,
+      COPYFILE_DISABLE: '1',
+      ...(shell.pathPrefix && { PATH: `${shell.pathPrefix}:${process.env.PATH ?? ''}` }),
+    },
   });
   shell.children.push(child);
   child.stdin.on('error', () => {});
@@ -406,6 +416,30 @@ describe('GET /api/sftp/:serverId/folder', () => {
       expect(row!.meta.tarMessages.join('\n')).toMatch(/secret\.txt.*Permission denied/);
     } finally {
       fs.chmodSync(`${dir}/secret.txt`, 0o644);
+    }
+  });
+
+  it("leaves busybox tar's closing summary out of _skipped.txt and the count", async () => {
+    const dir = folder('busybox', { 'ok.txt': 'fine' });
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'smt-fake-tar-'));
+    const realTar = execFileSync('sh', ['-c', 'command -v tar']).toString().trim();
+    fs.writeFileSync(
+      path.join(bin, 'tar'),
+      `#!/bin/sh\necho "tar: can't open './gone.txt': Permission denied" >&2\necho "tar: error exit delayed from previous errors" >&2\n'${realTar}' "$@"\nexit 1\n`,
+      { mode: 0o755 },
+    );
+    shell.pathPrefix = bin;
+    try {
+      const res = await get(admin, url(dir, 'tar.gz'));
+      expect(res.statusCode).toBe(200);
+      const note = tarMembers(res.rawPayload).find((m) => m.name === '_skipped.txt')!.data.toString();
+      expect(note).toMatch(/gone\.txt.*Permission denied/);
+      expect(note).not.toMatch(/exit delayed/);
+      const [row] = await audits(1);
+      expect(row!.meta).toMatchObject({ method: 'tar', skipped: 1 });
+    } finally {
+      shell.pathPrefix = null;
+      fs.rmSync(bin, { recursive: true, force: true });
     }
   });
 

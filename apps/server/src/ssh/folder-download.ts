@@ -266,8 +266,8 @@ function remoteTar(channel: ClientChannel): RemoteTar {
   const lines: string[] = [];
   let partial = '';
   const keep = (line: string) => {
-    // tar's closing summary of the errors it already reported one by one (GNU tar, then bsdtar)
-    if (!line || /Exiting with failure status due to previous errors|Error exit delayed from previous errors/.test(line)) return;
+    // tar's closing summary of the errors it already reported one by one (GNU tar, then bsdtar / busybox)
+    if (!line || /Exiting with failure status due to previous errors|error exit delayed from previous errors/i.test(line)) return;
     if (lines.length < MAX_TAR_MESSAGES) lines.push(line.length > 1000 ? `${line.slice(0, 1000)}…` : line);
   };
   channel.stderr.on('data', (data: Buffer) => {
