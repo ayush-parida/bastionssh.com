@@ -37,6 +37,8 @@ export interface FakeFtpState {
   extra: Map<string, FakeFtpRow[]>;
   /** Paths (and everything below) answered with 550 Permission denied. */
   denied: Set<string>;
+  /** Folders that cannot be listed, though what is below them can (mode 0711). */
+  unlistable: Set<string>;
   /** Downloads that send nothing until the client is closed. */
   stall: Set<string>;
   /** Downloads whose data connection is reset after this many bytes. */
@@ -60,6 +62,7 @@ export function fakeFtp(): { openClient: unknown; __state: FakeFtpState } {
     fs: new Map(),
     extra: new Map(),
     denied: new Set(),
+    unlistable: new Set(),
     stall: new Set(),
     dropAfter: new Map(),
     grow: new Map(),
@@ -71,6 +74,7 @@ export function fakeFtp(): { openClient: unknown; __state: FakeFtpState } {
       state.fs.clear();
       state.extra.clear();
       state.denied.clear();
+      state.unlistable.clear();
       state.stall.clear();
       state.dropAfter.clear();
       state.grow.clear();
@@ -161,7 +165,7 @@ export function fakeFtp(): { openClient: unknown; __state: FakeFtpState } {
         }),
       list: (p: string) =>
         task('list', p, async () => {
-          if (isDenied(p)) throw reply(550, 'Permission denied');
+          if (isDenied(p) || state.unlistable.has(p)) throw reply(550, 'Permission denied');
           const found = follow(p);
           if (!found) throw reply(550, 'No such file or directory');
           const [real, node] = found;

@@ -124,9 +124,10 @@ const MAX_REFUSALS_AUDITED = 10;
 
 /**
  * A folder download must start at a folder. The connection's start directory
- * and `/` are taken as they are: checking them would list their parent,
- * which the account may not be allowed to read. A link counts when what it
- * points at is not a file (SIZE / stat answer only for files).
+ * (by `.` or by its path) and `/` are taken as they are: checking them would
+ * list their parent, which the account may not be allowed to read. A link
+ * counts when what it points at is not a file (SIZE / stat answer only for
+ * files).
  */
 async function assertFolder(session: FileSession, path: string, isStart: boolean): Promise<void> {
   if (isStart || path === '/' || path === (await session.jailRoot?.())) return;
@@ -748,9 +749,10 @@ export async function ftpRoutes(app: FastifyInstance) {
     try {
       const connection = loadConnection(req.orgId, id);
       session = await openSession(connection);
-      const isStart = query.path === '.';
-      const path = isStart ? await session.home(connection.rootPath) : normalizeRemotePath(query.path);
-      await assertFolder(session, path, isStart);
+      // The page sends the folder it shows, which is the start directory's absolute path once listed
+      const home = await session.home(connection.rootPath);
+      const path = query.path === '.' ? home : normalizeRemotePath(query.path);
+      await assertFolder(session, path, path === home);
 
       const walker = connectionWalker({ session, reconnect: () => openSession(connection) });
       // The walker owns the session from here; sendFolderArchive closes it

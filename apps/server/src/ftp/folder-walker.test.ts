@@ -46,6 +46,25 @@ describe('connectionWalker', () => {
     expect(reconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('stops logging in again once the server has refused a few logins in a row', async () => {
+    const first = session({ list: vi.fn(async () => Promise.reject(new Error('socket hang up'))) });
+    const reconnect = vi.fn(async (): Promise<FileSession> => Promise.reject(new Error('connect ETIMEDOUT')));
+    const walker = connectionWalker({ session: first, reconnect });
+    await expect(walker.list('/srv')).rejects.toThrow('socket hang up');
+    for (let i = 0; i < 10; i++) await expect(walker.list('/srv')).rejects.toThrow('connect ETIMEDOUT');
+    expect(reconnect).toHaveBeenCalledTimes(3);
+  });
+
+  it('counts only failed logins in a row', async () => {
+    let calls = 0;
+    const broken = () => session({ list: vi.fn(async () => Promise.reject(new Error('socket hang up'))) });
+    // Fails twice, then logs in (to a session that drops again), over and over
+    const reconnect = vi.fn(async () => (++calls % 3 === 0 ? broken() : Promise.reject(new Error('connect ETIMEDOUT'))));
+    const walker = connectionWalker({ session: broken(), reconnect });
+    for (let i = 0; i < 12; i++) await walker.list('/srv').catch(() => {});
+    expect(reconnect).toHaveBeenCalledTimes(11);
+  });
+
   it('refuses a locator built from an unusable name', async () => {
     const walker = connectionWalker({ session: session(), reconnect: vi.fn() });
     await expect(walker.list('')).rejects.toThrow(/not a plain file name/);

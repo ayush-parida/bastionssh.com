@@ -176,6 +176,15 @@ describe('ftp folder download over FTP/FTPS', () => {
     expect((await folder(open, `${HOME}/nope`)).statusCode).toBe(404);
   });
 
+  it('downloads the start directory by its path when its parent cannot be listed', async () => {
+    // The page sends the folder it shows, absolute once listed; the account may not read /home
+    state.unlistable.add('/home');
+    const res = await folder(open, HOME, 'tar.gz');
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-disposition']).toMatch(/filename="deploy\.tar\.gz"/);
+    expect(readTarGz(res.rawPayload).map((e) => e.name)).toContain('site/index.html');
+  });
+
   it('skips a file the server refuses and keeps the control connection', async () => {
     state.denied.add(`${HOME}/site/css/app.css`);
     const res = await folder(open, `${HOME}/site`);

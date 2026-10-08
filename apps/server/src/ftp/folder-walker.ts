@@ -30,6 +30,14 @@ const MAX_DISCARD_BYTES = 1024 * 1024;
 
 const STOPPED = 'The archive stopped reading this file';
 
+/**
+ * Logins in a row that may fail before the walker stops trying: every entry
+ * left would otherwise wait out its own login timeout against a server that
+ * has gone away, and the download would hold its stream slot for hours. Past
+ * this, the rest of the walk fails at once (each entry noted in _skipped.txt).
+ */
+const MAX_FAILED_LOGINS = 3;
+
 export interface ConnectionWalkerOptions {
   /** Logged in, and jailed when the connection is restricted to its root. */
   session: FileSession;
@@ -89,6 +97,8 @@ export function connectionWalker(opts: ConnectionWalkerOptions): ConnectionWalke
   let idle: Promise<void> = Promise.resolve();
   const refused: string[] = [];
   let refusedCount = 0;
+  let failedLogins = 0;
+  let loginError: unknown;
 
   const ended = () => new FtpError('The folder download has ended', 499);
 
@@ -103,7 +113,16 @@ export function connectionWalker(opts: ConnectionWalkerOptions): ConnectionWalke
     if (session && !session.closed) return session;
     session?.close();
     session = null;
-    const fresh = await opts.reconnect();
+    if (failedLogins >= MAX_FAILED_LOGINS) throw loginError;
+    let fresh: FileSession;
+    try {
+      fresh = await opts.reconnect();
+    } catch (err) {
+      failedLogins++;
+      loginError = err;
+      throw err;
+    }
+    failedLogins = 0;
     if (closed) {
       fresh.close();
       throw ended();
