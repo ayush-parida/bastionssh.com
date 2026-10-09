@@ -73,6 +73,37 @@ export function isDomain(value: string): boolean {
 }
 
 /**
+ * A name people put www. in front of: example.com, or example.co.uk under a short
+ * second-level suffix of a country code. Not api.example.com.
+ */
+function isRegistrable(domain: string): boolean {
+  const labels = domain.split('.');
+  if (labels.length === 2) return true;
+  return labels.length === 3 && labels[2]!.length === 2 && labels[1]!.length <= 3;
+}
+
+/**
+ * `domains` with the other half of each www pair added after its partner, so that
+ * `redirect_www` works without listing both names: www.example.com brings
+ * example.com, and a registrable example.com brings www.example.com.
+ */
+export function withWwwCounterparts(domains: readonly string[], mode: DeployAppConfig['redirect_www']): string[] {
+  if (mode === 'none') return [...domains];
+  const out: string[] = [];
+  const seen = new Set(domains);
+  for (const d of domains) {
+    out.push(d);
+    if (d.startsWith('*.')) continue;
+    const other = d.startsWith('www.') ? d.slice(4) : isRegistrable(d) ? `www.${d}` : null;
+    if (other && isDomain(other) && !seen.has(other)) {
+      seen.add(other);
+      out.push(other);
+    }
+  }
+  return out;
+}
+
+/**
  * A relative path that stays where it is resolved from: no absolute paths, no
  * `..` segments, no backslashes or control characters. `.` is allowed.
  */
@@ -513,7 +544,7 @@ export function validateConfig(data: unknown, app: string | null): { config: Dep
     config: {
       name: name as string,
       service,
-      domains,
+      domains: withWwwCounterparts(domains, redirect),
       redirect_www: redirect,
       tls,
       build,
@@ -572,17 +603,29 @@ export function tryLoadConfig(layout: Layout, app: string): { config: DeployAppC
 }
 
 /** Domains `app` would share with other apps on the server (spec §4: refused). */
-export function domainConflicts(layout: Layout, app: string, domains: readonly string[]): DeployValidationIssue[] {
+export function domainConflicts(layout: Layout, app: string, domains: readonly string[], listed: readonly string[] = domains): DeployValidationIssue[] {
   const issues: DeployValidationIssue[] = [];
   for (const other of appNames(layout)) {
     if (other === app) continue;
     const { config } = tryLoadConfig(layout, other);
     if (!config) continue;
-    domains.forEach((d, i) => {
-      if (config.domains.includes(d)) issues.push({ path: `domains.${i}`, message: `${d} is already used by app ${other}` });
-    });
+    for (const d of domains) {
+      if (!config.domains.includes(d)) continue;
+      const i = listed.indexOf(d);
+      issues.push(
+        i >= 0
+          ? { path: `domains.${i}`, message: `${d} is already used by app ${other}` }
+          : { path: 'redirect_www', message: `${d}, added for redirect_www, is already used by app ${other}; set redirect_www: none or move it to one app` },
+      );
+    }
   }
   return issues;
+}
+
+/** The domains as written in the config text, before redirect_www adds the other www names. */
+function listedDomains(text: string): string[] {
+  const value = parseYaml(text).value as { domains?: unknown } | null;
+  return Array.isArray(value?.domains) ? value.domains.filter((d): d is string => typeof d === 'string') : [];
 }
 
 /** A host port `app` would publish that another app on the server publishes already (refused: only one can bind it). */
@@ -603,7 +646,7 @@ export function validateForServer(layout: Layout, app: string, text: string): De
   const { config, issues } = checkConfigText(text, app);
   if (!config) return { ok: false, errors: issues, config: null };
   const mode = proxyMode(layout);
-  const conflicts = [...domainConflicts(layout, app, config.domains), ...publishConflicts(layout, app, config.run.publish)];
+  const conflicts = [...domainConflicts(layout, app, config.domains, listedDomains(text)), ...publishConflicts(layout, app, config.run.publish)];
   // Without domains the app never reaches the proxy, whichever mode it names
   if (config.proxy !== mode && config.domains.length > 0) conflicts.unshift({ path: 'proxy', message: `This server's proxy is set up for ${mode}; use proxy: ${mode}` });
   return { ok: conflicts.length === 0, errors: conflicts, config: conflicts.length === 0 ? config : null };

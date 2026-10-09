@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { checkConfigText, domainConflicts, isDigestPinned, isDomain, isImageRef, isSafeRelative, publishConflicts, validateForServer } from './config.js';
+import { checkConfigText, domainConflicts, isDigestPinned, isDomain, isImageRef, isSafeRelative, publishConflicts, validateForServer, withWwwCounterparts } from './config.js';
 import { Layout } from './names.js';
 
 const valid = `
@@ -331,6 +331,42 @@ describe('domains across apps', () => {
     expect(result.errors).toEqual([{ path: 'domains.1', message: 'www.site1.com is already used by app blog' }]);
     // The app's own config does not conflict with itself
     expect(validateForServer(layout, 'blog', fs.readFileSync(layout.config('blog'), 'utf8')).ok).toBe(true);
+  });
+});
+
+describe('redirect_www adds the other www name', () => {
+  it('adds www. to a registrable domain and the bare domain to a www. one, after its partner', () => {
+    expect(withWwwCounterparts(['opinio.com'], 'apex')).toEqual(['opinio.com', 'www.opinio.com']);
+    expect(withWwwCounterparts(['www.a.com', 'b.com'], 'www')).toEqual(['www.a.com', 'a.com', 'b.com', 'www.b.com']);
+    expect(withWwwCounterparts(['shop.co.uk'], 'apex')).toEqual(['shop.co.uk', 'www.shop.co.uk']);
+  });
+
+  it('leaves lists alone with none, keeps names already listed, and skips subdomains and wildcards', () => {
+    expect(withWwwCounterparts(['a.com'], 'none')).toEqual(['a.com']);
+    expect(withWwwCounterparts(['www.a.com', 'a.com'], 'apex')).toEqual(['www.a.com', 'a.com']);
+    expect(withWwwCounterparts(['api.example.com', '*.a.com', 'app.example.io'], 'apex')).toEqual(['api.example.com', '*.a.com', 'app.example.io']);
+    expect(withWwwCounterparts(['www.api.example.com'], 'apex')).toEqual(['www.api.example.com', 'api.example.com']);
+  });
+
+  it('is applied when the config is read, so the proxy and certificates see both names', () => {
+    const { config, issues } = checkConfigText(valid.replace('[site1.com, www.site1.com]', '[site1.com]'), 'site1');
+    expect(issues).toEqual([]);
+    expect(config?.domains).toEqual(['site1.com', 'www.site1.com']);
+  });
+
+  it('points a conflict on an added name at redirect_www', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bastion-config-'));
+    try {
+      const layout = new Layout(root);
+      fs.mkdirSync(layout.app('blog'), { recursive: true });
+      fs.writeFileSync(layout.config('blog'), 'name: blog\ndomains: [www.site1.com]\nbuild: { type: static }\n');
+      const result = validateForServer(layout, 'site1', valid.replace('[site1.com, www.site1.com]', '[site1.com]'));
+      expect(result.errors).toEqual([
+        { path: 'redirect_www', message: 'www.site1.com, added for redirect_www, is already used by app blog; set redirect_www: none or move it to one app' },
+      ]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

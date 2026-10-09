@@ -122,7 +122,7 @@ See [Domains and HTTPS](domains-https.md) for the DNS records to create.
 - `www` — `example.com` redirects to `www.example.com`.
 - `none` — every listed domain is served as it is.
 
-A redirect happens only when **both** forms are in `domains`; the redirecting one still gets its own certificate.
+With `apex` or `www`, list either form: the other is added for you (`example.com` brings `www.example.com`, and `www.example.com` brings `example.com`). A bare domain gets `www.` only when it is a registrable name like `example.com` or `example.co.uk`, never a subdomain like `api.example.com`. The redirecting name gets its own certificate, so its DNS must point at the server too. If another app on the server already uses the added name, validation says so; set `redirect_www: none` or keep the name in one app.
 
 ## tls
 

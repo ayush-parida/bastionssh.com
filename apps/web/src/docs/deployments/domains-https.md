@@ -42,11 +42,11 @@ What it needs:
 ## www redirect
 
 ```yaml
-domains: [example.com, www.example.com]
+domains: [example.com]
 redirect_www: apex      # www.example.com → example.com (301)
 ```
 
-`www` redirects the other way. Both names must be in `domains`; each gets a certificate, so the redirect works over HTTPS too.
+`www` redirects the other way. The other name is added for you, so listing `example.com` is enough; listing both is fine too. Each name gets a certificate, so the redirect works over HTTPS — point DNS for `www.example.com` at the server as well (a CNAME to `example.com` works).
 
 ## TLS modes
 

@@ -791,8 +791,10 @@ describe('config changes during a deploy', () => {
     const caddyfile = fs.readFileSync(layout.caddyfile, 'utf8');
     expect(caddyfile).toContain('site1.org {\n\tencode zstd gzip\n\treverse_proxy bastion-site1-live-4000:4000 {');
     expect(caddyfile).not.toContain('site1.com');
+    // redirect_www: apex brings www.site1.org along, redirected to site1.org
+    expect(caddyfile).toContain('www.site1.org {');
     // The new Caddy is checked for the names it will serve
-    expect(fake.execs.filter((e) => isReload(e.cmd)).at(-1)!.cmd.slice(7)).toEqual(['site1.org']);
+    expect(fake.execs.filter((e) => isReload(e.cmd)).at(-1)!.cmd.slice(7)).toEqual(['site1.org', 'www.site1.org']);
   });
 
   it('fails the deploy, the old release serving, when bastion.yml became invalid meanwhile', async () => {

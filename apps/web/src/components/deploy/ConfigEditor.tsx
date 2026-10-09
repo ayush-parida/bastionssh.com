@@ -322,7 +322,7 @@ export default function ConfigEditor({
           <Field label="Domains" issues={at('domains')} hint="One per line, like example.com">
             {listField(['domains'], 'example.com\nwww.example.com')}
           </Field>
-          <Field label="Redirect www" issues={at('redirect_www')}>
+          <Field label="Redirect www" issues={at('redirect_www')} hint="apex and www add the other name for you: example.com brings www.example.com, and the reverse">
             <select className={input} disabled={readOnly} value={str(['redirect_www']) || 'none'} onChange={(e) => update(['redirect_www'], e.target.value)}>
               <option value="none">none — serve both as listed</option>
               <option value="apex">apex — www.example.com → example.com</option>
