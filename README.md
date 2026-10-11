@@ -105,8 +105,8 @@ For a production build run `pnpm build`, then start the server and let it serve 
 
 1. Open `SMT_BASE_URL` (e.g. `http://localhost:8080`) in your browser.
 2. Sign in as the first admin (an owner account seeded on first start):
-   - Set `SMT_ADMIN_EMAIL` and `SMT_ADMIN_PASSWORD` before the first start to choose the credentials.
-   - Unless `NODE_ENV` is explicitly `development` or `test`, an unset `SMT_ADMIN_PASSWORD` (or the dev default `admin1234`) gets a random password instead, printed **once** to the server's stderr (`Generated a random admin password`) whatever `SMT_LOG_LEVEL` is. This covers the Docker image and a bare `pnpm start` / `node dist/index.js`. Sign in and change it.
+   - Set `SMT_ADMIN_EMAIL` and `SMT_ADMIN_PASSWORD` (8+ characters) before the first start to choose the credentials; with Compose, put them in `deploy/docker/.env`. An unset `SMT_ADMIN_EMAIL` defaults to `ayush.parida@fgshq.com`. The account is created only while the database has no users, so changing these later does nothing.
+   - Unless `NODE_ENV` is explicitly `development` or `test`, an unset `SMT_ADMIN_PASSWORD` (or the dev default `admin1234`) gets a random password instead, printed **once** to the server's stderr (`Generated a random admin password`) whatever `SMT_LOG_LEVEL` is. This covers the Docker image and a bare `pnpm start` / `node dist/index.js`. With Compose: `docker compose logs smt 2>&1 | grep -A3 "Generated a random"`. It is stored nowhere else — sign in and change it.
    - `pnpm dev` runs with `NODE_ENV=development`, where the defaults are `ayush.parida@fgshq.com` / `admin1234`.
 3. **Add an SSH key** — paste an existing one or generate a new keypair from the UI.
 4. **Add a server** — host, port, user, and select the SSH key.
@@ -376,7 +376,7 @@ The step-by-step guides (static sites, Next.js built on the server or prebuilt, 
 ```yaml
 name: site1                         # a-z, 0-9 and -, at most 41 characters; the app's folder name
 domains: [site1.com, www.site1.com] # at most 50; no two apps on a server may share one
-redirect_www: apex                  # apex: www → apex · www: apex → www · none
+redirect_www: apex                  # apex: www → apex · www: apex → www · none; the other www name is added for you
 tls: auto                           # see TLS below
 build:
   type: nextjs                      # nextjs | dockerfile | static | image
@@ -487,9 +487,12 @@ Nothing an app's log prints of its `.env` values (6 characters or longer) reache
 
 **Domains** on an app checks each domain now: its A/AAAA records against the server's public address (with the exact record to create when they do not match — a domain is saved either way), whether ports 80 and 443 answer from BastionSSH for `auto`/`staging`, and each certificate's issuer, expiry and last issuance or renewal error, read from Caddy (or from certbot through the helper in nginx mode). The app list shows each app's certificate (days left, or an error) and its container's CPU and memory, read from the server when the list loads. A certificate that is past its renewal point, has a renewal error logged, has expired, or has under 14 days left without being renewed raises a **Certificate expiring or failing** alert through your notification channels — once when it starts (again if it expires), and when it recovers. Besides every read of Domains, BastionSSH checks every monitored server every 6 hours: it looks for a deployments install over SSH each time (nothing records which servers have one) and reads the certificates of each deployed app. The only thing kept is the alert itself, in the server's alerts.
 
+**www redirects.** With `redirect_www: apex` (or `www`), listing either name is enough: `site1.com` brings `www.site1.com` along and `www.site1.com` brings `site1.com`, each with its own certificate, so `https://www.site1.com/path?q` answers `301` to `https://site1.com/path?q`. `bastion.yml` stays as written; the added name shows on the Domains tab. Only registrable names (`site1.com`, `site1.co.uk`) get a `www.` added — never subdomains like `api.site1.com` or wildcards. Point DNS for the www name at the server too (a CNAME to the bare domain works); if another app on the server already serves the added name, validation refuses it at `redirect_www` — set `redirect_www: none` there or keep the name in one app.
+
 ### Sizing
 
 - **Builds run on the server** unless `build.where: bastion`. A Next.js build wants about 1–2 GB of memory on its own; on a 1 GB server build on BastionSSH, or add 2 GB of swap, or builds may be killed. Static and Dockerfile builds depend on the project. Builds on BastionSSH need that memory on BastionSSH's host instead (`SMT_BUILDKIT_MEMORY`, 4 GB by default) and disk for the layer cache (`SMT_BUILDKIT_CACHE_MB`).
+- **Quick services**: keep a service's memory limit under what the server has free — a limit above the server's RAM lets one first start take the whole machine down (a 1 GB server with no swap is tight for MongoDB at the default `1g`; `384m` works for small databases there).
 - **Running apps**: Caddy uses a few tens of MB; a Next.js standalone server typically 100–300 MB, a static site served by Caddy a few MB. Set `run.memory` so one app cannot starve the others.
 - **Disk**: each kept release keeps its image (often 150–500 MB for Node apps; layers are shared between releases of an app). `keep_releases: 5` with a few apps fits comfortably in 20 GB; lower it on small disks.
 - As a rule of thumb: 1 vCPU / 1 GB for a few static or small Dockerfile sites, 2 vCPU / 2–4 GB to build and run several Next.js apps.
