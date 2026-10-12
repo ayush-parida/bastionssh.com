@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { DEPLOY_ENV_KEY_PATTERN, type DeployEnvKeys, type DeployEnvReveal } from '@smt/shared';
-import { Eye, EyeOff, KeyRound, Loader2, Pencil, Plus, Trash2 } from 'lucide-react';
+import { DEPLOY_ENV_KEY_PATTERN, type DeployEnvFile, type DeployEnvKeys, type DeployEnvReplaced, type DeployEnvReveal, type DeployEnvTextIssue } from '@smt/shared';
+import { Eye, EyeOff, FileText, KeyRound, Loader2, Pencil, Plus, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, ApiError } from '@/lib/api.js';
 import { appPath, deployKeys } from '@/lib/deploy.js';
@@ -41,6 +41,103 @@ function ValueForm({ label, busy, onSubmit, onCancel }: { label: string; busy: b
   );
 }
 
+const names = (keys: string[]) => keys.join(', ');
+
+/** What a save changed, by name: "Added A; changed B; removed C". */
+function summary({ added, changed, removed }: DeployEnvReplaced): string {
+  const parts = [
+    added.length > 0 && `added ${names(added)}`,
+    changed.length > 0 && `changed ${names(changed)}`,
+    removed.length > 0 && `removed ${names(removed)}`,
+  ].filter(Boolean);
+  return parts.length === 0 ? 'No variables changed' : `${parts.join('; ')}`.replace(/^./, (c) => c.toUpperCase());
+}
+
+/**
+ * `.env` as one text file: loaded after a passkey confirmation (like a
+ * reveal), saved whole. The server checks every line and refuses a save when
+ * the file changed after it was opened.
+ */
+function EnvTextEditor({ serverId, app, file, onDone, onReload }: { serverId: string; app: string; file: DeployEnvFile; onDone: () => void; onReload: () => void }) {
+  const qc = useQueryClient();
+  const [text, setText] = useState(file.text);
+  const [issues, setIssues] = useState<DeployEnvTextIssue[]>([]);
+  const [error, setError] = useState<{ message: string; stale: boolean } | null>(null);
+  const dirty = text !== file.text;
+
+  const save = useMutation({
+    mutationFn: () => api.put<DeployEnvReplaced>(appPath(serverId, app, '/env-file'), { text, sha256: file.sha256 }),
+    onSuccess: (res) => {
+      toast.success(`${summary(res)} — restart the app to apply`);
+      qc.invalidateQueries({ queryKey: deployKeys.env(serverId, app) });
+      onDone();
+    },
+    onError: (err: Error) => {
+      if (err instanceof ApiError && err.code === 'env_invalid') {
+        setIssues((err.details?.issues as DeployEnvTextIssue[] | undefined) ?? []);
+        setError(null);
+        return;
+      }
+      setIssues([]);
+      setError({ message: err.message, stale: err instanceof ApiError && err.code === 'env_changed' });
+    },
+  });
+
+  return (
+    <form
+      aria-label="Edit .env as text"
+      className="space-y-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+        Values are visible while you edit. One <code>KEY=value</code> per line; <code>#</code> starts a comment. Quote values with spaces or <code>#</code> in
+        them (<code>"…"</code>). Saving replaces the whole file; changes apply when the app is next restarted or deployed.
+      </p>
+      {error && (
+        <div className="flex items-center gap-2 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">
+          <span className="flex-1">{error.message}</span>
+          {error.stale && (
+            <button type="button" onClick={onReload} className="rounded-md border border-red-500/30 px-2 py-0.5 text-xs hover:bg-red-500/10">
+              Open again
+            </button>
+          )}
+        </div>
+      )}
+      {issues.length > 0 && (
+        <ul aria-label="Problems" className="space-y-0.5 rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">
+          {issues.map((i) => (
+            <li key={`${i.line}-${i.message}`}>{i.line > 0 ? `Line ${i.line}: ${i.message}` : i.message}</li>
+          ))}
+        </ul>
+      )}
+      <textarea
+        aria-label=".env"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        spellCheck={false}
+        autoComplete="off"
+        autoCapitalize="off"
+        autoCorrect="off"
+        autoFocus
+        rows={Math.min(30, Math.max(8, text.split('\n').length + 2))}
+        placeholder={'DATABASE_URL="postgres://…"\nNODE_ENV=production'}
+        className={`${input} resize-y font-mono text-xs leading-5`}
+      />
+      <div className="flex justify-end gap-2">
+        <button type="button" onClick={onDone} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
+          {dirty ? 'Discard' : 'Close'}
+        </button>
+        <button type="submit" disabled={!dirty || save.isPending} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-50">
+          {save.isPending ? <Loader2 size={14} className="animate-spin" /> : 'Save .env'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
 /**
  * The app's `.env` on the server (spec §7): variable names are listed, values
  * are write-only. Revealing one needs a passkey confirmation and is recorded
@@ -63,13 +160,32 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
   const [revealing, setRevealing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [file, setFile] = useState<DeployEnvFile | null>(null);
+  const [opening, setOpening] = useState(false);
 
   // Revealed values never carry over to another app
   useEffect(() => {
     setRevealed({});
     setEditing(null);
     setError(null);
+    setFile(null);
   }, [serverId, app]);
+
+  async function openAsText() {
+    setOpening(true);
+    setError(null);
+    try {
+      const res = await withStepUp(() => api.post<DeployEnvFile>(appPath(serverId, app, '/env-file/reveal')));
+      setRevealed({});
+      setAdding(false);
+      setEditing(null);
+      setFile(res);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : passkeyErrorMessage(err, 'Could not open .env'));
+    } finally {
+      setOpening(false);
+    }
+  }
 
   const set = useMutation({
     mutationFn: ({ key, value }: { key: string; value: string }) =>
@@ -109,7 +225,17 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
           Values are never shown here unless revealed; revealing one asks for your passkey and is recorded in the audit log. Changes apply when the app
           is next restarted or deployed (a restart needs no rebuild).
         </p>
-        {!adding && (
+        {!file && (
+          <button
+            onClick={() => void openAsText()}
+            disabled={opening}
+            title="Edit every variable as one text file. Needs a passkey confirmation, and is recorded in the audit log."
+            className="flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted disabled:opacity-50"
+          >
+            {opening ? <Loader2 size={14} className="animate-spin" /> : <FileText size={14} />} Edit as text
+          </button>
+        )}
+        {!adding && !file && (
           <button onClick={() => setAdding(true)} className="flex shrink-0 items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-sm hover:bg-muted">
             <Plus size={14} /> Add variable
           </button>
@@ -117,6 +243,20 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
       </div>
 
       {error && <p className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{error}</p>}
+
+      {file && (
+        <EnvTextEditor
+          key={file.sha256}
+          serverId={serverId}
+          app={app}
+          file={file}
+          onDone={() => setFile(null)}
+          onReload={() => {
+            setFile(null);
+            void openAsText();
+          }}
+        />
+      )}
 
       {adding && (
         <form
@@ -167,7 +307,7 @@ export default function EnvEditor({ serverId, app }: { serverId: string; app: st
         </form>
       )}
 
-      {keys.isLoading ? (
+      {file ? null : keys.isLoading ? (
         <p className="text-sm text-muted-foreground">Loading…</p>
       ) : keys.error ? (
         <p className="text-sm text-red-600">{(keys.error as Error).message}</p>

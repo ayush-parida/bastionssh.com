@@ -34,6 +34,7 @@ const FLAGS = new Set([
   '--prebuilt',
   '--checksum',
   '--build-ms',
+  '--expect',
 ]);
 const WORD = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 /**

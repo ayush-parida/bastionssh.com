@@ -2,7 +2,7 @@ import path from 'node:path';
 import { certs } from './certs.js';
 import type { Ctx } from './context.js';
 import { DEFAULT_SOCKET, DockerApi } from './docker.js';
-import { MAX_VALUE_BYTES } from './env.js';
+import { MAX_ENV_BYTES, MAX_VALUE_BYTES } from './env.js';
 import { appName, BastionError, envKey, Layout, releaseId } from './names.js';
 import * as backups from './backups.js';
 import * as ops from './ops.js';
@@ -36,6 +36,8 @@ export const USAGE = `Usage: bastionctl <command> [options] [--json]
   restart <app> | stop <app>              The app's live container
   env keys|set|unset|get <app> [KEY]      .env: names only; set reads the value from stdin
   env build-args <app>                    NEXT_PUBLIC_* and build.args values (what a build gets)
+  env file <app>                          The whole .env, values included
+  env replace <app> [--expect <sha256>]   New .env text from stdin, checked line by line
   env generate <app> <KEY> [--bytes N] [--if-missing]
                                           A random URL-safe value into .env (never printed)
   exec <app> -- <program> [args…]         Run a program in the app's live container
@@ -341,6 +343,23 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
         const value = await io.readStdin(MAX_VALUE_BYTES + 1);
         return { value: ops.envSet(ctx, a, k, value) };
       }
+      if (sub === 'file') {
+        // The whole file, values included: BastionSSH's step-up reveal for editing it as text
+        expect(args, 2, 'env file <app>');
+        const r = ops.envFileText(ctx, appName(app));
+        return { value: r, text: r.text };
+      }
+      if (sub === 'replace') {
+        // The new text on stdin, like a value: never on a command line
+        expect(args, 2, 'env replace <app> [--expect <sha256>]');
+        const sha = flag(parsed, 'expect');
+        if (sha !== undefined && !/^[0-9a-f]{64}$/.test(sha)) throw new BastionError('--expect takes a sha256 in hex', 2);
+        const text = await io.readStdin(MAX_ENV_BYTES + 1);
+        const r = ops.envReplace(ctx, appName(app), text, sha);
+        if (r.ok) return { value: r, text: `Added ${r.added.length}, changed ${r.changed.length}, removed ${r.removed.length}\n` };
+        if ('stale' in r) return { value: r, text: '.env changed since it was read; nothing was written\n', exitCode: 1 };
+        return { value: r, text: lines(r.issues.map((i) => (i.line ? `line ${i.line}: ${i.message}` : i.message))), exitCode: 3 };
+      }
       if (sub === 'build-args') {
         // NEXT_PUBLIC_* and build.args only: what a build on the BastionSSH side gets, read for that build
         expect(args, 2, 'env build-args <app>');
@@ -354,7 +373,7 @@ async function dispatch(ctx: Ctx, command: string, args: string[], parsed: Parse
         const r = ops.envGenerate(ctx, appName(app), envKey(key), { bytes: bytes === undefined ? undefined : Number(bytes), ifMissing: parsed.flags.has('if-missing') });
         return { value: r, text: r.generated ? `Generated ${r.key}\n` : `${r.key} is set already; left as it is\n` };
       }
-      throw new BastionError('Usage: bastionctl env keys|set|unset|get|generate|build-args <app> [KEY]', 2);
+      throw new BastionError('Usage: bastionctl env keys|set|unset|get|generate|build-args|file|replace <app> [KEY]', 2);
     }
     default:
       throw new BastionError(`Unknown command ${command}\n\n${USAGE}`, 2);
@@ -377,7 +396,7 @@ export function readProcessStdin(max: number): Promise<string> {
       total += chunk.length;
       if (total > max) {
         process.stdin.destroy();
-        reject(new BastionError(`Value is larger than ${MAX_VALUE_BYTES / 1024} KiB`));
+        reject(new BastionError(`Input is larger than ${(max - 1) / 1024} KiB`));
         return;
       }
       chunks.push(chunk);

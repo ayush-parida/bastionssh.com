@@ -104,6 +104,36 @@ export function writeEnvFile(file: string, text: string): void {
   fs.renameSync(tmp, file);
 }
 
+/**
+ * Problems that stop `text` replacing `.env` as a whole, by line: lines that
+ * are neither blank, `# comments` nor `KEY=value`, names set twice, quotes
+ * left open, and the size limits.
+ */
+export function checkEnvText(text: string): Array<{ line: number; message: string }> {
+  const issues: Array<{ line: number; message: string }> = [];
+  if (Buffer.byteLength(text) > MAX_ENV_BYTES) return [{ line: 0, message: `Larger than ${MAX_ENV_BYTES / 1024} KiB` }];
+  if (text.includes('\0')) return [{ line: 0, message: 'Contains a NUL byte' }];
+  const seen = new Map<string, number>();
+  splitLines(text).forEach(({ raw, key }, i) => {
+    const line = i + 1;
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) return;
+    if (!key) {
+      issues.push({ line, message: /^\s*(?:export\s+)?[^=\s]+\s*=/.test(raw) ? 'Invalid name: letters, digits and _, not starting with a digit' : 'Not KEY=value' });
+      return;
+    }
+    if (!ENV_KEY_PATTERN.test(key)) issues.push({ line, message: `${key}: names are at most 128 characters` });
+    const first = seen.get(key);
+    if (first !== undefined) issues.push({ line, message: `${key} is set on line ${first} already` });
+    else seen.set(key, line);
+    const value = raw.slice(raw.indexOf('=') + 1).trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && (value.length < 2 || !value.endsWith(quote))) issues.push({ line, message: `${key}: the ${quote === '"' ? 'double' : 'single'} quote is not closed` });
+    if (Buffer.byteLength(value) > MAX_VALUE_BYTES) issues.push({ line, message: `${key}: value larger than ${MAX_VALUE_BYTES / 1024} KiB` });
+  });
+  return issues;
+}
+
 /** `KEY=value` entries for the Docker API, valid names only. */
 export function containerEnv(file: string): string[] {
   return [...parseEnv(readEnvFile(file))].filter(([k]) => ENV_KEY_PATTERN.test(k)).map(([k, v]) => `${k}=${v}`);

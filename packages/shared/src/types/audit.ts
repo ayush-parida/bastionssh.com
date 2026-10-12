@@ -193,6 +193,8 @@ export type AuditAction =
   | 'deploy.env_unset'
   | 'deploy.env_generate'
   | 'deploy.env_reveal'
+  | 'deploy.env_file_reveal'
+  | 'deploy.env_replace'
   | 'deploy.proxy_sync'
   | 'deploy.service_create'
   | 'deploy.service_update'

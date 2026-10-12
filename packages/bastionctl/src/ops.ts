@@ -8,7 +8,10 @@ import type {
   DeployAppSummary,
   DeployAppUsage,
   DeployContainer,
+  DeployEnvFile,
   DeployEnvGenerated,
+  DeployEnvReplaced,
+  DeployEnvTextIssue,
   DeployOutcome,
   DeployProxyMode,
   DeployProxyStatus,
@@ -37,7 +40,7 @@ import { sleep, type Ctx } from './context.js';
 import { appCertificates } from './certs.js';
 import { ensureCron } from './cron.js';
 import { DockerApiError, usageFrom } from './docker.js';
-import { containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
+import { checkEnvText, containerEnv, MAX_VALUE_BYTES, parseEnv, readEnvFile, setEnv, unsetEnv, writeEnvFile } from './env.js';
 import { IMAGES as images, pinnedRef } from './images.js';
 import { checkKernel, hostKernel } from './kernel.js';
 import { deployedLine, releaseRef, rollbackLineCheck } from './lines.js';
@@ -1120,6 +1123,41 @@ export function envGenerate(ctx: Ctx, app: string, key: string, opts: { bytes?: 
   writeEnvFile(file, setEnv(text, key, value));
   ctx.log(`Generated a new value for ${key} (${bytes} random bytes)`);
   return { key, generated: true };
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+
+/** `env file <app>`: the whole `.env` as written, comments included (BastionSSH's step-up reveal). */
+export function envFileText(ctx: Ctx, app: string): DeployEnvFile {
+  const text = readEnvFile(envFile(ctx, app));
+  return { text, sha256: sha256(text) };
+}
+
+/**
+ * `env replace <app> [--expect <sha256>]`: `text` (stdin) becomes `.env`, as
+ * written, once every line checks out. With `expect`, a file that changed
+ * since it was read is left alone. Reports names, never values.
+ */
+export function envReplace(
+  ctx: Ctx,
+  app: string,
+  text: string,
+  expect?: string,
+): ({ ok: true } & DeployEnvReplaced) | { ok: false; issues: DeployEnvTextIssue[] } | { ok: false; stale: true } {
+  const normalized = text.replace(/\r\n/g, '\n');
+  const issues = checkEnvText(normalized);
+  if (issues.length > 0) return { ok: false, issues };
+  const file = envFile(ctx, app);
+  const current = readEnvFile(file);
+  if (expect !== undefined && sha256(current) !== expect) return { ok: false, stale: true };
+  const before = parseEnv(current);
+  const after = parseEnv(normalized);
+  const added = [...after.keys()].filter((k) => !before.has(k));
+  const changed = [...after.keys()].filter((k) => before.has(k) && before.get(k) !== after.get(k));
+  const removed = [...before.keys()].filter((k) => !after.has(k));
+  const body = normalized === '' || normalized.endsWith('\n') ? normalized : `${normalized}\n`;
+  if (body !== current) writeEnvFile(file, body);
+  return { ok: true, added, changed, removed };
 }
 
 /** The one command that prints a value (BastionSSH's step-up reveal). */

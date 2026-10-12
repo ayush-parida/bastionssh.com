@@ -860,6 +860,49 @@ describe('rollback, restart, stop and delete', () => {
     expect(currentRelease(layout, 'site1')).toBe(id);
   });
 
+  it('edits .env as text: reports names only, keeps comments, refuses bad lines and a file changed meanwhile', async () => {
+    await app();
+    ops.envSet(ctx(), 'site1', 'A', 'one');
+    ops.envSet(ctx(), 'site1', 'B', 'two');
+    const read = ops.envFileText(ctx(), 'site1');
+    expect(read.text).toBe('A="one"\nB="two"\n');
+
+    const next = '# database\r\nA=uno\nC="three # not a comment"\n';
+    expect(ops.envReplace(ctx(), 'site1', next, read.sha256)).toEqual({ ok: true, added: ['C'], changed: ['A'], removed: ['B'] });
+    expect(fs.readFileSync(layout.env('site1'), 'utf8')).toBe('# database\nA=uno\nC="three # not a comment"\n');
+    expect((fs.statSync(layout.env('site1')).mode & 0o777).toString(8)).toBe('600');
+    expect(ops.envGet(ctx(), 'site1', 'C').value).toBe('three # not a comment');
+
+    // The sha256 of what was read before the save no longer matches
+    expect(ops.envReplace(ctx(), 'site1', 'A=x\n', read.sha256)).toEqual({ ok: false, stale: true });
+    expect(ops.envReplace(ctx(), 'site1', 'A=1\nA=2\n1BAD=x\nnot a line\nD="open\n')).toEqual({
+      ok: false,
+      issues: [
+        { line: 2, message: 'A is set on line 1 already' },
+        { line: 3, message: 'Invalid name: letters, digits and _, not starting with a digit' },
+        { line: 4, message: 'Not KEY=value' },
+        { line: 5, message: 'D: the double quote is not closed' },
+      ],
+    });
+    expect(ops.envGet(ctx(), 'site1', 'A').value).toBe('uno');
+
+    // From the CLI: the text on stdin, the file printed whole by env file
+    const out: string[] = [];
+    const io = (stdin: string) => ({
+      env: { BASTION_ROOT: root },
+      stdout: (t: string) => out.push(t),
+      stderr: () => {},
+      readStdin: async () => stdin,
+      ctx: { docker: new DockerApi(fake.socket), healthIntervalMs: 1, now: () => new Date((clock += 1000)) },
+    });
+    expect(await run(['env', 'replace', 'site1', '--json'], io('A=uno\n'))).toBe(0);
+    expect(JSON.parse(out.pop()!)).toEqual({ ok: true, added: [], changed: [], removed: ['C'] });
+    expect(await run(['env', 'replace', 'site1', '--json'], io('=x\n'))).toBe(3);
+    expect(JSON.parse(out.pop()!)).toMatchObject({ ok: false, issues: [{ line: 1, message: 'Not KEY=value' }] });
+    expect(await run(['env', 'file', 'site1', '--json'], io(''))).toBe(0);
+    expect(JSON.parse(out.pop()!)).toMatchObject({ text: 'A=uno\n' });
+  });
+
   it('keeps the old container serving when the restarted one is unhealthy', async () => {
     await app();
     const id = (await ops.deploy(ctx(), 'site1', upload('a.tgz', 'v1'))).release;

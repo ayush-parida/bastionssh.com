@@ -10,7 +10,10 @@ import {
   type DeployAppSummary,
   type DeployEnvGenerated,
   type DeployEnvKeys,
+  type DeployEnvFile,
+  type DeployEnvReplaced,
   type DeployEnvReveal,
+  type DeployEnvTextIssue,
   type DeployLogLine,
   type DeployOutcome,
   type DeployProxyStatus,
@@ -74,6 +77,8 @@ const rollbackBody = z.object({ release: z.string().regex(DEPLOY_NAME_PATTERN, '
 const configBody = z.object({ text: z.string().max(64 * 1024) }).strict();
 const envBody = z.object({ value: z.string().max(64 * 1024) }).strict();
 const generateBody = z.object({ bytes: z.number().int().min(16).max(512).optional(), ifMissing: z.boolean().optional() }).strict();
+/** The whole `.env` as text, and the sha256 of the file it was read from (so a file changed meanwhile is not overwritten). */
+const envFileBody = z.object({ text: z.string().max(256 * 1024), sha256: z.string().regex(/^[0-9a-f]{64}$/, 'sha256 of the .env that was read') }).strict();
 const deleteQuery = z.object({ purge: boolQuery });
 /** Where to build this time (the Deploy dialog's choice; default: build.where), and whether the upload's .env files stay. */
 const deployQuery = z.object({ where: z.enum(['server', 'bastion']).optional(), includeEnvFiles: boolQuery });
@@ -613,6 +618,61 @@ export async function deployRoutes(app: FastifyInstance) {
         const { value } = await ctx.run<DeployEnvReveal>(['env', 'get', name, key]);
         await auditDeploy(req, 'deploy.env_reveal', ctx, { app: name, key });
         return { key, value: value.value };
+      });
+    } catch (err) {
+      return sendDeployError(reply, err);
+    }
+  });
+
+  /**
+   * POST /servers/:id/apps/:app/env-file/reveal — the whole `.env` as text,
+   * values included, to edit it as a file. Revealed like a single value: a
+   * browser session that has just confirmed a passkey; audited by app.
+   */
+  app.post('/servers/:id/apps/:app/env-file/reveal', { preHandler: gate('manage') }, async (req, reply) => {
+    const { id, app: name } = appParams.parse(req.params);
+    if (!requireBrowserSession(req, reply, 'Secret values are revealed from a signed-in browser, not with an API token')) return reply;
+    if (!req.passkeyVerified) {
+      if (passkeyCount(req.user.id) === 0) {
+        return reply.status(403).send({
+          error: 'Revealing secret values needs a passkey. Add one under Settings → Passkeys, then try again.',
+          code: 'DEPLOY_REVEAL_NEEDS_PASSKEY',
+        });
+      }
+      return reply.status(403).send({ error: STEP_UP_MESSAGE, code: 'PASSKEY_STEP_UP_REQUIRED' });
+    }
+    try {
+      return await withDeploy(req, id, async (ctx): Promise<DeployEnvFile> => {
+        const { value } = await ctx.run<DeployEnvFile>(['env', 'file', name]);
+        await auditDeploy(req, 'deploy.env_file_reveal', ctx, { app: name });
+        return { text: value.text, sha256: value.sha256 };
+      });
+    } catch (err) {
+      return sendDeployError(reply, err);
+    }
+  });
+
+  /**
+   * PUT /servers/:id/apps/:app/env-file — `{ text, sha256 }`: the text becomes
+   * `.env` once every line checks out (422 `env_invalid` with the lines
+   * otherwise), unless the file changed since it was read (409
+   * `env_changed`). Handed over on stdin; audited with the names added,
+   * changed and removed, never values.
+   */
+  app.put('/servers/:id/apps/:app/env-file', { preHandler: gate('manage') }, async (req, reply) => {
+    const { id, app: name } = appParams.parse(req.params);
+    const { text, sha256 } = envFileBody.parse(req.body);
+    try {
+      return await withDeploy(req, id, async (ctx): Promise<DeployEnvReplaced> => {
+        type Replaced = ({ ok: true } & DeployEnvReplaced) | { ok: false; issues: DeployEnvTextIssue[] } | { ok: false; stale: true };
+        const { value } = await ctx.run<Replaced>(['env', 'replace', name, '--expect', sha256], { stdin: text });
+        if (!value.ok) {
+          if ('stale' in value) throw new DeployError('.env changed since you opened it. Open it again to see the current file.', 409, 'env_changed');
+          throw new DeployError('Some lines cannot be saved', 422, 'env_invalid', { issues: value.issues });
+        }
+        const { added, changed, removed } = value;
+        await auditDeploy(req, 'deploy.env_replace', ctx, { app: name, added, changed, removed });
+        return { added, changed, removed };
       });
     } catch (err) {
       return sendDeployError(reply, err);

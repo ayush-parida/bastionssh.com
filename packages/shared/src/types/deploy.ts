@@ -468,6 +468,26 @@ export interface DeployEnvReveal {
   value: string;
 }
 
+/** The whole `.env` as text, for editing it as a file (revealed like a value: passkey, audited). */
+export interface DeployEnvFile {
+  text: string;
+  /** sha256 of the text as read; a save names it so a file changed meanwhile is not overwritten. */
+  sha256: string;
+}
+
+/** A line of `.env` text that cannot be saved (1-based). */
+export interface DeployEnvTextIssue {
+  line: number;
+  message: string;
+}
+
+/** `.env` replaced as a whole: which names were added, changed or removed (never the values). */
+export interface DeployEnvReplaced {
+  added: string[];
+  changed: string[];
+  removed: string[];
+}
+
 // ── Domains, TLS and the proxy (spec §6) ────────────────────────────────────
 
 /**

@@ -681,6 +681,60 @@ describe('deployment routes', () => {
     });
   });
 
+  describe('.env as text', () => {
+    const SHA = 'a'.repeat(64);
+
+    it('reveals the whole file only from a browser session after a passkey step-up', async () => {
+      fake.bastionctl = (args) => (args[0] === 'env' && args[1] === 'file' ? { stdout: { text: '# db\nDB_URL="postgres://user:hunter2@db/app"\n', sha256: SHA } } : defaultBastionctl(args));
+      expect((await call(admin, 'POST', api('/apps/site1/env-file/reveal'))).statusCode).toBe(403);
+      const session = await seedSession(admin.userId);
+      getDb()
+        .insert(passkeys)
+        .values({ id: nanoid(), userId: admin.userId, credentialId: nanoid(), publicKey: Buffer.from([1]), deviceType: 'multiDevice', name: 'Laptop' })
+        .run();
+      expect((await call(session, 'POST', api('/apps/site1/env-file/reveal'))).json().code).toBe('PASSKEY_STEP_UP_REQUIRED');
+      expect(fake.runs).toEqual([]);
+      getDb().update(sessions).set({ passkeyVerified: true }).where(eq(sessions.id, session.sessionId)).run();
+      const res = await call(session, 'POST', api('/apps/site1/env-file/reveal'));
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ text: '# db\nDB_URL="postgres://user:hunter2@db/app"\n', sha256: SHA });
+      expect(fake.runs.at(-1)!.argv).toEqual(['env', 'file', 'site1']);
+      const [row] = audits('deploy.env_file_reveal');
+      expect(row!.meta).toEqual({ app: 'site1' });
+      expect(row!.metadata).not.toContain('hunter2');
+      expect((await call(operator, 'POST', api('/apps/site1/env-file/reveal'))).statusCode).toBe(403);
+    });
+
+    it('replaces the file on stdin, answering bad lines with 422 and a changed file with 409; audits names only', async () => {
+      const text = 'API_KEY=s3cret-value\nMODE=prod\n';
+      fake.bastionctl = (args) =>
+        args[0] === 'env' && args[1] === 'replace' ? { stdout: { ok: true, added: ['API_KEY'], changed: ['MODE'], removed: ['OLD'] } } : defaultBastionctl(args);
+      const ok = await call(admin, 'PUT', api('/apps/site1/env-file'), { text, sha256: SHA });
+      expect(ok.statusCode).toBe(200);
+      expect(ok.json()).toEqual({ added: ['API_KEY'], changed: ['MODE'], removed: ['OLD'] });
+      expect(fake.runs.at(-1)).toEqual({ argv: ['env', 'replace', 'site1', '--expect', SHA], stdin: text });
+      expect(fake.commands.join('\n')).not.toContain('s3cret');
+      const [row] = audits('deploy.env_replace');
+      expect(row!.meta).toEqual({ app: 'site1', added: ['API_KEY'], changed: ['MODE'], removed: ['OLD'] });
+      expect(row!.metadata).not.toContain('s3cret');
+
+      fake.bastionctl = (args) =>
+        args[1] === 'replace' ? { stdout: { ok: false, issues: [{ line: 2, message: 'Not KEY=value' }] }, exitCode: 3 } : defaultBastionctl(args);
+      const bad = await call(admin, 'PUT', api('/apps/site1/env-file'), { text: 'A=1\noops\n', sha256: SHA });
+      expect(bad.statusCode).toBe(422);
+      expect(bad.json()).toEqual({ error: 'Some lines cannot be saved', code: 'env_invalid', issues: [{ line: 2, message: 'Not KEY=value' }] });
+
+      fake.bastionctl = (args) => (args[1] === 'replace' ? { stdout: { ok: false, stale: true }, exitCode: 1 } : defaultBastionctl(args));
+      const stale = await call(admin, 'PUT', api('/apps/site1/env-file'), { text: 'A=1\n', sha256: SHA });
+      expect(stale.statusCode).toBe(409);
+      expect(stale.json().code).toBe('env_changed');
+      expect(audits('deploy.env_replace')).toHaveLength(1);
+
+      expect((await call(admin, 'PUT', api('/apps/site1/env-file'), { text: 'A=1\n' })).statusCode).toBe(400);
+      expect((await call(operator, 'PUT', api('/apps/site1/env-file'), { text: 'A=1\n', sha256: SHA })).statusCode).toBe(403);
+    });
+  });
+
   describe('deploy and rollback streams', () => {
     it('streams the upload to <root>/tmp, then the log, result and exit; audits start and finish', async () => {
       const payload = tarGz();

@@ -497,7 +497,7 @@ Nothing an app's log prints of its `.env` values (6 characters or longer) reache
 - **Disk**: each kept release keeps its image (often 150–500 MB for Node apps; layers are shared between releases of an app). `keep_releases: 5` with a few apps fits comfortably in 20 GB; lower it on small disks.
 - As a rule of thumb: 1 vCPU / 1 GB for a few static or small Dockerfile sites, 2 vCPU / 2–4 GB to build and run several Next.js apps.
 
-Permissions follow the **Deployments** module and your access to the server: view sees apps, releases, status, domains, connection details and backups; operate deploys, rolls back, restarts, stops and backs up; manage sets up, creates services, edits `bastion.yml` and `.env` (values are write-only; revealing one needs a passkey and is audited), downloads and restores backups, and deletes apps.
+Permissions follow the **Deployments** module and your access to the server: view sees apps, releases, status, domains, connection details and backups; operate deploys, rolls back, restarts, stops and backs up; manage sets up, creates services, edits `bastion.yml` and `.env` (values are write-only; revealing one — or opening the whole file with **Edit as text** to change many at once — needs a passkey and is audited), downloads and restores backups, and deletes apps.
 
 ---
 

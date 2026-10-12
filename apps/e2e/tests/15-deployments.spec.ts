@@ -311,6 +311,12 @@ async function stubDeploy(
       });
     }
     if (path === '/apps/site1/env' && method === 'GET') return json({ keys: ['DATABASE_URL', 'SECRET_KEY'] });
+    if (path === '/apps/site1/env-file/reveal') return json({ text: '# database\nDATABASE_URL="postgres://app:hunter2@db/app"\nSECRET_KEY=old\n', sha256: 'c'.repeat(64) });
+    if (path === '/apps/site1/env-file' && method === 'PUT') {
+      return (req.postData() ?? '').includes('oops')
+        ? json({ error: 'Some lines cannot be saved', code: 'env_invalid', issues: [{ line: 4, message: 'Not KEY=value' }] }, 422)
+        : json({ added: ['API_TOKEN'], changed: ['SECRET_KEY'], removed: [] });
+    }
     if (path === '/apps/site1/env/DATABASE_URL/reveal') return json({ key: 'DATABASE_URL', value: 'postgres://app:hunter2@db/app' });
     if (/^\/apps\/site1\/env\/[A-Z_]+$/.test(path)) return json({ key: path.split('/').pop(), changed: true });
     if (path === '/apps/site1/restart' || path === '/apps/site1/stop') return json({ app: 'site1', container: `bastion-site1-${RELEASE}` });
@@ -605,6 +611,39 @@ test.describe('Deployments', () => {
       ['PUT', '/apps/site1/env/SECRET_KEY', { value: 's3cret' }],
       ['PUT', '/apps/site1/env/API_TOKEN', { value: 'tok-123' }],
       ['DELETE', '/apps/site1/env/SECRET_KEY', null],
+    ]);
+  });
+
+  test('.env as text: opened on request, bad lines pointed out, saved whole', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await page.getByRole('tab', { name: 'Environment' }).click();
+    await expect(page.getByRole('list', { name: 'Variables' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Edit as text' }).click();
+    const editor = page.getByRole('form', { name: 'Edit .env as text' });
+    const text = editor.getByLabel('.env');
+    await expect(text).toHaveValue('# database\nDATABASE_URL="postgres://app:hunter2@db/app"\nSECRET_KEY=old\n');
+    // The list is hidden while the file is open, and nothing changed means nothing to save
+    await expect(page.getByRole('list', { name: 'Variables' })).toHaveCount(0);
+    await expect(editor.getByRole('button', { name: 'Save .env' })).toBeDisabled();
+
+    await text.fill('# database\nDATABASE_URL="postgres://app:hunter2@db/app"\nSECRET_KEY=new\noops\n');
+    await editor.getByRole('button', { name: 'Save .env' }).click();
+    await expect(editor.getByRole('list', { name: 'Problems' })).toContainText('Line 4: Not KEY=value');
+
+    await text.fill('# database\nDATABASE_URL="postgres://app:hunter2@db/app"\nSECRET_KEY=new\nAPI_TOKEN=tok-123\n');
+    await editor.getByRole('button', { name: 'Save .env' }).click();
+    await expect(page.getByText('Added API_TOKEN; changed SECRET_KEY — restart the app to apply')).toBeVisible();
+    await expect(editor).toHaveCount(0);
+    await expect(page.getByText('hunter2')).toHaveCount(0);
+
+    expect(sent.map((s) => [s.method, s.path, s.body])).toEqual([
+      ['POST', '/apps/site1/env-file/reveal', null],
+      ['PUT', '/apps/site1/env-file', { text: '# database\nDATABASE_URL="postgres://app:hunter2@db/app"\nSECRET_KEY=new\noops\n', sha256: 'c'.repeat(64) }],
+      ['PUT', '/apps/site1/env-file', { text: '# database\nDATABASE_URL="postgres://app:hunter2@db/app"\nSECRET_KEY=new\nAPI_TOKEN=tok-123\n', sha256: 'c'.repeat(64) }],
     ]);
   });
 
