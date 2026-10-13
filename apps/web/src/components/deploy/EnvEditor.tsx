@@ -43,6 +43,11 @@ function ValueForm({ label, busy, onSubmit, onCancel }: { label: string; busy: b
 
 const names = (keys: string[]) => keys.join(', ');
 
+/** The names `.env` text sets: `KEY=` lines, the way bastionctl reads them. */
+function envNames(text: string): string[] {
+  return [...text.matchAll(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)].map((m) => m[1]!);
+}
+
 /** What a save changed, by name: "Added A; changed B; removed C". */
 function summary({ added, changed, removed }: DeployEnvReplaced): string {
   const parts = [
@@ -63,7 +68,10 @@ function EnvTextEditor({ serverId, app, file, onDone, onReload }: { serverId: st
   const [text, setText] = useState(file.text);
   const [issues, setIssues] = useState<DeployEnvTextIssue[]>([]);
   const [error, setError] = useState<{ message: string; stale: boolean } | null>(null);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
   const dirty = text !== file.text;
+  // Saving text with no variables left removes every one the file has: confirm that first
+  const removesAll = envNames(text).length === 0 ? [...new Set(envNames(file.text))] : [];
 
   const save = useMutation({
     mutationFn: () => api.put<DeployEnvReplaced>(appPath(serverId, app, '/env-file'), { text, sha256: file.sha256 }),
@@ -84,12 +92,14 @@ function EnvTextEditor({ serverId, app, file, onDone, onReload }: { serverId: st
   });
 
   return (
+    <>
     <form
       aria-label="Edit .env as text"
       className="space-y-2"
       onSubmit={(e) => {
         e.preventDefault();
-        save.mutate();
+        if (removesAll.length > 0) setConfirmEmpty(true);
+        else save.mutate();
       }}
     >
       <p className="rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
@@ -135,6 +145,22 @@ function EnvTextEditor({ serverId, app, file, onDone, onReload }: { serverId: st
         </button>
       </div>
     </form>
+    {confirmEmpty && (
+      <ConfirmDialog
+        title="Save an empty .env"
+        subject={app}
+        confirmLabel={removesAll.length === 1 ? 'Remove the variable' : `Remove all ${removesAll.length} variables`}
+        onConfirm={() => save.mutateAsync().catch(() => undefined)}
+        onClose={() => setConfirmEmpty(false)}
+      >
+        <p>
+          The text has no variables left, so saving removes {removesAll.length === 1 ? 'the only one' : `all ${removesAll.length}`} from the app's .env:{' '}
+          <span className="font-mono">{names(removesAll)}</span>.
+        </p>
+        <p className="mt-2">The app keeps its current values until it is restarted or deployed again.</p>
+      </ConfirmDialog>
+    )}
+    </>
   );
 }
 

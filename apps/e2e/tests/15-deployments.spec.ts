@@ -647,6 +647,35 @@ test.describe('Deployments', () => {
     ]);
   });
 
+  test('.env as text: saving no variables at all asks first, naming the ones it removes', async ({ page }) => {
+    const sent: Sent[] = [];
+    await stubDeploy(page, serverId, sent);
+    await signInWithPassword(page, admin.email, admin.password);
+    await page.goto(`/servers/${serverId}/deployments/site1`);
+    await page.getByRole('tab', { name: 'Environment' }).click();
+    await page.getByRole('button', { name: 'Edit as text' }).click();
+    const editor = page.getByRole('form', { name: 'Edit .env as text' });
+
+    // Only a comment left: nothing is sent until confirmed
+    await editor.getByLabel('.env').fill('# moved to the secrets manager\n');
+    await editor.getByRole('button', { name: 'Save .env' }).click();
+    const dialog = page.getByRole('alertdialog');
+    await expect(dialog).toContainText('Save an empty .env');
+    await expect(dialog).toContainText('DATABASE_URL, SECRET_KEY');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(editor.getByLabel('.env')).toHaveValue('# moved to the secrets manager\n');
+
+    await editor.getByRole('button', { name: 'Save .env' }).click();
+    await page.getByRole('alertdialog').getByRole('button', { name: 'Remove all 2 variables' }).click();
+    await expect(editor).toHaveCount(0);
+
+    expect(sent.map((s) => [s.method, s.path, s.body])).toEqual([
+      ['POST', '/apps/site1/env-file/reveal', null],
+      ['PUT', '/apps/site1/env-file', { text: '# moved to the secrets manager\n', sha256: 'c'.repeat(64) }],
+    ]);
+  });
+
   test('domains: DNS checked by the server, with the record to create, ports and the certificate', async ({ page }) => {
     const sent: Sent[] = [];
     await stubDeploy(page, serverId, sent);
